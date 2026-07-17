@@ -284,15 +284,17 @@ export default function WeeklyPlanner() {
                   return (
                     <div 
                       key={`axis-${time}`} 
-                      className={`relative border-b border-border/30 flex items-start justify-center pt-2 ${
+                      className={`relative border-b border-border/30 flex items-start justify-center pt-1 ${
                         intervalOption === 60 ? 'h-24' : intervalOption === 30 ? 'h-16' : 'h-10'
                       }`}
                     >
-                      {isHour && (
-                        <span className="text-[10px] font-medium text-muted-foreground tabular-nums -mt-4 bg-background/50 px-1">
-                          {time}
-                        </span>
-                      )}
+                      <span className={`tabular-nums bg-background/50 px-1 leading-none ${
+                        isHour
+                          ? 'text-[10px] font-semibold text-muted-foreground -mt-[0.45rem]'
+                          : 'text-[9px] font-normal text-muted-foreground/50 -mt-[0.4rem]'
+                      }`}>
+                        {time}
+                      </span>
                     </div>
                   );
                 })}
