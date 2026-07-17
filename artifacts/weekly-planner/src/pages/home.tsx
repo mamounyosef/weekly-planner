@@ -6,9 +6,7 @@ import {
   startOfWeek, 
   endOfWeek, 
   eachDayOfInterval, 
-  isSameDay, 
-  isToday,
-  parseISO
+  isToday
 } from 'date-fns';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -46,12 +44,8 @@ const COLOR_PICKER_SWATCHES: Record<CellColor, string> = {
   transparent: 'bg-white border-[#e6e4e0]'
 };
 
-// Utils
-const getISOWeekString = (date: Date) => {
-  // Using a custom string since ISO week number varies slightly depending on region
-  // Let's use the start of the week as the key
-  return format(startOfWeek(date, { weekStartsOn: 1 }), 'yyyy-MM-dd');
-};
+// Utils — cell IDs are keyed by day-of-week (0=Mon…6=Sun) + time, shared across all weeks
+const TEMPLATE_KEY = 'planner-template';
 
 const generateTimeSlots = (interval: Interval) => {
   const slots = [];
@@ -83,31 +77,28 @@ export default function WeeklyPlanner() {
   const end = endOfWeek(currentDate, { weekStartsOn: 1 });
   const days = eachDayOfInterval({ start, end });
   const timeSlots = generateTimeSlots(intervalOption);
-  const weekKey = `planner-week-${getISOWeekString(currentDate)}`;
 
-  // Load data on mount & week change
+  // Load shared template data on mount only
   useEffect(() => {
-    const saved = localStorage.getItem(weekKey);
+    const saved = localStorage.getItem(TEMPLATE_KEY);
     if (saved) {
       setWeekData(JSON.parse(saved));
-    } else {
-      setWeekData({});
     }
     
     const savedInterval = localStorage.getItem('planner-interval');
     if (savedInterval) {
       setIntervalOption(parseInt(savedInterval, 10) as Interval);
     }
-  }, [weekKey]);
+  }, []);
 
-  // Save data effect
+  // Save shared template data whenever it changes
   useEffect(() => {
     if (Object.keys(weekData).length > 0) {
-      localStorage.setItem(weekKey, JSON.stringify(weekData));
+      localStorage.setItem(TEMPLATE_KEY, JSON.stringify(weekData));
     } else {
-      localStorage.removeItem(weekKey);
+      localStorage.removeItem(TEMPLATE_KEY);
     }
-  }, [weekData, weekKey]);
+  }, [weekData]);
 
   // Save interval effect
   useEffect(() => {
@@ -310,12 +301,11 @@ export default function WeeklyPlanner() {
               {/* Days Columns */}
               <div className="flex-1 grid grid-cols-7">
                 {days.map((day, colIdx) => {
-                  const dateStr = format(day, 'yyyy-MM-dd');
                   const isCurrentDay = isToday(day);
                   
                   return (
                     <div 
-                      key={`col-${dateStr}`} 
+                      key={`col-${colIdx}`} 
                       className={`flex flex-col border-r border-border/60 last:border-r-0 ${
                         isCurrentDay ? 'bg-primary/[0.03]' : ''
                       }`}
@@ -339,7 +329,7 @@ export default function WeeklyPlanner() {
                       {/* Time Slots for the day */}
                       <div className="flex-1 flex flex-col relative">
                         {timeSlots.map(time => {
-                          const id = `${dateStr}T${time}`;
+                          const id = `d${colIdx}-${time}`;
                           const cellData = weekData[id];
                           const isEditing = editingCell === id;
                           const hasContent = !!cellData?.content;
