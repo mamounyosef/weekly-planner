@@ -8,7 +8,7 @@ import {
   eachDayOfInterval,
   isToday,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -17,9 +17,9 @@ type EventColor = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
 
 interface PlannerEvent {
   id: string;
-  dayIndex: number;   // 0 = Mon … 6 = Sun
-  startTime: string;  // "HH:MM"
-  endTime: string;    // "HH:MM"
+  dayIndex: number;
+  startTime: string;
+  endTime: string;
   content: string;
   color: EventColor;
 }
@@ -35,10 +35,10 @@ const DAY_END_H      = 23;
 const HEADER_PX      = 56;
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP  = 5;
+const COL_GAP        = 2; // px gap between parallel events
 
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
-// Light event colours
 const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
   sage:  { bg: '#eef1ed', border: '#b8d0b3', text: '#3a5233' },
   peach: { bg: '#fcf2ed', border: '#f0d0bc', text: '#7a4530' },
@@ -47,7 +47,6 @@ const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: strin
   lilac: { bg: '#f5f1f8', border: '#d8c8ee', text: '#583878' },
 };
 
-// Dark event colours — same hues, shifted dark
 const DARK_EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
   sage:  { bg: '#182818', border: '#365e30', text: '#8ec88e' },
   peach: { bg: '#2e1810', border: '#6e3820', text: '#d48060' },
@@ -63,13 +62,11 @@ function timeToMin(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
 }
-
 function minToTime(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
-
 function formatTimeLabel(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
@@ -77,15 +74,12 @@ function formatTimeLabel(min: number): string {
   const h12 = h % 12 || 12;
   return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, '0')}${ampm}`;
 }
-
 function snapMin(min: number, interval: IntervalMin): number {
   return Math.round(min / interval) * interval;
 }
-
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
-
 function generateSlots(interval: IntervalMin): string[] {
   const slots: string[] = [];
   for (let h = DAY_START_H; h < DAY_END_H; h++) {
@@ -95,62 +89,83 @@ function generateSlots(interval: IntervalMin): string[] {
   }
   return slots;
 }
-
-function uid(): string {
-  return crypto.randomUUID();
-}
-
+function uid(): string { return crypto.randomUUID(); }
 function minToY(min: number, interval: IntervalMin): number {
-  const relMin = min - DAY_START_H * 60;
-  return (relMin / interval) * SLOT_H[interval];
+  return ((min - DAY_START_H * 60) / interval) * SLOT_H[interval];
+}
+function yToMin(y: number, interval: IntervalMin): number {
+  return snapMin(DAY_START_H * 60 + (y / SLOT_H[interval]) * interval, POSITION_SNAP);
 }
 
-function yToMin(y: number, interval: IntervalMin): number {
-  const rawMin = DAY_START_H * 60 + (y / SLOT_H[interval]) * interval;
-  return snapMin(rawMin, POSITION_SNAP);
+// ─── Parallel layout ──────────────────────────────────────────────────────────
+// Returns a map of eventId → { col, numCols } for events within a single day column.
+// Uses a greedy sweep: sort by start, assign each event to the first free sub-column.
+function layoutParallel(
+  evs: Array<{ id: string; startMin: number; endMin: number }>,
+): Map<string, { col: number; numCols: number }> {
+  const sorted = [...evs].sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
+  const colEnds: number[] = [];      // end-time of last event placed in each sub-column
+  const colAssign: Record<string, number> = {};
+
+  for (const ev of sorted) {
+    let placed = false;
+    for (let c = 0; c < colEnds.length; c++) {
+      if (colEnds[c] <= ev.startMin) {
+        colAssign[ev.id] = c;
+        colEnds[c] = ev.endMin;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      colAssign[ev.id] = colEnds.length;
+      colEnds.push(ev.endMin);
+    }
+  }
+
+  const numCols = colEnds.length || 1;
+  const result = new Map<string, { col: number; numCols: number }>();
+  for (const ev of sorted) {
+    result.set(ev.id, { col: colAssign[ev.id] ?? 0, numCols });
+  }
+  return result;
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
 export default function WeeklyPlanner() {
-  const [currentDate, setCurrentDate]   = useState(new Date());
-  const [interval, setIntervalOpt]      = useState<IntervalMin>(60);
-  const [events, setEvents]             = useState<PlannerData>({});
-  const [editingId, setEditingId]       = useState<string | null>(null);
-  const [hoveredId, setHoveredId]       = useState<string | null>(null);
-  const [direction, setDirection]       = useState(0);
-  const [darkMode, setDarkMode]         = useState(true); // default dark
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [interval, setIntervalOpt]    = useState<IntervalMin>(60);
+  const [events, setEvents]           = useState<PlannerData>({});
+  const [editingId, setEditingId]     = useState<string | null>(null);
+  const [hoveredId, setHoveredId]     = useState<string | null>(null);
+  const [menuId, setMenuId]           = useState<string | null>(null);
+  const [menuPos, setMenuPos]         = useState<{ x: number; y: number } | null>(null);
+  const [direction, setDirection]     = useState(0);
+  const [darkMode, setDarkMode]       = useState(true);
 
   const dragRef = useRef<{
-    eventId: string;
-    durationMin: number;
-    offsetMin: number;
-    origDay: number;
-    curDay: number;
-    curStartMin: number;
-    active: boolean;
-    initX: number;
-    initY: number;
+    eventId: string; durationMin: number; offsetMin: number;
+    origDay: number; curDay: number; curStartMin: number;
+    active: boolean; initX: number; initY: number;
   } | null>(null);
 
   const resizeRef = useRef<{
-    eventId: string;
-    edge: 'top' | 'bottom';
-    startMin: number;
-    endMin: number;
+    eventId: string; edge: 'top' | 'bottom'; startMin: number; endMin: number;
   } | null>(null);
 
   const [dragDisp, setDragDisp]     = useState<{ id: string; day: number; startMin: number } | null>(null);
   const [resizeDisp, setResizeDisp] = useState<{ id: string; startMin: number; endMin: number } | null>(null);
   const [clipboard, setClipboard]   = useState<PlannerEvent | null>(null);
 
-  const daysGridRef   = useRef<HTMLDivElement>(null);
-  const editRef       = useRef<HTMLTextAreaElement>(null);
-  const didDragRef    = useRef(false);
-  const editingIdRef  = useRef<string | null>(null);
-  const hoveredIdRef  = useRef<string | null>(null);
-  const eventsRef     = useRef<PlannerData>({});
+  const daysGridRef  = useRef<HTMLDivElement>(null);
+  const editRef      = useRef<HTMLTextAreaElement>(null);
+  const menuRef      = useRef<HTMLDivElement>(null);
+  const didDragRef   = useRef(false);
+  const editingIdRef = useRef<string | null>(null);
+  const hoveredIdRef = useRef<string | null>(null);
+  const eventsRef    = useRef<PlannerData>({});
 
-  // ── Derived ──────────────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn: 1 });
   const days        = eachDayOfInterval({ start: weekStart, end: endOfWeek(currentDate, { weekStartsOn: 1 }) });
   const slots       = generateSlots(interval);
@@ -158,17 +173,15 @@ export default function WeeklyPlanner() {
   const totalH      = slots.length * sh;
   const dayEndMin   = DAY_END_H * 60;
   const dayStartMin = DAY_START_H * 60;
-
   const colorPalette = darkMode ? DARK_EVENT_COLORS : EVENT_COLORS;
 
-  // ── Persistence ───────────────────────────────────────────────────────────────
+  // ── Persistence ──────────────────────────────────────────────────────────
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) { /* ignore */ } }
+    if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) {} }
     const savedInt = localStorage.getItem(INTERVAL_KEY);
     if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
     const savedDark = localStorage.getItem(DARK_MODE_KEY);
-    // default is dark — only switch to light if explicitly saved as 'false'
     if (savedDark === 'false') setDarkMode(false);
   }, []);
 
@@ -187,32 +200,45 @@ export default function WeeklyPlanner() {
     }
   }, [editingId]);
 
-  // ── Ctrl+C / Ctrl+V ──────────────────────────────────────────────────────────
+  // ── Close menu on outside click / Escape ─────────────────────────────────
+  useEffect(() => {
+    if (!menuId) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuId(null);
+        setMenuPos(null);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setMenuId(null); setMenuPos(null); }
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuId]);
+
+  // ── Ctrl+C / Ctrl+V ──────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const active = document.activeElement;
       if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
-
       if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
         const targetId = editingIdRef.current ?? hoveredIdRef.current;
         if (!targetId) return;
         const ev = eventsRef.current[targetId];
         if (ev) { setClipboard(ev); e.preventDefault(); }
-        return;
       }
-
       if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
         setClipboard(prev => {
           if (!prev) return prev;
-          const newId     = uid();
-          const startMin  = timeToMin(prev.startTime);
-          const endMin    = timeToMin(prev.endTime);
-          const duration  = endMin - startMin;
+          const newId      = uid();
+          const startMin   = timeToMin(prev.startTime);
+          const duration   = timeToMin(prev.endTime) - startMin;
           const pasteStart = clamp(startMin + 10, DAY_START_H * 60, DAY_END_H * 60 - duration);
-          setEvents(evs => ({
-            ...evs,
-            [newId]: { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) },
-          }));
+          setEvents(evs => ({ ...evs, [newId]: { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) } }));
           setEditingId(newId);
           return { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) };
         });
@@ -223,40 +249,34 @@ export default function WeeklyPlanner() {
     return () => document.removeEventListener('keydown', onKey);
   }, []);
 
-  // ── Grid coordinate helper ────────────────────────────────────────────────────
+  // ── Grid coordinate helper ────────────────────────────────────────────────
   const getGridCoords = useCallback((clientX: number, clientY: number) => {
     const el = daysGridRef.current;
     if (!el) return null;
-    const rect  = el.getBoundingClientRect();
-    const relX  = clientX - rect.left;
-    const relY  = clientY - rect.top - HEADER_PX;
-    const colW  = rect.width / 7;
-    const dayIndex = clamp(Math.floor(relX / colW), 0, 6);
-    const snapped  = clamp(yToMin(Math.max(0, relY), interval), dayStartMin, dayEndMin - POSITION_SNAP);
+    const rect     = el.getBoundingClientRect();
+    const colW     = rect.width / 7;
+    const dayIndex = clamp(Math.floor((clientX - rect.left) / colW), 0, 6);
+    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX), interval), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, snappedMin: snapped };
   }, [interval, dayStartMin, dayEndMin]);
 
-  // ── Global mouse move / up ────────────────────────────────────────────────────
+  // ── Global mouse move / up ────────────────────────────────────────────────
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const dr = dragRef.current;
       const rr = resizeRef.current;
-
       if (dr) {
         if (!dr.active) {
-          const dist = Math.hypot(e.clientX - dr.initX, e.clientY - dr.initY);
-          if (dist >= DRAG_THRESHOLD) { dr.active = true; didDragRef.current = true; }
-          else return;
+          if (Math.hypot(e.clientX - dr.initX, e.clientY - dr.initY) >= DRAG_THRESHOLD) {
+            dr.active = true; didDragRef.current = true;
+          } else return;
         }
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
-        let newStart = coords.snappedMin - dr.offsetMin;
-        newStart = clamp(snapMin(newStart, POSITION_SNAP), dayStartMin, dayEndMin - dr.durationMin);
-        dr.curDay      = coords.dayIndex;
-        dr.curStartMin = newStart;
+        const newStart = clamp(snapMin(coords.snappedMin - dr.offsetMin, POSITION_SNAP), dayStartMin, dayEndMin - dr.durationMin);
+        dr.curDay = coords.dayIndex; dr.curStartMin = newStart;
         setDragDisp({ id: dr.eventId, day: coords.dayIndex, startMin: newStart });
       }
-
       if (rr) {
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
@@ -271,108 +291,106 @@ export default function WeeklyPlanner() {
         }
       }
     };
-
     const onUp = () => {
       const dr = dragRef.current;
       const rr = resizeRef.current;
-
       if (dr) {
         if (dr.active) {
           setEvents(prev => {
             const ev = prev[dr.eventId];
             if (!ev) return prev;
-            return {
-              ...prev,
-              [dr.eventId]: { ...ev, dayIndex: dr.curDay, startTime: minToTime(dr.curStartMin), endTime: minToTime(dr.curStartMin + dr.durationMin) },
-            };
+            return { ...prev, [dr.eventId]: { ...ev, dayIndex: dr.curDay, startTime: minToTime(dr.curStartMin), endTime: minToTime(dr.curStartMin + dr.durationMin) } };
           });
           setTimeout(() => { didDragRef.current = false; }, 80);
-        } else {
-          didDragRef.current = false;
-        }
-        dragRef.current = null;
-        setDragDisp(null);
+        } else { didDragRef.current = false; }
+        dragRef.current = null; setDragDisp(null);
       }
-
       if (rr) {
         setEvents(prev => {
           const ev = prev[rr.eventId];
           if (!ev) return prev;
           return { ...prev, [rr.eventId]: { ...ev, startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) } };
         });
-        resizeRef.current = null;
-        setResizeDisp(null);
+        resizeRef.current = null; setResizeDisp(null);
       }
     };
-
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-    return () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
+    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
   }, [getGridCoords, interval, dayStartMin, dayEndMin]);
 
-  // ── Event handlers ────────────────────────────────────────────────────────────
+  // ── Event CRUD helpers ────────────────────────────────────────────────────
   const handleColClick = (e: React.MouseEvent<HTMLDivElement>, dayIdx: number) => {
     if (didDragRef.current) return;
     if ((e.target as HTMLElement).closest('[data-event]')) return;
     const rect     = e.currentTarget.getBoundingClientRect();
-    const relY     = e.clientY - rect.top;
-    const startMin = clamp(yToMin(Math.max(0, relY), interval), dayStartMin, dayEndMin - interval);
+    const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval), dayStartMin, dayEndMin - interval);
     const id       = uid();
-    setEvents(prev => ({
-      ...prev,
-      [id]: { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + interval), content: '', color: 'sage' },
-    }));
+    setEvents(prev => ({ ...prev, [id]: { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + interval), content: '', color: 'sage' } }));
     setEditingId(id);
+    setMenuId(null);
   };
 
   const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent) => {
     if (editingId === ev.id) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const coords    = getGridCoords(e.clientX, e.clientY);
+    e.preventDefault(); e.stopPropagation();
+    const coords   = getGridCoords(e.clientX, e.clientY);
     if (!coords) return;
-    const startMin  = timeToMin(ev.startTime);
-    const endMin    = timeToMin(ev.endTime);
-    const duration  = endMin - startMin;
-    const rawOffset = coords.snappedMin - startMin;
-    const offsetMin = clamp(rawOffset, 0, duration - interval);
+    const startMin = timeToMin(ev.startTime);
+    const duration = timeToMin(ev.endTime) - startMin;
     dragRef.current = {
-      eventId: ev.id, durationMin: duration, offsetMin,
+      eventId: ev.id, durationMin: duration,
+      offsetMin: clamp(coords.snappedMin - startMin, 0, duration - interval),
       origDay: ev.dayIndex, curDay: ev.dayIndex, curStartMin: startMin,
       active: false, initX: e.clientX, initY: e.clientY,
     };
   };
 
   const handleResizeMouseDown = (e: React.MouseEvent, ev: PlannerEvent, edge: 'top' | 'bottom') => {
-    e.preventDefault();
-    e.stopPropagation();
+    e.preventDefault(); e.stopPropagation();
     resizeRef.current = { eventId: ev.id, edge, startMin: timeToMin(ev.startTime), endMin: timeToMin(ev.endTime) };
   };
 
-  const deleteEvent = (e: React.MouseEvent, id: string) => {
-    e.preventDefault();
+  const openMenu = (e: React.MouseEvent, ev: PlannerEvent) => {
     e.stopPropagation();
-    setEvents(prev => { const n = { ...prev }; delete n[id]; return n; });
-    if (editingId === id) setEditingId(null);
+    if (didDragRef.current) return;
+    // Position popover to the right of the event block; fall back to left if near right edge
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const x    = rect.right + 6;
+    const y    = rect.top;
+    setMenuId(ev.id);
+    setMenuPos({ x, y });
   };
 
-  // ── Navigation ────────────────────────────────────────────────────────────────
-  const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); };
-  const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); };
-  const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); };
+  const deleteEvent = (id: string) => {
+    setEvents(prev => { const n = { ...prev }; delete n[id]; return n; });
+    if (editingId === id) setEditingId(null);
+    setMenuId(null); setMenuPos(null);
+  };
 
-  // ── Display props ─────────────────────────────────────────────────────────────
+  const cloneAcrossWeek = (ev: PlannerEvent) => {
+    const additions: PlannerData = {};
+    for (let day = 0; day < 7; day++) {
+      if (day === ev.dayIndex) continue;
+      const newId = uid();
+      additions[newId] = { ...ev, id: newId, dayIndex: day };
+    }
+    setEvents(prev => ({ ...prev, ...additions }));
+    setMenuId(null); setMenuPos(null);
+  };
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+  const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); setMenuId(null); };
+  const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
+  const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); setMenuId(null); };
+
+  // ── Display props (override during drag/resize) ───────────────────────────
   const dispProps = (ev: PlannerEvent) => {
     if (dragDisp?.id === ev.id) {
       const dur = timeToMin(ev.endTime) - timeToMin(ev.startTime);
       return { dayIndex: dragDisp.day, startMin: dragDisp.startMin, endMin: dragDisp.startMin + dur };
     }
-    if (resizeDisp?.id === ev.id) {
-      return { dayIndex: ev.dayIndex, startMin: resizeDisp.startMin, endMin: resizeDisp.endMin };
-    }
+    if (resizeDisp?.id === ev.id) return { dayIndex: ev.dayIndex, startMin: resizeDisp.startMin, endMin: resizeDisp.endMin };
     return { dayIndex: ev.dayIndex, startMin: timeToMin(ev.startTime), endMin: timeToMin(ev.endTime) };
   };
 
@@ -380,85 +398,46 @@ export default function WeeklyPlanner() {
   const isResizingAnything = !!resizeDisp;
   const globalCursor = isDraggingAnything ? 'grabbing' : isResizingAnything ? 'ns-resize' : undefined;
 
-  // Dark-mode surface colours (for header/grid elements that can't use CSS vars easily)
   const surfaceBg  = darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.60)';
   const surfaceBdr = darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.12)';
   const hoverBg    = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)';
+  const menuBg     = darkMode ? '#1e2022' : '#ffffff';
+  const menuBdr    = darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)';
+  const menuText   = darkMode ? '#e8e8e8' : '#1a1a1a';
+  const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
+  // ── Current menu event (for popover rendering) ────────────────────────────
+  const menuEvent = menuId ? events[menuId] : null;
+
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div
       className={`min-h-screen bg-background text-foreground flex flex-col font-sans select-none${darkMode ? ' dark' : ''}`}
       style={{ cursor: globalCursor }}
     >
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
         <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-5">
             <span className="text-base font-semibold tracking-tight text-foreground/80">
               {format(weekStart, 'MMMM yyyy')}
             </span>
-            <div
-              className="flex items-center rounded-lg p-0.5 shadow-sm"
-              style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
-            >
-              <button
-                onClick={goBack}
-                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                style={{ ['--hover-bg' as string]: hoverBg }}
-                onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <ChevronLeft size={15}/>
-              </button>
-              <button
-                onClick={goToday}
-                className="px-3 py-1 text-xs font-medium text-foreground/75 hover:text-foreground rounded-md transition-colors"
-                onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                Today
-              </button>
-              <button
-                onClick={goNext}
-                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <ChevronRight size={15}/>
-              </button>
+            <div className="flex items-center rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+              <button onClick={goBack}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
+              <button onClick={goToday} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
+              <button onClick={goNext}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
             </div>
           </div>
-
           <div className="flex items-center gap-3">
-            {/* Dark mode toggle */}
-            <button
-              onClick={() => setDarkMode(d => !d)}
-              title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
-              style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
-            >
+            <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
-
-            {/* Interval picker */}
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Interval</span>
-              <div
-                className="flex rounded-lg p-0.5 shadow-sm"
-                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
-              >
+              <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                 {([5, 15, 30, 60] as IntervalMin[]).map(v => (
-                  <button
-                    key={v}
-                    onClick={() => setIntervalOpt(v)}
-                    className="px-3 py-1 text-xs font-medium rounded-md transition-all duration-200"
-                    style={{
-                      background: interval === v ? (darkMode ? 'rgba(255,255,255,0.12)' : '#fff') : 'transparent',
-                      color: interval === v ? 'var(--color-foreground)' : 'var(--color-muted-foreground)',
-                      boxShadow: interval === v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
-                    }}
-                  >
+                  <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-medium rounded-md transition-all duration-200"
+                    style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.12)':'#fff') : 'transparent', color: interval===v ? 'var(--color-foreground)' : 'var(--color-muted-foreground)', boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                     {v}m
                   </button>
                 ))}
@@ -468,7 +447,7 @@ export default function WeeklyPlanner() {
         </div>
       </header>
 
-      {/* ── Grid ───────────────────────────────────────────────────────────── */}
+      {/* ── Grid ────────────────────────────────────────────────────────── */}
       <main className="flex-1 overflow-auto">
         <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
           <AnimatePresence initial={false} custom={direction} mode="wait">
@@ -476,9 +455,9 @@ export default function WeeklyPlanner() {
               key={weekStart.toISOString()}
               custom={direction}
               variants={{
-                enter:  (d: number) => ({ x: d > 0 ? 20 : d < 0 ? -20 : 0, opacity: 0 }),
+                enter:  (d: number) => ({ x: d>0?20:d<0?-20:0, opacity: 0 }),
                 center: { x: 0, opacity: 1 },
-                exit:   (d: number) => ({ x: d < 0 ? 20 : d > 0 ? -20 : 0, opacity: 0 }),
+                exit:   (d: number) => ({ x: d<0?20:d>0?-20:0, opacity: 0 }),
               }}
               initial="enter" animate="center" exit="exit"
               transition={{ x: { type: 'spring', stiffness: 300, damping: 30 }, opacity: { duration: 0.15 } }}
@@ -486,21 +465,14 @@ export default function WeeklyPlanner() {
               style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
             >
               {/* Time axis */}
-              <div
-                className="flex-shrink-0 border-r border-border/50"
-                style={{ width: 64, background: darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)' }}
-              >
+              <div className="flex-shrink-0 border-r border-border/50" style={{ width: 64, background: darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)' }}>
                 <div style={{ height: HEADER_PX }} className="border-b border-border/50" />
                 <div className="relative" style={{ height: totalH }}>
                   {slots.map((time, i) => {
                     const isHour = time.endsWith(':00');
                     return (
-                      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i * sh, height: sh }}>
-                        <span className={`leading-none px-1 tabular-nums ${
-                          isHour
-                            ? 'mt-1 text-[10px] font-semibold text-muted-foreground'
-                            : 'mt-1 text-[8.5px] text-muted-foreground/40'
-                        }`}>
+                      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i*sh, height: sh }}>
+                        <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[10px] font-semibold text-muted-foreground' : 'mt-1 text-[8.5px] text-muted-foreground/40'}`}>
                           {time}
                         </span>
                       </div>
@@ -515,40 +487,27 @@ export default function WeeklyPlanner() {
                   const today     = isToday(day);
                   const colEvents = Object.values(events).filter(ev => dispProps(ev).dayIndex === colIdx);
 
+                  // Compute parallel layout for this column
+                  const layoutInput = colEvents.map(ev => {
+                    const dp = dispProps(ev);
+                    return { id: ev.id, startMin: dp.startMin, endMin: dp.endMin };
+                  });
+                  const layout = layoutParallel(layoutInput);
+
                   return (
-                    <div
-                      key={colIdx}
-                      className={`flex flex-col border-r border-border/50 last:border-r-0`}
-                      style={{ background: today ? (darkMode ? 'rgba(100,160,100,0.04)' : 'rgba(100,160,100,0.03)') : 'transparent' }}
-                    >
+                    <div key={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0"
+                      style={{ background: today ? (darkMode ? 'rgba(100,160,100,0.04)' : 'rgba(100,160,100,0.03)') : 'transparent' }}>
                       {/* Day header */}
-                      <div
-                        className={`flex-shrink-0 flex flex-col items-center justify-center border-b ${today ? 'border-primary/20' : 'border-border/50'}`}
-                        style={{ height: HEADER_PX }}
-                      >
-                        <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-primary' : 'text-muted-foreground'}`}>
-                          {format(day, 'EEE')}
-                        </span>
-                        <span className={`text-lg font-semibold leading-none ${today ? 'text-primary' : 'text-foreground/70'}`}>
-                          {format(day, 'd')}
-                        </span>
+                      <div className={`flex-shrink-0 flex flex-col items-center justify-center border-b ${today ? 'border-primary/20' : 'border-border/50'}`} style={{ height: HEADER_PX }}>
+                        <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-primary' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
+                        <span className={`text-lg font-semibold leading-none ${today ? 'text-primary' : 'text-foreground/70'}`}>{format(day, 'd')}</span>
                       </div>
 
                       {/* Content area */}
-                      <div
-                        className="relative"
-                        style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
-                        onClick={(e) => handleColClick(e, colIdx)}
-                      >
+                      <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }} onClick={(e) => handleColClick(e, colIdx)}>
                         {/* Grid lines */}
                         {slots.map((time, i) => (
-                          <div
-                            key={time}
-                            className={`absolute w-full pointer-events-none border-b ${
-                              time.endsWith(':00') ? 'border-border/35' : 'border-border/12'
-                            }`}
-                            style={{ top: i * sh, height: sh }}
-                          />
+                          <div key={time} className={`absolute w-full pointer-events-none border-b ${time.endsWith(':00') ? 'border-border/35' : 'border-border/12'}`} style={{ top: i*sh, height: sh }} />
                         ))}
 
                         {/* Events */}
@@ -559,11 +518,20 @@ export default function WeeklyPlanner() {
                           const isDrag   = dragDisp?.id === ev.id;
                           const isEdit   = editingId === ev.id;
                           const isHov    = hoveredId === ev.id;
+                          const isMenu   = menuId === ev.id;
                           const isResize = resizeDisp?.id === ev.id;
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
 
-                          // Time tooltip during resize
+                          const { col, numCols } = layout.get(ev.id) ?? { col: 0, numCols: 1 };
+                          const colW   = 100 / numCols;
+                          const leftPct  = col * colW;
+                          const rightPct = 100 - (col + 1) * colW;
+                          // Convert percent to pixel offsets accounting for gap
+                          const EDGE = 3; // px from column wall
+                          // left/right in %, gap between parallel events
+                          const gapOffset = numCols > 1 ? COL_GAP / 2 : 0;
+
                           const showTopTime    = isResize && resizeRef.current?.edge === 'top';
                           const showBottomTime = isResize && resizeRef.current?.edge === 'bottom';
 
@@ -571,62 +539,40 @@ export default function WeeklyPlanner() {
                             <div
                               key={ev.id}
                               data-event="1"
-                              className={`absolute rounded-lg border overflow-visible transition-shadow duration-150 ${
-                                isDrag ? 'shadow-2xl z-50' : isEdit ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'
-                              }`}
+                              className={`absolute rounded-lg border overflow-visible transition-shadow duration-150 ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
-                                left: 3, right: 3,
+                                left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
+                                right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
                                 backgroundColor: bg,
                                 borderColor: border,
                                 color: text,
-                                cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'grab',
+                                cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.82 : 1,
+                                outline: isMenu ? `2px solid ${text}` : 'none',
+                                outlineOffset: 1,
                               }}
                               onMouseDown={(e) => handleEventMouseDown(e, ev)}
-                              onClick={(e) => { e.stopPropagation(); if (!didDragRef.current) setEditingId(ev.id); }}
+                              onClick={(e) => { e.stopPropagation(); if (!didDragRef.current) openMenu(e, ev); }}
+                              onDoubleClick={(e) => { e.stopPropagation(); setMenuId(null); setEditingId(ev.id); }}
                               onMouseEnter={() => setHoveredId(ev.id)}
                               onMouseLeave={() => setHoveredId(null)}
                             >
-                              {/* ── Top resize handle (5px hit zone) ── */}
-                              <div
-                                className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center"
-                                style={{ height: 5, cursor: 'n-resize', marginTop: -1 }}
-                                onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}
-                              >
-                                <div
-                                  className="rounded-full transition-opacity duration-150"
-                                  style={{
-                                    width: 24,
-                                    height: 2,
-                                    backgroundColor: text,
-                                    opacity: isHov || isEdit ? 0.35 : 0,
-                                    pointerEvents: 'none',
-                                  }}
-                                />
+                              {/* Top resize handle */}
+                              <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 'n-resize', marginTop: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
+                                <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
                               </div>
 
-                              {/* ── Top time tooltip ── */}
+                              {/* Top time tooltip */}
                               {showTopTime && resizeDisp && (
-                                <div
-                                  className="absolute z-50 pointer-events-none"
-                                  style={{ top: -22, left: '50%', transform: 'translateX(-50%)' }}
-                                >
-                                  <div
-                                    className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap"
-                                    style={{
-                                      background: text,
-                                      color: bg,
-                                      boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
-                                      letterSpacing: '0.02em',
-                                    }}
-                                  >
+                                <div className="absolute z-50 pointer-events-none" style={{ top: -22, left: '50%', transform: 'translateX(-50%)' }}>
+                                  <div className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
                                     {formatTimeLabel(resizeDisp.startMin)}
                                   </div>
                                 </div>
                               )}
 
-                              {/* ── Content ── */}
+                              {/* Content */}
                               <div className="absolute inset-0 px-2 pt-2 pb-2 flex flex-col overflow-hidden" style={{ top: 4, bottom: 6 }}>
                                 {isEdit ? (
                                   <>
@@ -649,21 +595,10 @@ export default function WeeklyPlanner() {
                                         {SWATCHES.map(c => {
                                           const sc = colorPalette[c];
                                           return (
-                                            <button
-                                              key={c}
-                                              type="button"
-                                              onClick={e => {
-                                                e.stopPropagation();
-                                                setEvents(prev => ({ ...prev, [ev.id]: { ...prev[ev.id], color: c } }));
-                                              }}
+                                            <button key={c} type="button"
+                                              onClick={e => { e.stopPropagation(); setEvents(prev => ({ ...prev, [ev.id]: { ...prev[ev.id], color: c } })); }}
                                               className="rounded-full border transition-transform hover:scale-110"
-                                              style={{
-                                                width: 11, height: 11,
-                                                backgroundColor: sc.bg,
-                                                borderColor: sc.border,
-                                                outline: ev.color === c ? `2px solid ${sc.text}` : 'none',
-                                                outlineOffset: 1,
-                                              }}
+                                              style={{ width: 11, height: 11, backgroundColor: sc.bg, borderColor: sc.border, outline: ev.color===c ? `2px solid ${sc.text}` : 'none', outlineOffset: 1 }}
                                             />
                                           );
                                         })}
@@ -677,92 +612,30 @@ export default function WeeklyPlanner() {
                                 )}
                               </div>
 
-                              {/* ── Delete button ── */}
-                              {(isHov || isEdit) && !isDrag && (
-                                <button
-                                  className="absolute top-1 right-1 z-30 flex items-center justify-center rounded transition-opacity"
-                                  style={{ width: 14, height: 14, color: text, opacity: 0.35, backgroundColor: 'transparent' }}
-                                  onMouseEnter={e => (e.currentTarget.style.opacity = '0.7')}
-                                  onMouseLeave={e => (e.currentTarget.style.opacity = '0.35')}
-                                  onClick={e => deleteEvent(e, ev.id)}
-                                  onMouseDown={e => e.stopPropagation()}
-                                >
-                                  <X size={10} strokeWidth={2.5} />
-                                </button>
-                              )}
-
-                              {/* ── Bottom resize handle (5px hit zone) ── */}
-                              <div
-                                className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center"
-                                style={{ height: 5, cursor: 's-resize', marginBottom: -1 }}
-                                onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}
-                              >
-                                <div
-                                  className="rounded-full transition-opacity duration-150"
-                                  style={{
-                                    width: 24,
-                                    height: 2,
-                                    backgroundColor: text,
-                                    opacity: isHov || isEdit ? 0.35 : 0,
-                                    pointerEvents: 'none',
-                                  }}
-                                />
+                              {/* Bottom resize handle */}
+                              <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 's-resize', marginBottom: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
+                                <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
                               </div>
 
-                              {/* ── Bottom time tooltip ── */}
+                              {/* Bottom time tooltip */}
                               {showBottomTime && resizeDisp && (
-                                <div
-                                  className="absolute z-50 pointer-events-none"
-                                  style={{ bottom: -22, left: '50%', transform: 'translateX(-50%)' }}
-                                >
-                                  <div
-                                    className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap"
-                                    style={{
-                                      background: text,
-                                      color: bg,
-                                      boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
-                                      letterSpacing: '0.02em',
-                                    }}
-                                  >
+                                <div className="absolute z-50 pointer-events-none" style={{ bottom: -22, left: '50%', transform: 'translateX(-50%)' }}>
+                                  <div className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
                                     {formatTimeLabel(resizeDisp.endMin)}
                                   </div>
                                 </div>
                               )}
 
-                              {/* ── Move handle square (bottom-right, outside event) ── */}
+                              {/* Move handle */}
                               <div
                                 className="absolute z-40 transition-all duration-150"
-                                style={{
-                                  width: 18, height: 18,
-                                  bottom: -9, right: -9,
-                                  borderRadius: 3,
-                                  backgroundColor: bg,
-                                  border: `1.5px solid ${border}`,
-                                  boxShadow: `0 1px 4px rgba(0,0,0,0.18)`,
-                                  cursor: 'grab',
-                                  opacity: isHov || isEdit ? 1 : 0,
-                                  pointerEvents: isHov || isEdit ? 'auto' : 'none',
-                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                }}
-                                onMouseDown={(e) => {
-                                  e.stopPropagation();
-                                  // Mark as dragging immediately so a short/slow drag
-                                  // never triggers a column click on mouseup
-                                  didDragRef.current = true;
-                                  handleEventMouseDown(e as unknown as React.MouseEvent, ev);
-                                }}
-                                onClick={(e) => {
-                                  // Swallow the click so it never reaches the column
-                                  e.stopPropagation();
-                                  e.preventDefault();
-                                }}
-                                title="Drag to move"
+                                style={{ width: 18, height: 18, bottom: -9, right: -9, borderRadius: 3, backgroundColor: bg, border: `1.5px solid ${border}`, boxShadow: '0 1px 4px rgba(0,0,0,0.18)', cursor: 'grab', opacity: isHov||isEdit||isMenu ? 1 : 0, pointerEvents: isHov||isEdit||isMenu ? 'auto' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                onMouseDown={(e) => { e.stopPropagation(); didDragRef.current = true; handleEventMouseDown(e as unknown as React.MouseEvent, ev); }}
+                                onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}
                               >
                                 <svg width="6" height="6" viewBox="0 0 6 6" fill={text} style={{ opacity: 0.5 }}>
-                                  <circle cx="1.5" cy="1.5" r="1" />
-                                  <circle cx="4.5" cy="1.5" r="1" />
-                                  <circle cx="1.5" cy="4.5" r="1" />
-                                  <circle cx="4.5" cy="4.5" r="1" />
+                                  <circle cx="1.5" cy="1.5" r="1"/><circle cx="4.5" cy="1.5" r="1"/>
+                                  <circle cx="1.5" cy="4.5" r="1"/><circle cx="4.5" cy="4.5" r="1"/>
                                 </svg>
                               </div>
                             </div>
@@ -777,6 +650,67 @@ export default function WeeklyPlanner() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* ── Context menu (portal-style fixed popover) ────────────────────── */}
+      {menuEvent && menuPos && (
+        <div
+          ref={menuRef}
+          className="fixed z-[200] rounded-xl shadow-xl overflow-hidden"
+          style={{
+            left: Math.min(menuPos.x, window.innerWidth - 200),
+            top:  Math.min(menuPos.y, window.innerHeight - 160),
+            minWidth: 180,
+            background: menuBg,
+            border: `1px solid ${menuBdr}`,
+            boxShadow: darkMode
+              ? '0 8px 32px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.06) inset'
+              : '0 8px 32px rgba(0,0,0,0.14), 0 1px 0 rgba(255,255,255,0.9) inset',
+          }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          {/* Event label */}
+          <div className="px-3 pt-2.5 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+            <p className="text-[11px] font-semibold truncate" style={{ color: menuText }}>
+              {menuEvent.content || 'Untitled'}
+            </p>
+            <p className="text-[10px] mt-0.5" style={{ color: menuSub }}>
+              {formatTimeLabel(timeToMin(menuEvent.startTime))} – {formatTimeLabel(timeToMin(menuEvent.endTime))}
+            </p>
+          </div>
+
+          {/* Actions */}
+          {[
+            {
+              icon: <Pencil size={13}/>,
+              label: 'Edit',
+              action: () => { setEditingId(menuEvent.id); setMenuId(null); setMenuPos(null); },
+            },
+            {
+              icon: <CalendarRange size={13}/>,
+              label: 'Clone to whole week',
+              action: () => cloneAcrossWeek(menuEvent),
+            },
+            {
+              icon: <Trash2 size={13}/>,
+              label: 'Delete',
+              danger: true,
+              action: () => deleteEvent(menuEvent.id),
+            },
+          ].map(({ icon, label, action, danger }) => (
+            <button
+              key={label}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+              style={{ color: danger ? '#e05555' : menuText }}
+              onMouseEnter={e => (e.currentTarget.style.background = danger ? 'rgba(224,85,85,0.10)' : hoverBg)}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              onClick={action}
+            >
+              <span style={{ opacity: 0.7 }}>{icon}</span>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
