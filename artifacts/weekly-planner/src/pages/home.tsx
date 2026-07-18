@@ -12,7 +12,7 @@ import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type IntervalMin = 15 | 30 | 60;
+type IntervalMin = 5 | 15 | 30 | 60;
 type EventColor = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
 
 interface PlannerEvent {
@@ -35,7 +35,7 @@ const HEADER_PX   = 56;  // matches h-14
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP = 5; // all positioning snaps to 5-minute grid
 
-const SLOT_H: Record<IntervalMin, number> = { 15: 40, 30: 64, 60: 96 };
+const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
 const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
   sage:  { bg: '#eef1ed', border: '#b8d0b3', text: '#3a5233' },
@@ -438,7 +438,7 @@ export default function WeeklyPlanner() {
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Interval</span>
             <div className="flex bg-white/60 border border-border/70 rounded-lg p-0.5 shadow-sm">
-              {([15, 30, 60] as IntervalMin[]).map(v => (
+              {([5, 15, 30, 60] as IntervalMin[]).map(v => (
                 <button
                   key={v}
                   onClick={() => setIntervalOpt(v)}
