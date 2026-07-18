@@ -33,6 +33,7 @@ const DAY_START_H = 7;   // 7:00
 const DAY_END_H   = 23;  // up to but not including 23:00
 const HEADER_PX   = 56;  // matches h-14
 const DRAG_THRESHOLD = 5;
+const POSITION_SNAP = 5; // all positioning snaps to 5-minute grid
 
 const SLOT_H: Record<IntervalMin, number> = { 15: 40, 30: 64, 60: 96 };
 
@@ -86,10 +87,10 @@ function minToY(min: number, interval: IntervalMin): number {
   return (relMin / interval) * SLOT_H[interval];
 }
 
-// Pixel Y within day column content area → snapped minutes
-function yToMin(y: number, interval: IntervalMin, slots: string[]): number {
-  const idx = clamp(Math.floor(y / SLOT_H[interval]), 0, slots.length - 1);
-  return timeToMin(slots[idx]);
+// Pixel Y within day column content area → minutes snapped to POSITION_SNAP
+function yToMin(y: number, interval: IntervalMin): number {
+  const rawMin = DAY_START_H * 60 + (y / SLOT_H[interval]) * interval;
+  return snapMin(rawMin, POSITION_SNAP);
 }
 
 // ─── Main Component ────────────────────────────────────────────────────────────
@@ -125,10 +126,14 @@ export default function WeeklyPlanner() {
   // Display overrides — set during drag/resize so React re-renders smoothly
   const [dragDisp, setDragDisp]     = useState<{ id: string; day: number; startMin: number } | null>(null);
   const [resizeDisp, setResizeDisp] = useState<{ id: string; startMin: number; endMin: number } | null>(null);
+  const [clipboard, setClipboard]   = useState<PlannerEvent | null>(null);
 
-  const daysGridRef = useRef<HTMLDivElement>(null);
-  const editRef     = useRef<HTMLTextAreaElement>(null);
-  const didDragRef  = useRef(false);  // prevent click-to-edit firing after a drag
+  const daysGridRef   = useRef<HTMLDivElement>(null);
+  const editRef       = useRef<HTMLTextAreaElement>(null);
+  const didDragRef    = useRef(false);  // prevent click-to-edit firing after a drag
+  const editingIdRef  = useRef<string | null>(null);
+  const hoveredIdRef  = useRef<string | null>(null);
+  const eventsRef     = useRef<PlannerData>({});
 
   // ── Derived ──────────────────────────────────────────────────────────────────
   const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
@@ -157,6 +162,11 @@ export default function WeeklyPlanner() {
     localStorage.setItem(INTERVAL_KEY, String(interval));
   }, [interval]);
 
+  // Keep refs in sync so keyboard handler always sees fresh values
+  useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
+  useEffect(() => { hoveredIdRef.current = hoveredId; }, [hoveredId]);
+  useEffect(() => { eventsRef.current = events; }, [events]);
+
   // ── Focus textarea when editing opens ─────────────────────────────────────────
   useEffect(() => {
     if (editingId && editRef.current) {
@@ -164,6 +174,54 @@ export default function WeeklyPlanner() {
       editRef.current.select();
     }
   }, [editingId]);
+
+  // ── Ctrl+C / Ctrl+V clipboard ─────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      // Don't intercept when typing in a textarea/input
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
+
+      if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
+        const targetId = editingIdRef.current ?? hoveredIdRef.current;
+        if (!targetId) return;
+        const ev = eventsRef.current[targetId];
+        if (ev) {
+          setClipboard(ev);
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
+        setClipboard(prev => {
+          if (!prev) return prev;
+          const newId = uid();
+          const startMin = timeToMin(prev.startTime);
+          const endMin   = timeToMin(prev.endTime);
+          const duration = endMin - startMin;
+          // Paste 10 minutes after original; clamp to day bounds
+          const pasteStart = clamp(startMin + 10, DAY_START_H * 60, DAY_END_H * 60 - duration);
+          setEvents(evs => ({
+            ...evs,
+            [newId]: {
+              ...prev,
+              id: newId,
+              startTime: minToTime(pasteStart),
+              endTime: minToTime(pasteStart + duration),
+            },
+          }));
+          setEditingId(newId);
+          // Update clipboard to the new copy so repeated pastes cascade
+          return { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) };
+        });
+        e.preventDefault();
+      }
+    };
+
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   // ── Grid coordinate helper ────────────────────────────────────────────────────
   const getGridCoords = useCallback((clientX: number, clientY: number) => {
@@ -174,10 +232,9 @@ export default function WeeklyPlanner() {
     const relY = clientY - rect.top - HEADER_PX;
     const colW = rect.width / 7;
     const dayIndex = clamp(Math.floor(relX / colW), 0, 6);
-    const rawMin = yToMin(Math.max(0, relY), interval, slots);
-    const snapped = clamp(snapMin(rawMin, interval), dayStartMin, dayEndMin - interval);
+    const snapped = clamp(yToMin(Math.max(0, relY), interval), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, snappedMin: snapped };
-  }, [interval, slots, dayStartMin, dayEndMin]);
+  }, [interval, dayStartMin, dayEndMin]);
 
   // ── Global mouse move / up ────────────────────────────────────────────────────
   useEffect(() => {
@@ -198,7 +255,7 @@ export default function WeeklyPlanner() {
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
         let newStart = coords.snappedMin - dr.offsetMin;
-        newStart = clamp(snapMin(newStart, interval), dayStartMin, dayEndMin - dr.durationMin);
+        newStart = clamp(snapMin(newStart, POSITION_SNAP), dayStartMin, dayEndMin - dr.durationMin);
         dr.curDay = coords.dayIndex;
         dr.curStartMin = newStart;
         setDragDisp({ id: dr.eventId, day: coords.dayIndex, startMin: newStart });
@@ -208,11 +265,11 @@ export default function WeeklyPlanner() {
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
         if (rr.edge === 'bottom') {
-          const newEnd = clamp(snapMin(coords.snappedMin + interval, interval), rr.startMin + interval, dayEndMin);
+          const newEnd = clamp(snapMin(coords.snappedMin + POSITION_SNAP, POSITION_SNAP), rr.startMin + POSITION_SNAP, dayEndMin);
           rr.endMin = newEnd;
           setResizeDisp({ id: rr.eventId, startMin: rr.startMin, endMin: newEnd });
         } else {
-          const newStart = clamp(snapMin(coords.snappedMin, interval), dayStartMin, rr.endMin - interval);
+          const newStart = clamp(snapMin(coords.snappedMin, POSITION_SNAP), dayStartMin, rr.endMin - POSITION_SNAP);
           rr.startMin = newStart;
           setResizeDisp({ id: rr.eventId, startMin: newStart, endMin: rr.endMin });
         }
@@ -280,7 +337,7 @@ export default function WeeklyPlanner() {
     if ((e.target as HTMLElement).closest('[data-event]')) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const relY = e.clientY - rect.top;
-    const startMin = clamp(snapMin(yToMin(Math.max(0, relY), interval, slots), interval), dayStartMin, dayEndMin - interval);
+    const startMin = clamp(yToMin(Math.max(0, relY), interval), dayStartMin, dayEndMin - interval);
     const id = uid();
     setEvents(prev => ({
       ...prev,
