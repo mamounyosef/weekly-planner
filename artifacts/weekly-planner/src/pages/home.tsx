@@ -674,6 +674,40 @@ export default function WeeklyPlanner() {
                                     opacity: isHov || isEdit ? 0.25 : 0,
                                   }}
                                 />
+
+                              {/* ── Move handle square (bottom-right, outside the event) ── */}
+                              <div
+                                className="absolute z-40 transition-all duration-150"
+                                style={{
+                                  width: 12,
+                                  height: 12,
+                                  bottom: -6,
+                                  right: -6,
+                                  borderRadius: 3,
+                                  backgroundColor: bg,
+                                  border: `1.5px solid ${border}`,
+                                  boxShadow: `0 1px 4px rgba(0,0,0,0.18)`,
+                                  cursor: 'grab',
+                                  opacity: isHov || isEdit ? 1 : 0,
+                                  pointerEvents: isHov || isEdit ? 'auto' : 'none',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                }}
+                                onMouseDown={(e) => {
+                                  e.stopPropagation();
+                                  handleEventMouseDown(e as unknown as React.MouseEvent, ev);
+                                }}
+                                title="Drag to move"
+                              >
+                                {/* 2×2 dot grid icon */}
+                                <svg width="6" height="6" viewBox="0 0 6 6" fill={text} style={{ opacity: 0.5 }}>
+                                  <circle cx="1.5" cy="1.5" r="1" />
+                                  <circle cx="4.5" cy="1.5" r="1" />
+                                  <circle cx="1.5" cy="4.5" r="1" />
+                                  <circle cx="4.5" cy="4.5" r="1" />
+                                </svg>
+                              </div>
                               </div>
                             </div>
                           );
