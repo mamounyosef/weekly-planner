@@ -746,7 +746,15 @@ export default function WeeklyPlanner() {
                                 }}
                                 onMouseDown={(e) => {
                                   e.stopPropagation();
+                                  // Mark as dragging immediately so a short/slow drag
+                                  // never triggers a column click on mouseup
+                                  didDragRef.current = true;
                                   handleEventMouseDown(e as unknown as React.MouseEvent, ev);
+                                }}
+                                onClick={(e) => {
+                                  // Swallow the click so it never reaches the column
+                                  e.stopPropagation();
+                                  e.preventDefault();
                                 }}
                                 title="Drag to move"
                               >
