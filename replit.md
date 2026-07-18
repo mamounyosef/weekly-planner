@@ -1,44 +1,40 @@
-# [Project name]
+# Weekly Planner
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A personal weekly time-management web app with a clean calendar grid, drag-and-drop scheduling, and no backend — all data lives in the browser's localStorage.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `pnpm --filter @workspace/weekly-planner run dev` — run the planner (Vite dev server)
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Frontend: React + Vite, Tailwind CSS, framer-motion, date-fns
+- Storage: localStorage only (no backend, no database)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/weekly-planner/src/pages/home.tsx` — entire app (events, drag/resize, clipboard)
+- `artifacts/weekly-planner/src/index.css` — theme / color tokens
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- **Template mode** — events are keyed by day-of-week (0=Mon…6=Sun) + time, not by specific date. All Mondays share the same schedule.
+- **localStorage key** — `planner-v3` for events (JSON), `planner-interval` for the selected interval.
+- **No backend** — user chose free Starter plan; zero server logic needed.
+- **5-minute position snap** — all drag/resize/click placement snaps to the nearest 5 minutes regardless of the display interval.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Weekly drag-and-drop scheduler: click to create events, drag to move across days and times, resize from top/bottom handles, Ctrl+C / Ctrl+V to copy-paste events.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- **Always push to GitHub when done** — after completing any work, push to `https://github.com/mamounyosef/weekly-planner` (remote: `origin`, branch: `main`).
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Changing the display interval (15/30/60m) only affects the grid row height and default new-event duration; stored times are always "HH:MM" strings so they survive interval changes.
 
 ## Pointers
 
