@@ -679,10 +679,10 @@ export default function WeeklyPlanner() {
                               <div
                                 className="absolute z-40 transition-all duration-150"
                                 style={{
-                                  width: 12,
-                                  height: 12,
-                                  bottom: -6,
-                                  right: -6,
+                                  width: 18,
+                                  height: 18,
+                                  bottom: -9,
+                                  right: -9,
                                   borderRadius: 3,
                                   backgroundColor: bg,
                                   border: `1.5px solid ${border}`,
