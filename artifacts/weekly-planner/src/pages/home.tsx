@@ -34,8 +34,8 @@ const INTERVAL_KEY     = 'planner-interval';
 const DARK_MODE_KEY    = 'planner-dark';
 const TIME_FORMAT_KEY  = 'planner-timefmt';
 const WEEK_START_KEY  = 'planner-weekstart';
-const DAY_START_H    = 7;
-const DAY_END_H      = 23;
+const DAY_START_KEY  = 'planner-daystart';
+const DAY_END_KEY    = 'planner-dayend';
 const HEADER_PX      = 56;
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP  = 5;
@@ -94,9 +94,9 @@ function snapMin(min: number, interval: IntervalMin): number {
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
-function generateSlots(interval: IntervalMin): string[] {
+function generateSlots(interval: IntervalMin, startH: number, endH: number): string[] {
   const slots: string[] = [];
-  for (let h = DAY_START_H; h < DAY_END_H; h++) {
+  for (let h = startH; h < endH; h++) {
     for (let m = 0; m < 60; m += interval) {
       slots.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
     }
@@ -104,11 +104,11 @@ function generateSlots(interval: IntervalMin): string[] {
   return slots;
 }
 function uid(): string { return crypto.randomUUID(); }
-function minToY(min: number, interval: IntervalMin): number {
-  return ((min - DAY_START_H * 60) / interval) * SLOT_H[interval];
+function minToY(min: number, interval: IntervalMin, dayStartH: number): number {
+  return ((min - dayStartH * 60) / interval) * SLOT_H[interval];
 }
-function yToMin(y: number, interval: IntervalMin): number {
-  return snapMin(DAY_START_H * 60 + (y / SLOT_H[interval]) * interval, POSITION_SNAP);
+function yToMin(y: number, interval: IntervalMin, dayStartH: number): number {
+  return snapMin(dayStartH * 60 + (y / SLOT_H[interval]) * interval, POSITION_SNAP);
 }
 
 // ─── Parallel layout ──────────────────────────────────────────────────────────
@@ -181,6 +181,8 @@ export default function WeeklyPlanner() {
   const [selRect, setSelRect]           = useState<{ col: number; topPx: number; heightPx: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
   const [nowTick, setNowTick]           = useState(Date.now());
+  const [dayStartH, setDayStartH]       = useState(7);
+  const [dayEndH, setDayEndH]           = useState(23);
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -212,15 +214,17 @@ export default function WeeklyPlanner() {
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
   const eventsRef    = useRef<PlannerData>({});
+  const dayStartRef  = useRef(7);
+  const dayEndRef    = useRef(23);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn });
   const days        = eachDayOfInterval({ start: weekStart, end: endOfWeek(currentDate, { weekStartsOn }) });
-  const slots       = generateSlots(interval);
+  const slots       = generateSlots(interval, dayStartH, dayEndH);
   const sh          = SLOT_H[interval];
   const totalH      = slots.length * sh;
-  const dayEndMin   = DAY_END_H * 60;
-  const dayStartMin = DAY_START_H * 60;
+  const dayEndMin   = dayEndH * 60;
+  const dayStartMin = dayStartH * 60;
   const colorPalette = darkMode ? DARK_EVENT_COLORS : EVENT_COLORS;
 
   // ── Live time indicator ────────────────────────────────────────────────────
@@ -246,6 +250,10 @@ export default function WeeklyPlanner() {
     if (savedFmt === '24h') setTimeFormat('24h');
     const savedWeek = localStorage.getItem(WEEK_START_KEY);
     if (savedWeek) setWeekStartsOn(parseInt(savedWeek) as WeekStartsOn);
+    const savedDayStart = localStorage.getItem(DAY_START_KEY);
+    if (savedDayStart) setDayStartH(parseInt(savedDayStart));
+    const savedDayEnd = localStorage.getItem(DAY_END_KEY);
+    if (savedDayEnd) setDayEndH(parseInt(savedDayEnd));
   }, []);
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(events)); }, [events]);
@@ -253,10 +261,14 @@ export default function WeeklyPlanner() {
   useEffect(() => { localStorage.setItem(DARK_MODE_KEY, String(darkMode)); }, [darkMode]);
   useEffect(() => { localStorage.setItem(TIME_FORMAT_KEY, timeFormat); }, [timeFormat]);
   useEffect(() => { localStorage.setItem(WEEK_START_KEY, String(weekStartsOn)); }, [weekStartsOn]);
+  useEffect(() => { localStorage.setItem(DAY_START_KEY, String(dayStartH)); }, [dayStartH]);
+  useEffect(() => { localStorage.setItem(DAY_END_KEY, String(dayEndH)); }, [dayEndH]);
 
   useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
   useEffect(() => { hoveredIdRef.current = hoveredId; }, [hoveredId]);
   useEffect(() => { eventsRef.current = events; }, [events]);
+  useEffect(() => { dayStartRef.current = dayStartH; }, [dayStartH]);
+  useEffect(() => { dayEndRef.current = dayEndH; }, [dayEndH]);
   useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
 
   // ── Clear selection on Escape ─────────────────────────────────────────────
@@ -327,7 +339,7 @@ export default function WeeklyPlanner() {
           const newId      = uid();
           const startMin   = timeToMin(prev.startTime);
           const duration   = timeToMin(prev.endTime) - startMin;
-          const pasteStart = clamp(startMin + 10, DAY_START_H * 60, DAY_END_H * 60 - duration);
+          const pasteStart = clamp(startMin + 10, dayStartRef.current * 60, dayEndRef.current * 60 - duration);
           setEvents(evs => ({ ...evs, [newId]: { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) } }));
           setEditingId(newId);
           return { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) };
@@ -346,7 +358,7 @@ export default function WeeklyPlanner() {
     const rect     = el.getBoundingClientRect();
     const colW     = rect.width / 7;
     const dayIndex = clamp(Math.floor((clientX - rect.left) / colW), 0, 6);
-    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX), interval), dayStartMin, dayEndMin - POSITION_SNAP);
+    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, snappedMin: snapped };
   }, [interval, dayStartMin, dayEndMin]);
 
@@ -454,8 +466,8 @@ export default function WeeklyPlanner() {
           const endY = e.clientY - colRect.top - HEADER_PX;
           const topPx = Math.min(sr.startY, endY);
           const bottomPx = Math.max(sr.startY, endY);
-          const topMin = yToMin(Math.max(0, topPx), interval);
-          const bottomMin = yToMin(Math.max(0, bottomPx), interval);
+          const topMin = yToMin(Math.max(0, topPx), interval, dayStartH);
+          const bottomMin = yToMin(Math.max(0, bottomPx), interval, dayStartH);
           const idsToAdd: string[] = [];
           for (const [id, ev] of Object.entries(eventsRef.current)) {
             if (ev.dayIndex !== sr.col) continue;
@@ -507,7 +519,7 @@ export default function WeeklyPlanner() {
     if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
     setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
-    const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval), dayStartMin, dayEndMin - interval);
+    const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - interval);
     const id       = uid();
     setEvents(prev => ({ ...prev, [id]: { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + interval), content: '', color: 'sage' } }));
     setEditingId(id);
@@ -750,7 +762,7 @@ export default function WeeklyPlanner() {
 
                         {/* Live time indicator */}
                         {today && nowInView && colIdx === todayColIdx && (() => {
-                          const lineTop = minToY(nowMin, interval);
+                          const lineTop = minToY(nowMin, interval, dayStartH);
                           return (
                             <div className="absolute left-0 right-0 z-30 pointer-events-none" style={{ top: lineTop, height: 0 }}>
                               {/* Circle / arrow dot */}
@@ -769,8 +781,8 @@ export default function WeeklyPlanner() {
                         {/* Events */}
                         {colEvents.map(ev => {
                           const dp       = dispProps(ev);
-                          const top      = minToY(dp.startMin, interval);
-                          const height   = Math.max(sh, minToY(dp.endMin, interval) - top);
+                          const top      = minToY(dp.startMin, interval, dayStartH);
+                          const height   = Math.max(sh, minToY(dp.endMin, interval, dayStartH) - top);
                           const isDrag   = dragDisp?.id === ev.id;
                           const isEdit   = editingId === ev.id;
                           const isHov    = hoveredId === ev.id;
@@ -1037,6 +1049,42 @@ export default function WeeklyPlanner() {
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Day start / end hours */}
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Visible Hours</span>
+                <div className="flex items-center gap-2">
+                  <div className="flex flex-col gap-0.5 flex-1">
+                    <span className="text-[9px] font-medium" style={{ color: menuSub }}>From</span>
+                    <select
+                      value={dayStartH}
+                      onChange={e => setDayStartH(Math.min(parseInt(e.target.value), dayEndH - 1))}
+                      className="w-full py-1.5 px-2 text-xs font-medium rounded-md transition-all duration-200"
+                      style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText, outline: 'none' }}
+                    >
+                      {Array.from({ length: 13 }, (_, i) => i).map(h => (
+                        <option key={h} value={h}>{h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-0.5 flex-1">
+                    <span className="text-[9px] font-medium" style={{ color: menuSub }}>To</span>
+                    <select
+                      value={dayEndH}
+                      onChange={e => setDayEndH(Math.max(parseInt(e.target.value), dayStartH + 1))}
+                      className="w-full py-1.5 px-2 text-xs font-medium rounded-md transition-all duration-200"
+                      style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText, outline: 'none' }}
+                    >
+                      {Array.from({ length: 13 }, (_, i) => i + 12).map(h => (
+                        <option key={h} value={h}>{h === 12 ? '12pm' : h === 24 ? '12am' : h < 24 ? `${h - 12}pm` : `${h - 24}am`}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <p className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
+                  {dayStartH}:00 – {dayEndH}:00 ({dayEndH - dayStartH}h visible)
+                </p>
               </div>
 
             </div>
