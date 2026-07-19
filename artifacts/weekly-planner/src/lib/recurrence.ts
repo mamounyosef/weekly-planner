@@ -32,10 +32,21 @@ export interface RecurFields {
   seriesId?: string;
   overridesSeriesId?: string;
   deleted?: boolean;
+  dayIndex?: number;
+  daysSpan?: number;
+  allDay?: boolean;
 }
 
 export function weekKeyOf(date: Date, weekStartsOn: WeekStartsOn): string {
   return format(startOfWeek(date, { weekStartsOn }), 'yyyy-MM-dd');
+}
+
+function parseDate(d: string): Date {
+  if (!d) return new Date(0);
+  const parts = d.split('-');
+  if (parts.length < 3) return new Date(0);
+  const [y, m, d_] = parts.map(Number);
+  return new Date(y, m - 1, d_);
 }
 
 const wk = (ev: RecurFields): string => ev.weekKey ?? FAR_PAST_WEEK;
@@ -71,9 +82,20 @@ export function resolveWeek<T extends RecurFields>(
   const suppressed = new Set<string>();
 
   // Single-week records pinned to this week (and the series they mask).
+  const weekStartMs = parseDate(viewedWeekKey).getTime();
+  const weekEndMs = weekStartMs + 7 * 24 * 60 * 60 * 1000;
+
   for (const ev of Object.values(raw)) {
     if (ev.scope !== 'week') continue;
-    if ((ev.weekKey ?? '') !== viewedWeekKey) continue;
+    
+    // Check if the event overlaps with the viewed week
+    const evStartWeekMs = parseDate(ev.weekKey || FAR_PAST_WEEK).getTime();
+    const evStartMs = evStartWeekMs + (ev.dayIndex || 0) * 24 * 60 * 60 * 1000;
+    const evEndMs = evStartMs + (ev.daysSpan || 1) * 24 * 60 * 60 * 1000;
+    
+    const overlaps = evStartMs < weekEndMs && evEndMs > weekStartMs;
+    if (!overlaps) continue;
+
     if (ev.overridesSeriesId) suppressed.add(ev.overridesSeriesId);
     if (ev.deleted) continue; // "skip this week" tombstone: suppress only
     out[ev.id] = ev;

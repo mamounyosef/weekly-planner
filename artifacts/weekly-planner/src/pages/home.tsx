@@ -13,8 +13,10 @@ import {
   isToday,
   isSameMonth,
   isSameDay,
+  addDays,
+  differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -36,6 +38,7 @@ import {
 import {
   type EventScope,
   type CommitCtx,
+  FAR_PAST_WEEK,
   weekKeyOf,
   migrateEvents,
   resolveWeek,
@@ -60,6 +63,8 @@ interface PlannerEvent {
   color: EventColor;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
+  allDay?: boolean;     // when true, this is an all-day event
+  daysSpan?: number;    // for all-day events, the number of days it spans (1 to 7)
   // ── Recurrence / modification-domain (see src/lib/recurrence.ts) ──
   scope?: EventScope;          // 'all' = recurring, 'week' = single-week
   weekKey?: string;            // 'all': effective-from week · 'week': the pinned week
@@ -171,6 +176,70 @@ function minToY(min: number, interval: IntervalMin, dayStartH: number): number {
 }
 function yToMin(y: number, interval: IntervalMin, dayStartH: number): number {
   return snapMin(dayStartH * 60 + (y / SLOT_H[interval]) * interval, POSITION_SNAP);
+}
+
+// ─── All-Day Layout Stacking ───────────────────────────────────────────────
+function layoutAllDay(events: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }>): Map<string, { row: number }> {
+  const sorted = [...events].sort((a, b) => {
+    const spanA = a.visibleDaysSpan;
+    const spanB = b.visibleDaysSpan;
+    if (spanA !== spanB) return spanB - spanA;
+    return a.visibleDayIndex - b.visibleDayIndex;
+  });
+
+  const rowTracking: number[][] = [];
+  const layoutMap = new Map<string, number>();
+
+  for (const ev of sorted) {
+    const start = ev.visibleDayIndex;
+    const end = start + ev.visibleDaysSpan;
+
+    let assignedRow = 0;
+    while (true) {
+      if (!rowTracking[assignedRow]) {
+        rowTracking[assignedRow] = [];
+      }
+      const overlap = rowTracking[assignedRow].some(dayIdx => dayIdx >= start && dayIdx < end);
+      if (!overlap) {
+        for (let d = start; d < end; d++) {
+          rowTracking[assignedRow].push(d);
+        }
+        layoutMap.set(ev.id, assignedRow);
+        break;
+      }
+      assignedRow++;
+    }
+  }
+
+  const result = new Map<string, { row: number }>();
+  for (const [id, r] of layoutMap.entries()) {
+    result.set(id, { row: r });
+  }
+  return result;
+}
+
+// Helper to calculate the visible dayIndex and daysSpan of an all-day event
+// within the viewed week (which starts at weekStart). Returns null if it doesn't overlap.
+function getEventWeekOverlap(ev: PlannerEvent, weekStart: Date): { dayIndex: number; daysSpan: number } | null {
+  const evWeekStart = new Date(ev.weekKey || FAR_PAST_WEEK);
+  const evStart = addDays(evWeekStart, ev.dayIndex);
+  const evEnd = addDays(evStart, ev.daysSpan || 1);
+  const weekEnd = addDays(weekStart, 7);
+
+  if (evStart >= weekEnd || evEnd <= weekStart) {
+    return null;
+  }
+
+  const startDiff = differenceInDays(evStart, weekStart);
+  const visibleDayIndex = Math.max(0, startDiff);
+  
+  const endDiff = differenceInDays(evEnd, weekStart);
+  const visibleDaysSpan = Math.min(7, endDiff) - visibleDayIndex;
+
+  return {
+    dayIndex: visibleDayIndex,
+    daysSpan: visibleDaysSpan
+  };
 }
 
 // ─── Parallel layout ──────────────────────────────────────────────────────────
@@ -310,6 +379,32 @@ export default function WeeklyPlanner() {
   const isPastWeek        = viewedWeekKey < currentRealWeekKey;
   // Items visible in the viewed week, keyed by the storage id actually shown.
   const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+  const weekAllDayEvents = useMemo(() => {
+    const rawAllDays = Object.values(weekEvents).filter(ev => ev.allDay && !ev.deleted);
+    const mapped: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
+    for (const ev of rawAllDays) {
+      const overlap = getEventWeekOverlap(ev, weekStart);
+      if (overlap) {
+        mapped.push({
+          ...ev,
+          visibleDayIndex: overlap.dayIndex,
+          visibleDaysSpan: overlap.daysSpan
+        });
+      }
+    }
+    return mapped;
+  }, [weekEvents, weekStart]);
+  const allDayLayout = useMemo(() => {
+    return layoutAllDay(weekAllDayEvents);
+  }, [weekAllDayEvents]);
+  const maxAllDayRowIndex = useMemo(() => {
+    let maxR = -1;
+    for (const info of allDayLayout.values()) {
+      if (info.row > maxR) maxR = info.row;
+    }
+    return maxR + 1;
+  }, [allDayLayout]);
+  const allDayHeight = maxAllDayRowIndex > 0 ? (maxAllDayRowIndex * 28 + 8) : 36;
 
   // Month overview: full weeks covering the current month, each day resolved to the
   // events actually visible that week (recurring versions + single-week overrides).
@@ -827,8 +922,19 @@ export default function WeeklyPlanner() {
   const redoRef = useRef(redo); useEffect(() => { redoRef.current = redo; }, [redo]);
 
   // ── Backup & Restore ──────────────────────────────────────────────────────
+  // Covers all three database files (events, settings, focus-sessions) so a
+  // single exported file is a complete snapshot of the whole app's data.
+  const BACKUP_FORMAT_VERSION = 2;
+
   const exportBackup = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(events, null, 2));
+    const backup = {
+      backupFormatVersion: BACKUP_FORMAT_VERSION,
+      exportedAt: new Date().toISOString(),
+      events,
+      settings: { interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, editDomain, calendarView },
+      focusSessions,
+    };
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backup, null, 2));
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", dataStr);
     downloadAnchor.setAttribute("download", `weekly-planner-backup-${new Date().toISOString().split('T')[0]}.json`);
@@ -844,12 +950,38 @@ export default function WeeklyPlanner() {
     reader.onload = (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
-        if (parsed && typeof parsed === 'object') {
-          setEvents(migrateEvents(parsed as PlannerData).events);
-          alert('Backup imported successfully!');
-        } else {
+        if (!parsed || typeof parsed !== 'object') {
           alert('Invalid backup file structure.');
+          return;
         }
+
+        // Comprehensive backup (v2+): { events, settings, focusSessions }.
+        // Legacy backup (v1): the file *is* the events map.
+        const isComprehensive = 'events' in parsed && typeof parsed.events === 'object';
+        const importedEvents: PlannerData = isComprehensive ? parsed.events : parsed;
+        const s = isComprehensive ? parsed.settings : null;
+        const sessions = isComprehensive && Array.isArray(parsed.focusSessions) ? parsed.focusSessions : null;
+
+        setEvents(migrateEvents(importedEvents as PlannerData).events);
+
+        if (s && typeof s === 'object') {
+          if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
+          if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+          if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
+          if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
+          if (s.dayStartH != null) setDayStartH(s.dayStartH);
+          if (s.dayEndH != null) setDayEndH(s.dayEndH);
+          if (s.editDomain === 'week' || s.editDomain === 'all') setEditDomain(s.editDomain);
+          if (s.calendarView === 'week' || s.calendarView === 'month') setCalendarView(s.calendarView);
+        }
+
+        if (sessions) {
+          const safeSessions = safeFocusSessions(sessions);
+          setFocusSessions(safeSessions);
+          persistFocusSessions(safeSessions);
+        }
+
+        alert(isComprehensive ? 'Full backup (events, settings, focus sessions) imported successfully!' : 'Backup imported successfully!');
       } catch (err) {
         alert('Error parsing backup file.');
       }
@@ -941,9 +1073,9 @@ export default function WeeklyPlanner() {
     const rect     = el.getBoundingClientRect();
     const colW     = rect.width / 7;
     const dayIndex = clamp(Math.floor((clientX - rect.left) / colW), 0, 6);
-    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
+    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX - allDayHeight), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, snappedMin: snapped };
-  }, [interval, dayStartMin, dayEndMin]);
+  }, [interval, dayStartMin, dayEndMin, allDayHeight]);
 
   // ── Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) ─────────────
   useEffect(() => {
@@ -1054,7 +1186,7 @@ export default function WeeklyPlanner() {
             const rect = el.getBoundingClientRect();
             const { x, y } = mousePosRef.current;
             // Check if cursor is over the grid (excluding the header row)
-            if (x >= rect.left && x <= rect.right && y >= rect.top + HEADER_PX && y <= rect.bottom) {
+            if (x >= rect.left && x <= rect.right && y >= rect.top + HEADER_PX + allDayHeight && y <= rect.bottom) {
               const coords = getGridCoords(x, y);
               if (coords) {
                 // Find anchor: earliest event in copied group
@@ -1155,7 +1287,7 @@ export default function WeeklyPlanner() {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [getGridCoords]);
+  }, [getGridCoords, allDayHeight]);
 
   // ── Global mouse move / up ────────────────────────────────────────────────
   useEffect(() => {
@@ -1193,7 +1325,7 @@ export default function WeeklyPlanner() {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
         const curX = e.clientX - rect.left;
-        const curY = e.clientY - rect.top - HEADER_PX;
+        const curY = e.clientY - rect.top - HEADER_PX - allDayHeight;
         const left = Math.min(sr.startX, curX);
         const top = Math.min(sr.startY, curY);
         const width = Math.abs(curX - sr.startX);
@@ -1208,7 +1340,7 @@ export default function WeeklyPlanner() {
       if (cr) {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const curY = e.clientY - rect.top - HEADER_PX;
+        const curY = e.clientY - rect.top - HEADER_PX - allDayHeight;
         const topPx = Math.min(cr.startY, curY);
         const heightPx = Math.abs(curY - cr.startY);
         if (heightPx >= DRAG_THRESHOLD) { cr.moved = true; didDragRef.current = true; }
@@ -1260,7 +1392,7 @@ export default function WeeklyPlanner() {
         if (cr.moved) {
           const rect = daysGridRef.current?.getBoundingClientRect();
           if (rect) {
-            const curY = e.clientY - rect.top - HEADER_PX;
+            const curY = e.clientY - rect.top - HEADER_PX - allDayHeight;
             let startMin = yToMin(Math.max(0, Math.min(cr.startY, curY)), interval, dayStartH);
             let endMin   = yToMin(Math.max(0, Math.max(cr.startY, curY)), interval, dayStartH);
             startMin = clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP);
@@ -1303,7 +1435,7 @@ export default function WeeklyPlanner() {
         if (gridRect) {
           const colW = gridRect.width / 7;
           const curX = e.clientX - gridRect.left;
-          const curY = e.clientY - gridRect.top - HEADER_PX;
+          const curY = e.clientY - gridRect.top - HEADER_PX - allDayHeight;
           const left = Math.min(sr.startX, curX);
           const right = Math.max(sr.startX, curX);
           const topPx = Math.min(sr.startY, curY);
@@ -1860,6 +1992,9 @@ export default function WeeklyPlanner() {
               {/* Time axis */}
               <div className="flex-shrink-0 border-r border-border/50" style={{ width: 64, background: darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)' }}>
                 <div style={{ height: HEADER_PX }} className="border-b border-border/50" />
+                <div style={{ height: allDayHeight }} className="border-b border-border/50 flex items-center justify-center">
+                  <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider text-center">All Day</span>
+                </div>
                 <div className="relative" style={{ height: totalH }}>
                   {slots.map((time, i) => {
                     const isHour = time.endsWith(':00');
@@ -1894,6 +2029,7 @@ export default function WeeklyPlanner() {
                   type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
                   const renderItems: RenderItem[] = [];
                   for (const ev of Object.values(weekEvents)) {
+                    if (ev.allDay) continue; // Skip all-day events in the timeline grid
                     const dp = dispProps(ev);
                     if (isActiveEvent(ev)) {
                       if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
@@ -1925,6 +2061,30 @@ export default function WeeklyPlanner() {
                         <span className={`text-lg font-semibold leading-none ${today ? 'text-primary' : 'text-foreground/70'}`}>{format(day, 'd')}</span>
                       </div>
 
+                      {/* All-day cell placeholder */}
+                      <div
+                        style={{ height: allDayHeight }}
+                        className="flex-shrink-0 border-b border-border/50 relative group"
+                      >
+                        {/* "+" add button on hover */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedIds(new Set());
+                            const id = uid();
+                            createStamped(
+                              { id, dayIndex: colIdx, startTime: "00:00", endTime: "00:30", allDay: true, content: '', color: 'sage' },
+                              { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } }
+                            );
+                          }}
+                          className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-all bg-background/70 hover:bg-background border border-border/40 opacity-0 group-hover:opacity-100 shadow-sm active:scale-95 z-20"
+                          style={{ color: menuSub }}
+                        >
+                          <Plus size={11} />
+                        </button>
+                      </div>
+
                       {/* Content area */}
                       <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
                         onClick={(e) => handleColClick(e, colIdx)}
@@ -1937,7 +2097,7 @@ export default function WeeklyPlanner() {
                             const gr = daysGridRef.current?.getBoundingClientRect();
                             if (gr) {
                               const sx = e.clientX - gr.left;
-                              const sy = e.clientY - gr.top - HEADER_PX;
+                              const sy = e.clientY - gr.top - HEADER_PX - allDayHeight;
                               selDragRef.current = { startX: sx, startY: sy };
                               setSelRect({ left: sx, top: sy, width: 0, height: 0 });
                             }
@@ -2194,11 +2354,107 @@ export default function WeeklyPlanner() {
                   );
                 })}
 
+                {/* All-Day Events Overlays (Continuous horizontal banners) */}
+                {weekAllDayEvents.length > 0 && (() => {
+                  const layoutMap = layoutAllDay(weekAllDayEvents);
+                  return weekAllDayEvents.map(ev => {
+                    const layoutInfo = layoutMap.get(ev.id);
+                    if (!layoutInfo) return null;
+                    const { row } = layoutInfo;
+                    const startIdx = ev.visibleDayIndex;
+                    const span = ev.visibleDaysSpan;
+                    const leftPct = (startIdx / 7) * 100;
+                    const widthPct = (span / 7) * 100;
+
+                    const isEdit = editingId === ev.id;
+                    const isSelected = selectedIds.has(ev.id);
+                    const isMenu = menuId === ev.id;
+                    const { bg, border, text } = colorPalette[ev.color];
+
+                    // Find actual day date string of start day
+                    const startDayDate = days[ev.dayIndex];
+                    const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                    const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+
+                    return (
+                      <div
+                        key={ev.id}
+                        data-event="1"
+                        data-event-id={ev.id}
+                        className={`absolute rounded-md border text-[11px] font-semibold flex items-center gap-1.5 px-2.5 transition-all duration-150 ${isEdit || isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                        style={{
+                          top: HEADER_PX + row * 28 + 4,
+                          height: 24,
+                          left: `calc(${leftPct}% + 4px)`,
+                          width: `calc(${widthPct}% - 8px)`,
+                          backgroundColor: bg,
+                          borderColor: border,
+                          color: text,
+                          cursor: isEdit ? 'text' : 'pointer',
+                          outline: isMenu ? `2px solid ${text}` : isSelected ? `2px solid ${darkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.45)'}` : 'none',
+                          outlineOffset: 1,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (e.ctrlKey || e.metaKey) {
+                            setSelectedIds(prev => { const n = new Set(prev); if (n.has(ev.id)) n.delete(ev.id); else n.add(ev.id); return n; });
+                            return;
+                          }
+                          openMenu(e, ev);
+                        }}
+                        onDoubleClick={(e) => { e.stopPropagation(); openMenu(e, ev); enterEdit(ev.id); }}
+                      >
+                        {isEdit ? (
+                          <input
+                            autoFocus
+                            type="text"
+                            value={ev.content}
+                            onChange={e => applyEdit(ev.id, { content: e.target.value })}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') { e.preventDefault(); finishEdit(); }
+                              if (e.key === 'Escape') finishEdit();
+                            }}
+                            onBlur={() => finishEdit()}
+                            onClick={e => e.stopPropagation()}
+                            className="flex-1 bg-transparent outline-none text-[11px] leading-none p-0 w-full placeholder:opacity-40"
+                            style={{ color: text }}
+                            placeholder="All-day event..."
+                          />
+                        ) : (
+                          <>
+                            {!ev.noCheckbox && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleEventCompleted(ev.id, startDayDate);
+                                }}
+                                className="flex-shrink-0 w-3 h-3 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                style={{
+                                  borderColor: isCompleted ? text : `${text}50`,
+                                  backgroundColor: isCompleted ? text : 'transparent',
+                                }}
+                              >
+                                {isCompleted && (
+                                  <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                )}
+                              </button>
+                            )}
+                            <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                              {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
+
                 {/* Selection rectangle overlay (spans multiple days) */}
                 {selRect && (
                   <div className="absolute pointer-events-none z-20" style={{
                     left: selRect.left,
-                    top: HEADER_PX + selRect.top,
+                    top: HEADER_PX + allDayHeight + selRect.top,
                     width: Math.max(2, selRect.width),
                     height: Math.max(2, selRect.height),
                     background: darkMode ? 'rgba(120,180,240,0.18)' : 'rgba(60,120,200,0.13)',
@@ -2711,27 +2967,104 @@ export default function WeeklyPlanner() {
           </div>
 
           {/* Precise start/end time editors */}
-          <div className="px-3 py-2.5 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-            {(['startTime', 'endTime'] as const).map((field, idx) => (
-              <div key={field} className="flex flex-col gap-1 flex-1">
-                <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
-                  {idx === 0 ? 'Start' : 'End'}
-                </span>
-                <input
-                  type="time"
-                  step={60}
-                  value={menuEvent[field]}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (!val) return;
-                    applyEdit(menuEvent.id, { [field]: val });
+          {!menuEvent.allDay && (
+            <div className="px-3 py-2.5 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              {(['startTime', 'endTime'] as const).map((field, idx) => (
+                <div key={field} className="flex flex-col gap-1 flex-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                    {idx === 0 ? 'Start' : 'End'}
+                  </span>
+                  <input
+                    type="time"
+                    step={60}
+                    value={menuEvent[field]}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (!val) return;
+                      applyEdit(menuEvent.id, { [field]: val });
+                    }}
+                    className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none"
+                    style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* All-day event toggle */}
+          <button
+            className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+            style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
+            onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            onClick={() => {
+              const nextAllDay = !menuEvent.allDay;
+              const patches: Partial<PlannerEvent> = { allDay: nextAllDay };
+              if (!nextAllDay) {
+                patches.daysSpan = undefined;
+              }
+              applyEdit(menuEvent.id, patches);
+            }}
+          >
+            <span className="flex items-center gap-2.5">
+              <Clock size={13} style={{ opacity: 0.7 }} />
+              All-day event
+            </span>
+            <span
+              className="flex items-center rounded-full transition-colors"
+              style={{
+                width: 30, height: 17, padding: 2,
+                background: menuEvent.allDay ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                justifyContent: menuEvent.allDay ? 'flex-end' : 'flex-start',
+              }}
+            >
+              <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
+            </span>
+          </button>
+
+          {/* All-day span selector */}
+          {menuEvent.allDay && (
+            <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              <span className="text-[11px] font-medium" style={{ color: menuText }}>Duration (days)</span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentSpan = menuEvent.daysSpan || 1;
+                    if (currentSpan > 1) {
+                      applyEdit(menuEvent.id, { daysSpan: currentSpan - 1 });
+                    }
                   }}
-                  className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none"
-                  style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
-                />
+                  disabled={(menuEvent.daysSpan || 1) <= 1}
+                  className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  style={{ color: menuText, borderColor: menuBdr }}
+                  onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
+                >
+                  -
+                </button>
+                <span className="text-xs font-semibold w-5 text-center tabular-nums" style={{ color: menuText }}>
+                  {menuEvent.daysSpan || 1}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const currentSpan = menuEvent.daysSpan || 1;
+                    if (currentSpan < 90) {
+                      applyEdit(menuEvent.id, { daysSpan: currentSpan + 1 });
+                    }
+                  }}
+                  disabled={(menuEvent.daysSpan || 1) >= 90}
+                  className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  style={{ color: menuText, borderColor: menuBdr }}
+                  onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
+                >
+                  +
+                </button>
               </div>
-            ))}
-          </div>
+            </div>
+          )}
 
           {/* Completion-checkbox toggle */}
           <button
