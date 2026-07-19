@@ -251,19 +251,46 @@ export default function Widget() {
     setShowLiveBtn(!isVisible);
   }, [normNowMin, interval, dayStartH]);
 
+  const scrollAnimFrame = useRef(0);
   const centerScrollOnLive = (smooth = true) => {
     const container = scrollContainerRef.current;
     if (!container || container.clientHeight === 0) return;
     const lineTop = minToY(normNowMin, interval, dayStartH);
-    isProgrammaticScroll.current = true;
-    if (smooth) {
-      container.scrollTo({
-        top: lineTop - container.clientHeight / 2,
-        behavior: 'smooth'
-      });
-    } else {
-      container.scrollTop = lineTop - container.clientHeight / 2;
+    const targetTop = lineTop - container.clientHeight / 2;
+
+    if (!smooth) {
+      isProgrammaticScroll.current = true;
+      container.scrollTop = targetTop;
+      return;
     }
+
+    // Custom eased scroll animation (800ms, easeInOutCubic)
+    const startTop = container.scrollTop;
+    const distance = targetTop - startTop;
+    if (Math.abs(distance) < 2) return;
+    const duration = 800;
+    const startTime = performance.now();
+
+    if (scrollAnimFrame.current) cancelAnimationFrame(scrollAnimFrame.current);
+
+    const easeInOutCubic = (t: number) =>
+      t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+    const step = (now: number) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = easeInOutCubic(progress);
+      isProgrammaticScroll.current = true;
+      container.scrollTop = startTop + distance * eased;
+
+      if (progress < 1) {
+        scrollAnimFrame.current = requestAnimationFrame(step);
+      } else {
+        scrollAnimFrame.current = 0;
+      }
+    };
+
+    scrollAnimFrame.current = requestAnimationFrame(step);
   };
 
   const handleScroll = () => {
