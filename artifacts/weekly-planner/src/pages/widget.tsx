@@ -24,6 +24,7 @@ import {
   sumFocusSecondsForDay,
   uid,
 } from '@/lib/focusSessions';
+import { type EventScope, weekKeyOf, migrateEvents, resolveWeek } from '@/lib/recurrence';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -40,6 +41,12 @@ interface PlannerEvent {
   color: EventColor;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
+  // Recurrence / modification-domain fields (see src/lib/recurrence.ts).
+  scope?: EventScope;
+  weekKey?: string;
+  seriesId?: string;
+  overridesSeriesId?: string;
+  deleted?: boolean;
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -192,7 +199,7 @@ export default function Widget() {
   useEffect(() => {
     // Fallback load local storage for events only
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) {} }
+    if (saved) { try { setEvents(migrateEvents(JSON.parse(saved) as PlannerData).events); } catch (_) {} }
     setFocusSessions(loadLocalFocusSessions());
     setFocusTimer(loadLocalFocusTimer());
 
@@ -219,7 +226,7 @@ export default function Widget() {
         .then(r => r.json())
         .then(data => {
           if (data && typeof data === 'object') {
-            setEvents(data);
+            setEvents(migrateEvents(data as PlannerData).events);
           }
         })
         .catch(err => console.error('Failed to sync widget database:', err));
@@ -264,6 +271,11 @@ export default function Widget() {
   const days = eachDayOfInterval({ start: weekStart, end: endOfWeek(today, { weekStartsOn }) });
   const todayColIdx = days.findIndex(d => isToday(d));
 
+  // Resolve raw storage into the items visible in the current (real) week, so the
+  // widget honours single-week items, recurring versions and per-week overrides.
+  const viewedWeekKey = weekKeyOf(today, weekStartsOn);
+  const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+
   const slots = generateSlots(interval, dayStartH, dayEndH);
   const sh = SLOT_H[interval];
   const totalH = slots.length * sh;
@@ -293,7 +305,7 @@ export default function Widget() {
   const colEvents = useMemo(() => {
     if (todayColIdx === -1) return [];
     const items: Array<{ ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' }> = [];
-    for (const ev of Object.values(events)) {
+    for (const ev of Object.values(weekEvents)) {
       if (isBoundarySpanning(ev)) {
         if (ev.dayIndex === todayColIdx) {
           items.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayEndMin, segKind: 'tail' });
@@ -312,7 +324,7 @@ export default function Widget() {
       }
     }
     return items;
-  }, [events, todayColIdx, isBoundarySpanning, dayStartMin, dayEndMin, dayStartH]);
+  }, [weekEvents, todayColIdx, isBoundarySpanning, dayStartMin, dayEndMin, dayStartH]);
 
   const layout = useMemo(() => {
     const layoutInput = colEvents.map(item => ({

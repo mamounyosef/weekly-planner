@@ -33,6 +33,17 @@ import {
   sumFocusSecondsForDay,
   uid as focusUid,
 } from '@/lib/focusSessions';
+import {
+  type EventScope,
+  type CommitCtx,
+  weekKeyOf,
+  migrateEvents,
+  resolveWeek,
+  ensureConcreteTarget,
+  collapseSeriesForward,
+  commitDelete,
+  stampNewItem,
+} from '@/lib/recurrence';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -49,6 +60,12 @@ interface PlannerEvent {
   color: EventColor;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
+  // ── Recurrence / modification-domain (see src/lib/recurrence.ts) ──
+  scope?: EventScope;          // 'all' = recurring, 'week' = single-week
+  weekKey?: string;            // 'all': effective-from week · 'week': the pinned week
+  seriesId?: string;           // groups the versions of one recurring item
+  overridesSeriesId?: string;  // a week-record that masks/forks a recurring series
+  deleted?: boolean;           // tombstone (recurring version, or skip-this-week)
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -221,6 +238,8 @@ export default function WeeklyPlanner() {
   const [darkMode, setDarkMode]       = useState(true);
   const [timeFormat, setTimeFormat]     = useState<TimeFormat>('12h');
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
+  const [editDomain, setEditDomain]     = useState<EventScope>('week'); // modification domain toggle
+  const [calendarView, setCalendarView] = useState<'week' | 'month'>('week');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -284,6 +303,147 @@ export default function WeeklyPlanner() {
   const dayEndMin   = dayEndH * 60;
   const dayStartMin = dayStartH * 60;
   const colorPalette = darkMode ? DARK_EVENT_COLORS : EVENT_COLORS;
+
+  // ── Modification domain / week resolution ──────────────────────────────────
+  const viewedWeekKey     = weekKeyOf(currentDate, weekStartsOn);
+  const currentRealWeekKey = weekKeyOf(new Date(nowTick), weekStartsOn);
+  const isPastWeek        = viewedWeekKey < currentRealWeekKey;
+  // Items visible in the viewed week, keyed by the storage id actually shown.
+  const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+
+  // Month overview: full weeks covering the current month, each day resolved to the
+  // events actually visible that week (recurring versions + single-week overrides).
+  const monthMatrix = useMemo(() => {
+    if (calendarView !== 'month') return [] as Array<{ weekKey: string; cells: Array<{ date: Date; events: PlannerEvent[] }> }>;
+    const gridStart = startOfWeek(startOfMonth(currentDate), { weekStartsOn });
+    const gridEnd   = endOfWeek(endOfMonth(currentDate), { weekStartsOn });
+    const allDays   = eachDayOfInterval({ start: gridStart, end: gridEnd });
+    const weeks: Array<{ weekKey: string; cells: Array<{ date: Date; events: PlannerEvent[] }> }> = [];
+    for (let i = 0; i < allDays.length; i += 7) {
+      const chunk = allDays.slice(i, i + 7);
+      const wkey = weekKeyOf(chunk[0], weekStartsOn);
+      const resolved = resolveWeek(events, wkey);
+      const cells = chunk.map((date, col) => ({
+        date,
+        events: Object.values(resolved)
+          .filter(e => e.dayIndex === col)
+          .sort((a, b) => timeToMin(a.startTime) - timeToMin(b.startTime)),
+      }));
+      weeks.push({ weekKey: wkey, cells });
+    }
+    return weeks;
+  }, [calendarView, currentDate, weekStartsOn, events]);
+  const weekEventsRef = useRef<PlannerData>({});
+  useEffect(() => { weekEventsRef.current = weekEvents; }, [weekEvents]);
+  // Context handed to the scope-aware committers. A ref keeps the latest value
+  // available inside the long-lived mouse/keyboard handlers.
+  const commitCtx: CommitCtx = { viewedWeekKey, domain: editDomain, isPastWeek, newId: uid };
+  const commitCtxRef = useRef<CommitCtx>(commitCtx);
+  useEffect(() => { commitCtxRef.current = commitCtx; }, [viewedWeekKey, editDomain, isPastWeek]);
+
+  // Patch the item shown as `id` this week through the scope-aware resolver, then
+  // remap any stale UI references (editing / menu / selection) if the edit landed
+  // on a freshly materialised fork or version. Returns the concrete target id.
+  const applyEdit = useCallback((id: string, patch: Partial<PlannerEvent>): string => {
+    const ctx = commitCtxRef.current;
+    const { events: prepared, targetId } = ensureConcreteTarget(eventsRef.current, id, ctx);
+    let map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch } };
+    map = collapseSeriesForward(map, targetId, ctx.viewedWeekKey);
+    setEvents(map);
+    if (targetId !== id) {
+      setEditingId(e => (e === id ? targetId : e));
+      setMenuId(m => (m === id ? targetId : m));
+      setSelectedIds(prev => {
+        if (!prev.has(id)) return prev;
+        const n = new Set(prev); n.delete(id); n.add(targetId); return n;
+      });
+    }
+    return targetId;
+  }, []);
+  const applyEditRef = useRef(applyEdit);
+  useEffect(() => { applyEditRef.current = applyEdit; }, [applyEdit]);
+
+  // Patch several visible items at once (batch drag) through the resolver.
+  const applyEditMany = useCallback((patches: Record<string, Partial<PlannerEvent>>) => {
+    const ctx = commitCtxRef.current;
+    let map = eventsRef.current;
+    const remap: Record<string, string> = {};
+    for (const [id, patch] of Object.entries(patches)) {
+      const { events: prepared, targetId } = ensureConcreteTarget(map, id, ctx);
+      map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch } };
+      map = collapseSeriesForward(map, targetId, ctx.viewedWeekKey);
+      if (targetId !== id) remap[id] = targetId;
+    }
+    setEvents(map);
+    if (Object.keys(remap).length) {
+      setSelectedIds(prev => {
+        const n = new Set<string>();
+        for (const id of prev) n.add(remap[id] ?? id);
+        return n;
+      });
+    }
+  }, []);
+
+  // Delete the item shown as `id` this week per the unified rule.
+  const applyDelete = useCallback((id: string) => {
+    setEvents(commitDelete(eventsRef.current, id, commitCtxRef.current));
+  }, []);
+  const applyDeleteRef = useRef(applyDelete);
+  useEffect(() => { applyDeleteRef.current = applyDelete; }, [applyDelete]);
+
+  // Delete several visible items at once (keyboard delete) per the unified rule.
+  const applyDeleteMany = useCallback((ids: Iterable<string>) => {
+    let map = eventsRef.current;
+    for (const id of ids) map = commitDelete(map, id, commitCtxRef.current);
+    setEvents(map);
+  }, []);
+  const applyDeleteManyRef = useRef(applyDeleteMany);
+  useEffect(() => { applyDeleteManyRef.current = applyDeleteMany; }, [applyDeleteMany]);
+
+  // Create a brand-new item, stamped with the current modification-domain scope.
+  const createStamped = useCallback((base: PlannerEvent, opts?: { edit?: boolean; menuAt?: { x: number; y: number } }) => {
+    const stamped = stampNewItem(base, commitCtxRef.current);
+    setEvents(prev => ({ ...prev, [stamped.id]: stamped }));
+    if (opts?.edit) setEditingId(stamped.id);
+    if (opts?.menuAt) { setMenuId(stamped.id); setMenuPos(opts.menuAt); }
+    return stamped.id;
+  }, []);
+  const createStampedRef = useRef(createStamped);
+  useEffect(() => { createStampedRef.current = createStamped; }, [createStamped]);
+
+  // Entering edit mode on an existing item materialises the concrete record edits
+  // should land on *up front* (so the text box never remounts mid-typing). If the
+  // user then makes no real change, `finishEdit` drops the freshly-forked record
+  // so the item stays linked to its recurring series instead of silently splitting.
+  const editForkRef = useRef<{ id: string; origin: PlannerEvent } | null>(null);
+  const sameSchedule = (a: PlannerEvent, b: PlannerEvent) =>
+    a.dayIndex === b.dayIndex && a.startTime === b.startTime && a.endTime === b.endTime &&
+    a.content === b.content && a.color === b.color && !!a.noCheckbox === !!b.noCheckbox;
+
+  const enterEdit = useCallback((id: string) => {
+    const src = eventsRef.current[id];
+    const { events: prepared, targetId } = ensureConcreteTarget(eventsRef.current, id, commitCtxRef.current);
+    if (targetId !== id) {
+      setEvents(prepared);
+      setMenuId(m => (m === id ? targetId : m));
+      editForkRef.current = src ? { id: targetId, origin: { ...src } } : null;
+    } else {
+      editForkRef.current = null;
+    }
+    setEditingId(targetId);
+  }, []);
+
+  const finishEdit = useCallback(() => {
+    const fork = editForkRef.current;
+    if (fork) {
+      const cur = eventsRef.current[fork.id];
+      if (cur && sameSchedule(cur, fork.origin)) {
+        setEvents(prev => { const n = { ...prev }; delete n[fork.id]; return n; });
+      }
+    }
+    editForkRef.current = null;
+    setEditingId(null);
+  }, []);
 
   // ── Live time indicator ────────────────────────────────────────────────────
   const nowDate = useMemo(() => new Date(nowTick), [nowTick]);
@@ -548,14 +708,14 @@ export default function WeeklyPlanner() {
   useEffect(() => {
     // Initial load from localStorage
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) {} }
+    if (saved) { try { setEvents(migrateEvents(JSON.parse(saved) as PlannerData).events); } catch (_) {} }
 
     // Fetch from backend file database
     fetch('/api/events')
       .then(r => r.json())
       .then(data => {
         if (data && typeof data === 'object' && Object.keys(data).length > 0) {
-          setEvents(data);
+          setEvents(migrateEvents(data as PlannerData).events);
         }
       })
       .catch(err => console.error('Failed to load events from backend database:', err));
@@ -584,6 +744,8 @@ export default function WeeklyPlanner() {
           if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
+          if (s.editDomain === 'week' || s.editDomain === 'all') setEditDomain(s.editDomain);
+          if (s.calendarView === 'week' || s.calendarView === 'month') setCalendarView(s.calendarView);
         }
       })
       .catch(err => console.error('Failed to load settings from backend:', err))
@@ -596,9 +758,9 @@ export default function WeeklyPlanner() {
     fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH }),
+      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, editDomain, calendarView }),
     }).catch(err => console.error('Failed to save settings to backend:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH]);
+  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, editDomain, calendarView]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
@@ -683,7 +845,7 @@ export default function WeeklyPlanner() {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (parsed && typeof parsed === 'object') {
-          setEvents(parsed);
+          setEvents(migrateEvents(parsed as PlannerData).events);
           alert('Backup imported successfully!');
         } else {
           alert('Invalid backup file structure.');
@@ -835,11 +997,7 @@ export default function WeeklyPlanner() {
         }
 
         if (idsToDelete.size > 0) {
-          setEvents(prev => {
-            const next = { ...prev };
-            for (const id of idsToDelete) delete next[id];
-            return next;
-          });
+          applyDeleteManyRef.current(idsToDelete);
 
           // Clean up state
           setSelectedIds(prev => {
@@ -941,7 +1099,12 @@ export default function WeeklyPlanner() {
                   pastedIds.push(newId);
                 }
 
-                setEvents(prev => ({ ...prev, ...newEvents }));
+                {
+                  const ctx = commitCtxRef.current;
+                  const stampedNew: PlannerData = {};
+                  for (const [k, v] of Object.entries(newEvents)) stampedNew[k] = stampNewItem(v, ctx);
+                  setEvents(prev => ({ ...prev, ...stampedNew }));
+                }
 
                 if (pastedIds.length === 1) {
                   setEditingId(pastedIds[0]);
@@ -1103,10 +1266,10 @@ export default function WeeklyPlanner() {
             startMin = clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP);
             endMin   = clamp(endMin, startMin + POSITION_SNAP, dayEndMin);
             const id = uid();
-            setEvents(prev => ({ ...prev, [id]: { id, dayIndex: cr.col, startTime: minToTime(startMin), endTime: minToTime(endMin), content: '', color: 'sage' } }));
-            setEditingId(id);
-            setMenuId(id);
-            setMenuPos({ x: e.clientX + 10, y: e.clientY });
+            createStampedRef.current(
+              { id, dayIndex: cr.col, startTime: minToTime(startMin), endTime: minToTime(endMin), content: '', color: 'sage' },
+              { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
+            );
           }
           setTimeout(() => { didDragRef.current = false; }, 80);
         }
@@ -1118,17 +1281,15 @@ export default function WeeklyPlanner() {
         if (br.active) {
           const finalBatch = batchDispRef.current;
           if (finalBatch) {
-            setEvents(prev => {
-              const next = { ...prev };
-              for (const id of br.eventIds) {
-                const bd = finalBatch[id];
-                const ev = next[id];
-                if (!ev || !bd) continue;
-                const dur = br.durations[id] ?? timeToMin(ev.endTime) - timeToMin(ev.startTime);
-                next[id] = { ...ev, dayIndex: bd.dayIndex, startTime: minToTime(bd.startMin), endTime: minToTime(bd.startMin + dur) };
-              }
-              return next;
-            });
+            const patches: Record<string, Partial<PlannerEvent>> = {};
+            for (const id of br.eventIds) {
+              const bd = finalBatch[id];
+              const ev = eventsRef.current[id];
+              if (!ev || !bd) continue;
+              const dur = br.durations[id] ?? timeToMin(ev.endTime) - timeToMin(ev.startTime);
+              patches[id] = { dayIndex: bd.dayIndex, startTime: minToTime(bd.startMin), endTime: minToTime(bd.startMin + dur) };
+            }
+            applyEditMany(patches);
           }
           setTimeout(() => { didDragRef.current = false; }, 80);
         } else { didDragRef.current = false; }
@@ -1150,7 +1311,7 @@ export default function WeeklyPlanner() {
           const topMin = yToMin(Math.max(0, topPx), interval, dayStartH);
           const bottomMin = yToMin(Math.max(0, bottomPx), interval, dayStartH);
           const idsToAdd: string[] = [];
-          for (const [id, ev] of Object.entries(eventsRef.current)) {
+          for (const [id, ev] of Object.entries(weekEventsRef.current)) {
             const colLeft = ev.dayIndex * colW;
             const colRight = (ev.dayIndex + 1) * colW;
             if (colRight <= left || colLeft >= right) continue;
@@ -1173,21 +1334,19 @@ export default function WeeklyPlanner() {
 
       if (dr) {
         if (dr.active) {
-          setEvents(prev => {
-            const ev = prev[dr.eventId];
-            if (!ev) return prev;
-            return { ...prev, [dr.eventId]: { ...ev, dayIndex: dr.curDay, startTime: minToTime(dr.curStartMin), endTime: minToTime(dr.curStartMin + dr.durationMin) } };
-          });
+          const ev = eventsRef.current[dr.eventId];
+          if (ev) {
+            applyEditRef.current(dr.eventId, { dayIndex: dr.curDay, startTime: minToTime(dr.curStartMin), endTime: minToTime(dr.curStartMin + dr.durationMin) });
+          }
           setTimeout(() => { didDragRef.current = false; }, 80);
         } else { didDragRef.current = false; }
         dragRef.current = null; setDragDisp(null);
       }
       if (rr) {
-        setEvents(prev => {
-          const ev = prev[rr.eventId];
-          if (!ev) return prev;
-          return { ...prev, [rr.eventId]: { ...ev, startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) } };
-        });
+        const ev = eventsRef.current[rr.eventId];
+        if (ev) {
+          applyEditRef.current(rr.eventId, { startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) });
+        }
         resizeRef.current = null; setResizeDisp(null);
       }
     };
@@ -1206,10 +1365,10 @@ export default function WeeklyPlanner() {
     const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
     const dur      = Math.min(DEFAULT_EVENT_MIN, dayEndMin - startMin);
     const id       = uid();
-    setEvents(prev => ({ ...prev, [id]: { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + dur), content: '', color: 'sage' } }));
-    setEditingId(id);
-    setMenuId(id);
-    setMenuPos({ x: e.clientX + 10, y: e.clientY });
+    createStamped(
+      { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + dur), content: '', color: 'sage' },
+      { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
+    );
   };
 
   const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent) => {
@@ -1301,17 +1460,19 @@ export default function WeeklyPlanner() {
   };
 
   const deleteEvent = (id: string) => {
-    setEvents(prev => { const n = { ...prev }; delete n[id]; return n; });
+    applyDelete(id);
     if (editingId === id) setEditingId(null);
     setMenuId(null); setMenuPos(null);
   };
 
   const cloneAcrossWeek = (ev: PlannerEvent) => {
+    const ctx = commitCtxRef.current;
     const additions: PlannerData = {};
     for (let day = 0; day < 7; day++) {
       if (day === ev.dayIndex) continue;
       const newId = uid();
-      additions[newId] = { ...ev, id: newId, dayIndex: day };
+      // Each clone is a fresh item stamped with the current modification domain.
+      additions[newId] = stampNewItem({ ...ev, id: newId, dayIndex: day, scope: undefined, weekKey: undefined, seriesId: undefined, overridesSeriesId: undefined, deleted: undefined }, ctx);
     }
     setEvents(prev => ({ ...prev, ...additions }));
     setMenuId(null); setMenuPos(null);
@@ -1321,6 +1482,9 @@ export default function WeeklyPlanner() {
   const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); setMenuId(null); };
   const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
   const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); setMenuId(null); };
+  // View-aware prev/next: steps a month at a time in month view, a week otherwise.
+  const navPrev = () => calendarView === 'month' ? (setDirection(-1), setCurrentDate(d => subMonths(d, 1)), setEditingId(null), setMenuId(null)) : goBack();
+  const navNext = () => calendarView === 'month' ? (setDirection(1),  setCurrentDate(d => addMonths(d, 1)), setEditingId(null), setMenuId(null)) : goNext();
 
   // ── Display props (override during drag/resize/batch) ─────────────────────
   const normDuration = (ev: PlannerEvent) => {
@@ -1354,9 +1518,12 @@ export default function WeeklyPlanner() {
   const menuBdr    = darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)';
   const menuText   = darkMode ? '#e8e8e8' : '#1a1a1a';
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
+  // Header control text — brighter than muted-foreground so it isn't washed out in dark mode.
+  const headerLabel    = darkMode ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.50)';
+  const headerInactive = darkMode ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.55)';
 
   // ── Current menu event (for popover rendering) ────────────────────────────
-  const menuEvent = menuId ? events[menuId] : null;
+  const menuEvent = menuId ? weekEvents[menuId] : null;
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -1383,12 +1550,24 @@ export default function WeeklyPlanner() {
             ) : (
               <>
                 <span className="text-base font-semibold tracking-tight text-foreground/80">
-                  {format(weekStart, 'MMMM yyyy')}
+                  {format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                 </span>
                 <div className="flex items-center rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                  <button onClick={goBack}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
+                  <button onClick={navPrev}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
                   <button onClick={goToday} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
-                  <button onClick={goNext}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
+                  <button onClick={navNext}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
+                </div>
+                {/* Week / Month view switch */}
+                <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  {(['week', 'month'] as const).map(v => {
+                    const active = calendarView === v;
+                    return (
+                      <button key={v} onClick={() => setCalendarView(v)} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 capitalize"
+                        style={{ background: active ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent', color: active ? (darkMode ? '#f5f5f5' : 'var(--color-foreground)') : headerInactive, boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
+                        {v}
+                      </button>
+                    );
+                  })}
                 </div>
               </>
             )}
@@ -1397,14 +1576,45 @@ export default function WeeklyPlanner() {
             <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
-            {!showFocusAnalysis && (
+            {!showFocusAnalysis && calendarView === 'week' && (
               <>
+                {/* Modification domain: does an edit touch just this week or every week? */}
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Interval</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: headerLabel }}>Applies to</span>
+                  <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    {([
+                      { v: 'week' as EventScope, label: 'This week' },
+                      { v: 'all'  as EventScope, label: 'All weeks' },
+                    ]).map(opt => {
+                      const active = (isPastWeek ? 'week' : editDomain) === opt.v;
+                      const lockedOut = isPastWeek && opt.v === 'all';
+                      return (
+                        <button
+                          key={opt.v}
+                          onClick={() => { if (!lockedOut) setEditDomain(opt.v); }}
+                          disabled={lockedOut}
+                          title={lockedOut ? 'Past weeks are frozen — edits here stay in this week only' : opt.v === 'all' ? 'Edits apply to this week and every future week' : 'Edits apply to this week only'}
+                          className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200"
+                          style={{
+                            background: active ? (opt.v === 'all' ? (darkMode ? 'rgba(96,165,250,0.24)' : 'rgba(37,99,235,0.12)') : (darkMode ? 'rgba(255,255,255,0.14)' : '#fff')) : 'transparent',
+                            color: active ? (opt.v === 'all' ? (darkMode ? '#93c5fd' : '#2563eb') : (darkMode ? '#f5f5f5' : 'var(--color-foreground)')) : headerInactive,
+                            boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                            opacity: lockedOut ? 0.45 : 1,
+                            cursor: lockedOut ? 'default' : 'pointer',
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: headerLabel }}>Interval</span>
                   <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                     {([5, 15, 30, 60] as IntervalMin[]).map(v => (
-                      <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-medium rounded-md transition-all duration-200"
-                        style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.12)':'#fff') : 'transparent', color: interval===v ? 'var(--color-foreground)' : 'var(--color-muted-foreground)', boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
+                      <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200"
+                        style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.14)':'#fff') : 'transparent', color: interval===v ? (darkMode ? '#f5f5f5' : 'var(--color-foreground)') : headerInactive, boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                         {v}m
                       </button>
                     ))}
@@ -1458,6 +1668,7 @@ export default function WeeklyPlanner() {
       <main className="flex-1 overflow-auto">
         {!showFocusAnalysis && (
         <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
+          {calendarView === 'week' && (
           <section
             className="mb-4 rounded-xl border overflow-hidden"
             style={{
@@ -1630,6 +1841,8 @@ export default function WeeklyPlanner() {
               </div>
             </div>
           </section>
+          )}
+          {calendarView === 'week' ? (
           <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
               key={weekStart.toISOString()}
@@ -1680,7 +1893,7 @@ export default function WeeklyPlanner() {
 
                   type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
                   const renderItems: RenderItem[] = [];
-                  for (const ev of Object.values(events)) {
+                  for (const ev of Object.values(weekEvents)) {
                     const dp = dispProps(ev);
                     if (isActiveEvent(ev)) {
                       if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
@@ -1832,7 +2045,7 @@ export default function WeeklyPlanner() {
                                 }
                                 if (!didDragRef.current) openMenu(e, ev);
                               }}
-                              onDoubleClick={(e) => { e.stopPropagation(); openMenu(e, ev); setEditingId(ev.id); }}
+                              onDoubleClick={(e) => { e.stopPropagation(); openMenu(e, ev); enterEdit(ev.id); }}
                               onMouseEnter={() => setHoveredId(ev.id)}
                               onMouseLeave={() => setHoveredId(null)}
                             >
@@ -1866,12 +2079,12 @@ export default function WeeklyPlanner() {
                                     <textarea
                                       ref={editRef}
                                       value={ev.content}
-                                      onChange={e => setEvents(prev => ({ ...prev, [ev.id]: { ...prev[ev.id], content: e.target.value } }))}
+                                      onChange={e => applyEdit(ev.id, { content: e.target.value })}
                                       onKeyDown={e => {
-                                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); setEditingId(null); }
-                                        if (e.key === 'Escape') setEditingId(null);
+                                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); finishEdit(); }
+                                        if (e.key === 'Escape') finishEdit();
                                       }}
-                                      onBlur={() => setEditingId(null)}
+                                      onBlur={() => finishEdit()}
                                       onClick={e => e.stopPropagation()}
                                       className="flex-1 w-full resize-none bg-transparent outline-none text-xs leading-snug placeholder:opacity-40"
                                       style={{ color: text, minHeight: 0 }}
@@ -1883,7 +2096,7 @@ export default function WeeklyPlanner() {
                                           const sc = colorPalette[c];
                                           return (
                                             <button key={c} type="button"
-                                              onClick={e => { e.stopPropagation(); setEvents(prev => ({ ...prev, [ev.id]: { ...prev[ev.id], color: c } })); }}
+                                              onClick={e => { e.stopPropagation(); applyEdit(ev.id, { color: c }); }}
                                               className="rounded-full border transition-transform hover:scale-110"
                                               style={{ width: 11, height: 11, backgroundColor: sc.bg, borderColor: sc.border, outline: ev.color===c ? `2px solid ${sc.text}` : 'none', outlineOffset: 1 }}
                                             />
@@ -1996,6 +2209,57 @@ export default function WeeklyPlanner() {
               </div>
             </motion.div>
           </AnimatePresence>
+          ) : (
+          /* ── Month overview ─────────────────────────────────────────── */
+          <div className="rounded-xl border border-border/60 overflow-hidden shadow-sm" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}>
+            {/* Weekday header row */}
+            <div className="grid grid-cols-7 border-b border-border/50">
+              {(monthMatrix[0]?.cells ?? []).map(({ date }) => (
+                <div key={date.toISOString()} className="py-2 text-center text-[10px] font-bold uppercase tracking-widest" style={{ color: headerLabel }}>
+                  {format(date, 'EEE')}
+                </div>
+              ))}
+            </div>
+            {/* Week rows */}
+            {monthMatrix.map(week => (
+              <div key={week.weekKey} className="grid grid-cols-7 border-b border-border/40 last:border-b-0">
+                {week.cells.map(({ date, events: cellEvents }) => {
+                  const inMonth = isSameMonth(date, currentDate);
+                  const cellToday = isToday(date);
+                  const baseBg = cellToday ? (darkMode ? 'rgba(96,165,250,0.08)' : 'rgba(37,99,235,0.05)') : 'transparent';
+                  return (
+                    <div
+                      key={date.toISOString()}
+                      onClick={() => { setDirection(0); setCurrentDate(date); setCalendarView('week'); }}
+                      title="Open this week"
+                      className="min-h-[108px] p-1.5 border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1 transition-colors"
+                      style={{ background: baseBg, opacity: inMonth ? 1 : 0.4 }}
+                      onMouseEnter={e => (e.currentTarget.style.background = cellToday ? (darkMode ? 'rgba(96,165,250,0.13)' : 'rgba(37,99,235,0.09)') : hoverBg)}
+                      onMouseLeave={e => (e.currentTarget.style.background = baseBg)}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold tabular-nums" style={{ color: cellToday ? '#60a5fa' : (inMonth ? menuText : menuSub) }}>{format(date, 'd')}</span>
+                        {cellEvents.length > 0 && <span className="text-[8.5px] tabular-nums" style={{ color: menuSub }}>{cellEvents.length}</span>}
+                      </div>
+                      <div className="flex flex-col gap-0.5 overflow-hidden">
+                        {cellEvents.slice(0, 4).map(ev => {
+                          const { bg, border, text } = colorPalette[ev.color];
+                          const label = formatTimeLabel(timeToMin(ev.startTime), timeFormat);
+                          return (
+                            <div key={ev.id} className="rounded px-1 py-0.5 truncate text-[9px] font-medium leading-tight" style={{ background: bg, borderLeft: `2px solid ${border}`, color: text }} title={`${label} ${ev.content}`}>
+                              <span className="tabular-nums opacity-80">{label}</span>{ev.content ? ` ${ev.content}` : ''}
+                            </div>
+                          );
+                        })}
+                        {cellEvents.length > 4 && <span className="text-[8.5px] pl-1" style={{ color: menuSub }}>+{cellEvents.length - 4} more</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          )}
         </div>
         )}
 
@@ -2460,11 +2724,7 @@ export default function WeeklyPlanner() {
                   onChange={(e) => {
                     const val = e.target.value;
                     if (!val) return;
-                    setEvents(prev => {
-                      const ev = prev[menuEvent.id];
-                      if (!ev) return prev;
-                      return { ...prev, [menuEvent.id]: { ...ev, [field]: val } };
-                    });
+                    applyEdit(menuEvent.id, { [field]: val });
                   }}
                   className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none"
                   style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
@@ -2479,11 +2739,7 @@ export default function WeeklyPlanner() {
             style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
             onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            onClick={() => setEvents(prev => {
-              const ev = prev[menuEvent.id];
-              if (!ev) return prev;
-              return { ...prev, [menuEvent.id]: { ...ev, noCheckbox: !ev.noCheckbox } };
-            })}
+            onClick={() => applyEdit(menuEvent.id, { noCheckbox: !menuEvent.noCheckbox })}
           >
             <span className="flex items-center gap-2.5">
               <CheckSquare size={13} style={{ opacity: 0.7 }} />
@@ -2508,11 +2764,7 @@ export default function WeeklyPlanner() {
               const sc = colorPalette[c];
               return (
                 <button key={c} type="button"
-                  onClick={() => setEvents(prev => {
-                    const ev = prev[menuEvent.id];
-                    if (!ev) return prev;
-                    return { ...prev, [menuEvent.id]: { ...ev, color: c } };
-                  })}
+                  onClick={() => applyEdit(menuEvent.id, { color: c })}
                   className="rounded-full border transition-transform hover:scale-110"
                   style={{ width: 15, height: 15, backgroundColor: sc.bg, borderColor: sc.border, outline: menuEvent.color===c ? `2px solid ${sc.text}` : 'none', outlineOffset: 1 }}
                 />
@@ -2525,7 +2777,7 @@ export default function WeeklyPlanner() {
             {
               icon: <Pencil size={13}/>,
               label: 'Edit',
-              action: () => { setEditingId(menuEvent.id); },
+              action: () => { enterEdit(menuEvent.id); },
             },
             {
               icon: <CalendarRange size={13}/>,
