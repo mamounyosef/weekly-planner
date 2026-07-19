@@ -907,11 +907,18 @@ export default function Widget() {
             // Live/duration status always reflects the event's true full start–end, not just this segment.
             const fullStartMin = timeToMin(ev.startTime);
             const fullEndMin   = timeToMin(ev.endTime);
-            const normStartMin = segKind === 'tail' ? fullStartMin + 1440 : normalizeMin(fullStartMin, dayStartH);
-            const normEndMin   = segKind === 'head' ? fullEndMin : normalizeMin(fullEndMin, dayStartH);
-            const isLive       = normNowMin >= normStartMin && normNowMin < normEndMin;
-            const minutesLeft  = Math.max(0, normEndMin - normNowMin);
-            const durationMin  = Math.max(0, normEndMin - normStartMin);
+            const spansBoundary = fullStartMin < dayStartMin && fullEndMin >= dayStartMin;
+            // "Live" is scoped to this segment's own on-screen range (each segment lives in a
+            // different day column, so at most one of tail/head is ever the active one).
+            const isLive       = normNowMin >= item.startMin && normNowMin < item.endMin;
+            const minutesLeft  = Math.max(0, segKind === 'tail'
+              ? fullEndMin + 1440 - normNowMin
+              : segKind === 'head'
+                ? fullEndMin - normNowMin
+                : normalizeMin(fullEndMin, dayStartH) - normNowMin);
+            const durationMin  = Math.max(0, spansBoundary
+              ? fullEndMin - fullStartMin
+              : normalizeMin(fullEndMin, dayStartH) - normalizeMin(fullStartMin, dayStartH));
             const durationLabel = durationMin < 60
               ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
               : durationMin % 60 === 0
