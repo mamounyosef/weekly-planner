@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   format,
   addWeeks,
@@ -180,6 +180,7 @@ export default function WeeklyPlanner() {
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [selRect, setSelRect]           = useState<{ col: number; topPx: number; heightPx: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
+  const [nowTick, setNowTick]           = useState(Date.now());
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -221,6 +222,17 @@ export default function WeeklyPlanner() {
   const dayEndMin   = DAY_END_H * 60;
   const dayStartMin = DAY_START_H * 60;
   const colorPalette = darkMode ? DARK_EVENT_COLORS : EVENT_COLORS;
+
+  // ── Live time indicator ────────────────────────────────────────────────────
+  const nowDate = useMemo(() => new Date(nowTick), [nowTick]);
+  const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
+  const nowInView = nowMin >= dayStartMin && nowMin <= dayEndMin;
+  const todayColIdx = days.findIndex(d => isToday(d));
+
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Persistence ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -735,6 +747,24 @@ export default function WeeklyPlanner() {
                             borderRadius: 6,
                           }} />
                         )}
+
+                        {/* Live time indicator */}
+                        {today && nowInView && colIdx === todayColIdx && (() => {
+                          const lineTop = minToY(nowMin, interval);
+                          return (
+                            <div className="absolute left-0 right-0 z-30 pointer-events-none" style={{ top: lineTop, height: 0 }}>
+                              {/* Circle / arrow dot */}
+                              <motion.div
+                                className="absolute -left-[1.5px]"
+                                style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444', top: -4 }}
+                                animate={{ opacity: [0.5, 1, 0.5], scale: [0.9, 1.1, 0.9] }}
+                                transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+                              />
+                              {/* Thin line */}
+                              <div className="absolute left-0 right-0" style={{ height: 2, background: '#ef4444', opacity: 0.65 }} />
+                            </div>
+                          );
+                        })()}
 
                         {/* Events */}
                         {colEvents.map(ev => {
