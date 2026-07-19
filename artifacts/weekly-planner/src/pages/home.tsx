@@ -8,12 +8,13 @@ import {
   eachDayOfInterval,
   isToday,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type IntervalMin = 5 | 15 | 30 | 60;
-type EventColor = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
+type EventColor  = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
+type TimeFormat  = '12h' | '24h';
 
 interface PlannerEvent {
   id: string;
@@ -27,9 +28,10 @@ interface PlannerEvent {
 type PlannerData = Record<string, PlannerEvent>;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const STORAGE_KEY    = 'planner-v3';
-const INTERVAL_KEY   = 'planner-interval';
-const DARK_MODE_KEY  = 'planner-dark';
+const STORAGE_KEY      = 'planner-v3';
+const INTERVAL_KEY     = 'planner-interval';
+const DARK_MODE_KEY    = 'planner-dark';
+const TIME_FORMAT_KEY  = 'planner-timefmt';
 const DAY_START_H    = 7;
 const DAY_END_H      = 23;
 const HEADER_PX      = 56;
@@ -67,12 +69,22 @@ function minToTime(min: number): string {
   const m = min % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
-function formatTimeLabel(min: number): string {
+function formatTimeLabel(min: number, fmt: TimeFormat = '12h'): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
+  if (fmt === '24h') {
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
   const ampm = h >= 12 ? 'pm' : 'am';
   const h12 = h % 12 || 12;
   return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, '0')}${ampm}`;
+}
+function formatSlotLabel(slot: string, fmt: TimeFormat): string {
+  if (fmt === '24h') return slot;
+  const [hStr, mStr] = slot.split(':');
+  const h = parseInt(hStr, 10);
+  const m = parseInt(mStr, 10);
+  return formatTimeLabel(h * 60 + m, fmt);
 }
 function snapMin(min: number, interval: IntervalMin): number {
   return Math.round(min / interval) * interval;
@@ -142,6 +154,8 @@ export default function WeeklyPlanner() {
   const [menuPos, setMenuPos]         = useState<{ x: number; y: number } | null>(null);
   const [direction, setDirection]     = useState(0);
   const [darkMode, setDarkMode]       = useState(true);
+  const [timeFormat, setTimeFormat]   = useState<TimeFormat>('12h');
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -160,6 +174,7 @@ export default function WeeklyPlanner() {
   const daysGridRef  = useRef<HTMLDivElement>(null);
   const editRef      = useRef<HTMLTextAreaElement>(null);
   const menuRef      = useRef<HTMLDivElement>(null);
+  const settingsRef  = useRef<HTMLDivElement>(null);
   const didDragRef   = useRef(false);
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
@@ -183,15 +198,30 @@ export default function WeeklyPlanner() {
     if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
     const savedDark = localStorage.getItem(DARK_MODE_KEY);
     if (savedDark === 'false') setDarkMode(false);
+    const savedFmt = localStorage.getItem(TIME_FORMAT_KEY);
+    if (savedFmt === '24h') setTimeFormat('24h');
   }, []);
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(events)); }, [events]);
   useEffect(() => { localStorage.setItem(INTERVAL_KEY, String(interval)); }, [interval]);
   useEffect(() => { localStorage.setItem(DARK_MODE_KEY, String(darkMode)); }, [darkMode]);
+  useEffect(() => { localStorage.setItem(TIME_FORMAT_KEY, timeFormat); }, [timeFormat]);
 
   useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
   useEffect(() => { hoveredIdRef.current = hoveredId; }, [hoveredId]);
   useEffect(() => { eventsRef.current = events; }, [events]);
+
+  // Close settings on outside click
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [settingsOpen]);
 
   useEffect(() => {
     if (editingId && editRef.current) {
@@ -443,6 +473,9 @@ export default function WeeklyPlanner() {
                 ))}
               </div>
             </div>
+            <button onClick={() => setSettingsOpen(s => !s)} title="Settings" className="p-1.5 rounded-lg transition-colors" style={{ background: settingsOpen ? (darkMode?'rgba(255,255,255,0.14)':'rgba(0,0,0,0.08)') : surfaceBg, border: `1px solid ${settingsOpen ? (darkMode?'rgba(255,255,255,0.22)':surfaceBdr) : surfaceBdr}`, color: settingsOpen ? 'var(--color-foreground)' : 'var(--color-muted-foreground)' }}>
+              <Settings size={14}/>
+            </button>
           </div>
         </div>
       </header>
@@ -473,7 +506,7 @@ export default function WeeklyPlanner() {
                     return (
                       <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i*sh, height: sh }}>
                         <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[10px] font-semibold text-muted-foreground' : 'mt-1 text-[8.5px] text-muted-foreground/40'}`}>
-                          {time}
+                          {formatSlotLabel(time, timeFormat)}
                         </span>
                       </div>
                     );
@@ -567,7 +600,7 @@ export default function WeeklyPlanner() {
                               {showTopTime && resizeDisp && (
                                 <div className="absolute z-50 pointer-events-none" style={{ top: -22, left: '50%', transform: 'translateX(-50%)' }}>
                                   <div className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
-                                    {formatTimeLabel(resizeDisp.startMin)}
+                                    {formatTimeLabel(resizeDisp.startMin, timeFormat)}
                                   </div>
                                 </div>
                               )}
@@ -621,7 +654,7 @@ export default function WeeklyPlanner() {
                               {showBottomTime && resizeDisp && (
                                 <div className="absolute z-50 pointer-events-none" style={{ bottom: -22, left: '50%', transform: 'translateX(-50%)' }}>
                                   <div className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
-                                    {formatTimeLabel(resizeDisp.endMin)}
+                                    {formatTimeLabel(resizeDisp.endMin, timeFormat)}
                                   </div>
                                 </div>
                               )}
@@ -651,6 +684,111 @@ export default function WeeklyPlanner() {
         </div>
       </main>
 
+      {/* ── Settings drawer ─────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {settingsOpen && (
+          <motion.div
+            ref={settingsRef}
+            key="settings-drawer"
+            initial={{ x: '100%', opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: '100%', opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 340, damping: 32 }}
+            className="fixed top-14 right-0 bottom-0 z-[150] flex flex-col overflow-y-auto"
+            style={{
+              width: 280,
+              background: darkMode ? '#16181a' : '#f9f9f9',
+              borderLeft: `1px solid ${surfaceBdr}`,
+              boxShadow: darkMode ? '-8px 0 32px rgba(0,0,0,0.45)' : '-8px 0 32px rgba(0,0,0,0.10)',
+            }}
+            onMouseDown={e => e.stopPropagation()}
+          >
+            {/* Drawer header */}
+            <div className="flex items-center justify-between px-4 py-3.5" style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
+              <span className="text-sm font-semibold" style={{ color: menuText }}>Settings</span>
+              <button onClick={() => setSettingsOpen(false)} className="p-1 rounded-md text-muted-foreground hover:text-foreground transition-colors">
+                <X size={14}/>
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-6 px-4 py-5">
+
+              {/* Time format */}
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Time Format</span>
+                <div className="flex rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  {(['12h', '24h'] as TimeFormat[]).map(fmt => (
+                    <button
+                      key={fmt}
+                      onClick={() => setTimeFormat(fmt)}
+                      className="flex-1 py-1.5 text-xs font-medium rounded-md transition-all duration-200"
+                      style={{
+                        background: timeFormat === fmt ? (darkMode ? 'rgba(255,255,255,0.13)' : '#fff') : 'transparent',
+                        color: timeFormat === fmt ? menuText : menuSub,
+                        boxShadow: timeFormat === fmt ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                      }}
+                    >
+                      {fmt === '12h' ? '12h (AM/PM)' : '24h'}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
+                  {timeFormat === '12h' ? 'e.g. 9am, 2:30pm' : 'e.g. 09:00, 14:30'}
+                </p>
+              </div>
+
+              {/* Appearance */}
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Appearance</span>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium" style={{ color: menuText }}>Dark mode</span>
+                  <button
+                    onClick={() => setDarkMode(d => !d)}
+                    className="relative flex-shrink-0 rounded-full transition-colors duration-200"
+                    style={{
+                      width: 36, height: 20,
+                      background: darkMode ? 'rgba(120,200,120,0.55)' : surfaceBdr,
+                      border: `1px solid ${surfaceBdr}`,
+                    }}
+                  >
+                    <span
+                      className="absolute top-0.5 rounded-full transition-transform duration-200"
+                      style={{
+                        width: 15, height: 15,
+                        background: darkMode ? '#fff' : menuSub,
+                        transform: darkMode ? 'translateX(17px)' : 'translateX(2px)',
+                      }}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {/* Grid interval */}
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Grid Interval</span>
+                <div className="flex rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  {([5, 15, 30, 60] as IntervalMin[]).map(v => (
+                    <button
+                      key={v}
+                      onClick={() => setIntervalOpt(v)}
+                      className="flex-1 py-1.5 text-xs font-medium rounded-md transition-all duration-200"
+                      style={{
+                        background: interval === v ? (darkMode ? 'rgba(255,255,255,0.13)' : '#fff') : 'transparent',
+                        color: interval === v ? menuText : menuSub,
+                        boxShadow: interval === v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                      }}
+                    >
+                      {v}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ── Context menu (portal-style fixed popover) ────────────────────── */}
       {menuEvent && menuPos && (
         <div
@@ -674,7 +812,7 @@ export default function WeeklyPlanner() {
               {menuEvent.content || 'Untitled'}
             </p>
             <p className="text-[10px] mt-0.5" style={{ color: menuSub }}>
-              {formatTimeLabel(timeToMin(menuEvent.startTime))} – {formatTimeLabel(timeToMin(menuEvent.endTime))}
+              {formatTimeLabel(timeToMin(menuEvent.startTime), timeFormat)} – {formatTimeLabel(timeToMin(menuEvent.endTime), timeFormat)}
             </p>
           </div>
 
