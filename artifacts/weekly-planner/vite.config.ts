@@ -1,9 +1,78 @@
 import path from 'path';
+import fsp from 'fs/promises';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
 import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
+
+// ─── File-database safety net ──────────────────────────────────────────────
+// Guards against a save silently wiping real data (e.g. a stale/empty client
+// state getting POSTed, or the server briefly pointing at the wrong path
+// mid-refactor): refuses to overwrite non-empty data with an empty payload,
+// and keeps a rolling backup of whatever was on disk before every write.
+function isEmptyJsonValue(text: string, kind: 'object' | 'array'): boolean {
+  try {
+    const parsed = JSON.parse(text);
+    if (kind === 'array') return Array.isArray(parsed) && parsed.length === 0;
+    return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0;
+  } catch {
+    return true;
+  }
+}
+
+async function pruneBackups(backupDir: string, baseName: string, keep = 30) {
+  try {
+    const files = (await fsp.readdir(backupDir)).filter(f => f.startsWith(`${baseName}.`));
+    files.sort();
+    const excess = files.length - keep;
+    for (let i = 0; i < excess; i++) {
+      await fsp.unlink(path.join(backupDir, files[i])).catch(() => {});
+    }
+  } catch {
+    // no backups yet
+  }
+}
+
+async function safeWriteJsonFile(opts: {
+  filePath: string;
+  backupDir: string;
+  baseName: string;
+  body: string;
+  kind: 'object' | 'array';
+  force: boolean;
+}): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const { filePath, backupDir, baseName, body, kind, force } = opts;
+
+  let existing: string | null = null;
+  try {
+    existing = await fsp.readFile(filePath, 'utf-8');
+  } catch {
+    existing = null;
+  }
+
+  const existingIsEmpty = existing === null || isEmptyJsonValue(existing, kind);
+  const incomingIsEmpty = isEmptyJsonValue(body, kind);
+
+  if (!existingIsEmpty && incomingIsEmpty && !force) {
+    return { ok: false, status: 409, error: `Refused to overwrite non-empty ${baseName} with an empty save. Retry with ?force=1 if this is intentional.` };
+  }
+
+  if (existing !== null && !existingIsEmpty) {
+    try {
+      await fsp.mkdir(backupDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await fsp.writeFile(path.join(backupDir, `${baseName}.${stamp}.json`), existing, 'utf-8');
+      await pruneBackups(backupDir, baseName);
+    } catch {
+      // a failed backup should never block the actual save
+    }
+  }
+
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  await fsp.writeFile(filePath, body, 'utf-8');
+  return { ok: true };
+}
 
 const rawPort = process.env.PORT || '5173';
 const port = Number(rawPort);
@@ -27,6 +96,7 @@ export default defineConfig({
           const fs = await import('fs/promises');
           const path = await import('path');
           const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'database.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
@@ -44,8 +114,14 @@ export default defineConfig({
             });
             req.on('end', async () => {
               try {
-                await fs.writeFile(dbPath, body, 'utf-8');
+                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                const result = await safeWriteJsonFile({ filePath: dbPath, backupDir, baseName: 'database', body, kind: 'object', force });
                 res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) {
+                  res.statusCode = result.status;
+                  res.end(JSON.stringify({ error: result.error }));
+                  return;
+                }
                 res.end(JSON.stringify({ success: true }));
               } catch (err) {
                 res.statusCode = 500;
@@ -62,6 +138,7 @@ export default defineConfig({
           const fs = await import('fs/promises');
           const path = await import('path');
           const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'settings.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
@@ -79,8 +156,14 @@ export default defineConfig({
             });
             req.on('end', async () => {
               try {
-                await fs.writeFile(settingsPath, body, 'utf-8');
+                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                const result = await safeWriteJsonFile({ filePath: settingsPath, backupDir, baseName: 'settings', body, kind: 'object', force });
                 res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) {
+                  res.statusCode = result.status;
+                  res.end(JSON.stringify({ error: result.error }));
+                  return;
+                }
                 res.end(JSON.stringify({ success: true }));
               } catch (err) {
                 res.statusCode = 500;
@@ -97,6 +180,7 @@ export default defineConfig({
           const fs = await import('fs/promises');
           const path = await import('path');
           const focusPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-sessions.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
@@ -114,8 +198,14 @@ export default defineConfig({
             });
             req.on('end', async () => {
               try {
-                await fs.writeFile(focusPath, body, 'utf-8');
+                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                const result = await safeWriteJsonFile({ filePath: focusPath, backupDir, baseName: 'focus-sessions', body, kind: 'array', force });
                 res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) {
+                  res.statusCode = result.status;
+                  res.end(JSON.stringify({ error: result.error }));
+                  return;
+                }
                 res.end(JSON.stringify({ success: true }));
               } catch (err) {
                 res.statusCode = 500;
