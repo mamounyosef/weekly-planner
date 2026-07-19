@@ -603,9 +603,9 @@ export default function Widget() {
                     </p>
                   </div>
                   {height >= sh * 1.5 && (
-                    <p className="text-[8.5px] mt-0.5 opacity-60 font-medium whitespace-nowrap pl-5">
-                      {formatTimeLabel(evStart, timeFormat)}
-                    </p>
+                    <span className="text-[8px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0" style={{ color: text, opacity: 0.45 }}>
+                      {formatTimeLabel(evStart, timeFormat)} – {formatTimeLabel(evEnd, timeFormat)}
+                    </span>
                   )}
                 </div>
               </div>

@@ -1172,29 +1172,36 @@ export default function WeeklyPlanner() {
                                   const dateStr = format(day, 'yyyy-MM-dd');
                                   const isCompleted = ev.completedDates?.includes(dateStr) ?? false;
                                   return (
-                                    <div className="flex items-start gap-1.5 flex-1 min-h-0">
-                                      {today && (
-                                        <button
-                                          type="button"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            toggleEventCompleted(ev.id, day);
-                                          }}
-                                          className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
-                                          style={{
-                                            borderColor: isCompleted ? text : `${text}50`,
-                                            backgroundColor: isCompleted ? text : 'transparent',
-                                          }}
-                                        >
-                                          {isCompleted && (
-                                            <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
-                                          )}
-                                        </button>
+                                    <>
+                                      <div className="flex items-start gap-1.5 flex-1 min-h-0">
+                                        {today && (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              toggleEventCompleted(ev.id, day);
+                                            }}
+                                            className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                            style={{
+                                              borderColor: isCompleted ? text : `${text}50`,
+                                              backgroundColor: isCompleted ? text : 'transparent',
+                                            }}
+                                          >
+                                            {isCompleted && (
+                                              <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                            )}
+                                          </button>
+                                        )}
+                                        <p className={`text-xs font-medium leading-snug break-words line-clamp-5 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                          {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                                        </p>
+                                      </div>
+                                      {!tooShort && (
+                                        <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 mt-auto" style={{ color: text, opacity: 0.45 }}>
+                                          {formatTimeLabel(dp.startMin, timeFormat)} – {formatTimeLabel(dp.endMin, timeFormat)}
+                                        </span>
                                       )}
-                                      <p className={`text-xs font-medium leading-snug break-words line-clamp-5 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                        {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
-                                      </p>
-                                    </div>
+                                    </>
                                   );
                                 })()}
                               </div>
