@@ -877,6 +877,16 @@ export default function Widget() {
             const top = minToY(evStart, interval, dayStartH);
             const height = Math.max(sh, minToY(evEnd, interval, dayStartH) - top);
             const { bg, border, text } = colorPalette[ev.color];
+            const normStartMin = normalizeMin(evStart, dayStartH);
+            const normEndMin   = normalizeMin(evEnd, dayStartH);
+            const isLive       = normNowMin >= normStartMin && normNowMin < normEndMin;
+            const minutesLeft  = Math.max(0, normEndMin - normNowMin);
+            const durationMin  = Math.max(0, normEndMin - normStartMin);
+            const durationLabel = durationMin < 60
+              ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
+              : durationMin % 60 === 0
+                ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
+                : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
 
             const { col, numCols } = layout.get(ev.id) ?? { col: 0, numCols: 1 };
             const colW = 100 / numCols;
@@ -926,8 +936,16 @@ export default function Widget() {
                     </p>
                   </div>
                   {height >= sh * 1.5 && (
-                    <span className="text-[8px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0" style={{ color: text, opacity: 0.45 }}>
+                    <span className="text-[8px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0 flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
                       {formatTimeLabel(evStart, timeFormat)} – {formatTimeLabel(evEnd, timeFormat)}
+                      {isLive ? (
+                        <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: '#ef4444' }}>
+                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: '#ef4444' }} />
+                          {minutesLeft}m left
+                        </span>
+                      ) : (
+                        <span>({durationLabel})</span>
+                      )}
                     </span>
                   )}
                 </div>

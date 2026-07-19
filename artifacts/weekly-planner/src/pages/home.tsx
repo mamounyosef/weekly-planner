@@ -1741,6 +1741,16 @@ export default function WeeklyPlanner() {
                           const isSelected = selectedIds.has(ev.id);
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
+                          const normStartMin = normalizeMin(dp.startMin, dayStartH);
+                          const normEndMin   = normalizeMin(dp.endMin, dayStartH);
+                          const isLive   = today && normNowMin >= normStartMin && normNowMin < normEndMin;
+                          const minutesLeft = Math.max(0, normEndMin - normNowMin);
+                          const durationMin = Math.max(0, normEndMin - normStartMin);
+                          const durationLabel = durationMin < 60
+                            ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
+                            : durationMin % 60 === 0
+                              ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
+                              : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
 
                           const { col, numCols } = layout.get(ev.id) ?? { col: 0, numCols: 1 };
                           const colW   = 100 / numCols;
@@ -1861,8 +1871,16 @@ export default function WeeklyPlanner() {
                                         </p>
                                       </div>
                                       {!tooShort && (
-                                        <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 mt-auto" style={{ color: text, opacity: 0.45 }}>
+                                        <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
                                           {formatTimeLabel(dp.startMin, timeFormat)} – {formatTimeLabel(dp.endMin, timeFormat)}
+                                          {isLive ? (
+                                            <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: '#ef4444' }}>
+                                              <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: '#ef4444' }} />
+                                              {minutesLeft}m left
+                                            </span>
+                                          ) : (
+                                            <span>({durationLabel})</span>
+                                          )}
                                         </span>
                                       )}
                                     </>
