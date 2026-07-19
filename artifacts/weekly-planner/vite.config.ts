@@ -58,6 +58,41 @@ export default defineConfig({
           }
         });
 
+        server.middlewares.use('/api/settings', async (req, res, next) => {
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'settings.json');
+
+          if (req.method === 'GET') {
+            try {
+              const data = await fs.readFile(settingsPath, 'utf-8');
+              res.setHeader('Content-Type', 'application/json');
+              res.end(data);
+            } catch (err) {
+              res.setHeader('Content-Type', 'application/json');
+              res.end('{}');
+            }
+          } else if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => {
+              body += chunk;
+            });
+            req.on('end', async () => {
+              try {
+                await fs.writeFile(settingsPath, body, 'utf-8');
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ success: true }));
+              } catch (err) {
+                res.statusCode = 500;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write settings file' }));
+              }
+            });
+          } else {
+            next();
+          }
+        });
+
         server.middlewares.use('/api/launch-widget', async (req, res, next) => {
           if (req.method === 'POST') {
             const { spawn } = await import('child_process');

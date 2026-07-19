@@ -8,7 +8,7 @@ import {
   eachDayOfInterval,
   isToday,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -25,6 +25,7 @@ interface PlannerEvent {
   content: string;
   color: EventColor;
   completedDates?: string[];
+  noCheckbox?: boolean; // when true, this event has no completion checkbox
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -40,16 +41,17 @@ const DAY_END_KEY    = 'planner-dayend';
 const HEADER_PX      = 56;
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP  = 5;
+const DEFAULT_EVENT_MIN = 30; // default duration for a newly created event
 const COL_GAP        = 2; // px gap between parallel events
 
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
 const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#eef1ed', border: '#b8d0b3', text: '#3a5233' },
-  peach: { bg: '#fcf2ed', border: '#f0d0bc', text: '#7a4530' },
-  blue:  { bg: '#eef3f9', border: '#b8d0ee', text: '#2a4f78' },
-  sand:  { bg: '#f9f5ed', border: '#e8d5b8', text: '#6b5030' },
-  lilac: { bg: '#f5f1f8', border: '#d8c8ee', text: '#583878' },
+  sage:  { bg: '#d9e8d2', border: '#7fae72', text: '#2c4726' },
+  peach: { bg: '#fbe0cf', border: '#e8a274', text: '#7a3d1c' },
+  blue:  { bg: '#d6e4f5', border: '#7ba6dd', text: '#1f3f66' },
+  sand:  { bg: '#f2e2bd', border: '#cba25a', text: '#5c421a' },
+  lilac: { bg: '#e8dcf2', border: '#b48cdb', text: '#4a2a68' },
 };
 
 const DARK_EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
@@ -198,11 +200,11 @@ export default function WeeklyPlanner() {
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
-  const [selRect, setSelRect]           = useState<{ col: number; topPx: number; heightPx: number } | null>(null);
+  const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
   const [nowTick, setNowTick]           = useState(Date.now());
   const [dayStartH, setDayStartH]       = useState(7);
-  const [dayEndH, setDayEndH]           = useState(23);
+  const [dayEndH, setDayEndH]           = useState(31);
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -224,19 +226,20 @@ export default function WeeklyPlanner() {
   const settingsRef    = useRef<HTMLDivElement>(null);
   const selectedIdsRef = useRef<Set<string>>(new Set());
   const batchDragRef   = useRef<{
-    eventIds: string[]; baseStartMins: Record<string, number>; durations: Record<string, number>;
+    eventIds: string[]; baseStartMins: Record<string, number>; baseDays: Record<string, number>; durations: Record<string, number>;
     origDay: number; curDay: number; baseMouseMin: number;
     active: boolean; initX: number; initY: number;
   } | null>(null);
   const batchDispRef   = useRef<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
-  const selDragRef     = useRef<{ col: number; startY: number } | null>(null);
+  const selDragRef     = useRef<{ startX: number; startY: number } | null>(null);
+  const createDragRef  = useRef<{ col: number; startY: number; moved: boolean } | null>(null);
   const didDragRef     = useRef(false);
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
   const menuIdRef    = useRef<string | null>(null);
   const eventsRef    = useRef<PlannerData>({});
   const dayStartRef  = useRef(7);
-  const dayEndRef    = useRef(23);
+  const dayEndRef    = useRef(31);
   const clipboardRef = useRef<PlannerEvent[]>([]);
   const mousePosRef  = useRef<{ x: number; y: number } | null>(null);
 
@@ -264,6 +267,7 @@ export default function WeeklyPlanner() {
 
   // ── Persistence & Backend Sync ───────────────────────────────────────────
   const isInitialMount = useRef(true);
+  const settingsLoaded = useRef(false);
 
   useEffect(() => {
     // Initial load from localStorage
@@ -292,7 +296,33 @@ export default function WeeklyPlanner() {
     if (savedDayStart) setDayStartH(parseInt(savedDayStart));
     const savedDayEnd = localStorage.getItem(DAY_END_KEY);
     if (savedDayEnd) setDayEndH(parseInt(savedDayEnd));
+
+    // Backend is the source of truth for settings so both windows stay in sync.
+    fetch('/api/settings')
+      .then(r => r.json())
+      .then((s) => {
+        if (s && typeof s === 'object') {
+          if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
+          if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+          if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
+          if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
+          if (s.dayStartH != null) setDayStartH(s.dayStartH);
+          if (s.dayEndH != null) setDayEndH(s.dayEndH);
+        }
+      })
+      .catch(err => console.error('Failed to load settings from backend:', err))
+      .finally(() => { settingsLoaded.current = true; });
   }, []);
+
+  // Persist settings to the shared backend whenever any of them change (after initial load).
+  useEffect(() => {
+    if (!settingsLoaded.current) return;
+    fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH }),
+    }).catch(err => console.error('Failed to save settings to backend:', err));
+  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
@@ -309,6 +339,54 @@ export default function WeeklyPlanner() {
       body: JSON.stringify(events),
     }).catch(err => console.error('Failed to save events to backend database:', err));
   }, [events]);
+
+  // ── Undo / Redo history ────────────────────────────────────────────────────
+  const undoStack      = useRef<PlannerData[]>([]);
+  const redoStack      = useRef<PlannerData[]>([]);
+  const prevEventsRef  = useRef<PlannerData>({});
+  const skipHistoryRef = useRef(false);
+  const historyReady   = useRef(false);
+  const [histVersion, setHistVersion] = useState(0);
+
+  useEffect(() => {
+    // Enable history recording only after the initial load has settled.
+    const t = setTimeout(() => { historyReady.current = true; }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (prevEventsRef.current === events) return;
+    if (!historyReady.current) { prevEventsRef.current = events; return; }
+    if (skipHistoryRef.current) { skipHistoryRef.current = false; prevEventsRef.current = events; return; }
+    undoStack.current.push(prevEventsRef.current);
+    if (undoStack.current.length > 200) undoStack.current.shift();
+    redoStack.current = [];
+    prevEventsRef.current = events;
+    setHistVersion(v => v + 1);
+  }, [events]);
+
+  const undo = useCallback(() => {
+    if (!undoStack.current.length) return;
+    const prevState = undoStack.current.pop()!;
+    redoStack.current.push(eventsRef.current);
+    skipHistoryRef.current = true;
+    prevEventsRef.current = prevState;
+    setEvents(prevState);
+    setHistVersion(v => v + 1);
+  }, []);
+
+  const redo = useCallback(() => {
+    if (!redoStack.current.length) return;
+    const nextState = redoStack.current.pop()!;
+    undoStack.current.push(eventsRef.current);
+    skipHistoryRef.current = true;
+    prevEventsRef.current = nextState;
+    setEvents(nextState);
+    setHistVersion(v => v + 1);
+  }, []);
+
+  const undoRef = useRef(undo); useEffect(() => { undoRef.current = undo; }, [undo]);
+  const redoRef = useRef(redo); useEffect(() => { redoRef.current = redo; }, [redo]);
 
   // ── Backup & Restore ──────────────────────────────────────────────────────
   const exportBackup = () => {
@@ -392,10 +470,12 @@ export default function WeeklyPlanner() {
   useEffect(() => {
     if (!menuId) return;
     const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuId(null);
-        setMenuPos(null);
-      }
+      if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
+      const target = e.target as HTMLElement;
+      const evEl = target.closest('[data-event-id]');
+      if (evEl && evEl.getAttribute('data-event-id') === menuIdRef.current) return; // clicking the item being edited keeps the popup open
+      setMenuId(null);
+      setMenuPos(null);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { setMenuId(null); setMenuPos(null); }
@@ -430,6 +510,19 @@ export default function WeeklyPlanner() {
   // ── Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) ─────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Undo / Redo (works even while focused elsewhere, but not inside text fields)
+      const inTextField = document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !inTextField) {
+        e.preventDefault();
+        if (e.shiftKey) redoRef.current(); else undoRef.current();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y') && !inTextField) {
+        e.preventDefault();
+        redoRef.current();
+        return;
+      }
+
       const active = document.activeElement;
       // Do not trigger shortcuts if typing inside text fields
       if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
@@ -643,11 +736,13 @@ export default function WeeklyPlanner() {
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
         br.curDay = coords.dayIndex;
+        const dayDelta = coords.dayIndex - br.origDay;
         const deltaMin = clamp(snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP), -dayStartMin * 4, dayEndMin);
         const newBatchDisp: { [id: string]: { dayIndex: number; startMin: number } } = {};
         for (const id of br.eventIds) {
           const newStart = clamp(br.baseStartMins[id] + deltaMin, dayStartMin, dayEndMin - br.durations[id]);
-          newBatchDisp[id] = { dayIndex: br.curDay, startMin: newStart };
+          const newDay = clamp(br.baseDays[id] + dayDelta, 0, 6);
+          newBatchDisp[id] = { dayIndex: newDay, startMin: newStart };
         }
         setBatchDisp(newBatchDisp);
         batchDispRef.current = newBatchDisp;
@@ -658,11 +753,30 @@ export default function WeeklyPlanner() {
       if (sr) {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
+        const curX = e.clientX - rect.left;
         const curY = e.clientY - rect.top - HEADER_PX;
-        const startY = sr.startY;
-        const topPx = Math.min(startY, curY);
-        const heightPx = Math.abs(curY - startY);
-        setSelRect({ col: sr.col, topPx, heightPx });
+        const left = Math.min(sr.startX, curX);
+        const top = Math.min(sr.startY, curY);
+        const width = Math.abs(curX - sr.startX);
+        const height = Math.abs(curY - sr.startY);
+        setSelRect({ left, top, width, height });
+        e.preventDefault();
+        return;
+      }
+
+      // Drag-to-create on empty column area (plain left drag)
+      const cr = createDragRef.current;
+      if (cr) {
+        const rect = daysGridRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const curY = e.clientY - rect.top - HEADER_PX;
+        const topPx = Math.min(cr.startY, curY);
+        const heightPx = Math.abs(curY - cr.startY);
+        if (heightPx >= DRAG_THRESHOLD) { cr.moved = true; didDragRef.current = true; }
+        if (cr.moved) {
+          const colW = rect.width / 7;
+          setSelRect({ left: cr.col * colW + 4, top: topPx, width: colW - 8, height: heightPx });
+        }
         e.preventDefault();
         return;
       }
@@ -698,6 +812,30 @@ export default function WeeklyPlanner() {
       const rr = resizeRef.current;
       const br = batchDragRef.current;
       const sr = selDragRef.current;
+      const cr = createDragRef.current;
+
+      // Drag-to-create commit (plain left drag on empty area)
+      if (cr) {
+        createDragRef.current = null;
+        setSelRect(null);
+        if (cr.moved) {
+          const rect = daysGridRef.current?.getBoundingClientRect();
+          if (rect) {
+            const curY = e.clientY - rect.top - HEADER_PX;
+            let startMin = yToMin(Math.max(0, Math.min(cr.startY, curY)), interval, dayStartH);
+            let endMin   = yToMin(Math.max(0, Math.max(cr.startY, curY)), interval, dayStartH);
+            startMin = clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP);
+            endMin   = clamp(endMin, startMin + POSITION_SNAP, dayEndMin);
+            const id = uid();
+            setEvents(prev => ({ ...prev, [id]: { id, dayIndex: cr.col, startTime: minToTime(startMin), endTime: minToTime(endMin), content: '', color: 'sage' } }));
+            setEditingId(id);
+            setMenuId(id);
+            setMenuPos({ x: e.clientX + 10, y: e.clientY });
+          }
+          setTimeout(() => { didDragRef.current = false; }, 80);
+        }
+        return;
+      }
 
       // Batch drag commit
       if (br) {
@@ -724,18 +862,25 @@ export default function WeeklyPlanner() {
 
       // Rubber-band commit
       if (sr) {
-        const colRect = daysGridRef.current?.getBoundingClientRect();
-        if (colRect) {
-          const endY = e.clientY - colRect.top - HEADER_PX;
-          const topPx = Math.min(sr.startY, endY);
-          const bottomPx = Math.max(sr.startY, endY);
+        const gridRect = daysGridRef.current?.getBoundingClientRect();
+        if (gridRect) {
+          const colW = gridRect.width / 7;
+          const curX = e.clientX - gridRect.left;
+          const curY = e.clientY - gridRect.top - HEADER_PX;
+          const left = Math.min(sr.startX, curX);
+          const right = Math.max(sr.startX, curX);
+          const topPx = Math.min(sr.startY, curY);
+          const bottomPx = Math.max(sr.startY, curY);
           const topMin = yToMin(Math.max(0, topPx), interval, dayStartH);
           const bottomMin = yToMin(Math.max(0, bottomPx), interval, dayStartH);
           const idsToAdd: string[] = [];
           for (const [id, ev] of Object.entries(eventsRef.current)) {
-            if (ev.dayIndex !== sr.col) continue;
-            const evStart = timeToMin(ev.startTime);
-            const evEnd = timeToMin(ev.endTime);
+            const colLeft = ev.dayIndex * colW;
+            const colRight = (ev.dayIndex + 1) * colW;
+            if (colRight <= left || colLeft >= right) continue;
+            let evStart = normalizeMin(timeToMin(ev.startTime), dayStartH);
+            let evEnd = normalizeMin(timeToMin(ev.endTime), dayStartH);
+            if (evEnd <= evStart) evEnd += 1440;
             if (evStart < bottomMin && evEnd > topMin) idsToAdd.push(id);
           }
           if (idsToAdd.length) {
@@ -782,11 +927,13 @@ export default function WeeklyPlanner() {
     if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
     setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
-    const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - interval);
+    const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
+    const dur      = Math.min(DEFAULT_EVENT_MIN, dayEndMin - startMin);
     const id       = uid();
-    setEvents(prev => ({ ...prev, [id]: { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + interval), content: '', color: 'sage' } }));
+    setEvents(prev => ({ ...prev, [id]: { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + dur), content: '', color: 'sage' } }));
     setEditingId(id);
-    setMenuId(null);
+    setMenuId(id);
+    setMenuPos({ x: e.clientX + 10, y: e.clientY });
   };
 
   const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent) => {
@@ -799,16 +946,21 @@ export default function WeeklyPlanner() {
       const coords = getGridCoords(e.clientX, e.clientY);
       if (!coords) return;
       const baseStartMins: Record<string, number> = {};
+      const baseDays: Record<string, number> = {};
       const durations: Record<string, number> = {};
       for (const id of selectedIds) {
         const eRef = eventsRef.current[id];
         if (eRef) {
-          baseStartMins[id] = timeToMin(eRef.startTime);
-          durations[id] = timeToMin(eRef.endTime) - timeToMin(eRef.startTime);
+          const s = normalizeMin(timeToMin(eRef.startTime), dayStartH);
+          let en = normalizeMin(timeToMin(eRef.endTime), dayStartH);
+          if (en <= s) en += 1440;
+          baseStartMins[id] = s;
+          baseDays[id] = eRef.dayIndex;
+          durations[id] = en - s;
         }
       }
       batchDragRef.current = {
-        eventIds: [...selectedIds], baseStartMins, durations,
+        eventIds: [...selectedIds], baseStartMins, baseDays, durations,
         origDay: ev.dayIndex, curDay: ev.dayIndex,
         baseMouseMin: coords.snappedMin,
         active: false, initX: e.clientX, initY: e.clientY,
@@ -820,11 +972,13 @@ export default function WeeklyPlanner() {
     setSelectedIds(new Set());
     const coords   = getGridCoords(e.clientX, e.clientY);
     if (!coords) return;
-    const startMin = timeToMin(ev.startTime);
-    const duration = timeToMin(ev.endTime) - startMin;
+    const startMin = normalizeMin(timeToMin(ev.startTime), dayStartH);
+    let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
+    if (endMin <= startMin) endMin += 1440;
+    const duration = endMin - startMin;
     dragRef.current = {
       eventId: ev.id, durationMin: duration,
-      offsetMin: clamp(coords.snappedMin - startMin, 0, duration - interval),
+      offsetMin: clamp(coords.snappedMin - startMin, 0, duration),
       origDay: ev.dayIndex, curDay: ev.dayIndex, curStartMin: startMin,
       active: false, initX: e.clientX, initY: e.clientY,
     };
@@ -832,7 +986,10 @@ export default function WeeklyPlanner() {
 
   const handleResizeMouseDown = (e: React.MouseEvent, ev: PlannerEvent, edge: 'top' | 'bottom') => {
     e.preventDefault(); e.stopPropagation();
-    resizeRef.current = { eventId: ev.id, edge, startMin: timeToMin(ev.startTime), endMin: timeToMin(ev.endTime) };
+    const startMin = normalizeMin(timeToMin(ev.startTime), dayStartH);
+    let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
+    if (endMin <= startMin) endMin += 1440;
+    resizeRef.current = { eventId: ev.id, edge, startMin, endMin };
   };
 
   const openMenu = (e: React.MouseEvent, ev: PlannerEvent) => {
@@ -890,14 +1047,20 @@ export default function WeeklyPlanner() {
   const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); setMenuId(null); };
 
   // ── Display props (override during drag/resize/batch) ─────────────────────
+  const normDuration = (ev: PlannerEvent) => {
+    const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
+    let en = normalizeMin(timeToMin(ev.endTime), dayStartH);
+    if (en <= s) en += 1440;
+    return en - s;
+  };
   const dispProps = (ev: PlannerEvent) => {
     if (batchDisp && batchDisp[ev.id]) {
       const bd = batchDisp[ev.id];
-      const dur = timeToMin(ev.endTime) - timeToMin(ev.startTime);
+      const dur = normDuration(ev);
       return { dayIndex: bd.dayIndex, startMin: bd.startMin, endMin: bd.startMin + dur };
     }
     if (dragDisp?.id === ev.id) {
-      const dur = timeToMin(ev.endTime) - timeToMin(ev.startTime);
+      const dur = normDuration(ev);
       return { dayIndex: dragDisp.day, startMin: dragDisp.startMin, endMin: dragDisp.startMin + dur };
     }
     if (resizeDisp?.id === ev.id) return { dayIndex: ev.dayIndex, startMin: resizeDisp.startMin, endMin: resizeDisp.endMin };
@@ -953,6 +1116,26 @@ export default function WeeklyPlanner() {
                 ))}
               </div>
             </div>
+            <div className="flex items-center gap-1" data-hist-version={histVersion}>
+              <button
+                onClick={undo}
+                disabled={undoStack.current.length === 0}
+                title="Undo (Ctrl+Z)"
+                className="p-1.5 rounded-lg transition-colors"
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: undoStack.current.length === 0 ? 0.4 : 1, cursor: undoStack.current.length === 0 ? 'default' : 'pointer' }}
+              >
+                <Undo2 size={14}/>
+              </button>
+              <button
+                onClick={redo}
+                disabled={redoStack.current.length === 0}
+                title="Redo (Ctrl+Shift+Z)"
+                className="p-1.5 rounded-lg transition-colors"
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: redoStack.current.length === 0 ? 0.4 : 1, cursor: redoStack.current.length === 0 ? 'default' : 'pointer' }}
+              >
+                <Redo2 size={14}/>
+              </button>
+            </div>
             <button onClick={openWidget} title="Open Floating Widget" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <AppWindow size={14}/>
             </button>
@@ -987,8 +1170,8 @@ export default function WeeklyPlanner() {
                   {slots.map((time, i) => {
                     const isHour = time.endsWith(':00');
                     return (
-                      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i*sh, height: sh }}>
-                        <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[10px] font-semibold text-muted-foreground' : 'mt-1 text-[8.5px] text-muted-foreground/40'}`}>
+                      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i*sh, height: sh, transform: 'translateY(-50%)' }}>
+                        <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-semibold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/40'}`}>
                           {formatSlotLabel(time, timeFormat)}
                         </span>
                       </div>
@@ -998,7 +1181,7 @@ export default function WeeklyPlanner() {
               </div>
 
               {/* Day columns */}
-              <div ref={daysGridRef} className="flex-1 grid grid-cols-7">
+              <div ref={daysGridRef} className="flex-1 grid grid-cols-7 relative">
                 {days.map((day, colIdx) => {
                   const today     = isToday(day);
                   const colEvents = Object.values(events).filter(ev => dispProps(ev).dayIndex === colIdx);
@@ -1023,10 +1206,21 @@ export default function WeeklyPlanner() {
                       <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
                         onClick={(e) => handleColClick(e, colIdx)}
                         onMouseDown={(e) => {
-                          if ((e.ctrlKey || e.metaKey) && !(e.target as HTMLElement).closest('[data-event]')) {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            selDragRef.current = { col: colIdx, startY: e.clientY - rect.top };
-                            setSelRect({ col: colIdx, topPx: e.clientY - rect.top, heightPx: 0 });
+                          if ((e.target as HTMLElement).closest('[data-event]')) return;
+                          if (e.button !== 0) return;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const y = e.clientY - rect.top;
+                          if (e.ctrlKey || e.metaKey) {
+                            const gr = daysGridRef.current?.getBoundingClientRect();
+                            if (gr) {
+                              const sx = e.clientX - gr.left;
+                              const sy = e.clientY - gr.top - HEADER_PX;
+                              selDragRef.current = { startX: sx, startY: sy };
+                              setSelRect({ left: sx, top: sy, width: 0, height: 0 });
+                            }
+                          } else {
+                            // Plain left-drag on empty space → create a new event spanning the drag
+                            createDragRef.current = { col: colIdx, startY: y, moved: false };
                           }
                         }}
                       >
@@ -1034,18 +1228,6 @@ export default function WeeklyPlanner() {
                         {slots.map((time, i) => (
                           <div key={time} className={`absolute w-full pointer-events-none border-b ${time.endsWith(':00') ? 'border-border/35' : 'border-border/12'}`} style={{ top: i*sh, height: sh }} />
                         ))}
-
-                        {/* Selection rectangle overlay */}
-                        {selRect && selRect.col === colIdx && (
-                          <div className="absolute pointer-events-none z-20 rounded-md" style={{
-                            top: selRect.topPx,
-                            height: Math.max(4, selRect.heightPx),
-                            left: 4, right: 4,
-                            background: darkMode ? 'rgba(120,180,240,0.18)' : 'rgba(60,120,200,0.13)',
-                            border: `1.5px solid ${darkMode ? 'rgba(120,180,240,0.40)' : 'rgba(60,120,200,0.30)'}`,
-                            borderRadius: 6,
-                          }} />
-                        )}
 
                         {/* Live time indicator */}
                         {today && nowInView && colIdx === todayColIdx && (() => {
@@ -1095,6 +1277,7 @@ export default function WeeklyPlanner() {
                             <div
                               key={ev.id}
                               data-event="1"
+                              data-event-id={ev.id}
                               className={`absolute rounded-lg border overflow-visible transition-shadow duration-150 ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
@@ -1117,7 +1300,7 @@ export default function WeeklyPlanner() {
                                 }
                                 if (!didDragRef.current) openMenu(e, ev);
                               }}
-                              onDoubleClick={(e) => { e.stopPropagation(); setMenuId(null); setEditingId(ev.id); }}
+                              onDoubleClick={(e) => { e.stopPropagation(); openMenu(e, ev); setEditingId(ev.id); }}
                               onMouseEnter={() => setHoveredId(ev.id)}
                               onMouseLeave={() => setHoveredId(null)}
                             >
@@ -1170,11 +1353,11 @@ export default function WeeklyPlanner() {
                                   </>
                                 ) : (() => {
                                   const dateStr = format(day, 'yyyy-MM-dd');
-                                  const isCompleted = ev.completedDates?.includes(dateStr) ?? false;
+                                  const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
                                   return (
                                     <>
                                       <div className="flex items-start gap-1.5 flex-1 min-h-0">
-                                        {today && (
+                                        {today && !ev.noCheckbox && (
                                           <button
                                             type="button"
                                             onClick={(e) => {
@@ -1239,6 +1422,19 @@ export default function WeeklyPlanner() {
                     </div>
                   );
                 })}
+
+                {/* Selection rectangle overlay (spans multiple days) */}
+                {selRect && (
+                  <div className="absolute pointer-events-none z-20" style={{
+                    left: selRect.left,
+                    top: HEADER_PX + selRect.top,
+                    width: Math.max(2, selRect.width),
+                    height: Math.max(2, selRect.height),
+                    background: darkMode ? 'rgba(120,180,240,0.18)' : 'rgba(60,120,200,0.13)',
+                    border: `1.5px solid ${darkMode ? 'rgba(120,180,240,0.40)' : 'rgba(60,120,200,0.30)'}`,
+                    borderRadius: 6,
+                  }} />
+                )}
               </div>
             </motion.div>
           </AnimatePresence>
@@ -1470,8 +1666,8 @@ export default function WeeklyPlanner() {
           ref={menuRef}
           className="fixed z-[200] rounded-xl shadow-xl overflow-hidden"
           style={{
-            left: Math.min(menuPos.x, window.innerWidth - 200),
-            top:  Math.min(menuPos.y, window.innerHeight - 160),
+            left: Math.min(menuPos.x, window.innerWidth - 220),
+            top:  Math.min(menuPos.y, window.innerHeight - 300),
             minWidth: 180,
             background: menuBg,
             border: `1px solid ${menuBdr}`,
@@ -1486,9 +1682,80 @@ export default function WeeklyPlanner() {
             <p className="text-[11px] font-semibold truncate" style={{ color: menuText }}>
               {menuEvent.content || 'Untitled'}
             </p>
-            <p className="text-[10px] mt-0.5" style={{ color: menuSub }}>
-              {formatTimeLabel(timeToMin(menuEvent.startTime), timeFormat)} – {formatTimeLabel(timeToMin(menuEvent.endTime), timeFormat)}
-            </p>
+          </div>
+
+          {/* Precise start/end time editors */}
+          <div className="px-3 py-2.5 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+            {(['startTime', 'endTime'] as const).map((field, idx) => (
+              <div key={field} className="flex flex-col gap-1 flex-1">
+                <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                  {idx === 0 ? 'Start' : 'End'}
+                </span>
+                <input
+                  type="time"
+                  step={60}
+                  value={menuEvent[field]}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (!val) return;
+                    setEvents(prev => {
+                      const ev = prev[menuEvent.id];
+                      if (!ev) return prev;
+                      return { ...prev, [menuEvent.id]: { ...ev, [field]: val } };
+                    });
+                  }}
+                  className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none"
+                  style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                />
+              </div>
+            ))}
+          </div>
+
+          {/* Completion-checkbox toggle */}
+          <button
+            className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+            style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
+            onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            onClick={() => setEvents(prev => {
+              const ev = prev[menuEvent.id];
+              if (!ev) return prev;
+              return { ...prev, [menuEvent.id]: { ...ev, noCheckbox: !ev.noCheckbox } };
+            })}
+          >
+            <span className="flex items-center gap-2.5">
+              <CheckSquare size={13} style={{ opacity: 0.7 }} />
+              Completion checkbox
+            </span>
+            <span
+              className="flex items-center rounded-full transition-colors"
+              style={{
+                width: 30, height: 17, padding: 2,
+                background: !menuEvent.noCheckbox ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                justifyContent: !menuEvent.noCheckbox ? 'flex-end' : 'flex-start',
+              }}
+            >
+              <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
+            </span>
+          </button>
+
+          {/* Color picker */}
+          <div className="px-3 py-2.5 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+            <span className="text-[9px] font-bold uppercase tracking-wider mr-1" style={{ color: menuSub }}>Color</span>
+            {SWATCHES.map(c => {
+              const sc = colorPalette[c];
+              return (
+                <button key={c} type="button"
+                  onClick={() => setEvents(prev => {
+                    const ev = prev[menuEvent.id];
+                    if (!ev) return prev;
+                    return { ...prev, [menuEvent.id]: { ...ev, color: c } };
+                  })}
+                  className="rounded-full border transition-transform hover:scale-110"
+                  style={{ width: 15, height: 15, backgroundColor: sc.bg, borderColor: sc.border, outline: menuEvent.color===c ? `2px solid ${sc.text}` : 'none', outlineOffset: 1 }}
+                />
+              );
+            })}
           </div>
 
           {/* Actions */}
@@ -1496,7 +1763,7 @@ export default function WeeklyPlanner() {
             {
               icon: <Pencil size={13}/>,
               label: 'Edit',
-              action: () => { setEditingId(menuEvent.id); setMenuId(null); setMenuPos(null); },
+              action: () => { setEditingId(menuEvent.id); },
             },
             {
               icon: <CalendarRange size={13}/>,

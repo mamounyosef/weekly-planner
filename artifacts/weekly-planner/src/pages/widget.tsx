@@ -22,6 +22,7 @@ interface PlannerEvent {
   content: string;
   color: EventColor;
   completedDates?: string[];
+  noCheckbox?: boolean; // when true, this event has no completion checkbox
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -39,11 +40,11 @@ const POSITION_SNAP  = 5;
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
 const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#eef1ed', border: '#b8d0b3', text: '#3a5233' },
-  peach: { bg: '#fcf2ed', border: '#f0d0bc', text: '#7a4530' },
-  blue:  { bg: '#eef3f9', border: '#b8d0ee', text: '#2a4f78' },
-  sand:  { bg: '#f9f5ed', border: '#e8d5b8', text: '#6b5030' },
-  lilac: { bg: '#f5f1f8', border: '#d8c8ee', text: '#583878' },
+  sage:  { bg: '#d9e8d2', border: '#7fae72', text: '#2c4726' },
+  peach: { bg: '#fbe0cf', border: '#e8a274', text: '#7a3d1c' },
+  blue:  { bg: '#d6e4f5', border: '#7ba6dd', text: '#1f3f66' },
+  sand:  { bg: '#f2e2bd', border: '#cba25a', text: '#5c421a' },
+  lilac: { bg: '#e8dcf2', border: '#b48cdb', text: '#4a2a68' },
 };
 
 const DARK_EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
@@ -159,30 +160,33 @@ export default function Widget() {
   const [darkMode, setDarkMode]       = useState(true);
   const [timeFormat, setTimeFormat]   = useState<TimeFormat>('12h');
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
-  const [dayStartH, setDayStartH]       = useState(6);
-  const [dayEndH, setDayEndH]           = useState(30);
+  const [dayStartH, setDayStartH]       = useState(7);
+  const [dayEndH, setDayEndH]           = useState(31);
   const [nowTick, setNowTick]           = useState(Date.now());
   const [isPinned, setIsPinned]         = useState(true);
 
   // ── Load Settings and initial events ───────────────────────────────────────
   useEffect(() => {
-    // Load config from localStorage
-    const savedInt = localStorage.getItem(INTERVAL_KEY);
-    if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
-    const savedDark = localStorage.getItem(DARK_MODE_KEY);
-    if (savedDark === 'false') setDarkMode(false);
-    const savedFmt = localStorage.getItem(TIME_FORMAT_KEY);
-    if (savedFmt === '24h') setTimeFormat('24h');
-    const savedWeek = localStorage.getItem(WEEK_START_KEY);
-    if (savedWeek) setWeekStartsOn(parseInt(savedWeek) as WeekStartsOn);
-    const savedDayStart = localStorage.getItem(DAY_START_KEY);
-    if (savedDayStart) setDayStartH(parseInt(savedDayStart));
-    const savedDayEnd = localStorage.getItem(DAY_END_KEY);
-    if (savedDayEnd) setDayEndH(parseInt(savedDayEnd));
-
-    // Fallback load local storage
+    // Fallback load local storage for events only
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) {} }
+
+    // Settings come from the shared backend so the widget always matches the main window.
+    const loadSettings = () => {
+      fetch('/api/settings')
+        .then(r => r.json())
+        .then((s) => {
+          if (s && typeof s === 'object') {
+            if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
+            if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+            if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
+            if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
+            if (s.dayStartH != null) setDayStartH(s.dayStartH);
+            if (s.dayEndH != null) setDayEndH(s.dayEndH);
+          }
+        })
+        .catch(err => console.error('Failed to sync widget settings:', err));
+    };
 
     // Fetch live from server & poll
     const loadEvents = () => {
@@ -196,11 +200,14 @@ export default function Widget() {
         .catch(err => console.error('Failed to sync widget database:', err));
     };
 
+    loadSettings();
     loadEvents();
+    const settingsPollId = setInterval(loadSettings, 5000);
     const pollId = setInterval(loadEvents, 5000);
     const clockId = setInterval(() => setNowTick(Date.now()), 1000);
 
     return () => {
+      clearInterval(settingsPollId);
       clearInterval(pollId);
       clearInterval(clockId);
     };
@@ -448,7 +455,7 @@ export default function Widget() {
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
 
   return (
-    <div className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`} style={{ background: darkMode ? '#0e1012' : '#f5f5f7' }}>
+    <div className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`} style={{ background: darkMode ? '#20242c' : '#f5f5f7' }}>
       <style>{`
         /* Hide scrollbars globally in the widget window */
         html, body, #root {
@@ -565,7 +572,7 @@ export default function Widget() {
 
             const todayDate = new Date();
             const dateStr = format(todayDate, 'yyyy-MM-dd');
-            const isCompleted = ev.completedDates?.includes(dateStr) ?? false;
+            const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
 
             return (
               <div
@@ -582,6 +589,7 @@ export default function Widget() {
               >
                 <div className="absolute inset-0 px-2 py-1.5 flex flex-col overflow-hidden">
                   <div className="flex items-start gap-1.5 flex-1 min-h-0">
+                    {!ev.noCheckbox && (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -598,6 +606,7 @@ export default function Widget() {
                         <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
                       )}
                     </button>
+                    )}
                     <p className={`text-[11px] font-semibold leading-tight break-words line-clamp-4 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                       {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
                     </p>
