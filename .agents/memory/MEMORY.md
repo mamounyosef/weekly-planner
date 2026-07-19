@@ -1,0 +1,1 @@
+- [Multi-select & batch drag](multi-select-batch-drag.md) — Ctrl+click toggles event selection; Ctrl+drag on empty column draws rubber-band; dragging any selected event moves all selected events together preserving relative positions.

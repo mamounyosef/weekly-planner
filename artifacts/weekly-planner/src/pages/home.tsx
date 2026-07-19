@@ -174,6 +174,9 @@ export default function WeeklyPlanner() {
   const [darkMode, setDarkMode]       = useState(true);
   const [timeFormat, setTimeFormat]   = useState<TimeFormat>('12h');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
+  const [selRect, setSelRect]           = useState<{ col: number; topPx: number; heightPx: number } | null>(null);
+  const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -192,8 +195,16 @@ export default function WeeklyPlanner() {
   const daysGridRef  = useRef<HTMLDivElement>(null);
   const editRef      = useRef<HTMLTextAreaElement>(null);
   const menuRef      = useRef<HTMLDivElement>(null);
-  const settingsRef  = useRef<HTMLDivElement>(null);
-  const didDragRef   = useRef(false);
+  const settingsRef    = useRef<HTMLDivElement>(null);
+  const selectedIdsRef = useRef<Set<string>>(new Set());
+  const batchDragRef   = useRef<{
+    eventIds: string[]; baseStartMins: Record<string, number>; durations: Record<string, number>;
+    origDay: number; curDay: number; baseMouseMin: number;
+    active: boolean; initX: number; initY: number;
+  } | null>(null);
+  const batchDispRef   = useRef<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
+  const selDragRef     = useRef<{ col: number; startY: number } | null>(null);
+  const didDragRef     = useRef(false);
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
   const eventsRef    = useRef<PlannerData>({});
@@ -228,6 +239,19 @@ export default function WeeklyPlanner() {
   useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
   useEffect(() => { hoveredIdRef.current = hoveredId; }, [hoveredId]);
   useEffect(() => { eventsRef.current = events; }, [events]);
+  useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
+
+  // ── Clear selection on Escape ─────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedIdsRef.current.size > 0) {
+        setSelectedIds(new Set());
+        setMenuId(null); setMenuPos(null);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   // Close settings on outside click
   useEffect(() => {
@@ -313,6 +337,43 @@ export default function WeeklyPlanner() {
     const onMove = (e: MouseEvent) => {
       const dr = dragRef.current;
       const rr = resizeRef.current;
+      const br = batchDragRef.current;
+      const sr = selDragRef.current;
+
+      // Batch drag of multiple selected events
+      if (br) {
+        if (!br.active) {
+          if (Math.hypot(e.clientX - br.initX, e.clientY - br.initY) >= DRAG_THRESHOLD) {
+            br.active = true; didDragRef.current = true;
+          } else return;
+        }
+        const coords = getGridCoords(e.clientX, e.clientY);
+        if (!coords) return;
+        br.curDay = coords.dayIndex;
+        const deltaMin = clamp(snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP), -dayStartMin * 4, dayEndMin);
+        const newBatchDisp: { [id: string]: { dayIndex: number; startMin: number } } = {};
+        for (const id of br.eventIds) {
+          const newStart = clamp(br.baseStartMins[id] + deltaMin, dayStartMin, dayEndMin - br.durations[id]);
+          newBatchDisp[id] = { dayIndex: br.curDay, startMin: newStart };
+        }
+        setBatchDisp(newBatchDisp);
+        batchDispRef.current = newBatchDisp;
+        return;
+      }
+
+      // Rubber-band selection (Ctrl+drag on empty column area)
+      if (sr) {
+        const rect = daysGridRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const curY = e.clientY - rect.top - HEADER_PX;
+        const startY = sr.startY;
+        const topPx = Math.min(startY, curY);
+        const heightPx = Math.abs(curY - startY);
+        setSelRect({ col: sr.col, topPx, heightPx });
+        e.preventDefault();
+        return;
+      }
+
       if (dr) {
         if (!dr.active) {
           if (Math.hypot(e.clientX - dr.initX, e.clientY - dr.initY) >= DRAG_THRESHOLD) {
@@ -339,9 +400,63 @@ export default function WeeklyPlanner() {
         }
       }
     };
-    const onUp = () => {
+    const onUp = (e: MouseEvent) => {
       const dr = dragRef.current;
       const rr = resizeRef.current;
+      const br = batchDragRef.current;
+      const sr = selDragRef.current;
+
+      // Batch drag commit
+      if (br) {
+        if (br.active) {
+          const finalBatch = batchDispRef.current;
+          if (finalBatch) {
+            setEvents(prev => {
+              const next = { ...prev };
+              for (const id of br.eventIds) {
+                const bd = finalBatch[id];
+                const ev = next[id];
+                if (!ev || !bd) continue;
+                const dur = br.durations[id] ?? timeToMin(ev.endTime) - timeToMin(ev.startTime);
+                next[id] = { ...ev, dayIndex: bd.dayIndex, startTime: minToTime(bd.startMin), endTime: minToTime(bd.startMin + dur) };
+              }
+              return next;
+            });
+          }
+          setTimeout(() => { didDragRef.current = false; }, 80);
+        } else { didDragRef.current = false; }
+        batchDragRef.current = null; batchDispRef.current = null; setBatchDisp(null);
+        return;
+      }
+
+      // Rubber-band commit
+      if (sr) {
+        const colRect = daysGridRef.current?.getBoundingClientRect();
+        if (colRect) {
+          const endY = e.clientY - colRect.top - HEADER_PX;
+          const topPx = Math.min(sr.startY, endY);
+          const bottomPx = Math.max(sr.startY, endY);
+          const topMin = yToMin(Math.max(0, topPx), interval);
+          const bottomMin = yToMin(Math.max(0, bottomPx), interval);
+          const idsToAdd: string[] = [];
+          for (const [id, ev] of Object.entries(eventsRef.current)) {
+            if (ev.dayIndex !== sr.col) continue;
+            const evStart = timeToMin(ev.startTime);
+            const evEnd = timeToMin(ev.endTime);
+            if (evStart < bottomMin && evEnd > topMin) idsToAdd.push(id);
+          }
+          if (idsToAdd.length) {
+            setSelectedIds(prev => {
+              const next = new Set(prev);
+              for (const id of idsToAdd) next.add(id);
+              return next;
+            });
+          }
+        }
+        selDragRef.current = null; setSelRect(null);
+        return;
+      }
+
       if (dr) {
         if (dr.active) {
           setEvents(prev => {
@@ -371,6 +486,8 @@ export default function WeeklyPlanner() {
   const handleColClick = (e: React.MouseEvent<HTMLDivElement>, dayIdx: number) => {
     if (didDragRef.current) return;
     if ((e.target as HTMLElement).closest('[data-event]')) return;
+    if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
+    setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
     const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval), dayStartMin, dayEndMin - interval);
     const id       = uid();
@@ -382,6 +499,32 @@ export default function WeeklyPlanner() {
   const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent) => {
     if (editingId === ev.id) return;
     e.preventDefault(); e.stopPropagation();
+    if (e.ctrlKey || e.metaKey) return; // toggle selection in onClick, don't drag
+
+    // Batch drag: mousedown on a selected event while others are selected
+    if (selectedIds.size > 1 && selectedIds.has(ev.id)) {
+      const coords = getGridCoords(e.clientX, e.clientY);
+      if (!coords) return;
+      const baseStartMins: Record<string, number> = {};
+      const durations: Record<string, number> = {};
+      for (const id of selectedIds) {
+        const eRef = eventsRef.current[id];
+        if (eRef) {
+          baseStartMins[id] = timeToMin(eRef.startTime);
+          durations[id] = timeToMin(eRef.endTime) - timeToMin(eRef.startTime);
+        }
+      }
+      batchDragRef.current = {
+        eventIds: [...selectedIds], baseStartMins, durations,
+        origDay: ev.dayIndex, curDay: ev.dayIndex,
+        baseMouseMin: coords.snappedMin,
+        active: false, initX: e.clientX, initY: e.clientY,
+      };
+      return;
+    }
+
+    // Single event drag
+    setSelectedIds(new Set());
     const coords   = getGridCoords(e.clientX, e.clientY);
     if (!coords) return;
     const startMin = timeToMin(ev.startTime);
@@ -432,8 +575,13 @@ export default function WeeklyPlanner() {
   const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
   const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); setMenuId(null); };
 
-  // ── Display props (override during drag/resize) ───────────────────────────
+  // ── Display props (override during drag/resize/batch) ─────────────────────
   const dispProps = (ev: PlannerEvent) => {
+    if (batchDisp && batchDisp[ev.id]) {
+      const bd = batchDisp[ev.id];
+      const dur = timeToMin(ev.endTime) - timeToMin(ev.startTime);
+      return { dayIndex: bd.dayIndex, startMin: bd.startMin, endMin: bd.startMin + dur };
+    }
     if (dragDisp?.id === ev.id) {
       const dur = timeToMin(ev.endTime) - timeToMin(ev.startTime);
       return { dayIndex: dragDisp.day, startMin: dragDisp.startMin, endMin: dragDisp.startMin + dur };
@@ -442,7 +590,7 @@ export default function WeeklyPlanner() {
     return { dayIndex: ev.dayIndex, startMin: timeToMin(ev.startTime), endMin: timeToMin(ev.endTime) };
   };
 
-  const isDraggingAnything = !!dragDisp;
+  const isDraggingAnything = !!(dragDisp || batchDisp);
   const isResizingAnything = !!resizeDisp;
   const globalCursor = isDraggingAnything ? 'grabbing' : isResizingAnything ? 'ns-resize' : undefined;
 
@@ -555,11 +703,32 @@ export default function WeeklyPlanner() {
                       </div>
 
                       {/* Content area */}
-                      <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }} onClick={(e) => handleColClick(e, colIdx)}>
+                      <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
+                        onClick={(e) => handleColClick(e, colIdx)}
+                        onMouseDown={(e) => {
+                          if ((e.ctrlKey || e.metaKey) && !(e.target as HTMLElement).closest('[data-event]')) {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            selDragRef.current = { col: colIdx, startY: e.clientY - rect.top };
+                            setSelRect({ col: colIdx, topPx: e.clientY - rect.top, heightPx: 0 });
+                          }
+                        }}
+                      >
                         {/* Grid lines */}
                         {slots.map((time, i) => (
                           <div key={time} className={`absolute w-full pointer-events-none border-b ${time.endsWith(':00') ? 'border-border/35' : 'border-border/12'}`} style={{ top: i*sh, height: sh }} />
                         ))}
+
+                        {/* Selection rectangle overlay */}
+                        {selRect && selRect.col === colIdx && (
+                          <div className="absolute pointer-events-none z-20 rounded-md" style={{
+                            top: selRect.topPx,
+                            height: Math.max(4, selRect.heightPx),
+                            left: 4, right: 4,
+                            background: darkMode ? 'rgba(120,180,240,0.18)' : 'rgba(60,120,200,0.13)',
+                            border: `1.5px solid ${darkMode ? 'rgba(120,180,240,0.40)' : 'rgba(60,120,200,0.30)'}`,
+                            borderRadius: 6,
+                          }} />
+                        )}
 
                         {/* Events */}
                         {colEvents.map(ev => {
@@ -571,6 +740,7 @@ export default function WeeklyPlanner() {
                           const isHov    = hoveredId === ev.id;
                           const isMenu   = menuId === ev.id;
                           const isResize = resizeDisp?.id === ev.id;
+                          const isSelected = selectedIds.has(ev.id);
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
 
@@ -600,11 +770,18 @@ export default function WeeklyPlanner() {
                                 color: text,
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.82 : 1,
-                                outline: isMenu ? `2px solid ${text}` : 'none',
+                                outline: isMenu ? `2px solid ${text}` : isSelected ? `2px solid ${darkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.45)'}` : 'none',
                                 outlineOffset: 1,
                               }}
                               onMouseDown={(e) => handleEventMouseDown(e, ev)}
-                              onClick={(e) => { e.stopPropagation(); if (!didDragRef.current) openMenu(e, ev); }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (e.ctrlKey || e.metaKey) {
+                                  setSelectedIds(prev => { const n = new Set(prev); if (n.has(ev.id)) n.delete(ev.id); else n.add(ev.id); return n; });
+                                  return;
+                                }
+                                if (!didDragRef.current) openMenu(e, ev);
+                              }}
                               onDoubleClick={(e) => { e.stopPropagation(); setMenuId(null); setEditingId(ev.id); }}
                               onMouseEnter={() => setHoveredId(ev.id)}
                               onMouseLeave={() => setHoveredId(null)}
