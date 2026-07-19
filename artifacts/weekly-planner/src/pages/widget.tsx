@@ -241,7 +241,7 @@ export default function Widget() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [showLiveBtn, setShowLiveBtn] = useState(false);
   const isProgrammaticScroll = useRef(false);
-  const lastManualScrollTime = useRef(0);
+  const isTrackingLive = useRef(true);
 
   const checkLiveVisibility = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -251,12 +251,38 @@ export default function Widget() {
     setShowLiveBtn(!isVisible);
   }, [normNowMin, interval, dayStartH]);
 
+  const centerScrollOnLive = (smooth = true) => {
+    const container = scrollContainerRef.current;
+    if (!container || container.clientHeight === 0) return;
+    const lineTop = minToY(normNowMin, interval, dayStartH);
+    isProgrammaticScroll.current = true;
+    if (smooth) {
+      container.scrollTo({
+        top: lineTop - container.clientHeight / 2,
+        behavior: 'smooth'
+      });
+    } else {
+      container.scrollTop = lineTop - container.clientHeight / 2;
+    }
+  };
+
   const handleScroll = () => {
-    checkLiveVisibility();
     if (isProgrammaticScroll.current) {
       isProgrammaticScroll.current = false;
-    } else {
-      lastManualScrollTime.current = Date.now();
+      return;
+    }
+    
+    // Check if the live line is visible in the container
+    const container = scrollContainerRef.current;
+    if (container) {
+      const lineTop = minToY(normNowMin, interval, dayStartH);
+      const isVisible = lineTop >= container.scrollTop && lineTop <= container.scrollTop + container.clientHeight;
+      setShowLiveBtn(!isVisible);
+    }
+    
+    // If the user scrolls away, pause live tracking
+    if (isTrackingLive.current) {
+      isTrackingLive.current = false;
     }
   };
 
@@ -276,9 +302,9 @@ export default function Widget() {
     let attempts = 0;
     const scrollInitial = () => {
       if (container.clientHeight > 0) {
-        const lineTop = minToY(normNowMin, interval, dayStartH);
-        isProgrammaticScroll.current = true;
-        container.scrollTop = lineTop - container.clientHeight / 2;
+        if (isTrackingLive.current) {
+          centerScrollOnLive(false);
+        }
       } else if (attempts < 10) {
         attempts++;
         requestAnimationFrame(scrollInitial);
@@ -290,34 +316,19 @@ export default function Widget() {
   // Keep centering dynamically every time the live time updates
   const lastCenteringMin = useRef(-1);
   useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container || container.clientHeight === 0) return;
-
     const currentMin = Math.floor(normNowMin);
     if (currentMin === lastCenteringMin.current) return;
     lastCenteringMin.current = currentMin;
 
-    // Only auto-center if the user hasn't manually scrolled in the last 12 seconds
-    if (Date.now() - lastManualScrollTime.current > 12000) {
-      const lineTop = minToY(normNowMin, interval, dayStartH);
-      isProgrammaticScroll.current = true;
-      container.scrollTo({
-        top: lineTop - container.clientHeight / 2,
-        behavior: 'smooth'
-      });
+    if (isTrackingLive.current) {
+      centerScrollOnLive(true);
     }
-  }, [nowTick, normNowMin, dayStartH, interval]);
+  }, [nowTick, normNowMin]);
 
   const scrollToLive = () => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const lineTop = minToY(normNowMin, interval, dayStartH);
-    lastManualScrollTime.current = 0; // Reset manual scroll block
-    isProgrammaticScroll.current = true;
-    container.scrollTo({
-      top: lineTop - container.clientHeight / 2,
-      behavior: 'smooth'
-    });
+    isTrackingLive.current = true;
+    setShowLiveBtn(false);
+    centerScrollOnLive(true);
   };
 
   const minimizeWidget = () => {
