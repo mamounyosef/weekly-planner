@@ -3,24 +3,35 @@ import {
   format,
   addWeeks,
   subWeeks,
+  addMonths,
+  subMonths,
   startOfWeek,
   endOfWeek,
+  startOfMonth,
+  endOfMonth,
   eachDayOfInterval,
   isToday,
+  isSameMonth,
+  isSameDay,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
   FOCUS_TIMER_KEY,
+  DEFAULT_FOCUS_TIMER,
   type FocusSession,
+  type FocusTimerState,
   dateKey,
+  formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
   loadLocalFocusSessions,
   loadLocalFocusTimer,
+  isCompletedFocusSession,
   safeFocusSessions,
   sumFocusSecondsForDay,
+  uid as focusUid,
 } from '@/lib/focusSessions';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -218,7 +229,14 @@ export default function WeeklyPlanner() {
   const [dayStartH, setDayStartH]       = useState(7);
   const [dayEndH, setDayEndH]           = useState(31);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
-  const [activeFocus, setActiveFocus] = useState<{ dayKey: string; seconds: number }>({ dayKey: '', seconds: 0 });
+  const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
+  const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
+  const [focusMinutesDraft, setFocusMinutesDraft]     = useState('25');
+  const focusCompleteRef = useRef(false);
+  const [showFocusAnalysis, setShowFocusAnalysis] = useState(false);
+  const [analysisTab, setAnalysisTab]       = useState<'month' | 'year'>('month');
+  const [analysisMonthCursor, setAnalysisMonthCursor] = useState(() => new Date());
+  const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -273,12 +291,16 @@ export default function WeeklyPlanner() {
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
   const todayColIdx = days.findIndex(d => isToday(d));
+  const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
+  const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
+  const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
+  const activeFocusDayKey = focusTimer.sessionStartedAt ? dateKey(focusTimer.sessionStartedAt) : '';
   const focusStats = useMemo(() => {
     const perDay = days.map(day => {
       const key = dateKey(day);
       const loggedSeconds = sumFocusSecondsForDay(focusSessions, day);
-      const activeSeconds = activeFocus.dayKey === key ? activeFocus.seconds : 0;
-      const sessions = focusSessions.filter(session => dateKey(session.endedAt) === key).length;
+      const activeSeconds = activeFocusDayKey === key ? focusElapsedSeconds : 0;
+      const sessions = focusSessions.filter(session => dateKey(session.endedAt) === key && isCompletedFocusSession(session)).length;
       return {
         day,
         key,
@@ -299,10 +321,86 @@ export default function WeeklyPlanner() {
       maxSeconds,
       todaySeconds: perDay.find(day => isToday(day.day))?.seconds ?? 0,
     };
-  }, [activeFocus, days, focusSessions]);
+  }, [activeFocusDayKey, focusElapsedSeconds, days, focusSessions]);
+
+  // ── Focus analysis (month / year) ──────────────────────────────────────────
+  const focusAnalysis = useMemo(() => {
+    const byDaySeconds = new Map<string, number>();
+    const byDaySessions = new Map<string, number>();
+    for (const s of focusSessions) {
+      const k = dateKey(s.endedAt);
+      byDaySeconds.set(k, (byDaySeconds.get(k) ?? 0) + s.durationSeconds);
+      if (isCompletedFocusSession(s)) byDaySessions.set(k, (byDaySessions.get(k) ?? 0) + 1);
+    }
+    const completedSessions = focusSessions.filter(isCompletedFocusSession);
+
+    // Month view
+    const monthStart = startOfMonth(analysisMonthCursor);
+    const monthEnd = endOfMonth(analysisMonthCursor);
+    const monthGridDays = eachDayOfInterval({
+      start: startOfWeek(monthStart, { weekStartsOn }),
+      end: endOfWeek(monthEnd, { weekStartsOn }),
+    });
+    const monthDaysInMonth = eachDayOfInterval({ start: monthStart, end: monthEnd });
+    const monthSeconds = monthDaysInMonth.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
+    const monthSessions = monthDaysInMonth.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
+    const monthActiveDays = monthDaysInMonth.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
+    const monthMaxSeconds = Math.max(1, ...monthDaysInMonth.map(d => byDaySeconds.get(dateKey(d)) ?? 0));
+    const monthBestDay = monthDaysInMonth.reduce(
+      (best, d) => (byDaySeconds.get(dateKey(d)) ?? 0) > (byDaySeconds.get(dateKey(best)) ?? 0) ? d : best,
+      monthDaysInMonth[0],
+    );
+
+    // Year view
+    const monthsOfYear = Array.from({ length: 12 }, (_, m) => new Date(analysisYearCursor, m, 1));
+    const monthTotals = monthsOfYear.map(m => {
+      const dayList = eachDayOfInterval({ start: startOfMonth(m), end: endOfMonth(m) });
+      const seconds = dayList.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
+      const sessions = dayList.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
+      const activeDays = dayList.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
+      return { month: m, seconds, sessions, activeDays };
+    });
+    const yearSeconds = monthTotals.reduce((sum, m) => sum + m.seconds, 0);
+    const yearSessions = monthTotals.reduce((sum, m) => sum + m.sessions, 0);
+    const yearActiveDays = monthTotals.reduce((sum, m) => sum + m.activeDays, 0);
+    const yearMaxSeconds = Math.max(1, ...monthTotals.map(m => m.seconds));
+    const yearBestMonth = monthTotals.reduce((best, m) => m.seconds > best.seconds ? m : best, monthTotals[0]);
+
+    // Streaks (all-time, based on any day with logged focus time)
+    const activeDayKeys = new Set(Array.from(byDaySeconds.entries()).filter(([, secs]) => secs > 0).map(([k]) => k));
+    let currentStreak = 0;
+    {
+      let cursorDate = new Date();
+      while (activeDayKeys.has(dateKey(cursorDate))) {
+        currentStreak++;
+        cursorDate = new Date(cursorDate.getTime() - 86400000);
+      }
+    }
+    let longestStreak = 0, run = 0;
+    let prevDate: Date | null = null;
+    for (const k of Array.from(activeDayKeys).sort()) {
+      const d = new Date(`${k}T00:00:00`);
+      run = (prevDate && d.getTime() - prevDate.getTime() === 86400000) ? run + 1 : 1;
+      longestStreak = Math.max(longestStreak, run);
+      prevDate = d;
+    }
+
+    const allTimeSeconds = Array.from(byDaySeconds.values()).reduce((a, b) => a + b, 0);
+    const allTimeSessions = completedSessions.length;
+    const avgSessionLength = allTimeSessions > 0
+      ? Math.floor(completedSessions.reduce((s, x) => s + x.durationSeconds, 0) / allTimeSessions)
+      : 0;
+
+    return {
+      byDaySeconds, byDaySessions,
+      monthGridDays, monthStart, monthEnd, monthSeconds, monthSessions, monthActiveDays, monthMaxSeconds, monthBestDay,
+      monthTotals, yearSeconds, yearSessions, yearActiveDays, yearMaxSeconds, yearBestMonth,
+      currentStreak, longestStreak, allTimeSeconds, allTimeSessions, avgSessionLength,
+    };
+  }, [focusSessions, analysisMonthCursor, analysisYearCursor, weekStartsOn]);
 
   useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 30_000);
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -326,26 +424,122 @@ export default function WeeklyPlanner() {
   }, []);
 
   useEffect(() => {
-    const refreshActiveFocus = () => {
-      const timer = loadLocalFocusTimer();
-      setActiveFocus({
-        dayKey: timer.sessionStartedAt ? dateKey(timer.sessionStartedAt) : '',
-        seconds: getFocusTimerElapsedSeconds(timer),
-      });
-    };
+    setFocusTimer(loadLocalFocusTimer());
 
     const handleStorage = (event: StorageEvent) => {
-      if (!event.key || event.key === FOCUS_TIMER_KEY) refreshActiveFocus();
+      if (!event.key || event.key === FOCUS_TIMER_KEY) setFocusTimer(loadLocalFocusTimer());
     };
 
-    refreshActiveFocus();
-    const activePollId = setInterval(refreshActiveFocus, 1000);
     window.addEventListener('storage', handleStorage);
-    return () => {
-      clearInterval(activePollId);
-      window.removeEventListener('storage', handleStorage);
-    };
+    return () => window.removeEventListener('storage', handleStorage);
   }, []);
+
+  const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
+    localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+    fetch('/api/focus-sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sessions),
+    }).catch(err => console.error('Failed to save focus sessions:', err));
+  }, []);
+
+  const completeFocusSession = useCallback((durationSeconds?: number) => {
+    const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
+    if (duration <= 0) {
+      setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+      return;
+    }
+
+    const endedAt = new Date();
+    const startedAt = focusTimer.sessionStartedAt
+      ? new Date(focusTimer.sessionStartedAt)
+      : new Date(endedAt.getTime() - duration * 1000);
+
+    const session: FocusSession = {
+      id: focusUid(),
+      startedAt: startedAt.toISOString(),
+      endedAt: endedAt.toISOString(),
+      durationSeconds: duration,
+      plannedSeconds: focusTimer.plannedSeconds,
+    };
+
+    setFocusSessions(prev => {
+      const next = [session, ...prev].slice(0, 1000);
+      persistFocusSessions(next);
+      return next;
+    });
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+  }, [focusTimer, persistFocusSessions]);
+
+  useEffect(() => {
+    localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(focusTimer));
+  }, [focusTimer]);
+
+  useEffect(() => {
+    if (!editingFocusMinutes) {
+      setFocusMinutesDraft(String(Math.max(1, Math.round(focusTimer.plannedSeconds / 60))));
+    }
+  }, [editingFocusMinutes, focusTimer.plannedSeconds]);
+
+  useEffect(() => {
+    if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
+      focusCompleteRef.current = true;
+      completeFocusSession(focusTimer.plannedSeconds);
+    } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
+      focusCompleteRef.current = false;
+    }
+  }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds]);
+
+  const startFocus = () => {
+    const startedAt = new Date().toISOString();
+    setFocusTimer(prev => ({
+      ...prev,
+      isRunning: true,
+      lastStartedAt: startedAt,
+      sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+    }));
+  };
+
+  const pauseFocus = () => {
+    setFocusTimer(prev => ({
+      ...prev,
+      accumulatedSeconds: getFocusTimerElapsedSeconds(prev),
+      isRunning: false,
+      lastStartedAt: null,
+    }));
+  };
+
+  const resetFocus = () => {
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+  };
+
+  const stopFocus = () => {
+    completeFocusSession(focusElapsedSeconds);
+  };
+
+  const setFocusMinutes = (minutes: number) => {
+    const safeMinutes = Math.max(1, Math.floor(minutes));
+    setFocusTimer(prev => ({ ...prev, plannedSeconds: safeMinutes * 60 }));
+  };
+
+  const adjustFocusMinutes = (deltaMinutes: number) => {
+    const currentMinutes = Math.max(1, Math.round(focusTimer.plannedSeconds / 60));
+    if (deltaMinutes > 0) {
+      setFocusMinutes(Math.max(5, Math.ceil((currentMinutes + 1) / 5) * 5));
+    } else {
+      setFocusMinutes(Math.max(5, Math.floor((currentMinutes - 1) / 5) * 5));
+    }
+  };
+
+  const commitFocusMinutesDraft = () => {
+    const parsed = Number(focusMinutesDraft);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      setFocusMinutes(parsed);
+    } else {
+      setFocusMinutesDraft(String(Math.max(1, Math.round(focusTimer.plannedSeconds / 60))));
+    }
+    setEditingFocusMinutes(false);
+  };
 
   // ── Persistence & Backend Sync ───────────────────────────────────────────
   const isInitialMount = useRef(true);
@@ -1287,11 +1481,119 @@ export default function WeeklyPlanner() {
                 })}
               </div>
 
-              <div className="hidden xl:flex items-center gap-2 min-w-[160px] justify-end" style={{ color: menuSub }}>
+              <button
+                onClick={() => setShowFocusAnalysis(true)}
+                className="hidden xl:flex items-center gap-2 min-w-[160px] justify-end rounded-md px-2 py-1 transition-colors"
+                style={{ color: menuSub }}
+                onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                title="Open detailed focus analysis"
+              >
                 <BarChart3 size={15} />
                 <span className="text-[11px] font-medium truncate">
                   Best {format(focusStats.bestDay.day, 'EEE')} - {formatFocusDuration(focusStats.bestDay.seconds)}
                 </span>
+              </button>
+            </div>
+
+            {/* Focus timer controls */}
+            <div className="px-4 pb-3 flex items-center gap-3 border-t" style={{ borderColor: surfaceBdr }}>
+              <div className="pt-3 flex items-center gap-3 flex-1 min-w-0">
+                <div className="text-2xl font-semibold tabular-nums leading-none flex-shrink-0" style={{ color: menuText }}>
+                  {formatCountdown(focusRemainingSeconds)}
+                </div>
+                <div className="flex-1 min-w-[80px] max-w-[220px] h-1.5 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+                  <div
+                    className="h-full rounded-full transition-all duration-300"
+                    style={{
+                      width: `${focusProgressPct}%`,
+                      background: focusTimer.isRunning ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)',
+                    }}
+                  />
+                </div>
+                <button
+                  onClick={() => adjustFocusMinutes(-5)}
+                  className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.96] flex-shrink-0"
+                  title="Decrease focus duration by 5 minutes"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuSub }}
+                >
+                  <Minus size={12} />
+                </button>
+                <div
+                  className="h-7 rounded-md flex items-center justify-center px-2 flex-shrink-0"
+                  style={{ background: darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.08)', border: '1px solid rgba(96,165,250,0.24)', color: menuText, minWidth: 64 }}
+                >
+                  {editingFocusMinutes ? (
+                    <input
+                      autoFocus
+                      value={focusMinutesDraft}
+                      onChange={(e) => setFocusMinutesDraft(e.target.value.replace(/[^\d]/g, ''))}
+                      onBlur={commitFocusMinutesDraft}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitFocusMinutesDraft();
+                        if (e.key === 'Escape') {
+                          setFocusMinutesDraft(String(Math.max(1, Math.round(focusTimer.plannedSeconds / 60))));
+                          setEditingFocusMinutes(false);
+                        }
+                      }}
+                      className="w-full bg-transparent outline-none text-center text-xs font-semibold tabular-nums"
+                      style={{ color: menuText }}
+                    />
+                  ) : (
+                    <button
+                      onDoubleClick={() => setEditingFocusMinutes(true)}
+                      className="w-full h-full text-xs font-semibold tabular-nums"
+                      title="Double-click to edit focus duration"
+                    >
+                      {Math.max(1, Math.round(focusTimer.plannedSeconds / 60))} min
+                    </button>
+                  )}
+                </div>
+                <button
+                  onClick={() => adjustFocusMinutes(5)}
+                  className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.96] flex-shrink-0"
+                  title="Increase focus duration by 5 minutes"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuSub }}
+                >
+                  <Plus size={12} />
+                </button>
+              </div>
+              <div className="pt-3 flex items-center gap-1.5 flex-shrink-0">
+                <button
+                  onClick={focusTimer.isRunning ? pauseFocus : startFocus}
+                  className="h-7 px-3 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
+                  style={{
+                    background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
+                    border: `1px solid ${focusTimer.isRunning ? 'rgba(245,158,11,0.35)' : '#2563eb'}`,
+                    color: focusTimer.isRunning ? '#fbbf24' : '#ffffff',
+                  }}
+                >
+                  {focusTimer.isRunning ? <Pause size={12} /> : <Play size={12} />}
+                  {focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
+                </button>
+                <button
+                  onClick={resetFocus}
+                  disabled={focusElapsedSeconds <= 0}
+                  className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+                  title="Reset focus timer"
+                  style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub, opacity: focusElapsedSeconds <= 0 ? 0.4 : 1 }}
+                >
+                  <RotateCcw size={12} />
+                </button>
+                <button
+                  onClick={stopFocus}
+                  disabled={focusElapsedSeconds <= 0}
+                  className="h-7 px-3 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
+                  title="Stop and log focus time"
+                  style={{
+                    background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
+                    border: `1px solid ${focusElapsedSeconds > 0 ? 'rgba(34,197,94,0.35)' : surfaceBdr}`,
+                    color: focusElapsedSeconds > 0 ? '#4ade80' : menuSub,
+                    opacity: focusElapsedSeconds <= 0 ? 0.4 : 1,
+                  }}
+                >
+                  Stop
+                </button>
               </div>
             </div>
           </section>
@@ -1937,6 +2239,232 @@ export default function WeeklyPlanner() {
           ))}
         </div>
       )}
+
+      {/* ── Focus Analysis modal ─────────────────────────────────────────── */}
+      <AnimatePresence>
+        {showFocusAnalysis && (
+          <motion.div
+            key="focus-analysis-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] flex items-center justify-center p-6"
+            style={{ background: darkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.25)' }}
+            onMouseDown={() => setShowFocusAnalysis(false)}
+          >
+            <motion.div
+              key="focus-analysis-panel"
+              initial={{ opacity: 0, scale: 0.97, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ type: 'spring', stiffness: 340, damping: 30 }}
+              className="w-full flex flex-col rounded-2xl overflow-hidden shadow-2xl"
+              style={{ maxWidth: 880, maxHeight: '86vh', background: darkMode ? '#16181a' : '#f9f9f9', border: `1px solid ${surfaceBdr}` }}
+              onMouseDown={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-3.5 flex-shrink-0" style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
+                    <BarChart3 size={16} />
+                  </div>
+                  <span className="text-sm font-semibold" style={{ color: menuText }}>Focus Analysis</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    {(['month', 'year'] as const).map(tab => (
+                      <button
+                        key={tab}
+                        onClick={() => setAnalysisTab(tab)}
+                        className="px-3 py-1 rounded-md text-[11px] font-semibold capitalize transition-colors"
+                        style={{
+                          background: analysisTab === tab ? (darkMode ? 'rgba(96,165,250,0.20)' : '#ffffff') : 'transparent',
+                          color: analysisTab === tab ? '#60a5fa' : menuSub,
+                        }}
+                      >
+                        {tab}
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={() => setShowFocusAnalysis(false)} className="p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors">
+                    <X size={15} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-5 py-4">
+                {/* All-time summary strip */}
+                <div className="grid grid-cols-5 gap-3 mb-5">
+                  {[
+                    ['All-time', formatFocusDuration(focusAnalysis.allTimeSeconds), <Target size={13} key="i" />],
+                    ['Sessions Done', `${focusAnalysis.allTimeSessions}`, <CheckSquare size={13} key="i" />],
+                    ['Avg Session', formatFocusDuration(focusAnalysis.avgSessionLength), <BarChart3 size={13} key="i" />],
+                    ['Current Streak', `${focusAnalysis.currentStreak}d`, <Flame size={13} key="i" />],
+                    ['Best Streak', `${focusAnalysis.longestStreak}d`, <Award size={13} key="i" />],
+                  ].map(([label, value, icon]) => (
+                    <div key={label as string} className="rounded-xl px-3 py-2.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                      <div className="flex items-center gap-1.5 mb-1" style={{ color: menuSub }}>
+                        {icon}
+                        <span className="text-[9px] font-bold uppercase tracking-wider truncate">{label}</span>
+                      </div>
+                      <div className="text-base font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {analysisTab === 'month' ? (
+                  <div>
+                    {/* Month nav */}
+                    <div className="flex items-center justify-between mb-3">
+                      <button onClick={() => setAnalysisMonthCursor(d => subMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronLeft size={16} />
+                      </button>
+                      <span className="text-sm font-semibold" style={{ color: menuText }}>{format(analysisMonthCursor, 'MMMM yyyy')}</span>
+                      <button onClick={() => setAnalysisMonthCursor(d => addMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronRight size={16} />
+                      </button>
+                    </div>
+
+                    {/* Month stats */}
+                    <div className="grid grid-cols-4 gap-3 mb-4">
+                      {[
+                        ['Total', formatFocusDuration(focusAnalysis.monthSeconds)],
+                        ['Sessions', `${focusAnalysis.monthSessions}`],
+                        ['Active Days', `${focusAnalysis.monthActiveDays}`],
+                        ['Best Day', format(focusAnalysis.monthBestDay, 'MMM d')],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
+                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Weekday labels */}
+                    <div className="grid grid-cols-7 gap-1.5 mb-1.5">
+                      {focusAnalysis.monthGridDays.slice(0, 7).map(d => (
+                        <div key={d.toISOString()} className="text-[9px] font-bold uppercase text-center tracking-wider" style={{ color: menuSub }}>
+                          {format(d, 'EEEEE')}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Calendar heatmap grid */}
+                    <div className="grid grid-cols-7 gap-1.5">
+                      {focusAnalysis.monthGridDays.map(d => {
+                        const key = dateKey(d);
+                        const secs = focusAnalysis.byDaySeconds.get(key) ?? 0;
+                        const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
+                        const inMonth = isSameMonth(d, analysisMonthCursor);
+                        const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
+                        const todayCell = isSameDay(d, nowDate);
+                        return (
+                          <div
+                            key={key}
+                            title={`${format(d, 'EEEE, MMM d')}: ${formatFocusDuration(secs)}${sessions ? ` · ${sessions} session${sessions === 1 ? '' : 's'}` : ''}`}
+                            className="aspect-square rounded-md flex flex-col items-center justify-center gap-0.5 relative"
+                            style={{
+                              background: secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg,
+                              border: `1px solid ${todayCell ? '#60a5fa' : surfaceBdr}`,
+                              opacity: inMonth ? 1 : 0.35,
+                            }}
+                          >
+                            <span className="text-[10px] font-medium tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? '#fff' : menuText }}>
+                              {format(d, 'd')}
+                            </span>
+                            {sessions > 0 && (
+                              <span className="text-[7px] font-bold tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? 'rgba(255,255,255,0.85)' : menuSub }}>
+                                {sessions}×
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    {/* Year nav */}
+                    <div className="flex items-center justify-between mb-3">
+                      <button onClick={() => setAnalysisYearCursor(y => y - 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronLeft size={16} />
+                      </button>
+                      <span className="text-sm font-semibold" style={{ color: menuText }}>{analysisYearCursor}</span>
+                      <button onClick={() => setAnalysisYearCursor(y => y + 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronRight size={16} />
+                      </button>
+                    </div>
+
+                    {/* Year stats */}
+                    <div className="grid grid-cols-4 gap-3 mb-5">
+                      {[
+                        ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
+                        ['Sessions', `${focusAnalysis.yearSessions}`],
+                        ['Active Days', `${focusAnalysis.yearActiveDays}`],
+                        ['Best Month', format(focusAnalysis.yearBestMonth.month, 'MMM')],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
+                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* 12-month bar chart */}
+                    <div className="flex items-end gap-2.5 h-40">
+                      {focusAnalysis.monthTotals.map(m => {
+                        const pct = Math.max(3, (m.seconds / focusAnalysis.yearMaxSeconds) * 100);
+                        const active = isSameMonth(m.month, nowDate) && analysisYearCursor === nowDate.getFullYear();
+                        return (
+                          <div key={m.month.toISOString()} className="flex-1 h-full flex flex-col justify-end gap-1.5 min-w-0">
+                            <div className="flex-1 flex items-end">
+                              <div
+                                className="w-full rounded-t-md transition-all duration-300"
+                                title={`${format(m.month, 'MMMM')}: ${formatFocusDuration(m.seconds)} · ${m.sessions} session${m.sessions === 1 ? '' : 's'}`}
+                                style={{
+                                  height: `${pct}%`,
+                                  background: active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
+                                  border: `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
+                                }}
+                              />
+                            </div>
+                            <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: active ? '#60a5fa' : menuSub }}>
+                              {format(m.month, 'MMM')}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Monthly breakdown table */}
+                    <div className="mt-5 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
+                      {focusAnalysis.monthTotals.filter(m => m.seconds > 0 || m.sessions > 0).length === 0 ? (
+                        <div className="px-4 py-6 text-center text-xs" style={{ color: menuSub }}>No focus sessions logged in {analysisYearCursor}.</div>
+                      ) : (
+                        focusAnalysis.monthTotals.map((m, i) => (
+                          <div
+                            key={m.month.toISOString()}
+                            className="flex items-center justify-between px-3.5 py-2 text-xs"
+                            style={{ background: i % 2 === 0 ? surfaceBg : 'transparent', borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}` }}
+                          >
+                            <span className="font-medium flex items-center gap-1.5" style={{ color: menuText }}>
+                              <TrendingUp size={11} style={{ opacity: 0.5 }} />
+                              {format(m.month, 'MMMM')}
+                            </span>
+                            <span className="tabular-nums" style={{ color: menuSub }}>
+                              {formatFocusDuration(m.seconds)} · {m.sessions} session{m.sessions === 1 ? '' : 's'} · {m.activeDays} active day{m.activeDays === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

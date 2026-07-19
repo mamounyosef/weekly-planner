@@ -17,6 +17,7 @@ import {
   formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
+  isCompletedFocusSession,
   loadLocalFocusSessions,
   loadLocalFocusTimer,
   safeFocusSessions,
@@ -235,6 +236,11 @@ export default function Widget() {
         .catch(err => console.error('Failed to sync focus sessions:', err));
     };
 
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key || event.key === FOCUS_TIMER_KEY) setFocusTimer(loadLocalFocusTimer());
+    };
+    window.addEventListener('storage', handleStorage);
+
     loadSettings();
     loadEvents();
     loadFocusSessions();
@@ -244,6 +250,7 @@ export default function Widget() {
     const clockId = setInterval(() => setNowTick(Date.now()), 1000);
 
     return () => {
+      window.removeEventListener('storage', handleStorage);
       clearInterval(settingsPollId);
       clearInterval(pollId);
       clearInterval(focusPollId);
@@ -271,7 +278,7 @@ export default function Widget() {
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   const todayFocusSeconds = sumFocusSecondsForDay(focusSessions, today)
     + (focusTimer.sessionStartedAt && dateKey(focusTimer.sessionStartedAt) === dateKey(today) ? focusElapsedSeconds : 0);
-  const todayFocusSessions = focusSessions.filter(session => dateKey(session.endedAt) === dateKey(today)).length;
+  const todayFocusSessions = focusSessions.filter(session => dateKey(session.endedAt) === dateKey(today) && isCompletedFocusSession(session)).length;
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
   const colEvents = useMemo(() => {

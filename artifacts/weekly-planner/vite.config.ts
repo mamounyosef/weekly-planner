@@ -26,7 +26,7 @@ export default defineConfig({
         server.middlewares.use('/api/events', async (req, res, next) => {
           const fs = await import('fs/promises');
           const path = await import('path');
-          const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database.json');
+          const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'database.json');
 
           if (req.method === 'GET') {
             try {
@@ -61,7 +61,7 @@ export default defineConfig({
         server.middlewares.use('/api/settings', async (req, res, next) => {
           const fs = await import('fs/promises');
           const path = await import('path');
-          const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'settings.json');
+          const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'settings.json');
 
           if (req.method === 'GET') {
             try {
@@ -96,7 +96,7 @@ export default defineConfig({
         server.middlewares.use('/api/focus-sessions', async (req, res, next) => {
           const fs = await import('fs/promises');
           const path = await import('path');
-          const focusPath = path.resolve(import.meta.dirname, '..', '..', 'focus-sessions.json');
+          const focusPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-sessions.json');
 
           if (req.method === 'GET') {
             try {

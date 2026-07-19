@@ -16,6 +16,11 @@ export interface FocusTimerState {
 
 export const FOCUS_SESSIONS_KEY = 'planner-focus-sessions';
 export const FOCUS_TIMER_KEY = 'planner-focus-timer';
+export const MIN_COMPLETED_SESSION_SECONDS = 10 * 60;
+
+export function isCompletedFocusSession(session: FocusSession): boolean {
+  return session.durationSeconds >= MIN_COMPLETED_SESSION_SECONDS;
+}
 
 export const DEFAULT_FOCUS_TIMER: FocusTimerState = {
   plannedSeconds: 25 * 60,

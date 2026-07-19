@@ -50,5 +50,5 @@ Thumbs.db
 
 # Local database and cache profiles
 .chrome-profile/
-database.json
+database/
 my-made-main-icon.png
