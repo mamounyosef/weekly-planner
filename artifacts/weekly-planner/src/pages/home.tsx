@@ -1652,7 +1652,7 @@ export default function WeeklyPlanner() {
                     const isHour = time.endsWith(':00');
                     return (
                       <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i*sh, height: sh, transform: 'translateY(-50%)' }}>
-                        <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-semibold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/40'}`}>
+                        <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-bold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/40'}`}>
                           {formatSlotLabel(time, timeFormat)}
                         </span>
                       </div>
@@ -1665,13 +1665,42 @@ export default function WeeklyPlanner() {
               <div ref={daysGridRef} className="flex-1 grid grid-cols-7 relative">
                 {days.map((day, colIdx) => {
                   const today     = isToday(day);
-                  const colEvents = Object.values(events).filter(ev => dispProps(ev).dayIndex === colIdx);
+
+                  // An event "spans the day boundary" when it starts before the configured
+                  // day-start hour and ends after it (e.g. sleep from 1:15am to 9:45am with a
+                  // 7am day cutoff) — it can't be drawn as one block in a single column, so it
+                  // renders as a linked tail (in its own day) + head (in the next day) segment.
+                  const isActiveEvent = (ev: PlannerEvent) =>
+                    dragDisp?.id === ev.id || resizeDisp?.id === ev.id || !!batchDisp?.[ev.id];
+                  const isBoundarySpanning = (ev: PlannerEvent) => {
+                    const s = timeToMin(ev.startTime);
+                    const e = timeToMin(ev.endTime);
+                    return s < dayStartMin && e >= dayStartMin;
+                  };
+
+                  type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
+                  const renderItems: RenderItem[] = [];
+                  for (const ev of Object.values(events)) {
+                    const dp = dispProps(ev);
+                    if (isActiveEvent(ev)) {
+                      if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
+                      continue;
+                    }
+                    if (isBoundarySpanning(ev)) {
+                      if (ev.dayIndex === colIdx) {
+                        renderItems.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayEndMin, segKind: 'tail' });
+                      }
+                      if ((ev.dayIndex + 1) % 7 === colIdx) {
+                        renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: timeToMin(ev.endTime), segKind: 'head' });
+                      }
+                      continue;
+                    }
+                    if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
+                  }
+                  const colEvents = renderItems;
 
                   // Compute parallel layout for this column
-                  const layoutInput = colEvents.map(ev => {
-                    const dp = dispProps(ev);
-                    return { id: ev.id, startMin: dp.startMin, endMin: dp.endMin };
-                  });
+                  const layoutInput = colEvents.map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }));
                   const layout = layoutParallel(layoutInput);
 
                   return (
@@ -1729,10 +1758,10 @@ export default function WeeklyPlanner() {
                         })()}
 
                         {/* Events */}
-                        {colEvents.map(ev => {
-                          const dp       = dispProps(ev);
-                          const top      = minToY(dp.startMin, interval, dayStartH);
-                          const height   = Math.max(sh, minToY(dp.endMin, interval, dayStartH) - top);
+                        {colEvents.map(item => {
+                          const { ev, key: itemKey, segKind } = item;
+                          const top      = minToY(item.startMin, interval, dayStartH);
+                          const height   = Math.max(sh, minToY(item.endMin, interval, dayStartH) - top);
                           const isDrag   = dragDisp?.id === ev.id;
                           const isEdit   = editingId === ev.id;
                           const isHov    = hoveredId === ev.id;
@@ -1741,8 +1770,11 @@ export default function WeeklyPlanner() {
                           const isSelected = selectedIds.has(ev.id);
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
-                          const normStartMin = normalizeMin(dp.startMin, dayStartH);
-                          const normEndMin   = normalizeMin(dp.endMin, dayStartH);
+                          // Live/duration status always reflects the event's true full start–end, not just this segment.
+                          const fullStartMin = timeToMin(ev.startTime);
+                          const fullEndMin   = timeToMin(ev.endTime);
+                          const normStartMin = segKind === 'tail' ? fullStartMin + 1440 : normalizeMin(fullStartMin, dayStartH);
+                          const normEndMin   = segKind === 'head' ? fullEndMin : normalizeMin(fullEndMin, dayStartH);
                           const isLive   = today && normNowMin >= normStartMin && normNowMin < normEndMin;
                           const minutesLeft = Math.max(0, normEndMin - normNowMin);
                           const durationMin = Math.max(0, normEndMin - normStartMin);
@@ -1752,7 +1784,7 @@ export default function WeeklyPlanner() {
                               ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
                               : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
 
-                          const { col, numCols } = layout.get(ev.id) ?? { col: 0, numCols: 1 };
+                          const { col, numCols } = layout.get(itemKey) ?? { col: 0, numCols: 1 };
                           const colW   = 100 / numCols;
                           const leftPct  = col * colW;
                           const rightPct = 100 - (col + 1) * colW;
@@ -1766,16 +1798,18 @@ export default function WeeklyPlanner() {
 
                           return (
                             <div
-                              key={ev.id}
+                              key={itemKey}
                               data-event="1"
                               data-event-id={ev.id}
-                              className={`absolute rounded-lg border overflow-visible transition-shadow duration-150 ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                              className={`absolute border overflow-visible transition-shadow duration-150 ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
                                 left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
                                 right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
                                 backgroundColor: bg,
                                 borderColor: border,
+                                borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
+                                borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
                                 color: text,
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.82 : 1,
@@ -1795,10 +1829,19 @@ export default function WeeklyPlanner() {
                               onMouseEnter={() => setHoveredId(ev.id)}
                               onMouseLeave={() => setHoveredId(null)}
                             >
+                              {/* Continuation indicator (head segment: rest of event started the day before) */}
+                              {segKind === 'head' && (
+                                <div className="absolute top-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 10 }} title={`Continues from ${formatTimeLabel(fullStartMin, timeFormat)} the night before`}>
+                                  <span style={{ fontSize: 9, lineHeight: 1, opacity: 0.55, color: text }}>⌃ continued</span>
+                                </div>
+                              )}
+
                               {/* Top resize handle */}
-                              <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 'n-resize', marginTop: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
-                                <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
-                              </div>
+                              {segKind !== 'head' && (
+                                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 'n-resize', marginTop: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
+                                  <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
+                                </div>
+                              )}
 
                               {/* Top time tooltip */}
                               {showTopTime && resizeDisp && (
@@ -1871,11 +1914,11 @@ export default function WeeklyPlanner() {
                                         </p>
                                       </div>
                                       {!tooShort && (
-                                        <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
-                                          {formatTimeLabel(dp.startMin, timeFormat)} – {formatTimeLabel(dp.endMin, timeFormat)}
+                                        <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
+                                          {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
                                           {isLive ? (
-                                            <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: '#ef4444' }}>
-                                              <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: '#ef4444' }} />
+                                            <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                              <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                               {minutesLeft}m left
                                             </span>
                                           ) : (
@@ -1889,9 +1932,18 @@ export default function WeeklyPlanner() {
                               </div>
 
                               {/* Bottom resize handle */}
-                              <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 's-resize', marginBottom: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
-                                <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
-                              </div>
+                              {segKind !== 'tail' && (
+                                <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 's-resize', marginBottom: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
+                                  <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
+                                </div>
+                              )}
+
+                              {/* Continuation indicator (tail segment: event keeps going into the next day) */}
+                              {segKind === 'tail' && (
+                                <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 10 }} title={`Continues until ${formatTimeLabel(fullEndMin, timeFormat)}`}>
+                                  <span style={{ fontSize: 9, lineHeight: 1, opacity: 0.55, color: text }}>continued ⌄</span>
+                                </div>
+                              )}
 
                               {/* Bottom time tooltip */}
                               {showBottomTime && resizeDisp && (

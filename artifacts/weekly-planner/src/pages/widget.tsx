@@ -281,16 +281,44 @@ export default function Widget() {
   const todayFocusSessions = focusSessions.filter(session => dateKey(session.endedAt) === dateKey(today) && isCompletedFocusSession(session)).length;
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
+  // An event "spans the day boundary" when it starts before the configured day-start
+  // hour and ends after it (e.g. sleep from 1:15am to 9:45am with a 7am day cutoff) —
+  // it renders as a linked tail (in its own day) + head (in the next day) segment.
+  const isBoundarySpanning = useCallback((ev: PlannerEvent) => {
+    const s = timeToMin(ev.startTime);
+    const e = timeToMin(ev.endTime);
+    return s < dayStartMin && e >= dayStartMin;
+  }, [dayStartMin]);
+
   const colEvents = useMemo(() => {
     if (todayColIdx === -1) return [];
-    return Object.values(events).filter(ev => ev.dayIndex === todayColIdx);
-  }, [events, todayColIdx]);
+    const items: Array<{ ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' }> = [];
+    for (const ev of Object.values(events)) {
+      if (isBoundarySpanning(ev)) {
+        if (ev.dayIndex === todayColIdx) {
+          items.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayEndMin, segKind: 'tail' });
+        }
+        if ((ev.dayIndex + 1) % 7 === todayColIdx) {
+          items.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: timeToMin(ev.endTime), segKind: 'head' });
+        }
+        continue;
+      }
+      if (ev.dayIndex === todayColIdx) {
+        items.push({
+          ev, key: ev.id, segKind: 'normal',
+          startMin: normalizeMin(timeToMin(ev.startTime), dayStartH),
+          endMin: normalizeMin(timeToMin(ev.endTime), dayStartH),
+        });
+      }
+    }
+    return items;
+  }, [events, todayColIdx, isBoundarySpanning, dayStartMin, dayEndMin, dayStartH]);
 
   const layout = useMemo(() => {
-    const layoutInput = colEvents.map(ev => ({
-      id: ev.id,
-      startMin: timeToMin(ev.startTime),
-      endMin: timeToMin(ev.endTime),
+    const layoutInput = colEvents.map(item => ({
+      id: item.key,
+      startMin: item.startMin,
+      endMin: item.endMin,
     }));
     return layoutParallel(layoutInput);
   }, [colEvents]);
@@ -837,13 +865,13 @@ export default function Widget() {
       {/* Timeline Column */}
       <main ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto flex no-scrollbar">
         {/* Time axis */}
-        <div className="flex-shrink-0 border-r border-border/50" style={{ width: 56, background: darkMode ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.30)' }}>
+        <div className="flex-shrink-0 border-r border-border/50" style={{ width: 62, background: darkMode ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.30)' }}>
           <div className="relative" style={{ height: totalH }}>
             {slots.map((time, i) => {
               const isHour = time.endsWith(':00');
               return (
                 <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i * sh, height: sh }}>
-                  <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[9px] font-semibold text-muted-foreground' : 'mt-1 text-[7.5px] text-muted-foreground/30'}`}>
+                  <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[12px] font-semibold text-muted-foreground' : 'mt-1 text-[7.5px] text-muted-foreground/30'}`}>
                     {formatSlotLabel(time, timeFormat)}
                   </span>
                 </div>
@@ -871,14 +899,16 @@ export default function Widget() {
           })()}
 
           {/* Events list */}
-          {colEvents.map(ev => {
-            const evStart = timeToMin(ev.startTime);
-            const evEnd = timeToMin(ev.endTime);
-            const top = minToY(evStart, interval, dayStartH);
-            const height = Math.max(sh, minToY(evEnd, interval, dayStartH) - top);
+          {colEvents.map(item => {
+            const { ev, key: itemKey, segKind } = item;
+            const top = minToY(item.startMin, interval, dayStartH);
+            const height = Math.max(sh, minToY(item.endMin, interval, dayStartH) - top);
             const { bg, border, text } = colorPalette[ev.color];
-            const normStartMin = normalizeMin(evStart, dayStartH);
-            const normEndMin   = normalizeMin(evEnd, dayStartH);
+            // Live/duration status always reflects the event's true full start–end, not just this segment.
+            const fullStartMin = timeToMin(ev.startTime);
+            const fullEndMin   = timeToMin(ev.endTime);
+            const normStartMin = segKind === 'tail' ? fullStartMin + 1440 : normalizeMin(fullStartMin, dayStartH);
+            const normEndMin   = segKind === 'head' ? fullEndMin : normalizeMin(fullEndMin, dayStartH);
             const isLive       = normNowMin >= normStartMin && normNowMin < normEndMin;
             const minutesLeft  = Math.max(0, normEndMin - normNowMin);
             const durationMin  = Math.max(0, normEndMin - normStartMin);
@@ -888,7 +918,7 @@ export default function Widget() {
                 ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
                 : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
 
-            const { col, numCols } = layout.get(ev.id) ?? { col: 0, numCols: 1 };
+            const { col, numCols } = layout.get(itemKey) ?? { col: 0, numCols: 1 };
             const colW = 100 / numCols;
             const leftPct = col * colW;
             const rightPct = 100 - (col + 1) * colW;
@@ -900,17 +930,24 @@ export default function Widget() {
 
             return (
               <div
-                key={ev.id}
-                className="absolute rounded-lg border shadow-sm transition-shadow duration-150 z-10"
+                key={itemKey}
+                className={`absolute border shadow-sm transition-shadow duration-150 z-10 ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'}`}
                 style={{
                   top, height,
                   left:  `calc(${leftPct}% + ${EDGE}px)`,
                   right: `calc(${rightPct}% + ${EDGE}px)`,
                   backgroundColor: bg,
                   borderColor: border,
+                  borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
+                  borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
                   color: text,
                 }}
               >
+                {segKind === 'head' && (
+                  <div className="absolute top-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 9 }} title={`Continues from ${formatTimeLabel(fullStartMin, timeFormat)} the night before`}>
+                    <span style={{ fontSize: 8, lineHeight: 1, opacity: 0.55, color: text }}>⌃ continued</span>
+                  </div>
+                )}
                 <div className="absolute inset-0 px-2 py-1.5 flex flex-col overflow-hidden">
                   <div className="flex items-start gap-1.5 flex-1 min-h-0">
                     {!ev.noCheckbox && (
@@ -931,16 +968,16 @@ export default function Widget() {
                       )}
                     </button>
                     )}
-                    <p className={`text-[11px] font-semibold leading-tight break-words line-clamp-4 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                    <p className={`text-[13px] font-semibold leading-tight break-words line-clamp-4 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                       {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
                     </p>
                   </div>
                   {height >= sh * 1.5 && (
-                    <span className="text-[8px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0 flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
-                      {formatTimeLabel(evStart, timeFormat)} – {formatTimeLabel(evEnd, timeFormat)}
+                    <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0 flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
+                      {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
                       {isLive ? (
-                        <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: '#ef4444' }}>
-                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: '#ef4444' }} />
+                        <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                           {minutesLeft}m left
                         </span>
                       ) : (
@@ -949,6 +986,11 @@ export default function Widget() {
                     </span>
                   )}
                 </div>
+                {segKind === 'tail' && (
+                  <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 9 }} title={`Continues until ${formatTimeLabel(fullEndMin, timeFormat)}`}>
+                    <span style={{ fontSize: 8, lineHeight: 1, opacity: 0.55, color: text }}>continued ⌄</span>
+                  </div>
+                )}
               </div>
             );
           })}
