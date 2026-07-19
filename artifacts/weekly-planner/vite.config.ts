@@ -5,27 +5,14 @@ import { defineConfig } from 'vite';
 
 import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 
-const rawPort = process.env.PORT;
-
-if (!rawPort) {
-  throw new Error(
-    'PORT environment variable is required but was not provided.',
-  );
-}
-
+const rawPort = process.env.PORT || '5173';
 const port = Number(rawPort);
 
 if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-const basePath = process.env.BASE_PATH;
-
-if (!basePath) {
-  throw new Error(
-    'BASE_PATH environment variable is required but was not provided.',
-  );
-}
+const basePath = process.env.BASE_PATH || '/';
 
 export default defineConfig({
   base: basePath,
@@ -33,6 +20,88 @@ export default defineConfig({
     react(),
     tailwindcss(),
     runtimeErrorOverlay(),
+    {
+      name: 'local-file-db-plugin',
+      configureServer(server) {
+        server.middlewares.use('/api/events', async (req, res, next) => {
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database.json');
+
+          if (req.method === 'GET') {
+            try {
+              const data = await fs.readFile(dbPath, 'utf-8');
+              res.setHeader('Content-Type', 'application/json');
+              res.end(data);
+            } catch (err) {
+              res.setHeader('Content-Type', 'application/json');
+              res.end('{}');
+            }
+          } else if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => {
+              body += chunk;
+            });
+            req.on('end', async () => {
+              try {
+                await fs.writeFile(dbPath, body, 'utf-8');
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ success: true }));
+              } catch (err) {
+                res.statusCode = 500;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write to file database' }));
+              }
+            });
+          } else {
+            next();
+          }
+        });
+
+        server.middlewares.use('/api/launch-widget', async (req, res, next) => {
+          if (req.method === 'POST') {
+            const { spawn } = await import('child_process');
+            const path = await import('path');
+            const fs = await import('fs/promises');
+            const pythonScript = path.resolve(import.meta.dirname, '..', '..', 'widget-window.py');
+
+            const condaExe = 'C:\\ProgramData\\anaconda3\\Scripts\\conda.exe';
+            const condaPythonw = 'C:\\ProgramData\\anaconda3\\pythonw.exe';
+            let spawnCmd = 'pythonw';
+            let spawnArgs = [pythonScript];
+
+            try {
+              await fs.access(condaExe);
+              spawnCmd = condaExe;
+              spawnArgs = ['run', '-n', 'base', 'pythonw', pythonScript];
+            } catch (_) {
+              try {
+                await fs.access(condaPythonw);
+                spawnCmd = condaPythonw;
+              } catch (__) {
+                // fallback to path env
+              }
+            }
+
+            try {
+              const child = spawn(spawnCmd, spawnArgs, {
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: true
+              });
+              child.unref();
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: true }));
+            } catch (err) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Failed to spawn widget wrapper process' }));
+            }
+          } else {
+            next();
+          }
+        });
+      }
+    },
     ...(process.env.NODE_ENV !== 'production' &&
     process.env.REPL_ID !== undefined
       ? [

@@ -8,7 +8,7 @@ import {
   eachDayOfInterval,
   isToday,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -24,6 +24,7 @@ interface PlannerEvent {
   endTime: string;
   content: string;
   color: EventColor;
+  completedDates?: string[];
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -67,13 +68,15 @@ function timeToMin(t: string): number {
   return h * 60 + m;
 }
 function minToTime(min: number): string {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
+  const normMin = ((min % 1440) + 1440) % 1440;
+  const h = Math.floor(normMin / 60);
+  const m = normMin % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 function formatTimeLabel(min: number, fmt: TimeFormat = '12h'): string {
-  const h = Math.floor(min / 60);
-  const m = min % 60;
+  const normMin = ((min % 1440) + 1440) % 1440;
+  const h = Math.floor(normMin / 60);
+  const m = normMin % 60;
   if (fmt === '24h') {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   }
@@ -97,15 +100,32 @@ function clamp(v: number, lo: number, hi: number): number {
 function generateSlots(interval: IntervalMin, startH: number, endH: number): string[] {
   const slots: string[] = [];
   for (let h = startH; h < endH; h++) {
+    const displayH = h % 24;
     for (let m = 0; m < 60; m += interval) {
-      slots.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+      slots.push(`${String(displayH).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
     }
   }
   return slots;
 }
-function uid(): string { return crypto.randomUUID(); }
+function uid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+function normalizeMin(min: number, dayStartH: number): number {
+  if (min < dayStartH * 60) {
+    return min + 24 * 60;
+  }
+  return min;
+}
 function minToY(min: number, interval: IntervalMin, dayStartH: number): number {
-  return ((min - dayStartH * 60) / interval) * SLOT_H[interval];
+  const normMin = normalizeMin(min, dayStartH);
+  return ((normMin - dayStartH * 60) / interval) * SLOT_H[interval];
 }
 function yToMin(y: number, interval: IntervalMin, dayStartH: number): number {
   return snapMin(dayStartH * 60 + (y / SLOT_H[interval]) * interval, POSITION_SNAP);
@@ -166,7 +186,7 @@ function layoutParallel(
 // ─── Main Component ────────────────────────────────────────────────────────────
 export default function WeeklyPlanner() {
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [interval, setIntervalOpt]    = useState<IntervalMin>(60);
+  const [interval, setIntervalOpt]    = useState<IntervalMin>(5);
   const [events, setEvents]           = useState<PlannerData>({});
   const [editingId, setEditingId]     = useState<string | null>(null);
   const [hoveredId, setHoveredId]     = useState<string | null>(null);
@@ -196,7 +216,7 @@ export default function WeeklyPlanner() {
 
   const [dragDisp, setDragDisp]     = useState<{ id: string; day: number; startMin: number } | null>(null);
   const [resizeDisp, setResizeDisp] = useState<{ id: string; startMin: number; endMin: number } | null>(null);
-  const [clipboard, setClipboard]   = useState<PlannerEvent | null>(null);
+  const [clipboard, setClipboard]   = useState<PlannerEvent[]>([]);
 
   const daysGridRef  = useRef<HTMLDivElement>(null);
   const editRef      = useRef<HTMLTextAreaElement>(null);
@@ -213,9 +233,12 @@ export default function WeeklyPlanner() {
   const didDragRef     = useRef(false);
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
+  const menuIdRef    = useRef<string | null>(null);
   const eventsRef    = useRef<PlannerData>({});
   const dayStartRef  = useRef(7);
   const dayEndRef    = useRef(23);
+  const clipboardRef = useRef<PlannerEvent[]>([]);
+  const mousePosRef  = useRef<{ x: number; y: number } | null>(null);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn });
@@ -230,7 +253,8 @@ export default function WeeklyPlanner() {
   // ── Live time indicator ────────────────────────────────────────────────────
   const nowDate = useMemo(() => new Date(nowTick), [nowTick]);
   const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
-  const nowInView = nowMin >= dayStartMin && nowMin <= dayEndMin;
+  const normNowMin = normalizeMin(nowMin, dayStartH);
+  const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
   const todayColIdx = days.findIndex(d => isToday(d));
 
   useEffect(() => {
@@ -238,10 +262,24 @@ export default function WeeklyPlanner() {
     return () => clearInterval(id);
   }, []);
 
-  // ── Persistence ──────────────────────────────────────────────────────────
+  // ── Persistence & Backend Sync ───────────────────────────────────────────
+  const isInitialMount = useRef(true);
+
   useEffect(() => {
+    // Initial load from localStorage
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) {} }
+
+    // Fetch from backend file database
+    fetch('/api/events')
+      .then(r => r.json())
+      .then(data => {
+        if (data && typeof data === 'object' && Object.keys(data).length > 0) {
+          setEvents(data);
+        }
+      })
+      .catch(err => console.error('Failed to load events from backend database:', err));
+
     const savedInt = localStorage.getItem(INTERVAL_KEY);
     if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
     const savedDark = localStorage.getItem(DARK_MODE_KEY);
@@ -256,7 +294,65 @@ export default function WeeklyPlanner() {
     if (savedDayEnd) setDayEndH(parseInt(savedDayEnd));
   }, []);
 
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(events)); }, [events]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
+
+    // Avoid overwriting backend on initial mount before fetch resolves
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
+    fetch('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(events),
+    }).catch(err => console.error('Failed to save events to backend database:', err));
+  }, [events]);
+
+  // ── Backup & Restore ──────────────────────────────────────────────────────
+  const exportBackup = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(events, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `weekly-planner-backup-${new Date().toISOString().split('T')[0]}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+  };
+
+  const importBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const parsed = JSON.parse(event.target?.result as string);
+        if (parsed && typeof parsed === 'object') {
+          setEvents(parsed);
+          alert('Backup imported successfully!');
+        } else {
+          alert('Invalid backup file structure.');
+        }
+      } catch (err) {
+        alert('Error parsing backup file.');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const openWidget = () => {
+    fetch('/api/launch-widget', { method: 'POST' })
+      .catch(err => {
+        console.error('Failed to launch native widget process:', err);
+        const basePath = import.meta.env.BASE_URL.replace(/\/$/, '');
+        window.open(
+          window.location.origin + basePath + '/widget',
+          'planner_widget',
+          'width=340,height=750,menubar=no,toolbar=no,location=no,status=no,resizable=no'
+        );
+      });
+  };
   useEffect(() => { localStorage.setItem(INTERVAL_KEY, String(interval)); }, [interval]);
   useEffect(() => { localStorage.setItem(DARK_MODE_KEY, String(darkMode)); }, [darkMode]);
   useEffect(() => { localStorage.setItem(TIME_FORMAT_KEY, timeFormat); }, [timeFormat]);
@@ -270,18 +366,8 @@ export default function WeeklyPlanner() {
   useEffect(() => { dayStartRef.current = dayStartH; }, [dayStartH]);
   useEffect(() => { dayEndRef.current = dayEndH; }, [dayEndH]);
   useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
-
-  // ── Clear selection on Escape ─────────────────────────────────────────────
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && selectedIdsRef.current.size > 0) {
-        setSelectedIds(new Set());
-        setMenuId(null); setMenuPos(null);
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, []);
+  useEffect(() => { menuIdRef.current = menuId; }, [menuId]);
+  useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
 
   // Close settings on outside click
   useEffect(() => {
@@ -322,36 +408,15 @@ export default function WeeklyPlanner() {
     };
   }, [menuId]);
 
-  // ── Ctrl+C / Ctrl+V ──────────────────────────────────────────────────────
+  // ── Mouse coordinates tracking ───────────────────────────────────────────
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const active = document.activeElement;
-      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
-      if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
-        const targetId = editingIdRef.current ?? hoveredIdRef.current;
-        if (!targetId) return;
-        const ev = eventsRef.current[targetId];
-        if (ev) { setClipboard(ev); e.preventDefault(); }
-      }
-      if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
-        setClipboard(prev => {
-          if (!prev) return prev;
-          const newId      = uid();
-          const startMin   = timeToMin(prev.startTime);
-          const duration   = timeToMin(prev.endTime) - startMin;
-          const pasteStart = clamp(startMin + 10, dayStartRef.current * 60, dayEndRef.current * 60 - duration);
-          setEvents(evs => ({ ...evs, [newId]: { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) } }));
-          setEditingId(newId);
-          return { ...prev, id: newId, startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration) };
-        });
-        e.preventDefault();
-      }
+    const handleMouseMove = (e: MouseEvent) => {
+      mousePosRef.current = { x: e.clientX, y: e.clientY };
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
-  // ── Grid coordinate helper ────────────────────────────────────────────────
   const getGridCoords = useCallback((clientX: number, clientY: number) => {
     const el = daysGridRef.current;
     if (!el) return null;
@@ -361,6 +426,204 @@ export default function WeeklyPlanner() {
     const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, snappedMin: snapped };
   }, [interval, dayStartMin, dayEndMin]);
+
+  // ── Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) ─────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      // Do not trigger shortcuts if typing inside text fields
+      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
+
+      // Escape: Clear selection & close menus
+      if (e.key === 'Escape') {
+        let changed = false;
+        if (selectedIdsRef.current.size > 0) {
+          setSelectedIds(new Set());
+          changed = true;
+        }
+        if (menuIdRef.current) {
+          setMenuId(null);
+          setMenuPos(null);
+          changed = true;
+        }
+        if (changed) {
+          e.preventDefault();
+        }
+        return;
+      }
+
+      // Delete / Backspace: Remove selected, hovered, menu, or editing events
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const idsToDelete = new Set<string>();
+        if (selectedIdsRef.current.size > 0) {
+          for (const id of selectedIdsRef.current) idsToDelete.add(id);
+        } else if (hoveredIdRef.current) {
+          idsToDelete.add(hoveredIdRef.current);
+        } else if (menuIdRef.current) {
+          idsToDelete.add(menuIdRef.current);
+        } else if (editingIdRef.current) {
+          idsToDelete.add(editingIdRef.current);
+        }
+
+        if (idsToDelete.size > 0) {
+          setEvents(prev => {
+            const next = { ...prev };
+            for (const id of idsToDelete) delete next[id];
+            return next;
+          });
+
+          // Clean up state
+          setSelectedIds(prev => {
+            const next = new Set(prev);
+            for (const id of idsToDelete) next.delete(id);
+            return next;
+          });
+          if (editingIdRef.current && idsToDelete.has(editingIdRef.current)) {
+            setEditingId(null);
+          }
+          if (menuIdRef.current && idsToDelete.has(menuIdRef.current)) {
+            setMenuId(null);
+            setMenuPos(null);
+          }
+          e.preventDefault();
+        }
+        return;
+      }
+
+      // Ctrl+C / Cmd+C: Copy selected, hovered, menu, or editing events
+      if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
+        let targetIds: string[] = [];
+        if (selectedIdsRef.current.size > 0) {
+          targetIds = Array.from(selectedIdsRef.current);
+        } else if (hoveredIdRef.current) {
+          targetIds = [hoveredIdRef.current];
+        } else if (menuIdRef.current) {
+          targetIds = [menuIdRef.current];
+        } else if (editingIdRef.current) {
+          targetIds = [editingIdRef.current];
+        }
+
+        if (targetIds.length > 0) {
+          const evsToCopy = targetIds
+            .map(id => eventsRef.current[id])
+            .filter((ev): ev is PlannerEvent => !!ev);
+          if (evsToCopy.length > 0) {
+            setClipboard(evsToCopy);
+            e.preventDefault();
+          }
+        }
+        return;
+      }
+
+      // Ctrl+V / Cmd+V: Paste events
+      if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
+        const clip = clipboardRef.current;
+        if (!clip || clip.length === 0) return;
+
+        let pastedAtCursor = false;
+        if (mousePosRef.current) {
+          const el = daysGridRef.current;
+          if (el) {
+            const rect = el.getBoundingClientRect();
+            const { x, y } = mousePosRef.current;
+            // Check if cursor is over the grid (excluding the header row)
+            if (x >= rect.left && x <= rect.right && y >= rect.top + HEADER_PX && y <= rect.bottom) {
+              const coords = getGridCoords(x, y);
+              if (coords) {
+                // Find anchor: earliest event in copied group
+                let anchor = clip[0];
+                let minDay = anchor.dayIndex;
+                let minStart = timeToMin(anchor.startTime);
+
+                for (const ev of clip) {
+                  const start = timeToMin(ev.startTime);
+                  if (ev.dayIndex < minDay || (ev.dayIndex === minDay && start < minStart)) {
+                    anchor = ev;
+                    minDay = ev.dayIndex;
+                    minStart = start;
+                  }
+                }
+
+                const newEvents: PlannerData = {};
+                const pastedIds: string[] = [];
+
+                for (const ev of clip) {
+                  const newId = uid();
+                  const evStart = timeToMin(ev.startTime);
+                  const duration = timeToMin(ev.endTime) - evStart;
+
+                  const dayOffset = ev.dayIndex - anchor.dayIndex;
+                  const timeOffset = evStart - timeToMin(anchor.startTime);
+
+                  const targetDay = clamp(coords.dayIndex + dayOffset, 0, 6);
+                  const targetStart = clamp(
+                    coords.snappedMin + timeOffset,
+                    dayStartRef.current * 60,
+                    dayEndRef.current * 60 - duration
+                  );
+
+                  newEvents[newId] = {
+                    ...ev,
+                    id: newId,
+                    dayIndex: targetDay,
+                    startTime: minToTime(targetStart),
+                    endTime: minToTime(targetStart + duration),
+                  };
+                  pastedIds.push(newId);
+                }
+
+                setEvents(prev => ({ ...prev, ...newEvents }));
+
+                if (pastedIds.length === 1) {
+                  setEditingId(pastedIds[0]);
+                } else {
+                  setSelectedIds(new Set(pastedIds));
+                }
+                pastedAtCursor = true;
+                e.preventDefault();
+              }
+            }
+          }
+        }
+
+        // Fallback: paste in-place with offset (+10 min)
+        if (!pastedAtCursor) {
+          const newEvents: PlannerData = {};
+          const pastedIds: string[] = [];
+
+          for (const ev of clip) {
+            const newId = uid();
+            const evStart = timeToMin(ev.startTime);
+            const duration = timeToMin(ev.endTime) - evStart;
+            const pasteStart = clamp(
+              evStart + 10,
+              dayStartRef.current * 60,
+              dayEndRef.current * 60 - duration
+            );
+
+            newEvents[newId] = {
+              ...ev,
+              id: newId,
+              startTime: minToTime(pasteStart),
+              endTime: minToTime(pasteStart + duration),
+            };
+            pastedIds.push(newId);
+          }
+
+          setEvents(prev => ({ ...prev, ...newEvents }));
+
+          if (pastedIds.length === 1) {
+            setEditingId(pastedIds[0]);
+          } else {
+            setSelectedIds(new Set(pastedIds));
+          }
+          e.preventDefault();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [getGridCoords]);
 
   // ── Global mouse move / up ────────────────────────────────────────────────
   useEffect(() => {
@@ -583,6 +846,27 @@ export default function WeeklyPlanner() {
     setMenuPos({ x, y });
   };
 
+  const toggleEventCompleted = (id: string, day: Date) => {
+    const dateStr = format(day, 'yyyy-MM-dd');
+    setEvents(prev => {
+      const ev = prev[id];
+      if (!ev) return prev;
+      const completedDates = ev.completedDates || [];
+      const updatedDates = completedDates.includes(dateStr)
+        ? completedDates.filter(d => d !== dateStr)
+        : [...completedDates, dateStr];
+      const updatedEvents = { ...prev, [id]: { ...ev, completedDates: updatedDates } };
+      
+      fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedEvents),
+      }).catch(err => console.error("Failed to save checkbox state:", err));
+      
+      return updatedEvents;
+    });
+  };
+
   const deleteEvent = (id: string) => {
     setEvents(prev => { const n = { ...prev }; delete n[id]; return n; });
     if (editingId === id) setEditingId(null);
@@ -669,6 +953,9 @@ export default function WeeklyPlanner() {
                 ))}
               </div>
             </div>
+            <button onClick={openWidget} title="Open Floating Widget" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+              <AppWindow size={14}/>
+            </button>
             <button onClick={() => setSettingsOpen(s => !s)} title="Settings" className="p-1.5 rounded-lg transition-colors" style={{ background: settingsOpen ? (darkMode?'rgba(255,255,255,0.14)':'rgba(0,0,0,0.08)') : surfaceBg, border: `1px solid ${settingsOpen ? (darkMode?'rgba(255,255,255,0.22)':surfaceBdr) : surfaceBdr}`, color: settingsOpen ? 'var(--color-foreground)' : 'var(--color-muted-foreground)' }}>
               <Settings size={14}/>
             </button>
@@ -881,11 +1168,35 @@ export default function WeeklyPlanner() {
                                       </div>
                                     )}
                                   </>
-                                ) : (
-                                  <p className="text-xs font-medium leading-snug break-words line-clamp-5" style={{ color: text }}>
-                                    {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
-                                  </p>
-                                )}
+                                ) : (() => {
+                                  const dateStr = format(day, 'yyyy-MM-dd');
+                                  const isCompleted = ev.completedDates?.includes(dateStr) ?? false;
+                                  return (
+                                    <div className="flex items-start gap-1.5 flex-1 min-h-0">
+                                      {today && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            toggleEventCompleted(ev.id, day);
+                                          }}
+                                          className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                          style={{
+                                            borderColor: isCompleted ? text : `${text}50`,
+                                            backgroundColor: isCompleted ? text : 'transparent',
+                                          }}
+                                        >
+                                          {isCompleted && (
+                                            <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                          )}
+                                        </button>
+                                      )}
+                                      <p className={`text-xs font-medium leading-snug break-words line-clamp-5 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                        {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                                      </p>
+                                    </div>
+                                  );
+                                })()}
                               </div>
 
                               {/* Bottom resize handle */}
@@ -1059,32 +1370,86 @@ export default function WeeklyPlanner() {
                     <span className="text-[9px] font-medium" style={{ color: menuSub }}>From</span>
                     <select
                       value={dayStartH}
-                      onChange={e => setDayStartH(Math.min(parseInt(e.target.value), dayEndH - 1))}
+                      onChange={e => {
+                        const newStart = parseInt(e.target.value);
+                        const duration = dayEndH - dayStartH;
+                        setDayStartH(newStart);
+                        setDayEndH(newStart + duration);
+                      }}
                       className="w-full py-1.5 px-2 text-xs font-medium rounded-md transition-all duration-200"
                       style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText, outline: 'none' }}
                     >
-                      {Array.from({ length: 13 }, (_, i) => i).map(h => (
+                      {Array.from({ length: 24 }, (_, i) => i).map(h => (
                         <option key={h} value={h}>{h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`}</option>
                       ))}
                     </select>
                   </div>
                   <div className="flex flex-col gap-0.5 flex-1">
-                    <span className="text-[9px] font-medium" style={{ color: menuSub }}>To</span>
+                    <span className="text-[9px] font-medium" style={{ color: menuSub }}>Duration</span>
                     <select
-                      value={dayEndH}
-                      onChange={e => setDayEndH(Math.max(parseInt(e.target.value), dayStartH + 1))}
+                      value={dayEndH - dayStartH}
+                      onChange={e => setDayEndH(dayStartH + parseInt(e.target.value))}
                       className="w-full py-1.5 px-2 text-xs font-medium rounded-md transition-all duration-200"
                       style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText, outline: 'none' }}
                     >
-                      {Array.from({ length: 13 }, (_, i) => i + 12).map(h => (
-                        <option key={h} value={h}>{h === 12 ? '12pm' : h === 24 ? '12am' : h < 24 ? `${h - 12}pm` : `${h - 24}am`}</option>
+                      {Array.from({ length: 24 }, (_, i) => i + 1).map(d => (
+                        <option key={d} value={d}>{d} {d === 1 ? 'hour' : 'hours'}</option>
                       ))}
                     </select>
                   </div>
                 </div>
                 <p className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
-                  {dayStartH}:00 – {dayEndH}:00 ({dayEndH - dayStartH}h visible)
+                  {(() => {
+                    const formatHourLabel = (h: number) => {
+                      const displayH = h % 24;
+                      if (displayH === 0) return '12am';
+                      if (displayH === 12) return '12pm';
+                      return displayH < 12 ? `${displayH}am` : `${displayH - 12}pm`;
+                    };
+                    return `${formatHourLabel(dayStartH)} – ${formatHourLabel(dayEndH)} (${dayEndH - dayStartH}h visible)`;
+                  })()}
                 </p>
+              </div>
+
+              {/* Backup & Restore */}
+              <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Backup & Restore</span>
+                <div className="flex flex-col gap-2">
+                  <button
+                    onClick={exportBackup}
+                    className="w-full py-2 px-3 text-xs font-semibold rounded-md text-center transition-all duration-200"
+                    style={{
+                      background: surfaceBg,
+                      border: `1px solid ${surfaceBdr}`,
+                      color: menuText,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                    onMouseLeave={e => (e.currentTarget.style.background = surfaceBg)}
+                  >
+                    Export Backup (.json)
+                  </button>
+                  <button
+                    onClick={() => document.getElementById('import-backup-file')?.click()}
+                    className="w-full py-2 px-3 text-xs font-semibold rounded-md text-center transition-all duration-200"
+                    style={{
+                      background: surfaceBg,
+                      border: `1px solid ${surfaceBdr}`,
+                      color: menuText,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                    onMouseLeave={e => (e.currentTarget.style.background = surfaceBg)}
+                  >
+                    Import Backup
+                  </button>
+                  <input
+                    type="file"
+                    accept=".json"
+                    id="import-backup-file"
+                    onChange={importBackup}
+                    style={{ display: 'none' }}
+                  />
+                </div>
               </div>
 
             </div>
