@@ -12,9 +12,10 @@ import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2,
 import { AnimatePresence, motion } from 'framer-motion';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type IntervalMin = 5 | 15 | 30 | 60;
-type EventColor  = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
-type TimeFormat  = '12h' | '24h';
+type IntervalMin   = 5 | 15 | 30 | 60;
+type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
+type TimeFormat    = '12h' | '24h';
+type WeekStartsOn  = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0=Sun … 6=Sat
 
 interface PlannerEvent {
   id: string;
@@ -32,6 +33,7 @@ const STORAGE_KEY      = 'planner-v3';
 const INTERVAL_KEY     = 'planner-interval';
 const DARK_MODE_KEY    = 'planner-dark';
 const TIME_FORMAT_KEY  = 'planner-timefmt';
+const WEEK_START_KEY  = 'planner-weekstart';
 const DAY_START_H    = 7;
 const DAY_END_H      = 23;
 const HEADER_PX      = 56;
@@ -172,7 +174,8 @@ export default function WeeklyPlanner() {
   const [menuPos, setMenuPos]         = useState<{ x: number; y: number } | null>(null);
   const [direction, setDirection]     = useState(0);
   const [darkMode, setDarkMode]       = useState(true);
-  const [timeFormat, setTimeFormat]   = useState<TimeFormat>('12h');
+  const [timeFormat, setTimeFormat]     = useState<TimeFormat>('12h');
+  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [selRect, setSelRect]           = useState<{ col: number; topPx: number; heightPx: number } | null>(null);
@@ -210,8 +213,8 @@ export default function WeeklyPlanner() {
   const eventsRef    = useRef<PlannerData>({});
 
   // ── Derived ───────────────────────────────────────────────────────────────
-  const weekStart   = startOfWeek(currentDate, { weekStartsOn: 1 });
-  const days        = eachDayOfInterval({ start: weekStart, end: endOfWeek(currentDate, { weekStartsOn: 1 }) });
+  const weekStart   = startOfWeek(currentDate, { weekStartsOn });
+  const days        = eachDayOfInterval({ start: weekStart, end: endOfWeek(currentDate, { weekStartsOn }) });
   const slots       = generateSlots(interval);
   const sh          = SLOT_H[interval];
   const totalH      = slots.length * sh;
@@ -229,12 +232,15 @@ export default function WeeklyPlanner() {
     if (savedDark === 'false') setDarkMode(false);
     const savedFmt = localStorage.getItem(TIME_FORMAT_KEY);
     if (savedFmt === '24h') setTimeFormat('24h');
+    const savedWeek = localStorage.getItem(WEEK_START_KEY);
+    if (savedWeek) setWeekStartsOn(parseInt(savedWeek) as WeekStartsOn);
   }, []);
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(events)); }, [events]);
   useEffect(() => { localStorage.setItem(INTERVAL_KEY, String(interval)); }, [interval]);
   useEffect(() => { localStorage.setItem(DARK_MODE_KEY, String(darkMode)); }, [darkMode]);
   useEffect(() => { localStorage.setItem(TIME_FORMAT_KEY, timeFormat); }, [timeFormat]);
+  useEffect(() => { localStorage.setItem(WEEK_START_KEY, String(weekStartsOn)); }, [weekStartsOn]);
 
   useEffect(() => { editingIdRef.current = editingId; }, [editingId]);
   useEffect(() => { hoveredIdRef.current = hoveredId; }, [hoveredId]);
@@ -974,6 +980,30 @@ export default function WeeklyPlanner() {
                       }}
                     >
                       {v}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Week starts on */}
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Week Starts On</span>
+                <div className="flex rounded-lg p-0.5 flex-wrap" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  {([
+                    [0, 'Sun'], [1, 'Mon'], [2, 'Tue'], [3, 'Wed'],
+                    [4, 'Thu'], [5, 'Fri'], [6, 'Sat'],
+                  ] as [WeekStartsOn, string][]).map(([v, label]) => (
+                    <button
+                      key={v}
+                      onClick={() => setWeekStartsOn(v)}
+                      className="flex-1 py-1.5 text-xs font-medium rounded-md transition-all duration-200"
+                      style={{
+                        background: weekStartsOn === v ? (darkMode ? 'rgba(255,255,255,0.13)' : '#fff') : 'transparent',
+                        color: weekStartsOn === v ? menuText : menuSub,
+                        boxShadow: weekStartsOn === v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                      }}
+                    >
+                      {label}
                     </button>
                   ))}
                 </div>
