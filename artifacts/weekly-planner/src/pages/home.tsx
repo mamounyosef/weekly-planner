@@ -111,7 +111,9 @@ function yToMin(y: number, interval: IntervalMin): number {
 
 // ─── Parallel layout ──────────────────────────────────────────────────────────
 // Returns a map of eventId → { col, numCols } for events within a single day column.
-// Uses a greedy sweep: sort by start, assign each event to the first free sub-column.
+// Uses a greedy sweep to assign sub-columns, then computes numCols per event based
+// on the maximum number of concurrent events during that event's span.  This way
+// a lone event elsewhere in the column never gets compressed by a crowded hour.
 function layoutParallel(
   evs: Array<{ id: string; startMin: number; endMin: number }>,
 ): Map<string, { col: number; numCols: number }> {
@@ -135,10 +137,26 @@ function layoutParallel(
     }
   }
 
-  const numCols = colEnds.length || 1;
+  // Per-event numCols: find the max concurrency within each event's time span.
+  // Checking at every unique start/end boundary inside the span gives exact results.
   const result = new Map<string, { col: number; numCols: number }>();
   for (const ev of sorted) {
-    result.set(ev.id, { col: colAssign[ev.id] ?? 0, numCols });
+    const points = new Set<number>();
+    points.add(ev.startMin);
+    for (const other of sorted) {
+      if (other.startMin > ev.startMin && other.startMin < ev.endMin) points.add(other.startMin);
+      if (other.endMin   > ev.startMin && other.endMin   < ev.endMin) points.add(other.endMin);
+    }
+
+    let maxConcurrent = 1;
+    for (const p of points) {
+      let count = 0;
+      for (const other of sorted) {
+        if (other.startMin <= p && other.endMin > p) count++;
+      }
+      if (count > maxConcurrent) maxConcurrent = count;
+    }
+    result.set(ev.id, { col: colAssign[ev.id] ?? 0, numCols: maxConcurrent });
   }
   return result;
 }
