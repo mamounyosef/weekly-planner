@@ -65,6 +65,12 @@ interface PlannerEvent {
   noCheckbox?: boolean; // when true, this event has no completion checkbox
   allDay?: boolean;     // when true, this is an all-day event
   daysSpan?: number;    // for all-day events, the number of days it spans (1 to 7)
+  gCalId?: string;
+  gCalCalendarId?: string;
+  gCalETag?: string;
+  gCalRecurSig?: string;
+  lastSyncedAt?: number;
+  updatedAt?: number;
   // ── Recurrence / modification-domain (see src/lib/recurrence.ts) ──
   scope?: EventScope;          // 'all' = recurring, 'week' = single-week
   weekKey?: string;            // 'all': effective-from week · 'week': the pinned week
@@ -325,6 +331,18 @@ export default function WeeklyPlanner() {
   const [analysisTab, setAnalysisTab]       = useState<'month' | 'year'>('month');
   const [analysisMonthCursor, setAnalysisMonthCursor] = useState(() => new Date());
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
+  // Google Calendar Integration State
+  const [gCalStatus, setGCalStatus] = useState<{
+    configured: boolean;
+    authenticated: boolean;
+    email?: string;
+    autoSync?: boolean;
+    clientId?: string;
+    clientSecret?: string;
+  }>({ configured: false, authenticated: false });
+  const [gCalSyncing, setGCalSyncing] = useState(false);
+  const [clientIdInput, setClientIdInput] = useState('');
+  const [clientSecretInput, setClientSecretInput] = useState('');
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -358,10 +376,89 @@ export default function WeeklyPlanner() {
   const hoveredIdRef = useRef<string | null>(null);
   const menuIdRef    = useRef<string | null>(null);
   const eventsRef    = useRef<PlannerData>({});
+  // Guards Google sync from running before the initial events load has resolved —
+  // syncing an empty map would push a truncated database back to disk (data loss).
+  const eventsLoadedRef = useRef(false);
   const dayStartRef  = useRef(7);
   const dayEndRef    = useRef(31);
   const clipboardRef = useRef<PlannerEvent[]>([]);
   const mousePosRef  = useRef<{ x: number; y: number } | null>(null);
+
+  // Google Calendar Integration Functions & Hooks
+  // Holds the exact events object returned by the last sync. The post-edit sync
+  // effect compares against it by identity to recognise a "sync echo" and skip
+  // re-syncing — otherwise applying a sync result would re-trigger a sync forever.
+  const gcalEchoRef = useRef<PlannerData | null>(null);
+  const triggerGCalSync = useCallback((customEvents?: PlannerData) => {
+    // Never sync before events have loaded — see eventsLoadedRef.
+    if (!customEvents && !eventsLoadedRef.current) return;
+    setGCalSyncing(true);
+    const currentEvents = customEvents || eventsRef.current;
+    fetch('/api/google-sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: currentEvents, weekStartsOn })
+    })
+    .then(r => r.json())
+    .then(res => {
+      if (res.success && res.events) {
+        gcalEchoRef.current = res.events; // mark this state change as a sync echo
+        skipHistoryRef.current = true;    // and don't record it as an undo step
+        setEvents(res.events);
+      }
+    })
+    .catch(err => console.error('Google Calendar sync failed:', err))
+    .finally(() => {
+      setGCalSyncing(false);
+      fetch('/api/google-auth/status')
+        .then(r => r.json())
+        .then(status => {
+          setGCalStatus(status);
+          if (status.clientId) setClientIdInput(status.clientId);
+          if (status.clientSecret) setClientSecretInput(status.clientSecret);
+        });
+    });
+  }, [weekStartsOn]);
+
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    if (code) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      const redirectUri = window.location.origin;
+      fetch('/api/google-auth/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, redirectUri })
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (res.success) {
+          triggerGCalSync();
+        } else {
+          console.error('Failed to exchange auth code:', res.error);
+        }
+      })
+      .catch(err => console.error('Error during token exchange:', err));
+    }
+  }, [triggerGCalSync]);
+
+  useEffect(() => {
+    if (!gCalStatus.authenticated || !gCalStatus.autoSync) return;
+    const intervalId = setInterval(() => {
+      triggerGCalSync();
+    }, 5 * 60 * 1000);
+    return () => clearInterval(intervalId);
+  }, [gCalStatus.authenticated, gCalStatus.autoSync, triggerGCalSync]);
+
+  useEffect(() => {
+    if (isInitialMount.current || !gCalStatus.authenticated) return;
+    // If this render is the result of applying a sync response, don't sync again.
+    if (gcalEchoRef.current === events) { gcalEchoRef.current = null; return; }
+    const timer = setTimeout(() => { triggerGCalSync(); }, 1500);
+    return () => clearTimeout(timer);
+  }, [events, gCalStatus.authenticated, triggerGCalSync]);
+
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn });
@@ -442,7 +539,8 @@ export default function WeeklyPlanner() {
   const applyEdit = useCallback((id: string, patch: Partial<PlannerEvent>): string => {
     const ctx = commitCtxRef.current;
     const { events: prepared, targetId } = ensureConcreteTarget(eventsRef.current, id, ctx);
-    let map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch } };
+    const nowMs = Date.now();
+    let map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch, updatedAt: nowMs } };
     map = collapseSeriesForward(map, targetId, ctx.viewedWeekKey);
     setEvents(map);
     if (targetId !== id) {
@@ -463,9 +561,10 @@ export default function WeeklyPlanner() {
     const ctx = commitCtxRef.current;
     let map = eventsRef.current;
     const remap: Record<string, string> = {};
+    const nowMs = Date.now();
     for (const [id, patch] of Object.entries(patches)) {
       const { events: prepared, targetId } = ensureConcreteTarget(map, id, ctx);
-      map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch } };
+      map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch, updatedAt: nowMs } };
       map = collapseSeriesForward(map, targetId, ctx.viewedWeekKey);
       if (targetId !== id) remap[id] = targetId;
     }
@@ -813,7 +912,8 @@ export default function WeeklyPlanner() {
           setEvents(migrateEvents(data as PlannerData).events);
         }
       })
-      .catch(err => console.error('Failed to load events from backend database:', err));
+      .catch(err => console.error('Failed to load events from backend database:', err))
+      .finally(() => { eventsLoadedRef.current = true; });
 
     const savedInt = localStorage.getItem(INTERVAL_KEY);
     if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
@@ -844,7 +944,21 @@ export default function WeeklyPlanner() {
         }
       })
       .catch(err => console.error('Failed to load settings from backend:', err))
-      .finally(() => { settingsLoaded.current = true; });
+      .finally(() => {
+        settingsLoaded.current = true;
+
+        fetch('/api/google-auth/status')
+          .then(r => r.json())
+          .then(status => {
+            setGCalStatus(status);
+            if (status.clientId) setClientIdInput(status.clientId);
+            if (status.clientSecret) setClientSecretInput(status.clientSecret);
+            if (status.authenticated) {
+              triggerGCalSync();
+            }
+          })
+          .catch(err => console.error('Failed to load Google Auth status on startup:', err));
+      });
   }, []);
 
   // Persist settings to the shared backend whenever any of them change (after initial load).
@@ -2936,6 +3050,199 @@ export default function WeeklyPlanner() {
                   />
                 </div>
               </div>
+
+              {/* Google Calendar Sync */}
+              <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Google Calendar Sync</span>
+                
+                {!gCalStatus.configured ? (
+                  <div className="flex flex-col gap-2">
+                    <p className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
+                      Configure your OAuth 2.0 client credentials to hook up Google Calendar.
+                    </p>
+                    <div className="flex flex-col gap-1.5">
+                      <input
+                        type="text"
+                        placeholder="Client ID"
+                        value={clientIdInput}
+                        onChange={e => setClientIdInput(e.target.value)}
+                        className="w-full py-1.5 px-2.5 text-xs rounded-md border outline-none transition-colors"
+                        style={{
+                          background: surfaceBg,
+                          borderColor: surfaceBdr,
+                          color: menuText
+                        }}
+                      />
+                      <input
+                        type="password"
+                        placeholder="Client Secret"
+                        value={clientSecretInput}
+                        onChange={e => setClientSecretInput(e.target.value)}
+                        className="w-full py-1.5 px-2.5 text-xs rounded-md border outline-none transition-colors"
+                        style={{
+                          background: surfaceBg,
+                          borderColor: surfaceBdr,
+                          color: menuText
+                        }}
+                      />
+                      <button
+                        onClick={() => {
+                          if (!clientIdInput || !clientSecretInput) return;
+                          fetch('/api/google-auth/setup', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ clientId: clientIdInput, clientSecret: clientSecretInput, autoSync: true })
+                          })
+                          .then(r => r.json())
+                          .then(res => {
+                            if (res.success) {
+                              setGCalStatus(prev => ({ ...prev, configured: true, autoSync: true }));
+                            }
+                          });
+                        }}
+                        disabled={!clientIdInput || !clientSecretInput}
+                        className="w-full py-1.5 px-3 text-xs font-semibold rounded-md text-center transition-all duration-200"
+                        style={{
+                          background: (clientIdInput && clientSecretInput) ? '#4a90e2' : surfaceBg,
+                          borderColor: surfaceBdr,
+                          color: (clientIdInput && clientSecretInput) ? '#fff' : menuSub,
+                          cursor: (clientIdInput && clientSecretInput) ? 'pointer' : 'not-allowed'
+                        }}
+                      >
+                        Save Credentials
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2.5">
+                    <div className="flex items-center justify-between p-2 rounded-md" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[10px] font-semibold" style={{ color: menuText }}>
+                          {gCalStatus.authenticated ? 'Connected' : 'Credentials Configured'}
+                        </span>
+                        {gCalStatus.email && (
+                          <span className="text-[9px]" style={{ color: menuSub }}>
+                            {gCalStatus.email}
+                          </span>
+                        )}
+                      </div>
+                      <span className="flex h-2 w-2 relative">
+                        <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${gCalStatus.authenticated ? 'bg-green-400' : 'bg-yellow-400'}`}></span>
+                        <span className={`relative inline-flex rounded-full h-2 w-2 ${gCalStatus.authenticated ? 'bg-green-500' : 'bg-yellow-500'}`}></span>
+                      </span>
+                    </div>
+
+                    {!gCalStatus.authenticated ? (
+                      <button
+                        onClick={() => {
+                          const redirectUri = window.location.origin;
+                          fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
+                            .then(r => r.json())
+                            .then(res => {
+                              if (res.url) {
+                                window.location.href = res.url;
+                              }
+                            });
+                        }}
+                        className="w-full py-1.5 px-3 text-xs font-semibold rounded-md text-center transition-all text-white bg-blue-500 hover:bg-blue-600 cursor-pointer"
+                      >
+                        Link Google Account
+                      </button>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-center justify-between py-1">
+                          <span className="text-xs font-medium" style={{ color: menuText }}>Auto-Sync (5m)</span>
+                          <button
+                            onClick={() => {
+                              const newAuto = !gCalStatus.autoSync;
+                              fetch('/api/google-auth/setup', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ clientId: gCalStatus.clientId, clientSecret: gCalStatus.clientSecret, autoSync: newAuto })
+                              })
+                              .then(r => r.json())
+                              .then(res => {
+                                if (res.success) {
+                                  setGCalStatus(prev => ({ ...prev, autoSync: newAuto }));
+                                }
+                              });
+                            }}
+                            className="relative flex-shrink-0 rounded-full transition-colors duration-200"
+                            style={{
+                              width: 36, height: 20,
+                              background: gCalStatus.autoSync ? 'rgba(120,200,120,0.55)' : surfaceBdr,
+                              border: `1px solid ${surfaceBdr}`,
+                            }}
+                          >
+                            <span
+                              className="absolute rounded-full transition-transform duration-200"
+                              style={{
+                                width: 15, height: 15, top: 2, left: 2,
+                                background: gCalStatus.autoSync ? '#fff' : menuSub,
+                                transform: gCalStatus.autoSync ? 'translateX(17px)' : 'translateX(0px)',
+                              }}
+                            />
+                          </button>
+                        </div>
+
+                        <button
+                          onClick={() => triggerGCalSync()}
+                          disabled={gCalSyncing}
+                          className="w-full py-1.5 px-3 text-xs font-semibold rounded-md text-center transition-all duration-200"
+                          style={{
+                            background: surfaceBg,
+                            border: `1px solid ${surfaceBdr}`,
+                            color: menuText,
+                            cursor: gCalSyncing ? 'not-allowed' : 'pointer'
+                          }}
+                        >
+                          {gCalSyncing ? 'Syncing...' : 'Sync Now'}
+                        </button>
+
+                        <div className="flex gap-1.5 mt-1">
+                          <button
+                            onClick={() => {
+                              fetch('/api/google-auth/disconnect', { method: 'POST' })
+                                .then(r => r.json())
+                                .then(res => {
+                                  if (res.success) {
+                                    setGCalStatus(prev => ({ ...prev, authenticated: false, email: undefined }));
+                                  }
+                                });
+                            }}
+                            className="flex-1 py-1 px-2 text-[10px] rounded-md transition-all border text-red-500 hover:bg-red-50/10 cursor-pointer"
+                            style={{ borderColor: 'rgba(220,50,50,0.2)' }}
+                          >
+                            Disconnect
+                          </button>
+                          <button
+                            onClick={() => {
+                              fetch('/api/google-auth/disconnect', { method: 'POST' }).then(() => {
+                                fetch('/api/google-auth/setup', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ clientId: '', clientSecret: '', autoSync: false })
+                                })
+                                .then(() => {
+                                  setGCalStatus({ configured: false, authenticated: false });
+                                  setClientIdInput('');
+                                  setClientSecretInput('');
+                                });
+                              });
+                            }}
+                            className="flex-1 py-1 px-2 text-[10px] rounded-md transition-all border text-muted-foreground hover:bg-muted-foreground/10 cursor-pointer"
+                            style={{ borderColor: surfaceBdr }}
+                          >
+                            Reset Credentials
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
 
             </div>
           </motion.div>

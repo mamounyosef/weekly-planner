@@ -35,6 +35,23 @@ export interface RecurFields {
   dayIndex?: number;
   daysSpan?: number;
   allDay?: boolean;
+  gCalId?: string;
+  gCalCalendarId?: string;
+  gCalETag?: string;
+  gCalRecurSig?: string; // signature of the recurrence spec last pushed to Google
+  lastSyncedAt?: number;
+  updatedAt?: number;
+}
+
+// One recurring Google event to maintain for a single stored 'all' version record.
+// The version owns the Google event referenced by `recordId`'s gCalId; the fields
+// describe how its native RRULE should be bounded and punched so that the whole
+// series (multiple versions + per-week masks/forks) maps faithfully onto Google.
+export interface DailySeriesSpec {
+  recordId: string;         // the 'all' version record that owns this Google event
+  dtStartWeekKey: string;   // week of the first occurrence (effective-from)
+  untilWeekKey: string | null; // next version's week (exclusive bound); null = open-ended
+  exWeekKeys: string[];     // weeks to exclude — skip-this-week masks AND this-week forks
 }
 
 export function weekKeyOf(date: Date, weekStartsOn: WeekStartsOn): string {
@@ -51,6 +68,20 @@ function parseDate(d: string): Date {
 
 const wk = (ev: RecurFields): string => ev.weekKey ?? FAR_PAST_WEEK;
 const seriesOf = (ev: RecurFields): string => ev.seriesId ?? ev.id;
+
+// A Google-sync identity (gCalId/etag/lastSyncedAt) must belong to exactly one
+// storage record. When the recurrence model derives a NEW record from an existing
+// one (a this-week fork, a skip-this-week mask, a split series version), that new
+// record must NOT inherit the original's Google identity — otherwise two records
+// claim the same Google event, which corrupts pull-matching and could make a
+// mere "skip this week" delete the whole Google series. Callers spread this over
+// any derived record to clear those fields.
+const NO_SYNC_IDENTITY = {
+  gCalId: undefined,
+  gCalCalendarId: undefined,
+  gCalETag: undefined,
+  lastSyncedAt: undefined,
+} as const;
 
 // Legacy items (no scope) become recurring, effective since forever — preserving
 // exactly the old "every week" behaviour. Returns `changed` so callers can decide
@@ -195,7 +226,7 @@ export function ensureConcreteTarget<T extends RecurFields>(
     // them via collapseSeriesForward, but merely opening an editor must not.
     const targetId = ctx.newId();
     return {
-      events: { ...raw, [targetId]: { ...ev, id: targetId, scope: 'all', seriesId: sid, weekKey: ctx.viewedWeekKey, deleted: false } },
+      events: { ...raw, [targetId]: { ...ev, ...NO_SYNC_IDENTITY, id: targetId, scope: 'all', seriesId: sid, weekKey: ctx.viewedWeekKey, deleted: false } },
       targetId,
     };
   }
@@ -208,7 +239,7 @@ export function ensureConcreteTarget<T extends RecurFields>(
     if (existingOverride.deleted) {
       // A skip-this-week tombstone becomes a real fork again on edit.
       return {
-        events: { ...raw, [existingOverride.id]: { ...ev, id: existingOverride.id, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: sid, deleted: false } },
+        events: { ...raw, [existingOverride.id]: { ...ev, ...NO_SYNC_IDENTITY, id: existingOverride.id, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: sid, deleted: false } },
         targetId: existingOverride.id,
       };
     }
@@ -218,7 +249,7 @@ export function ensureConcreteTarget<T extends RecurFields>(
   return {
     events: {
       ...raw,
-      [nid]: { ...ev, id: nid, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: sid, deleted: false },
+      [nid]: { ...ev, ...NO_SYNC_IDENTITY, id: nid, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: sid, deleted: false },
     },
     targetId: nid,
   };
@@ -236,7 +267,7 @@ export function commitDelete<T extends RecurFields>(
   if (ev.scope === 'week') {
     // A fork of a recurring series must stay masked (become a skip-this-week
     // tombstone) so the series doesn't pop back; a plain single-week item is gone.
-    if (ev.overridesSeriesId) {
+    if (ev.overridesSeriesId || (ev as any).gCalId) {
       return { ...raw, [id]: { ...ev, deleted: true } };
     }
     const next = { ...raw };
@@ -253,7 +284,7 @@ export function commitDelete<T extends RecurFields>(
       next[id] = { ...ev, deleted: true };
     } else {
       const nid = ctx.newId();
-      next[nid] = { ...ev, id: nid, scope: 'all', seriesId: sid, weekKey: ctx.viewedWeekKey, deleted: true };
+      next[nid] = { ...ev, ...NO_SYNC_IDENTITY, id: nid, scope: 'all', seriesId: sid, weekKey: ctx.viewedWeekKey, deleted: true };
     }
     collapseForward(next, sid, ctx.viewedWeekKey);
     return next;
@@ -271,7 +302,7 @@ export function commitDelete<T extends RecurFields>(
   return {
     ...raw,
     [nid]: {
-      ...ev, id: nid,
+      ...ev, ...NO_SYNC_IDENTITY, id: nid,
       scope: 'week', weekKey: ctx.viewedWeekKey,
       seriesId: undefined, overridesSeriesId: sid, deleted: true,
     },
@@ -282,8 +313,51 @@ export function commitDelete<T extends RecurFields>(
 // recurring item is effective from the viewed week (so the past never gains it).
 export function stampNewItem<T extends RecurFields>(item: T, ctx: CommitCtx): T {
   const eff = effectiveDomain(ctx);
+  const nowMs = Date.now();
   if (eff === 'all') {
-    return { ...item, scope: 'all', seriesId: item.id, weekKey: ctx.viewedWeekKey, overridesSeriesId: undefined, deleted: false };
+    return { ...item, scope: 'all', seriesId: item.id, weekKey: ctx.viewedWeekKey, overridesSeriesId: undefined, deleted: false, updatedAt: nowMs };
   }
-  return { ...item, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: undefined, deleted: false };
+  return { ...item, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: undefined, deleted: false, updatedAt: nowMs };
+}
+
+// Turn a series' stored records into the set of recurring Google events to keep.
+// Each ACTIVE 'all' version becomes one RRULE event, bounded by the next version's
+// week (UNTIL) so consecutive versions never overlap, and punched with EXDATE for
+// every week that carries an override (a skip-this-week mask OR a this-week fork —
+// both replace that week's series occurrence). Deleted 'all' tombstones produce no
+// event but still act as an UNTIL boundary for the version before them, which is how
+// "delete from here forward" (and full-series delete) map onto Google without ever
+// touching earlier occurrences.
+export function computeDailySeriesSpecs<T extends RecurFields>(raw: Record<string, T>): DailySeriesSpec[] {
+  const versionsBySeries = new Map<string, T[]>();
+  const exWeeksBySeries = new Map<string, Set<string>>();
+
+  for (const ev of Object.values(raw)) {
+    if (ev.scope === 'all') {
+      const sid = seriesOf(ev);
+      const list = versionsBySeries.get(sid);
+      if (list) list.push(ev);
+      else versionsBySeries.set(sid, [ev]);
+    } else if (ev.scope === 'week' && ev.overridesSeriesId) {
+      const set = exWeeksBySeries.get(ev.overridesSeriesId) ?? new Set<string>();
+      set.add(ev.weekKey ?? '');
+      exWeeksBySeries.set(ev.overridesSeriesId, set);
+    }
+  }
+
+  const specs: DailySeriesSpec[] = [];
+  for (const [sid, versionsRaw] of versionsBySeries) {
+    const versions = [...versionsRaw].sort((a, b) => (wk(a) < wk(b) ? -1 : wk(a) > wk(b) ? 1 : 0));
+    const exWeeks = exWeeksBySeries.get(sid);
+    for (let i = 0; i < versions.length; i++) {
+      const v = versions[i];
+      const untilWeekKey = i + 1 < versions.length ? wk(versions[i + 1]) : null;
+      if (v.deleted) continue; // tombstone: no event, but still bounds the previous version
+      const exWeekKeys = exWeeks
+        ? [...exWeeks].filter(w => w >= wk(v) && (untilWeekKey === null || w < untilWeekKey)).sort()
+        : [];
+      specs.push({ recordId: v.id, dtStartWeekKey: wk(v), untilWeekKey, exWeekKeys });
+    }
+  }
+  return specs;
 }

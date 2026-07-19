@@ -43,6 +43,12 @@ interface PlannerEvent {
   noCheckbox?: boolean; // when true, this event has no completion checkbox
   allDay?: boolean;     // when true, this is an all-day event
   daysSpan?: number;    // for all-day events, the number of days it spans (1 to 7)
+  gCalId?: string;
+  gCalCalendarId?: string;
+  gCalETag?: string;
+  gCalRecurSig?: string;
+  lastSyncedAt?: number;
+  updatedAt?: number;
   // Recurrence / modification-domain fields (see src/lib/recurrence.ts).
   scope?: EventScope;
   weekKey?: string;
