@@ -6,7 +6,23 @@ import {
   eachDayOfInterval,
   isToday,
 } from 'date-fns';
-import { X, Calendar, Clock, Minus, ExternalLink, Pin } from 'lucide-react';
+import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown } from 'lucide-react';
+import {
+  DEFAULT_FOCUS_TIMER,
+  FOCUS_SESSIONS_KEY,
+  FOCUS_TIMER_KEY,
+  type FocusSession,
+  type FocusTimerState,
+  dateKey,
+  formatCountdown,
+  formatFocusDuration,
+  getFocusTimerElapsedSeconds,
+  loadLocalFocusSessions,
+  loadLocalFocusTimer,
+  safeFocusSessions,
+  sumFocusSecondsForDay,
+  uid,
+} from '@/lib/focusSessions';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -164,12 +180,20 @@ export default function Widget() {
   const [dayEndH, setDayEndH]           = useState(31);
   const [nowTick, setNowTick]           = useState(Date.now());
   const [isPinned, setIsPinned]         = useState(true);
+  const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
+  const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
+  const [focusMinutesDraft, setFocusMinutesDraft] = useState('25');
+  const [focusCollapsed, setFocusCollapsed] = useState(false);
+  const focusCompleteRef = useRef(false);
 
   // ── Load Settings and initial events ───────────────────────────────────────
   useEffect(() => {
     // Fallback load local storage for events only
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) { try { setEvents(JSON.parse(saved)); } catch (_) {} }
+    setFocusSessions(loadLocalFocusSessions());
+    setFocusTimer(loadLocalFocusTimer());
 
     // Settings come from the shared backend so the widget always matches the main window.
     const loadSettings = () => {
@@ -200,15 +224,29 @@ export default function Widget() {
         .catch(err => console.error('Failed to sync widget database:', err));
     };
 
+    const loadFocusSessions = () => {
+      fetch('/api/focus-sessions')
+        .then(r => r.json())
+        .then(data => {
+          const sessions = safeFocusSessions(data);
+          setFocusSessions(sessions);
+          localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+        })
+        .catch(err => console.error('Failed to sync focus sessions:', err));
+    };
+
     loadSettings();
     loadEvents();
+    loadFocusSessions();
     const settingsPollId = setInterval(loadSettings, 5000);
     const pollId = setInterval(loadEvents, 5000);
+    const focusPollId = setInterval(loadFocusSessions, 5000);
     const clockId = setInterval(() => setNowTick(Date.now()), 1000);
 
     return () => {
       clearInterval(settingsPollId);
       clearInterval(pollId);
+      clearInterval(focusPollId);
       clearInterval(clockId);
     };
   }, []);
@@ -229,6 +267,12 @@ export default function Widget() {
   const nowMin = today.getHours() * 60 + today.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
+  const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
+  const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
+  const todayFocusSeconds = sumFocusSecondsForDay(focusSessions, today)
+    + (focusTimer.sessionStartedAt && dateKey(focusTimer.sessionStartedAt) === dateKey(today) ? focusElapsedSeconds : 0);
+  const todayFocusSessions = focusSessions.filter(session => dateKey(session.endedAt) === dateKey(today)).length;
+  const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
   const colEvents = useMemo(() => {
     if (todayColIdx === -1) return [];
@@ -396,6 +440,117 @@ export default function Widget() {
     }
   };
 
+  const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
+    localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+    fetch('/api/focus-sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sessions),
+    }).catch(err => console.error('Failed to save focus sessions:', err));
+  }, []);
+
+  const completeFocusSession = useCallback((durationSeconds?: number) => {
+    const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
+    if (duration <= 0) {
+      setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+      return;
+    }
+
+    const endedAt = new Date();
+    const startedAt = focusTimer.sessionStartedAt
+      ? new Date(focusTimer.sessionStartedAt)
+      : new Date(endedAt.getTime() - duration * 1000);
+
+    const session: FocusSession = {
+      id: uid(),
+      startedAt: startedAt.toISOString(),
+      endedAt: endedAt.toISOString(),
+      durationSeconds: duration,
+      plannedSeconds: focusTimer.plannedSeconds,
+    };
+
+    setFocusSessions(prev => {
+      const next = [session, ...prev].slice(0, 1000);
+      persistFocusSessions(next);
+      return next;
+    });
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+  }, [focusTimer, persistFocusSessions]);
+
+  useEffect(() => {
+    localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(focusTimer));
+  }, [focusTimer]);
+
+  useEffect(() => {
+    if (!editingFocusMinutes) {
+      setFocusMinutesDraft(String(Math.max(1, Math.round(focusTimer.plannedSeconds / 60))));
+    }
+  }, [editingFocusMinutes, focusTimer.plannedSeconds]);
+
+  useEffect(() => {
+    if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
+      focusCompleteRef.current = true;
+      completeFocusSession(focusTimer.plannedSeconds);
+    } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
+      focusCompleteRef.current = false;
+    }
+  }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds]);
+
+  const startFocus = () => {
+    const startedAt = new Date().toISOString();
+    setFocusCollapsed(true);
+    setFocusTimer(prev => ({
+      ...prev,
+      isRunning: true,
+      lastStartedAt: startedAt,
+      sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+    }));
+  };
+
+  const pauseFocus = () => {
+    setFocusTimer(prev => ({
+      ...prev,
+      accumulatedSeconds: getFocusTimerElapsedSeconds(prev),
+      isRunning: false,
+      lastStartedAt: null,
+    }));
+  };
+
+  const resetFocus = () => {
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+  };
+
+  const stopFocus = () => {
+    completeFocusSession(focusElapsedSeconds);
+  };
+
+  const setFocusMinutes = (minutes: number) => {
+    const safeMinutes = Math.max(1, Math.floor(minutes));
+    setFocusTimer(prev => ({
+      ...prev,
+      plannedSeconds: safeMinutes * 60,
+    }));
+  };
+
+  const adjustFocusMinutes = (deltaMinutes: number) => {
+    const currentMinutes = Math.max(1, Math.round(focusTimer.plannedSeconds / 60));
+    if (deltaMinutes > 0) {
+      setFocusMinutes(Math.max(5, Math.ceil((currentMinutes + 1) / 5) * 5));
+    } else {
+      setFocusMinutes(Math.max(5, Math.floor((currentMinutes - 1) / 5) * 5));
+    }
+  };
+
+  const commitFocusMinutesDraft = () => {
+    const parsed = Number(focusMinutesDraft);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      setFocusMinutes(parsed);
+    } else {
+      setFocusMinutesDraft(String(Math.max(1, Math.round(focusTimer.plannedSeconds / 60))));
+    }
+    setEditingFocusMinutes(false);
+  };
+
   const toggleEventCompleted = (id: string) => {
     const todayDate = new Date();
     const dateStr = format(todayDate, 'yyyy-MM-dd');
@@ -519,6 +674,158 @@ export default function Widget() {
           </button>
         </div>
       </header>
+
+      <section className={`flex-shrink-0 px-3 ${focusCollapsed ? 'py-2' : 'py-3'} border-b border-border/50 transition-all duration-200`} style={{ background: darkMode ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.38)' }}>
+        <div className="rounded-lg overflow-hidden" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+          <div className={`${focusCollapsed ? 'px-3 py-2' : 'px-3 pt-3 pb-2'} flex items-center justify-between gap-2`}>
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-md flex items-center justify-center" style={{ background: darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(59,130,246,0.10)', color: '#60a5fa' }}>
+                <Clock size={14} />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[11px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Focus Session</div>
+                <div className="text-[10px] tabular-nums truncate" style={{ color: menuSub }}>
+                  Today {formatFocusDuration(todayFocusSeconds)} - {todayFocusSessions} done
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <div className={`${focusCollapsed ? 'text-[18px]' : 'text-[28px]'} leading-none font-semibold tabular-nums tracking-normal transition-all duration-200`} style={{ color: menuText }}>
+                {formatCountdown(focusRemainingSeconds)}
+              </div>
+              <button
+                onClick={() => setFocusCollapsed(v => !v)}
+                className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
+                title={focusCollapsed ? 'Expand focus session' : 'Minimize focus session'}
+                style={{
+                  background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                  border: `1px solid ${surfaceBdr}`,
+                  color: menuSub,
+                }}
+              >
+                {focusCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+              </button>
+            </div>
+          </div>
+
+          {!focusCollapsed && (
+          <>
+          <div className="h-1 mx-3 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+            <div
+              className="h-full rounded-full transition-all duration-300"
+              style={{
+                width: `${focusProgressPct}%`,
+                background: focusTimer.isRunning ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)',
+              }}
+            />
+          </div>
+
+          <div className="px-3 py-2 flex items-center gap-2">
+            <button
+              onClick={() => adjustFocusMinutes(-5)}
+              className="w-8 h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
+              title="Decrease focus duration by 5 minutes"
+              style={{
+                background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                border: `1px solid ${surfaceBdr}`,
+                color: menuSub,
+              }}
+            >
+              <Minus size={13} />
+            </button>
+            <div
+              className="flex-1 h-8 rounded-md flex items-center justify-center px-2"
+              style={{
+                background: darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.08)',
+                border: '1px solid rgba(96,165,250,0.24)',
+                color: menuText,
+              }}
+            >
+              {editingFocusMinutes ? (
+                <input
+                  autoFocus
+                  value={focusMinutesDraft}
+                  onChange={(e) => setFocusMinutesDraft(e.target.value.replace(/[^\d]/g, ''))}
+                  onBlur={commitFocusMinutesDraft}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitFocusMinutesDraft();
+                    if (e.key === 'Escape') {
+                      setFocusMinutesDraft(String(Math.max(1, Math.round(focusTimer.plannedSeconds / 60))));
+                      setEditingFocusMinutes(false);
+                    }
+                  }}
+                  className="w-full bg-transparent outline-none text-center text-sm font-semibold tabular-nums"
+                  style={{ color: menuText }}
+                />
+              ) : (
+                <button
+                  onDoubleClick={() => setEditingFocusMinutes(true)}
+                  className="w-full h-full text-sm font-semibold tabular-nums"
+                  title="Double-click to edit focus duration"
+                >
+                  {Math.max(1, Math.round(focusTimer.plannedSeconds / 60))} min
+                </button>
+              )}
+            </div>
+            <button
+              onClick={() => adjustFocusMinutes(5)}
+              className="w-8 h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
+              title="Increase focus duration by 5 minutes"
+              style={{
+                background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                border: `1px solid ${surfaceBdr}`,
+                color: menuSub,
+              }}
+            >
+              <Plus size={13} />
+            </button>
+          </div>
+          <div className="px-3 pb-3 grid grid-cols-4 gap-1.5">
+            <button
+              onClick={focusTimer.isRunning ? pauseFocus : startFocus}
+              className="col-span-2 h-8 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
+              style={{
+                background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
+                border: `1px solid ${focusTimer.isRunning ? 'rgba(245,158,11,0.35)' : '#2563eb'}`,
+                color: focusTimer.isRunning ? '#fbbf24' : '#ffffff',
+              }}
+            >
+              {focusTimer.isRunning ? <Pause size={13} /> : <Play size={13} />}
+              {focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
+            </button>
+            <button
+              onClick={resetFocus}
+              disabled={focusElapsedSeconds <= 0}
+              className="h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+              title="Reset focus timer"
+              style={{
+                background: 'transparent',
+                border: `1px solid ${surfaceBdr}`,
+                color: menuSub,
+                opacity: focusElapsedSeconds <= 0 ? 0.4 : 1,
+              }}
+            >
+              <RotateCcw size={13} />
+            </button>
+            <button
+              onClick={stopFocus}
+              disabled={focusElapsedSeconds <= 0}
+              className="h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+              title="Stop and log focus time"
+              style={{
+                background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
+                border: `1px solid ${focusElapsedSeconds > 0 ? 'rgba(34,197,94,0.35)' : surfaceBdr}`,
+                color: focusElapsedSeconds > 0 ? '#4ade80' : menuSub,
+                opacity: focusElapsedSeconds <= 0 ? 0.4 : 1,
+              }}
+            >
+              <Square size={12} />
+            </button>
+          </div>
+          </>
+          )}
+        </div>
+      </section>
 
       {/* Timeline Column */}
       <main ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto flex no-scrollbar">

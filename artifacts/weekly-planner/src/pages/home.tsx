@@ -8,8 +8,20 @@ import {
   eachDayOfInterval,
   isToday,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
+import {
+  FOCUS_SESSIONS_KEY,
+  FOCUS_TIMER_KEY,
+  type FocusSession,
+  dateKey,
+  formatFocusDuration,
+  getFocusTimerElapsedSeconds,
+  loadLocalFocusSessions,
+  loadLocalFocusTimer,
+  safeFocusSessions,
+  sumFocusSecondsForDay,
+} from '@/lib/focusSessions';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -205,6 +217,8 @@ export default function WeeklyPlanner() {
   const [nowTick, setNowTick]           = useState(Date.now());
   const [dayStartH, setDayStartH]       = useState(7);
   const [dayEndH, setDayEndH]           = useState(31);
+  const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  const [activeFocus, setActiveFocus] = useState<{ dayKey: string; seconds: number }>({ dayKey: '', seconds: 0 });
 
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
@@ -259,10 +273,78 @@ export default function WeeklyPlanner() {
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
   const todayColIdx = days.findIndex(d => isToday(d));
+  const focusStats = useMemo(() => {
+    const perDay = days.map(day => {
+      const key = dateKey(day);
+      const loggedSeconds = sumFocusSecondsForDay(focusSessions, day);
+      const activeSeconds = activeFocus.dayKey === key ? activeFocus.seconds : 0;
+      const sessions = focusSessions.filter(session => dateKey(session.endedAt) === key).length;
+      return {
+        day,
+        key,
+        seconds: loggedSeconds + activeSeconds,
+        sessions,
+      };
+    });
+    const weekSeconds = perDay.reduce((sum, day) => sum + day.seconds, 0);
+    const sessionCount = perDay.reduce((sum, day) => sum + day.sessions, 0);
+    const bestDay = perDay.reduce((best, day) => day.seconds > best.seconds ? day : best, perDay[0]);
+    const maxSeconds = Math.max(1, ...perDay.map(day => day.seconds));
+    return {
+      perDay,
+      weekSeconds,
+      sessionCount,
+      averageSeconds: Math.floor(weekSeconds / 7),
+      bestDay,
+      maxSeconds,
+      todaySeconds: perDay.find(day => isToday(day.day))?.seconds ?? 0,
+    };
+  }, [activeFocus, days, focusSessions]);
 
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 30_000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    setFocusSessions(loadLocalFocusSessions());
+
+    const loadFocusSessions = () => {
+      fetch('/api/focus-sessions')
+        .then(r => r.json())
+        .then(data => {
+          const sessions = safeFocusSessions(data);
+          setFocusSessions(sessions);
+          localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+        })
+        .catch(err => console.error('Failed to load focus sessions:', err));
+    };
+
+    loadFocusSessions();
+    const focusPollId = setInterval(loadFocusSessions, 5000);
+    return () => clearInterval(focusPollId);
+  }, []);
+
+  useEffect(() => {
+    const refreshActiveFocus = () => {
+      const timer = loadLocalFocusTimer();
+      setActiveFocus({
+        dayKey: timer.sessionStartedAt ? dateKey(timer.sessionStartedAt) : '',
+        seconds: getFocusTimerElapsedSeconds(timer),
+      });
+    };
+
+    const handleStorage = (event: StorageEvent) => {
+      if (!event.key || event.key === FOCUS_TIMER_KEY) refreshActiveFocus();
+    };
+
+    refreshActiveFocus();
+    const activePollId = setInterval(refreshActiveFocus, 1000);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      clearInterval(activePollId);
+      window.removeEventListener('storage', handleStorage);
+    };
   }, []);
 
   // ── Persistence & Backend Sync ───────────────────────────────────────────
@@ -1149,6 +1231,70 @@ export default function WeeklyPlanner() {
       {/* ── Grid ────────────────────────────────────────────────────────── */}
       <main className="flex-1 overflow-auto">
         <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
+          <section
+            className="mb-4 rounded-xl border overflow-hidden"
+            style={{
+              background: darkMode ? 'linear-gradient(135deg, rgba(96,165,250,0.10), rgba(34,197,94,0.06))' : 'linear-gradient(135deg, rgba(59,130,246,0.08), rgba(34,197,94,0.06))',
+              borderColor: surfaceBdr,
+            }}
+          >
+            <div className="px-4 py-3 flex items-center gap-5">
+              <div className="flex items-center gap-3 min-w-[240px]">
+                <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
+                  <Target size={17} />
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Focus This Week</div>
+                  <div className="text-xl font-semibold tabular-nums leading-tight" style={{ color: menuText }}>{formatFocusDuration(focusStats.weekSeconds)}</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3 min-w-[300px]">
+                {[
+                  ['Today', formatFocusDuration(focusStats.todaySeconds)],
+                  ['Sessions', `${focusStats.sessionCount}`],
+                  ['Daily Avg', formatFocusDuration(focusStats.averageSeconds)],
+                ].map(([label, value]) => (
+                  <div key={label} className="min-w-0">
+                    <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
+                    <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex-1 min-w-0 flex items-end gap-2 h-16">
+                {focusStats.perDay.map(day => {
+                  const pct = Math.max(5, (day.seconds / focusStats.maxSeconds) * 100);
+                  const active = isToday(day.day);
+                  return (
+                    <div key={day.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
+                      <div className="flex-1 flex items-end">
+                        <div
+                          className="w-full rounded-t-md transition-all duration-300"
+                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}`}
+                          style={{
+                            height: `${pct}%`,
+                            background: active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
+                            border: `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
+                          }}
+                        />
+                      </div>
+                      <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: active ? '#60a5fa' : menuSub }}>
+                        {format(day.day, 'EEE')}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="hidden xl:flex items-center gap-2 min-w-[160px] justify-end" style={{ color: menuSub }}>
+                <BarChart3 size={15} />
+                <span className="text-[11px] font-medium truncate">
+                  Best {format(focusStats.bestDay.day, 'EEE')} - {formatFocusDuration(focusStats.bestDay.seconds)}
+                </span>
+              </div>
+            </div>
+          </section>
           <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
               key={weekStart.toISOString()}
@@ -1509,11 +1655,11 @@ export default function WeeklyPlanner() {
                     }}
                   >
                     <span
-                      className="absolute top-0.5 rounded-full transition-transform duration-200"
+                      className="absolute rounded-full transition-transform duration-200"
                       style={{
-                        width: 15, height: 15,
+                        width: 15, height: 15, top: 2, left: 2,
                         background: darkMode ? '#fff' : menuSub,
-                        transform: darkMode ? 'translateX(17px)' : 'translateX(2px)',
+                        transform: darkMode ? 'translateX(17px)' : 'translateX(0px)',
                       }}
                     />
                   </button>
