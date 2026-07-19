@@ -14,7 +14,7 @@ import {
   isSameMonth,
   isSameDay,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -1368,50 +1368,82 @@ export default function WeeklyPlanner() {
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
         <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-5">
-            <span className="text-base font-semibold tracking-tight text-foreground/80">
-              {format(weekStart, 'MMMM yyyy')}
-            </span>
-            <div className="flex items-center rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-              <button onClick={goBack}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
-              <button onClick={goToday} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
-              <button onClick={goNext}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
-            </div>
+            {showFocusAnalysis ? (
+              <button
+                onClick={() => setShowFocusAnalysis(false)}
+                className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-foreground)' }}
+                onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)}
+                onMouseLeave={e=>(e.currentTarget.style.background=surfaceBg)}
+                title="Back to calendar"
+              >
+                <Home size={15}/>
+                Home
+              </button>
+            ) : (
+              <>
+                <span className="text-base font-semibold tracking-tight text-foreground/80">
+                  {format(weekStart, 'MMMM yyyy')}
+                </span>
+                <div className="flex items-center rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  <button onClick={goBack}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
+                  <button onClick={goToday} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
+                  <button onClick={goNext}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
+                </div>
+              </>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Interval</span>
-              <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                {([5, 15, 30, 60] as IntervalMin[]).map(v => (
-                  <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-medium rounded-md transition-all duration-200"
-                    style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.12)':'#fff') : 'transparent', color: interval===v ? 'var(--color-foreground)' : 'var(--color-muted-foreground)', boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
-                    {v}m
+            {!showFocusAnalysis && (
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">Interval</span>
+                  <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    {([5, 15, 30, 60] as IntervalMin[]).map(v => (
+                      <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-medium rounded-md transition-all duration-200"
+                        style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.12)':'#fff') : 'transparent', color: interval===v ? 'var(--color-foreground)' : 'var(--color-muted-foreground)', boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
+                        {v}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1" data-hist-version={histVersion}>
+                  <button
+                    onClick={undo}
+                    disabled={undoStack.current.length === 0}
+                    title="Undo (Ctrl+Z)"
+                    className="p-1.5 rounded-lg transition-colors"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: undoStack.current.length === 0 ? 0.4 : 1, cursor: undoStack.current.length === 0 ? 'default' : 'pointer' }}
+                  >
+                    <Undo2 size={14}/>
                   </button>
-                ))}
-              </div>
-            </div>
-            <div className="flex items-center gap-1" data-hist-version={histVersion}>
-              <button
-                onClick={undo}
-                disabled={undoStack.current.length === 0}
-                title="Undo (Ctrl+Z)"
-                className="p-1.5 rounded-lg transition-colors"
-                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: undoStack.current.length === 0 ? 0.4 : 1, cursor: undoStack.current.length === 0 ? 'default' : 'pointer' }}
-              >
-                <Undo2 size={14}/>
-              </button>
-              <button
-                onClick={redo}
-                disabled={redoStack.current.length === 0}
-                title="Redo (Ctrl+Shift+Z)"
-                className="p-1.5 rounded-lg transition-colors"
-                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: redoStack.current.length === 0 ? 0.4 : 1, cursor: redoStack.current.length === 0 ? 'default' : 'pointer' }}
-              >
-                <Redo2 size={14}/>
-              </button>
-            </div>
+                  <button
+                    onClick={redo}
+                    disabled={redoStack.current.length === 0}
+                    title="Redo (Ctrl+Shift+Z)"
+                    className="p-1.5 rounded-lg transition-colors"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: redoStack.current.length === 0 ? 0.4 : 1, cursor: redoStack.current.length === 0 ? 'default' : 'pointer' }}
+                  >
+                    <Redo2 size={14}/>
+                  </button>
+                </div>
+              </>
+            )}
+            <button
+              onClick={() => setShowFocusAnalysis(v => !v)}
+              title={showFocusAnalysis ? 'Back to calendar' : 'Focus Analysis'}
+              className="p-1.5 rounded-lg transition-colors"
+              style={{
+                background: showFocusAnalysis ? (darkMode?'rgba(96,165,250,0.20)':'rgba(37,99,235,0.10)') : surfaceBg,
+                border: `1px solid ${showFocusAnalysis ? 'rgba(96,165,250,0.40)' : surfaceBdr}`,
+                color: showFocusAnalysis ? '#60a5fa' : 'var(--color-muted-foreground)',
+              }}
+            >
+              <BarChart3 size={14}/>
+            </button>
             <button onClick={openWidget} title="Open Floating Widget" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <AppWindow size={14}/>
             </button>
@@ -1424,6 +1456,7 @@ export default function WeeklyPlanner() {
 
       {/* ── Grid ────────────────────────────────────────────────────────── */}
       <main className="flex-1 overflow-auto">
+        {!showFocusAnalysis && (
         <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
           <section
             className="mb-4 rounded-xl border overflow-hidden"
@@ -1887,6 +1920,210 @@ export default function WeeklyPlanner() {
             </motion.div>
           </AnimatePresence>
         </div>
+        )}
+
+        {showFocusAnalysis && (
+          <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
+            {/* All-time summary strip */}
+            <div className="grid grid-cols-5 gap-3 mb-5">
+              {[
+                ['All-time', formatFocusDuration(focusAnalysis.allTimeSeconds), <Target size={13} key="i" />],
+                ['Sessions Done', `${focusAnalysis.allTimeSessions}`, <CheckSquare size={13} key="i" />],
+                ['Avg Session', formatFocusDuration(focusAnalysis.avgSessionLength), <BarChart3 size={13} key="i" />],
+                ['Current Streak', `${focusAnalysis.currentStreak}d`, <Flame size={13} key="i" />],
+                ['Best Streak', `${focusAnalysis.longestStreak}d`, <Award size={13} key="i" />],
+              ].map(([label, value, icon]) => (
+                <div key={label as string} className="rounded-xl px-3.5 py-3" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  <div className="flex items-center gap-1.5 mb-1.5" style={{ color: menuSub }}>
+                    {icon}
+                    <span className="text-[9px] font-bold uppercase tracking-wider truncate">{label}</span>
+                  </div>
+                  <div className="text-lg font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-xl overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)', border: `1px solid ${surfaceBdr}` }}>
+              {/* Panel header: tab switcher */}
+              <div className="flex items-center justify-between px-5 py-3" style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-md flex items-center justify-center" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
+                    <BarChart3 size={14} />
+                  </div>
+                  <span className="text-sm font-semibold" style={{ color: menuText }}>
+                    {analysisTab === 'month' ? format(analysisMonthCursor, 'MMMM yyyy') : analysisYearCursor}
+                  </span>
+                </div>
+                <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  {(['month', 'year'] as const).map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setAnalysisTab(tab)}
+                      className="px-3 py-1 rounded-md text-[11px] font-semibold capitalize transition-colors"
+                      style={{
+                        background: analysisTab === tab ? (darkMode ? 'rgba(96,165,250,0.20)' : '#ffffff') : 'transparent',
+                        color: analysisTab === tab ? '#60a5fa' : menuSub,
+                      }}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="px-5 py-4">
+                {analysisTab === 'month' ? (
+                  <div>
+                    {/* Month nav */}
+                    <div className="flex items-center justify-between mb-3">
+                      <button onClick={() => setAnalysisMonthCursor(d => subMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronLeft size={16} />
+                      </button>
+                      <span className="text-xs font-medium" style={{ color: menuSub }}>Monthly overview</span>
+                      <button onClick={() => setAnalysisMonthCursor(d => addMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronRight size={16} />
+                      </button>
+                    </div>
+
+                    {/* Month stats */}
+                    <div className="grid grid-cols-4 gap-3 mb-4">
+                      {[
+                        ['Total', formatFocusDuration(focusAnalysis.monthSeconds)],
+                        ['Sessions', `${focusAnalysis.monthSessions}`],
+                        ['Active Days', `${focusAnalysis.monthActiveDays}`],
+                        ['Best Day', format(focusAnalysis.monthBestDay, 'MMM d')],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
+                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Weekday labels */}
+                    <div className="grid grid-cols-7 gap-1.5 mb-1.5">
+                      {focusAnalysis.monthGridDays.slice(0, 7).map(d => (
+                        <div key={d.toISOString()} className="text-[9px] font-bold uppercase text-center tracking-wider" style={{ color: menuSub }}>
+                          {format(d, 'EEEEE')}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Calendar heatmap grid */}
+                    <div className="grid grid-cols-7 gap-1.5">
+                      {focusAnalysis.monthGridDays.map(d => {
+                        const key = dateKey(d);
+                        const secs = focusAnalysis.byDaySeconds.get(key) ?? 0;
+                        const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
+                        const inMonth = isSameMonth(d, analysisMonthCursor);
+                        const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
+                        const todayCell = isSameDay(d, nowDate);
+                        return (
+                          <div
+                            key={key}
+                            title={`${format(d, 'EEEE, MMM d')}: ${formatFocusDuration(secs)}${sessions ? ` · ${sessions} session${sessions === 1 ? '' : 's'}` : ''}`}
+                            className="aspect-square rounded-md flex flex-col items-center justify-center gap-0.5 relative"
+                            style={{
+                              background: secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg,
+                              border: `1px solid ${todayCell ? '#60a5fa' : surfaceBdr}`,
+                              opacity: inMonth ? 1 : 0.35,
+                            }}
+                          >
+                            <span className="text-[10px] font-medium tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? '#fff' : menuText }}>
+                              {format(d, 'd')}
+                            </span>
+                            {sessions > 0 && (
+                              <span className="text-[7px] font-bold tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? 'rgba(255,255,255,0.85)' : menuSub }}>
+                                {sessions}×
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    {/* Year nav */}
+                    <div className="flex items-center justify-between mb-3">
+                      <button onClick={() => setAnalysisYearCursor(y => y - 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronLeft size={16} />
+                      </button>
+                      <span className="text-xs font-medium" style={{ color: menuSub }}>Yearly overview</span>
+                      <button onClick={() => setAnalysisYearCursor(y => y + 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronRight size={16} />
+                      </button>
+                    </div>
+
+                    {/* Year stats */}
+                    <div className="grid grid-cols-4 gap-3 mb-5">
+                      {[
+                        ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
+                        ['Sessions', `${focusAnalysis.yearSessions}`],
+                        ['Active Days', `${focusAnalysis.yearActiveDays}`],
+                        ['Best Month', format(focusAnalysis.yearBestMonth.month, 'MMM')],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
+                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* 12-month bar chart */}
+                    <div className="flex items-end gap-2.5 h-40">
+                      {focusAnalysis.monthTotals.map(m => {
+                        const pct = Math.max(3, (m.seconds / focusAnalysis.yearMaxSeconds) * 100);
+                        const active = isSameMonth(m.month, nowDate) && analysisYearCursor === nowDate.getFullYear();
+                        return (
+                          <div key={m.month.toISOString()} className="flex-1 h-full flex flex-col justify-end gap-1.5 min-w-0">
+                            <div className="flex-1 flex items-end">
+                              <div
+                                className="w-full rounded-t-md transition-all duration-300"
+                                title={`${format(m.month, 'MMMM')}: ${formatFocusDuration(m.seconds)} · ${m.sessions} session${m.sessions === 1 ? '' : 's'}`}
+                                style={{
+                                  height: `${pct}%`,
+                                  background: active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
+                                  border: `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
+                                }}
+                              />
+                            </div>
+                            <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: active ? '#60a5fa' : menuSub }}>
+                              {format(m.month, 'MMM')}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Monthly breakdown table */}
+                    <div className="mt-5 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
+                      {focusAnalysis.monthTotals.filter(m => m.seconds > 0 || m.sessions > 0).length === 0 ? (
+                        <div className="px-4 py-6 text-center text-xs" style={{ color: menuSub }}>No focus sessions logged in {analysisYearCursor}.</div>
+                      ) : (
+                        focusAnalysis.monthTotals.map((m, i) => (
+                          <div
+                            key={m.month.toISOString()}
+                            className="flex items-center justify-between px-3.5 py-2 text-xs"
+                            style={{ background: i % 2 === 0 ? surfaceBg : 'transparent', borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}` }}
+                          >
+                            <span className="font-medium flex items-center gap-1.5" style={{ color: menuText }}>
+                              <TrendingUp size={11} style={{ opacity: 0.5 }} />
+                              {format(m.month, 'MMMM')}
+                            </span>
+                            <span className="tabular-nums" style={{ color: menuSub }}>
+                              {formatFocusDuration(m.seconds)} · {m.sessions} session{m.sessions === 1 ? '' : 's'} · {m.activeDays} active day{m.activeDays === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </main>
 
       {/* ── Settings drawer ─────────────────────────────────────────────── */}
@@ -2240,231 +2477,6 @@ export default function WeeklyPlanner() {
         </div>
       )}
 
-      {/* ── Focus Analysis modal ─────────────────────────────────────────── */}
-      <AnimatePresence>
-        {showFocusAnalysis && (
-          <motion.div
-            key="focus-analysis-backdrop"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[300] flex items-center justify-center p-6"
-            style={{ background: darkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.25)' }}
-            onMouseDown={() => setShowFocusAnalysis(false)}
-          >
-            <motion.div
-              key="focus-analysis-panel"
-              initial={{ opacity: 0, scale: 0.97, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.97, y: 8 }}
-              transition={{ type: 'spring', stiffness: 340, damping: 30 }}
-              className="w-full flex flex-col rounded-2xl overflow-hidden shadow-2xl"
-              style={{ maxWidth: 880, maxHeight: '86vh', background: darkMode ? '#16181a' : '#f9f9f9', border: `1px solid ${surfaceBdr}` }}
-              onMouseDown={e => e.stopPropagation()}
-            >
-              {/* Header */}
-              <div className="flex items-center justify-between px-5 py-3.5 flex-shrink-0" style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
-                    <BarChart3 size={16} />
-                  </div>
-                  <span className="text-sm font-semibold" style={{ color: menuText }}>Focus Analysis</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                    {(['month', 'year'] as const).map(tab => (
-                      <button
-                        key={tab}
-                        onClick={() => setAnalysisTab(tab)}
-                        className="px-3 py-1 rounded-md text-[11px] font-semibold capitalize transition-colors"
-                        style={{
-                          background: analysisTab === tab ? (darkMode ? 'rgba(96,165,250,0.20)' : '#ffffff') : 'transparent',
-                          color: analysisTab === tab ? '#60a5fa' : menuSub,
-                        }}
-                      >
-                        {tab}
-                      </button>
-                    ))}
-                  </div>
-                  <button onClick={() => setShowFocusAnalysis(false)} className="p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors">
-                    <X size={15} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto px-5 py-4">
-                {/* All-time summary strip */}
-                <div className="grid grid-cols-5 gap-3 mb-5">
-                  {[
-                    ['All-time', formatFocusDuration(focusAnalysis.allTimeSeconds), <Target size={13} key="i" />],
-                    ['Sessions Done', `${focusAnalysis.allTimeSessions}`, <CheckSquare size={13} key="i" />],
-                    ['Avg Session', formatFocusDuration(focusAnalysis.avgSessionLength), <BarChart3 size={13} key="i" />],
-                    ['Current Streak', `${focusAnalysis.currentStreak}d`, <Flame size={13} key="i" />],
-                    ['Best Streak', `${focusAnalysis.longestStreak}d`, <Award size={13} key="i" />],
-                  ].map(([label, value, icon]) => (
-                    <div key={label as string} className="rounded-xl px-3 py-2.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                      <div className="flex items-center gap-1.5 mb-1" style={{ color: menuSub }}>
-                        {icon}
-                        <span className="text-[9px] font-bold uppercase tracking-wider truncate">{label}</span>
-                      </div>
-                      <div className="text-base font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {analysisTab === 'month' ? (
-                  <div>
-                    {/* Month nav */}
-                    <div className="flex items-center justify-between mb-3">
-                      <button onClick={() => setAnalysisMonthCursor(d => subMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                        <ChevronLeft size={16} />
-                      </button>
-                      <span className="text-sm font-semibold" style={{ color: menuText }}>{format(analysisMonthCursor, 'MMMM yyyy')}</span>
-                      <button onClick={() => setAnalysisMonthCursor(d => addMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                        <ChevronRight size={16} />
-                      </button>
-                    </div>
-
-                    {/* Month stats */}
-                    <div className="grid grid-cols-4 gap-3 mb-4">
-                      {[
-                        ['Total', formatFocusDuration(focusAnalysis.monthSeconds)],
-                        ['Sessions', `${focusAnalysis.monthSessions}`],
-                        ['Active Days', `${focusAnalysis.monthActiveDays}`],
-                        ['Best Day', format(focusAnalysis.monthBestDay, 'MMM d')],
-                      ].map(([label, value]) => (
-                        <div key={label} className="min-w-0">
-                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
-                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Weekday labels */}
-                    <div className="grid grid-cols-7 gap-1.5 mb-1.5">
-                      {focusAnalysis.monthGridDays.slice(0, 7).map(d => (
-                        <div key={d.toISOString()} className="text-[9px] font-bold uppercase text-center tracking-wider" style={{ color: menuSub }}>
-                          {format(d, 'EEEEE')}
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Calendar heatmap grid */}
-                    <div className="grid grid-cols-7 gap-1.5">
-                      {focusAnalysis.monthGridDays.map(d => {
-                        const key = dateKey(d);
-                        const secs = focusAnalysis.byDaySeconds.get(key) ?? 0;
-                        const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
-                        const inMonth = isSameMonth(d, analysisMonthCursor);
-                        const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
-                        const todayCell = isSameDay(d, nowDate);
-                        return (
-                          <div
-                            key={key}
-                            title={`${format(d, 'EEEE, MMM d')}: ${formatFocusDuration(secs)}${sessions ? ` · ${sessions} session${sessions === 1 ? '' : 's'}` : ''}`}
-                            className="aspect-square rounded-md flex flex-col items-center justify-center gap-0.5 relative"
-                            style={{
-                              background: secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg,
-                              border: `1px solid ${todayCell ? '#60a5fa' : surfaceBdr}`,
-                              opacity: inMonth ? 1 : 0.35,
-                            }}
-                          >
-                            <span className="text-[10px] font-medium tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? '#fff' : menuText }}>
-                              {format(d, 'd')}
-                            </span>
-                            {sessions > 0 && (
-                              <span className="text-[7px] font-bold tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? 'rgba(255,255,255,0.85)' : menuSub }}>
-                                {sessions}×
-                              </span>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    {/* Year nav */}
-                    <div className="flex items-center justify-between mb-3">
-                      <button onClick={() => setAnalysisYearCursor(y => y - 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                        <ChevronLeft size={16} />
-                      </button>
-                      <span className="text-sm font-semibold" style={{ color: menuText }}>{analysisYearCursor}</span>
-                      <button onClick={() => setAnalysisYearCursor(y => y + 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                        <ChevronRight size={16} />
-                      </button>
-                    </div>
-
-                    {/* Year stats */}
-                    <div className="grid grid-cols-4 gap-3 mb-5">
-                      {[
-                        ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
-                        ['Sessions', `${focusAnalysis.yearSessions}`],
-                        ['Active Days', `${focusAnalysis.yearActiveDays}`],
-                        ['Best Month', format(focusAnalysis.yearBestMonth.month, 'MMM')],
-                      ].map(([label, value]) => (
-                        <div key={label} className="min-w-0">
-                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
-                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* 12-month bar chart */}
-                    <div className="flex items-end gap-2.5 h-40">
-                      {focusAnalysis.monthTotals.map(m => {
-                        const pct = Math.max(3, (m.seconds / focusAnalysis.yearMaxSeconds) * 100);
-                        const active = isSameMonth(m.month, nowDate) && analysisYearCursor === nowDate.getFullYear();
-                        return (
-                          <div key={m.month.toISOString()} className="flex-1 h-full flex flex-col justify-end gap-1.5 min-w-0">
-                            <div className="flex-1 flex items-end">
-                              <div
-                                className="w-full rounded-t-md transition-all duration-300"
-                                title={`${format(m.month, 'MMMM')}: ${formatFocusDuration(m.seconds)} · ${m.sessions} session${m.sessions === 1 ? '' : 's'}`}
-                                style={{
-                                  height: `${pct}%`,
-                                  background: active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
-                                  border: `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
-                                }}
-                              />
-                            </div>
-                            <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: active ? '#60a5fa' : menuSub }}>
-                              {format(m.month, 'MMM')}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-
-                    {/* Monthly breakdown table */}
-                    <div className="mt-5 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
-                      {focusAnalysis.monthTotals.filter(m => m.seconds > 0 || m.sessions > 0).length === 0 ? (
-                        <div className="px-4 py-6 text-center text-xs" style={{ color: menuSub }}>No focus sessions logged in {analysisYearCursor}.</div>
-                      ) : (
-                        focusAnalysis.monthTotals.map((m, i) => (
-                          <div
-                            key={m.month.toISOString()}
-                            className="flex items-center justify-between px-3.5 py-2 text-xs"
-                            style={{ background: i % 2 === 0 ? surfaceBg : 'transparent', borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}` }}
-                          >
-                            <span className="font-medium flex items-center gap-1.5" style={{ color: menuText }}>
-                              <TrendingUp size={11} style={{ opacity: 0.5 }} />
-                              {format(m.month, 'MMMM')}
-                            </span>
-                            <span className="tabular-nums" style={{ color: menuSub }}>
-                              {formatFocusDuration(m.seconds)} · {m.sessions} session{m.sessions === 1 ? '' : 's'} · {m.activeDays} active day{m.activeDays === 1 ? '' : 's'}
-                            </span>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
