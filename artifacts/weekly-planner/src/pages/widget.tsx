@@ -476,7 +476,7 @@ export default function Widget() {
       </header>
 
       {/* Timeline Column */}
-      <main ref={scrollContainerRef} className="flex-1 overflow-y-auto flex no-scrollbar">
+      <main ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto flex no-scrollbar">
         {/* Time axis */}
         <div className="flex-shrink-0 border-r border-border/50" style={{ width: 56, background: darkMode ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.30)' }}>
           <div className="relative" style={{ height: totalH }}>
