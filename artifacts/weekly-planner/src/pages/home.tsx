@@ -547,6 +547,7 @@ export default function WeeklyPlanner() {
   } | null>(null);
 
   const [dragDisp, setDragDisp]     = useState<{ id: string; day: number; startMin: number } | null>(null);
+  const [dragDelta, setDragDelta]   = useState<{ x: number; y: number } | null>(null);
   const [resizeDisp, setResizeDisp] = useState<{ id: string; startMin: number; endMin: number } | null>(null);
   const [clipboard, setClipboard]   = useState<PlannerEvent[]>([]);
 
@@ -577,6 +578,8 @@ export default function WeeklyPlanner() {
   const dayEndRef    = useRef(31);
   const clipboardRef = useRef<PlannerEvent[]>([]);
   const mousePosRef  = useRef<{ x: number; y: number } | null>(null);
+  const autoScrollTimerRef = useRef<number | null>(null);
+  const autoScrollLastPosRef = useRef<{ clientX: number; clientY: number } | null>(null);
 
   // Keep the popup glued to its event: recompute its position from the live
   // element rect on scroll/resize/content-change (instead of letting it drift or
@@ -1738,10 +1741,40 @@ export default function WeeklyPlanner() {
   // ── Global mouse move / up ────────────────────────────────────────────────
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
+      autoScrollLastPosRef.current = { clientX: e.clientX, clientY: e.clientY };
       const dr = dragRef.current;
       const rr = resizeRef.current;
       const br = batchDragRef.current;
       const sr = selDragRef.current;
+      const cr = createDragRef.current;
+
+      const isDragging = (dr && dr.active) || (br && br.active) || rr || sr || (cr && cr.moved);
+      if (isDragging && mainRef.current) {
+        const rect = mainRef.current.getBoundingClientRect();
+        const EDGE = 60;
+        const nearTop = e.clientY < rect.top + EDGE;
+        const nearBottom = e.clientY > rect.bottom - EDGE;
+        if (nearTop || nearBottom) {
+          if (!autoScrollTimerRef.current) {
+            autoScrollTimerRef.current = window.setInterval(() => {
+              if (!autoScrollLastPosRef.current || !mainRef.current) return;
+              const { clientX, clientY } = autoScrollLastPosRef.current;
+              const r = mainRef.current.getBoundingClientRect();
+              let dy = 0;
+              if (clientY < r.top + EDGE) dy = -15 * (1 - Math.max(0, clientY - r.top) / EDGE);
+              else if (clientY > r.bottom - EDGE) dy = 15 * (1 - Math.max(0, r.bottom - clientY) / EDGE);
+              
+              if (dy !== 0) {
+                mainRef.current.scrollTop += dy;
+                document.dispatchEvent(new MouseEvent('mousemove', { clientX, clientY, bubbles: true }));
+              }
+            }, 16);
+          }
+        } else if (autoScrollTimerRef.current) {
+          clearInterval(autoScrollTimerRef.current);
+          autoScrollTimerRef.current = null;
+        }
+      }
 
       // Batch drag of multiple selected events
       if (br) {
@@ -1763,6 +1796,7 @@ export default function WeeklyPlanner() {
         }
         setBatchDisp(newBatchDisp);
         batchDispRef.current = newBatchDisp;
+        setDragDelta({ x: e.clientX - br.initX, y: e.clientY - br.initY });
         return;
       }
 
@@ -1782,7 +1816,6 @@ export default function WeeklyPlanner() {
       }
 
       // Drag-to-create on empty column area (plain left drag)
-      const cr = createDragRef.current;
       if (cr) {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
@@ -1809,6 +1842,7 @@ export default function WeeklyPlanner() {
         const newStart = clamp(snapMin(coords.snappedMin - dr.offsetMin, POSITION_SNAP), dayStartMin, dayEndMin - dr.durationMin);
         dr.curDay = coords.dayIndex; dr.curStartMin = newStart;
         setDragDisp({ id: dr.eventId, day: coords.dayIndex, startMin: newStart });
+        setDragDelta({ x: e.clientX - dr.initX, y: e.clientY - dr.initY });
       }
       if (rr) {
         const coords = getGridCoords(e.clientX, e.clientY);
@@ -1825,11 +1859,17 @@ export default function WeeklyPlanner() {
       }
     };
     const onUp = (e: MouseEvent) => {
+      if (autoScrollTimerRef.current) {
+        clearInterval(autoScrollTimerRef.current);
+        autoScrollTimerRef.current = null;
+      }
       const dr = dragRef.current;
       const rr = resizeRef.current;
       const br = batchDragRef.current;
       const sr = selDragRef.current;
       const cr = createDragRef.current;
+
+      setDragDelta(null);
 
       // Drag-to-create commit (plain left drag on empty area)
       if (cr) {
@@ -2235,8 +2275,16 @@ export default function WeeklyPlanner() {
 
       {/* ── Grid ────────────────────────────────────────────────────────── */}
       <main ref={mainRef} className="flex-1 overflow-auto">
-        {!showFocusAnalysis && (
-        <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
+        <AnimatePresence mode="wait">
+          {!showFocusAnalysis ? (
+            <motion.div
+              key="calendar-view-container"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+              className="min-w-[900px] max-w-[1400px] mx-auto p-4"
+            >
           {calendarView === 'week' && (
           <section
             className="mb-4 rounded-xl border overflow-hidden"
@@ -2411,8 +2459,16 @@ export default function WeeklyPlanner() {
             </div>
           </section>
           )}
-          {calendarView === 'week' ? (
-          <AnimatePresence initial={false} custom={direction} mode="wait">
+          <AnimatePresence mode="wait">
+            {calendarView === 'week' ? (
+              <motion.div
+                key="week-view-wrapper"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
               key={weekStart.toISOString()}
               custom={direction}
@@ -2455,8 +2511,6 @@ export default function WeeklyPlanner() {
                   // day-start hour and ends after it (e.g. sleep from 1:15am to 9:45am with a
                   // 7am day cutoff) — it can't be drawn as one block in a single column, so it
                   // renders as a linked tail (in its own day) + head (in the next day) segment.
-                  const isActiveEvent = (ev: PlannerEvent) =>
-                    dragDisp?.id === ev.id || resizeDisp?.id === ev.id || !!batchDisp?.[ev.id];
                   const isBoundarySpanning = (ev: PlannerEvent) => {
                     const s = timeToMin(ev.startTime);
                     const e = timeToMin(ev.endTime);
@@ -2467,11 +2521,55 @@ export default function WeeklyPlanner() {
                   const renderItems: RenderItem[] = [];
                   for (const ev of Object.values(weekEvents)) {
                     if (ev.allDay) continue; // Skip all-day events in the timeline grid
-                    const dp = dispProps(ev);
-                    if (isActiveEvent(ev)) {
-                      if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
+                    
+                    const isDrag      = dragDisp?.id === ev.id;
+                    const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
+                    const isDragging  = isDrag || isBatchDrag;
+                    const isResizing  = resizeDisp?.id === ev.id;
+
+                    if (isDragging) {
+                      const dp = dispProps(ev);
+                      // 1. Push a visual placeholder to the snapped column
+                      if (dp.dayIndex === colIdx) {
+                        renderItems.push({
+                          ev: { ...ev, isPlaceholder: true } as PlannerEvent,
+                          key: `${ev.id}__placeholder`,
+                          startMin: dp.startMin,
+                          endMin: dp.endMin,
+                          segKind: 'normal'
+                        });
+                      }
+                      
+                      // 2. Push the original element to its original column so it can be translated
+                      const startMinOrig = normalizeMin(timeToMin(ev.startTime), dayStartH);
+                      let endMinOrig = normalizeMin(timeToMin(ev.endTime), dayStartH);
+                      if (endMinOrig <= startMinOrig) endMinOrig += 1440;
+                      if (ev.dayIndex === colIdx) {
+                        renderItems.push({
+                          ev,
+                          key: ev.id,
+                          startMin: startMinOrig,
+                          endMin: endMinOrig,
+                          segKind: 'normal'
+                        });
+                      }
                       continue;
                     }
+
+                    if (isResizing) {
+                      const dp = dispProps(ev);
+                      if (dp.dayIndex === colIdx) {
+                        renderItems.push({
+                          ev,
+                          key: ev.id,
+                          startMin: dp.startMin,
+                          endMin: dp.endMin,
+                          segKind: 'normal'
+                        });
+                      }
+                      continue;
+                    }
+
                     if (isBoundarySpanning(ev)) {
                       if (ev.dayIndex === colIdx) {
                         renderItems.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayEndMin, segKind: 'tail' });
@@ -2481,12 +2579,16 @@ export default function WeeklyPlanner() {
                       }
                       continue;
                     }
+                    
+                    const dp = dispProps(ev);
                     if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
                   }
                   const colEvents = renderItems;
 
-                  // Compute parallel layout for this column
-                  const layoutInput = colEvents.map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }));
+                  // Compute parallel layout for this column, excluding placeholders to prevent shrinking
+                  const layoutInput = colEvents
+                    .filter(item => !(item.ev as any).isPlaceholder)
+                    .map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }));
                   const layout = layoutParallel(layoutInput);
 
                   return (
@@ -2578,13 +2680,16 @@ export default function WeeklyPlanner() {
                           const isMenu   = menuId === ev.id;
                           const isResize = resizeDisp?.id === ev.id;
                           const isSelected = selectedIds.has(ev.id);
+                          const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
+                          const isPlaceholder = (ev as any).isPlaceholder;
+                          
                           // While actively dragging/resizing the block must track the cursor
                           // 1:1 (no easing, or it lags). The moment it settles, let its
                           // position/size glide to the snapped target for a smooth landing.
-                          const isMoving = isDrag || isResize || !!(batchDisp && batchDisp[ev.id]);
+                          const isMoving = isDrag || isResize || isBatchDrag;
                           const blockTransition = isMoving
-                            ? 'box-shadow 150ms ease, opacity 150ms ease'
-                            : 'top 260ms cubic-bezier(0.22,1,0.36,1), height 260ms cubic-bezier(0.22,1,0.36,1), left 260ms cubic-bezier(0.22,1,0.36,1), right 260ms cubic-bezier(0.22,1,0.36,1), box-shadow 150ms ease, opacity 150ms ease, outline-color 150ms ease';
+                            ? 'none'
+                            : 'box-shadow 75ms ease, outline-color 75ms ease';
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
                           // Duration always reflects the event's true full start–end, not just this segment.
@@ -2608,7 +2713,8 @@ export default function WeeklyPlanner() {
                               ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
                               : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
 
-                          const { col, numCols } = layout.get(itemKey) ?? { col: 0, numCols: 1 };
+                          const layoutKey = isPlaceholder ? ev.id : itemKey;
+                          const { col, numCols } = layout.get(layoutKey) ?? { col: 0, numCols: 1 };
                           const colW   = 100 / numCols;
                           const leftPct  = col * colW;
                           const rightPct = 100 - (col + 1) * colW;
@@ -2620,16 +2726,39 @@ export default function WeeklyPlanner() {
                           const showTopTime    = isResize && resizeRef.current?.edge === 'top';
                           const showBottomTime = isResize && resizeRef.current?.edge === 'bottom';
 
+                          if (isPlaceholder) {
+                            return (
+                              <div
+                                key={itemKey}
+                                className={`absolute rounded-lg border-2 border-dashed pointer-events-none z-0`}
+                                style={{
+                                  top, height,
+                                  left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
+                                  right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
+                                  borderColor: border,
+                                  backgroundColor: darkMode ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)',
+                                  opacity: 0.45,
+                                }}
+                              />
+                            );
+                          }
+
+                          const transform = (isMoving && dragDelta)
+                            ? `translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0)`
+                            : 'translate3d(0, 0, 0)';
+
                           return (
                             <div
                               key={itemKey}
                               data-event="1"
                               data-event-id={ev.id}
-                              className={`absolute border overflow-visible ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                              className={`absolute border overflow-visible ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-lg z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
                                 transition: blockTransition,
-                                willChange: isMoving ? 'top, height' : undefined,
+                                willChange: isMoving ? 'transform, top, height' : undefined,
+                                transform,
+                                transformOrigin: 'center center',
                                 left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
                                 right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
                                 backgroundColor: bg,
@@ -2638,9 +2767,10 @@ export default function WeeklyPlanner() {
                                 borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
                                 color: text,
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
-                                opacity: isDrag ? 0.82 : 1,
+                                opacity: isDrag ? 0.95 : 1,
                                 outline: isMenu ? `2px solid ${text}` : isSelected ? `2px solid ${darkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.45)'}` : 'none',
                                 outlineOffset: 1,
+                                pointerEvents: (isMoving && !isResize) ? 'none' : undefined,
                               }}
                               onMouseDown={(e) => handleEventMouseDown(e, ev)}
                               onClick={(e) => {
@@ -2655,6 +2785,24 @@ export default function WeeklyPlanner() {
                               onMouseEnter={() => setHoveredId(ev.id)}
                               onMouseLeave={() => setHoveredId(null)}
                             >
+                              {/* Drag time tooltip */}
+                              {isDrag && dragDisp && (
+                                <div className="absolute z-50 pointer-events-none" style={{ top: -24, left: '50%', transform: 'translateX(-50%)' }}>
+                                  <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
+                                    {formatTimeLabel(dragDisp.startMin, timeFormat)} – {formatTimeLabel(dragDisp.startMin + durationMin, timeFormat)}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Batch drag time tooltip */}
+                              {isBatchDrag && batchDisp?.[ev.id] && (
+                                <div className="absolute z-50 pointer-events-none" style={{ top: -24, left: '50%', transform: 'translateX(-50%)' }}>
+                                  <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
+                                    {formatTimeLabel(batchDisp[ev.id].startMin, timeFormat)} – {formatTimeLabel(batchDisp[ev.id].startMin + durationMin, timeFormat)}
+                                  </div>
+                                </div>
+                              )}
+
                               {/* Continuation indicator (head segment: rest of event started the day before) */}
                               {segKind === 'head' && (
                                 <div className="absolute top-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 10 }} title={`Continues from ${formatTimeLabel(fullStartMin, timeFormat)} the night before`}>
@@ -2664,8 +2812,8 @@ export default function WeeklyPlanner() {
 
                               {/* Top resize handle */}
                               {segKind !== 'head' && (
-                                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 'n-resize', marginTop: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
-                                  <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
+                                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 'n-resize', marginTop: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
+                                  <div className="rounded-full transition-opacity duration-150 animate-pulse" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.45 : 0, pointerEvents: 'none' }} />
                                 </div>
                               )}
 
@@ -2679,7 +2827,7 @@ export default function WeeklyPlanner() {
                               )}
 
                               {/* Content */}
-                              <div className="absolute inset-0 px-2 pt-2 pb-2 flex flex-col overflow-hidden" style={{ top: 4, bottom: 6 }}>
+                              <div className="absolute inset-0 px-2 pt-2.5 pb-2 flex flex-col overflow-hidden" style={{ top: 6, bottom: 8 }}>
                                 {isEdit ? (
                                   <>
                                     <textarea
@@ -2759,8 +2907,8 @@ export default function WeeklyPlanner() {
 
                               {/* Bottom resize handle */}
                               {segKind !== 'tail' && (
-                                <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 5, cursor: 's-resize', marginBottom: -1 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
-                                  <div className="rounded-full transition-opacity duration-150" style={{ width: 24, height: 2, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.35 : 0, pointerEvents: 'none' }} />
+                                <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 's-resize', marginBottom: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
+                                  <div className="rounded-full transition-opacity duration-150 animate-pulse" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.45 : 0, pointerEvents: 'none' }} />
                                 </div>
                               )}
 
@@ -2911,9 +3059,18 @@ export default function WeeklyPlanner() {
               </div>
             </motion.div>
           </AnimatePresence>
-          ) : (
-          /* ── Month overview ─────────────────────────────────────────── */
-          <div className="rounded-xl border border-border/60 overflow-hidden shadow-sm" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}>
+        </motion.div>
+        ) : (
+        /* ── Month overview ─────────────────────────────────────────── */
+        <motion.div
+          key="month-view-wrapper"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          className="rounded-xl border border-border/60 overflow-hidden shadow-sm"
+          style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
+        >
             {/* Weekday header row */}
             <div className="grid grid-cols-7 border-b border-border/50">
               {(monthMatrix[0]?.cells ?? []).map(({ date }) => (
@@ -2960,13 +3117,19 @@ export default function WeeklyPlanner() {
                 })}
               </div>
             ))}
-          </div>
+            </motion.div>
           )}
-        </div>
-        )}
-
-        {showFocusAnalysis && (
-          <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
+        </AnimatePresence>
+      </motion.div>
+      ) : (
+        <motion.div
+          key="focus-analysis-container"
+          initial={{ opacity: 0, y: 15 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -15 }}
+          transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+          className="min-w-[900px] max-w-[1400px] mx-auto p-4"
+        >
             {/* All-time summary strip */}
             <div className="grid grid-cols-5 gap-3 mb-5">
               {[
@@ -3191,16 +3354,32 @@ export default function WeeklyPlanner() {
                 )}
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
-      </main>
+      </AnimatePresence>
+    </main>
 
       {/* ── Settings drawer ─────────────────────────────────────────────── */}
       <AnimatePresence>
         {settingsOpen && (
-          <motion.div
-            ref={settingsRef}
-            key="settings-drawer"
+          <>
+            {/* Backdrop with blur */}
+            <motion.div
+              key="settings-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              onClick={() => setSettingsOpen(false)}
+              className="fixed inset-0 top-14 z-[140] backdrop-blur-[6px]"
+              style={{
+                background: darkMode ? 'rgba(0, 0, 0, 0.45)' : 'rgba(0, 0, 0, 0.15)',
+              }}
+            />
+
+            <motion.div
+              ref={settingsRef}
+              key="settings-drawer"
             initial={{ x: '100%', opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
@@ -3604,8 +3783,9 @@ export default function WeeklyPlanner() {
 
             </div>
           </motion.div>
-        )}
-      </AnimatePresence>
+        </>
+      )}
+    </AnimatePresence>
 
       {/* ── Context menu (portal-style fixed popover) ────────────────────── */}
       <AnimatePresence>
