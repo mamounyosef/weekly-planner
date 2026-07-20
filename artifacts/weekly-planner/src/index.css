@@ -177,6 +177,43 @@
   background-color: hsl(var(--border));
   border-radius: 10px;
 }
+::-webkit-scrollbar-thumb {
+  transition: background-color 160ms ease;
+}
 ::-webkit-scrollbar-thumb:hover {
   background-color: hsl(var(--muted-foreground));
+}
+
+/* ── Interface polish ─────────────────────────────────────────────────────
+   Smooth, consistent micro-interactions on interactive controls. Scoped to
+   buttons/inputs (never framer-motion-driven divs) so animations can't fight.
+   Many buttons swap their background on hover via JS — easing that here makes
+   the whole UI feel softer without touching each call site. */
+button, [role="button"], label[for] {
+  transition: background-color 160ms ease, border-color 160ms ease,
+              color 160ms ease, box-shadow 160ms ease, transform 120ms ease,
+              opacity 160ms ease;
+}
+input, textarea, select {
+  transition: background-color 160ms ease, border-color 160ms ease,
+              color 160ms ease, box-shadow 160ms ease;
+}
+/* Gentle press feedback (utilities like active:scale-* still win where set). */
+button:not(:disabled):active {
+  transform: scale(0.97);
+}
+/* Focus rings that fade in rather than snap. */
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.45);
+}
+
+/* Respect users who prefer less motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

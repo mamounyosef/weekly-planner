@@ -94,6 +94,36 @@ export default defineConfig({
       async configureServer(server) {
           const fs = await import('fs/promises');
           const path = await import('path');
+
+          // ── Crash-proof "open in editor" ─────────────────────────────────
+          // Vite 7's launchEditor calls onErrorCallback() on its Windows UNC-path
+          // guard, but Vite registers /__open-in-editor without that callback, so
+          // on Windows the request throws "onErrorCallback is not a function" and
+          // the runtime-error overlay renders it as a scary crash. Plugin
+          // middlewares register before Vite's built-in handler, so this shadows
+          // it: open the file best-effort, never let the request crash the server.
+          server.middlewares.use('/__open-in-editor', (req, res) => {
+            (async () => {
+              try {
+                const { spawn } = await import('child_process');
+                const raw = new URL(req.url || '', 'http://localhost').searchParams.get('file') || '';
+                // Strip a trailing :line:col and any file:// prefix, then keep only
+                // real, existing local files (skips blank/URL/UNC frames that trip Vite).
+                const fileOnly = raw.replace(/^file:\/\//, '').replace(/:\d+(:\d+)?$/, '');
+                const abs = path.resolve(server.config.root, fileOnly);
+                if (fileOnly && !abs.startsWith('\\\\') && (await fs.stat(abs).then(() => true).catch(() => false))) {
+                  const editor = process.env.VISUAL || process.env.EDITOR || 'code';
+                  spawn(editor, [abs], { stdio: 'ignore', detached: true, shell: true }).unref();
+                }
+              } catch (err) {
+                console.warn('[open-in-editor] ignored:', (err as Error)?.message);
+              } finally {
+                res.statusCode = 204;
+                res.end();
+              }
+            })();
+          });
+
           const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'database.json');
           const configPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'google-config.json');
           const tokensPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'google-tokens.json');
@@ -153,9 +183,12 @@ export default defineConfig({
             }
           }
 
-          // Maps Google event to PlannerEvent
-          function mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt) {
+          // Maps Google event to PlannerEvent. `parseRecur` (from recurrence.ts)
+          // turns a Google recurrence array into { recur, exdates } so a repeating
+          // event round-trips as a single master.
+          function mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseRecur) {
             const isAllDay = !!gEv.start.date;
+            const { recur, exdates } = gEv.recurrence ? parseRecur(gEv.recurrence) : {};
 
             if (isAllDay) {
               const startD = new Date(gEv.start.date + 'T00:00:00');
@@ -176,7 +209,8 @@ export default defineConfig({
                 allDay: true,
                 daysSpan,
                 weekKey,
-                scope: 'week',
+                ...(recur ? { recur } : {}),
+                ...(exdates ? { exdates } : {}),
                 gCalId: gEv.gCalId,
                 gCalCalendarId: gEv.gCalCalendarId,
                 gCalETag: gEv.gCalETag
@@ -200,7 +234,8 @@ export default defineConfig({
                 content: gEv.summary,
                 color: mapGoogleColor(gEv.gCalCalendarId),
                 weekKey,
-                scope: 'week',
+                ...(recur ? { recur } : {}),
+                ...(exdates ? { exdates } : {}),
                 gCalId: gEv.gCalId,
                 gCalCalendarId: gEv.gCalCalendarId,
                 gCalETag: gEv.gCalETag
@@ -217,55 +252,36 @@ export default defineConfig({
             return colors[Math.abs(hash) % colors.length];
           }
 
-          function constructGoogleEventBody(ev, format, startOfWeek, addDays, weekStartsOnOpt) {
-            const isRecurring = ev.scope === 'all';
-            let eventDate;
-
-            if (isRecurring) {
-              const now = new Date();
-              const startOfCurrentWeek = startOfWeek(now, { weekStartsOn: weekStartsOnOpt });
-              eventDate = addDays(startOfCurrentWeek, ev.dayIndex);
-            } else {
-              const weekStartDate = new Date(ev.weekKey + 'T00:00:00');
-              eventDate = addDays(weekStartDate, ev.dayIndex);
-            }
-
+          // Build the Google event body for an app-owned event. The first occurrence
+          // is the master's anchor (weekKey + dayIndex); repetition (if any) comes
+          // from `ev.recur` via buildGoogleRecurrence, so app and Google agree 1:1.
+          function constructGoogleEventBody(ev, format, addDays, buildRecur) {
+            const weekStartDate = new Date((ev.weekKey || '0000-01-01') + 'T00:00:00');
+            const eventDate = addDays(weekStartDate, ev.dayIndex || 0);
             const dateStr = format(eventDate, 'yyyy-MM-dd');
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+            const recurrence = ev.recur ? buildRecur(ev, tz) : undefined;
 
             if (ev.allDay) {
-              const span = ev.daysSpan || 1;
-              const endDate = addDays(eventDate, span);
-              const endDateStr = format(endDate, 'yyyy-MM-dd');
+              const endDate = addDays(eventDate, ev.daysSpan || 1);
               const body: any = {
                 summary: ev.content || 'Untitled',
                 start: { date: dateStr },
-                end: { date: endDateStr }
+                end: { date: format(endDate, 'yyyy-MM-dd') }
               };
-              if (isRecurring) {
-                const actualDayOfWeek = (weekStartsOnOpt + ev.dayIndex) % 7;
-                const byDayStr = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][actualDayOfWeek];
-                body.recurrence = [`RRULE:FREQ=WEEKLY;BYDAY=${byDayStr}`];
-              }
+              if (recurrence) body.recurrence = recurrence;
               return body;
             } else {
-              const [sh, sm] = ev.startTime.split(':').map(Number);
-              const [eh, em] = ev.endTime.split(':').map(Number);
-              const startDate = new Date(eventDate);
-              startDate.setHours(sh, sm, 0, 0);
-              const endDate = new Date(eventDate);
-              endDate.setHours(eh, em, 0, 0);
-
-              const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+              const [sh, sm] = (ev.startTime || '00:00').split(':').map(Number);
+              const [eh, em] = (ev.endTime || ev.startTime || '00:30').split(':').map(Number);
+              const startDate = new Date(eventDate); startDate.setHours(sh, sm, 0, 0);
+              const endDate = new Date(eventDate); endDate.setHours(eh, em, 0, 0);
               const body: any = {
                 summary: ev.content || 'Untitled',
                 start: { dateTime: startDate.toISOString(), timeZone: tz },
                 end: { dateTime: endDate.toISOString(), timeZone: tz }
               };
-              if (isRecurring) {
-                const actualDayOfWeek = (weekStartsOnOpt + ev.dayIndex) % 7;
-                const byDayStr = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][actualDayOfWeek];
-                body.recurrence = [`RRULE:FREQ=WEEKLY;BYDAY=${byDayStr}`];
-              }
+              if (recurrence) body.recurrence = recurrence;
               return body;
             }
           }
@@ -273,7 +289,7 @@ export default defineConfig({
           // The concrete calendar date of a single-week event (for sync-window filtering).
           // Recurring ('all') events return null — they are always "in window".
           function eventOccurrenceDate(ev, addDays) {
-            if (ev.scope === 'all' || !ev.weekKey) return null;
+            if (ev.recur || !ev.weekKey) return null;
             const weekStartDate = new Date(ev.weekKey + 'T00:00:00');
             return addDays(weekStartDate, ev.dayIndex || 0);
           }
@@ -291,9 +307,9 @@ export default defineConfig({
               if (!accessToken) return clientEvents;
 
               const { format, startOfWeek, addDays, differenceInDays } = await import('date-fns');
-              // Load the app's own recurrence resolver so the series→Google mapping stays
-              // in one place (no duplicated logic drifting out of sync).
-              const { computeDailySeriesSpecs } = await server.ssrLoadModule('/src/lib/recurrence.ts');
+              // Load the app's own recurrence formatting so app↔Google mapping stays
+              // in one place (no duplicated RRULE logic drifting out of sync).
+              const { buildGoogleRecurrence, parseGoogleRecurrence } = await server.ssrLoadModule('/src/lib/recurrence.ts');
 
               // 1. Fetch calendar list
               const listRes = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
@@ -334,6 +350,11 @@ export default defineConfig({
               //      event round-trips 1:1 instead of exploding into per-occurrence copies.
               //    • Every other calendar → singleEvents=true: each occurrence is expanded
               //      into its own read-only item so every event shows up in the app.
+              // Set true if ANY calendar/page fetch fails. When the snapshot is
+              // incomplete we cannot safely conclude "not seen ⇒ deleted on Google",
+              // so step E (deletion mirroring) is skipped to avoid wiping local events
+              // on a transient error (rate-limit, token blip, network hiccup).
+              let fetchIncomplete = false;
               async function fetchCalendarEvents(calId, singleEvents) {
                 const out = [];
                 let pageToken = '';
@@ -343,7 +364,7 @@ export default defineConfig({
                     + `&singleEvents=${singleEvents ? 'true' : 'false'}&showDeleted=false&maxResults=2500`
                     + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
                   const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-                  if (!res.ok) break;
+                  if (!res.ok) { fetchIncomplete = true; break; }
                   const data = await res.json();
                   for (const item of (data.items || [])) {
                     if (item.status === 'cancelled') continue;
@@ -354,6 +375,7 @@ export default defineConfig({
                       summary: item.summary || '',
                       start: item.start,
                       end: item.end,
+                      recurrence: item.recurrence || null,
                       description: item.description || ''
                     });
                   }
@@ -370,6 +392,7 @@ export default defineConfig({
                   const bucket = cal.id === targetCalendarId ? dailyGoogleEvents : otherGoogleEvents;
                   for (const e of evs) bucket.push(e);
                 } catch (err) {
+                  fetchIncomplete = true;
                   console.error(`Failed to fetch events for calendar ${cal.id}:`, err);
                 }
               }
@@ -384,16 +407,15 @@ export default defineConfig({
               for (const e of dailyGoogleEvents) seenGCalIds.add(e.gCalId);
               for (const e of otherGoogleEvents) seenGCalIds.add(e.gCalId);
 
-              // A. Local deletions of CONCRETE single-week events.
-              //    Recurrence bookkeeping records — skip-this-week masks (overridesSeriesId)
-              //    and series-end / forward-delete tombstones (scope 'all') — are NOT user
-              //    deletions of a Google event: they must stay in storage so resolveWeek
-              //    keeps honouring them, and must never touch Google. We deliberately do
-              //    not propagate whole-series deletes to Google (that would risk wiping past
-              //    occurrences); recurring series stay on Google once created.
+              const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+              // A. Mirror local deletions to Google. A tombstone (deleted:true) that
+              //    carries a Daily gCalId is DELETEd on Google (this covers a whole
+              //    repeating series too); then the record is dropped locally. A
+              //    tombstone without a gCalId (never synced, or a foreign read-only
+              //    event the user hid) is just dropped.
               for (const [id, ev] of Object.entries(localMap)) {
                 if (!ev.deleted) continue;
-                if (ev.overridesSeriesId || ev.scope === 'all') continue;
                 if (ev.gCalId && ev.gCalCalendarId === targetCalendarId) {
                   try {
                     const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
@@ -408,25 +430,28 @@ export default defineConfig({
                     console.error(`Failed to delete event ${ev.gCalId} from Google:`, err);
                   }
                 } else {
-                  // Never synced, or a read-only foreign event the user removed locally
-                  // (it will simply re-appear on the next pull — other calendars are read-only).
                   delete localMap[id];
                 }
               }
 
-              // B. Push app-owned creates/updates to the Daily calendar ONLY. An event
-              //    carrying a foreign gCalId belongs to a read-only calendar and is never
-              //    written back.
+              // B. Push app-owned creates/updates to the Daily calendar ONLY. Each app
+              //    event (repeating or not) is one Google event; recurrence comes from
+              //    ev.recur via constructGoogleEventBody → buildGoogleRecurrence. Events
+              //    carrying a foreign gCalId are read-only mirrors, never written back.
+              // Records we create/update on Google in this pass. The Daily calendar was
+              // fetched at the very start (before these writes), so its snapshot is stale
+              // for exactly these ids — we must NOT reconcile them against it in step C,
+              // or we'd overwrite the change we just pushed with its pre-push state (the
+              // "new item / new repeat vanishes then reappears" bug).
+              const justPushed = new Set();
               for (const [id, ev] of Object.entries(localMap)) {
                 if (ev.deleted) continue;
-                // Recurring series are pushed as native RRULE events in B2 below, not here.
-                if (ev.scope === 'all') continue;
                 const isForeign = ev.gCalId && ev.gCalCalendarId && ev.gCalCalendarId !== targetCalendarId;
                 if (isForeign) continue;
 
                 if (!ev.gCalId) {
                   try {
-                    const body = constructGoogleEventBody(ev, format, startOfWeek, addDays, weekStartsOnOpt);
+                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence);
                     const insRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
                       method: 'POST',
                       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -436,6 +461,7 @@ export default defineConfig({
                       const created = await insRes.json();
                       localMap[id] = { ...ev, gCalId: created.id, gCalCalendarId: targetCalendarId, gCalETag: created.etag, lastSyncedAt: nowMs };
                       seenGCalIds.add(created.id);
+                      justPushed.add(id);
                     } else {
                       console.error(`Google API insert failed for event ${id}: Status ${insRes.status} - ${await insRes.text()}`);
                     }
@@ -445,7 +471,7 @@ export default defineConfig({
                 }
                 else if (ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt)) {
                   try {
-                    const body = constructGoogleEventBody(ev, format, startOfWeek, addDays, weekStartsOnOpt);
+                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence);
                     const updRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
                       method: 'PUT',
                       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -455,8 +481,8 @@ export default defineConfig({
                       const updated = await updRes.json();
                       localMap[id] = { ...ev, gCalETag: updated.etag, lastSyncedAt: nowMs };
                       seenGCalIds.add(ev.gCalId);
+                      justPushed.add(id);
                     } else if (updRes.status === 404 || updRes.status === 410) {
-                      // Deleted on Google meanwhile → mirror the deletion locally.
                       seenGCalIds.delete(ev.gCalId);
                       delete localMap[id];
                     } else {
@@ -465,148 +491,6 @@ export default defineConfig({
                   } catch (err) {
                     console.error(`Failed to update event ${ev.gCalId} on Google:`, err);
                   }
-                }
-              }
-
-              // B2. Push recurring series to the Daily calendar as native RRULE events.
-              //     Each active version owns one Google event, bounded by the next version
-              //     (UNTIL) and punched with EXDATE for skip-this-week masks and this-week
-              //     forks. This makes version splits, forward-deletes and per-week skips map
-              //     faithfully onto Google instead of leaving duplicate/open-ended series.
-              const two = (n) => String(n).padStart(2, '0');
-              const basicDate = (d) => `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}`;
-              const basicLocalDT = (d, hh, mm) => `${basicDate(d)}T${two(hh)}${two(mm)}00`;
-              const basicUTC = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-              const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-
-              // Occurrence date for a weekKey; absurdly-old anchors (migrated "since forever"
-              // events) are clamped forward to the first occurrence inside the sync window so
-              // we never send a DTSTART in year 0.
-              const occurrenceOf = (weekKey, dayIndex) => {
-                if (!weekKey || new Date(weekKey + 'T00:00:00').getFullYear() < 1990) {
-                  const base = startOfWeek(new Date(timeMinMs), { weekStartsOn: weekStartsOnOpt });
-                  let occ = addDays(base, dayIndex || 0);
-                  while (occ.getTime() < timeMinMs) occ = addDays(occ, 7);
-                  return occ;
-                }
-                return addDays(new Date(weekKey + 'T00:00:00'), dayIndex || 0);
-              };
-
-              const buildSeriesBody = (ev, spec) => {
-                const dayIndex = ev.dayIndex || 0;
-                const startOcc = occurrenceOf(spec.dtStartWeekKey, dayIndex);
-                const byDay = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][startOcc.getDay()];
-                const allDay = !!ev.allDay;
-                const [sh, sm] = allDay ? [0, 0] : (ev.startTime || '00:00').split(':').map(Number);
-
-                // Last included occurrence = one week before the next version's occurrence.
-                let lastOcc = null;
-                if (spec.untilWeekKey) {
-                  lastOcc = addDays(occurrenceOf(spec.untilWeekKey, dayIndex), -7);
-                  if (lastOcc.getTime() < startOcc.getTime()) return null; // no occurrences in range
-                }
-
-                let rrule = `RRULE:FREQ=WEEKLY;BYDAY=${byDay}`;
-                if (lastOcc) {
-                  if (allDay) {
-                    rrule += `;UNTIL=${basicDate(lastOcc)}`;
-                  } else {
-                    const u = new Date(lastOcc); u.setHours(sh, sm, 0, 0);
-                    rrule += `;UNTIL=${basicUTC(u)}`;
-                  }
-                }
-                const recurrence = [rrule];
-
-                // EXDATE for every excluded (skipped/forked) week within range.
-                const exOccs = spec.exWeekKeys
-                  .map((w) => occurrenceOf(w, dayIndex))
-                  .filter((d) => d.getTime() >= startOcc.getTime() && (!lastOcc || d.getTime() <= lastOcc.getTime()));
-                if (exOccs.length) {
-                  if (allDay) {
-                    recurrence.push(`EXDATE;VALUE=DATE:${exOccs.map(basicDate).join(',')}`);
-                  } else {
-                    recurrence.push(`EXDATE;TZID=${tz}:${exOccs.map((d) => basicLocalDT(d, sh, sm)).join(',')}`);
-                  }
-                }
-
-                let start, end;
-                if (allDay) {
-                  start = { date: format(startOcc, 'yyyy-MM-dd') };
-                  end = { date: format(addDays(startOcc, ev.daysSpan || 1), 'yyyy-MM-dd') };
-                } else {
-                  const [eh, em] = (ev.endTime || ev.startTime || '00:30').split(':').map(Number);
-                  const s = new Date(startOcc); s.setHours(sh, sm, 0, 0);
-                  const e = new Date(startOcc); e.setHours(eh, em, 0, 0);
-                  start = { dateTime: s.toISOString(), timeZone: tz };
-                  end = { dateTime: e.toISOString(), timeZone: tz };
-                }
-                return { summary: ev.content || 'Untitled', start, end, recurrence };
-              };
-
-              const specs = computeDailySeriesSpecs(localMap);
-              const activeRecordIds = new Set(specs.map((s) => s.recordId));
-
-              // Delete Google events for 'all' records that are no longer active (deleted
-              // tombstones / full-series deletes) but still carry a gCalId, then keep the
-              // record as an app-side boundary marker without its stale Google identity.
-              for (const [id, ev] of Object.entries(localMap)) {
-                if (ev.scope !== 'all' || !ev.gCalId || activeRecordIds.has(id)) continue;
-                if (ev.gCalCalendarId && ev.gCalCalendarId !== targetCalendarId) continue;
-                try {
-                  const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
-                    method: 'DELETE',
-                    headers: { Authorization: `Bearer ${accessToken}` }
-                  });
-                  if (delRes.ok || delRes.status === 404 || delRes.status === 410) {
-                    seenGCalIds.delete(ev.gCalId);
-                    localMap[id] = { ...ev, gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined };
-                  }
-                } catch (err) {
-                  console.error(`Failed to delete stale series event ${ev.gCalId}:`, err);
-                }
-              }
-
-              for (const spec of specs) {
-                const ev = localMap[spec.recordId];
-                if (!ev) continue;
-                const body = buildSeriesBody(ev, spec);
-                if (!body) continue;
-                const sig = JSON.stringify(body);
-                try {
-                  if (!ev.gCalId) {
-                    const insRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
-                      method: 'POST',
-                      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-                      body: JSON.stringify(body)
-                    });
-                    if (insRes.ok) {
-                      const created = await insRes.json();
-                      localMap[spec.recordId] = { ...ev, gCalId: created.id, gCalCalendarId: targetCalendarId, gCalETag: created.etag, gCalRecurSig: sig, lastSyncedAt: nowMs };
-                      seenGCalIds.add(created.id);
-                    } else {
-                      console.error(`Series insert failed for ${spec.recordId}: ${insRes.status} - ${await insRes.text()}`);
-                    }
-                  } else if (ev.gCalRecurSig !== sig) {
-                    const updRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
-                      method: 'PUT',
-                      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-                      body: JSON.stringify(body)
-                    });
-                    if (updRes.ok) {
-                      const updated = await updRes.json();
-                      localMap[spec.recordId] = { ...ev, gCalETag: updated.etag, gCalRecurSig: sig, lastSyncedAt: nowMs };
-                      seenGCalIds.add(ev.gCalId);
-                    } else if (updRes.status === 404 || updRes.status === 410) {
-                      seenGCalIds.delete(ev.gCalId);
-                      localMap[spec.recordId] = { ...ev, gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined };
-                    } else {
-                      console.error(`Series update failed for ${ev.gCalId}: ${updRes.status} - ${await updRes.text()}`);
-                    }
-                  } else {
-                    seenGCalIds.add(ev.gCalId);
-                  }
-                } catch (err) {
-                  console.error(`Failed to push series ${spec.recordId} to Google:`, err);
                 }
               }
 
@@ -620,8 +504,7 @@ export default defineConfig({
               for (const gEv of dailyGoogleEvents) {
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
-                  // Created directly in Google's Daily calendar → import as an app-owned event.
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt);
+                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
                   if (plannerEv) {
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
@@ -631,17 +514,16 @@ export default defineConfig({
                 }
                 const ev = localMap[localId];
                 if (!ev || ev.deleted) continue; // never resurrect a locally-deleted record
+                if (justPushed.has(localId)) continue; // we authored this in step B; snapshot is stale
                 // A local edit we just pushed wins this round; only pull when Google is ahead.
                 const locallyDirty = ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt);
                 if (!locallyDirty && ev.gCalETag !== gEv.gCalETag) {
-                  const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt);
+                  const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
                   if (g) {
-                    if (ev.scope === 'all') {
-                      // Preserve recurrence identity; refresh only the display fields.
-                      localMap[localId] = { ...ev, content: g.content, startTime: g.startTime, endTime: g.endTime, allDay: g.allDay, daysSpan: g.daysSpan, gCalETag: gEv.gCalETag, lastSyncedAt: nowMs };
-                    } else {
-                      localMap[localId] = { ...ev, ...g, id: localId, scope: 'week', completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
-                    }
+                    // Daily events are app-owned: the app is the source of truth for
+                    // colour (Google doesn't store our palette, so mapGoogleColor would
+                    // clobber the user's choice — e.g. green → lilac). Keep ev.color.
+                    localMap[localId] = { ...ev, ...g, id: localId, color: ev.color, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
                   }
                 }
               }
@@ -650,7 +532,7 @@ export default defineConfig({
               for (const gEv of otherGoogleEvents) {
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt);
+                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
                   if (plannerEv) {
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
@@ -659,22 +541,24 @@ export default defineConfig({
                 } else {
                   const ev = localMap[localId];
                   if (ev && !ev.deleted && ev.gCalETag !== gEv.gCalETag) {
-                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt);
+                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
                     if (g) {
-                      localMap[localId] = { ...ev, ...g, id: localId, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
+                      localMap[localId] = { ...ev, ...g, id: localId, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
                     }
                   }
                 }
               }
 
               // E. Mirror Google-side deletions: any previously-synced local event whose
-              //    gCalId is no longer present on Google is removed locally. Single-week
-              //    events are only reconciled when their date is inside the fetch window,
-              //    so events outside the window aren't wrongly dropped.
+              //    gCalId is no longer present on Google is removed locally. Repeating
+              //    masters are always reconciled; non-repeating ones only when their date
+              //    is inside the fetch window (so events outside it aren't wrongly dropped).
               for (const [id, ev] of Object.entries(localMap)) {
+                if (fetchIncomplete) break; // snapshot unreliable → never mirror deletions this run
                 if (!ev.gCalId || ev.deleted) continue;
+                if (justPushed.has(id)) continue; // just created/updated; not in the stale fetch
                 if (seenGCalIds.has(ev.gCalId)) continue;
-                if (ev.scope !== 'all') {
+                if (!ev.recur) {
                   const d = eventOccurrenceDate(ev, addDays);
                   if (d) {
                     const t = d.getTime();
@@ -1028,6 +912,48 @@ export default defineConfig({
                 res.statusCode = 500;
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ error: 'Failed to write focus sessions file' }));
+              }
+            });
+          } else {
+            next();
+          }
+        });
+
+        // Shared running-timer state so the main window and the side widget reflect
+        // the same live focus session (localStorage events don't cross windows).
+        server.middlewares.use('/api/focus-timer', async (req, res, next) => {
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const timerPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-timer.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
+
+          if (req.method === 'GET') {
+            try {
+              const data = await fs.readFile(timerPath, 'utf-8');
+              res.setHeader('Content-Type', 'application/json');
+              res.end(data);
+            } catch (err) {
+              res.setHeader('Content-Type', 'application/json');
+              res.end('{}');
+            }
+          } else if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', async () => {
+              try {
+                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                const result = await safeWriteJsonFile({ filePath: timerPath, backupDir, baseName: 'focus-timer', body, kind: 'object', force });
+                res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) {
+                  res.statusCode = result.status;
+                  res.end(JSON.stringify({ error: result.error }));
+                  return;
+                }
+                res.end(JSON.stringify({ success: true }));
+              } catch (err) {
+                res.statusCode = 500;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write focus timer file' }));
               }
             });
           } else {

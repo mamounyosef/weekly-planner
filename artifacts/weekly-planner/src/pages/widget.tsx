@@ -14,17 +14,19 @@ import {
   type FocusSession,
   type FocusTimerState,
   dateKey,
+  focusDayKey,
   formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
   isCompletedFocusSession,
   loadLocalFocusSessions,
   loadLocalFocusTimer,
+  coerceFocusTimer,
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid,
 } from '@/lib/focusSessions';
-import { type EventScope, weekKeyOf, migrateEvents, resolveWeek } from '@/lib/recurrence';
+import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId } from '@/lib/recurrence';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -49,12 +51,13 @@ interface PlannerEvent {
   gCalRecurSig?: string;
   lastSyncedAt?: number;
   updatedAt?: number;
-  // Recurrence / modification-domain fields (see src/lib/recurrence.ts).
-  scope?: EventScope;
+  // Recurrence fields (see src/lib/recurrence.ts).
   weekKey?: string;
-  seriesId?: string;
-  overridesSeriesId?: string;
+  recur?: Recurrence;
+  exdates?: string[];
   deleted?: boolean;
+  masterId?: string;
+  occDate?: string;
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -198,8 +201,11 @@ export default function Widget() {
   const [isPinned, setIsPinned]         = useState(true);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
+  const [focusDayStartHour, setFocusDayStartHour] = useState(3);
+  const lastTimerJsonRef = useRef<string | null>(null);
+  const timerHydratedRef = useRef(false);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
-  const [focusMinutesDraft, setFocusMinutesDraft] = useState('25');
+  const [focusMinutesDraft, setFocusMinutesDraft] = useState('60');
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const focusCompleteRef = useRef(false);
 
@@ -223,6 +229,7 @@ export default function Widget() {
             if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
             if (s.dayStartH != null) setDayStartH(s.dayStartH);
             if (s.dayEndH != null) setDayEndH(s.dayEndH);
+            if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
           }
         })
         .catch(err => console.error('Failed to sync widget settings:', err));
@@ -256,20 +263,46 @@ export default function Widget() {
     };
     window.addEventListener('storage', handleStorage);
 
+    // Shared running-timer state (see home.tsx for the echo-guard rationale).
+    const pullTimer = () => {
+      fetch('/api/focus-timer')
+        .then(r => r.json())
+        .then(data => {
+          if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
+          const json = JSON.stringify(coerceFocusTimer(data));
+          timerHydratedRef.current = true;
+          if (json === lastTimerJsonRef.current) return;
+          lastTimerJsonRef.current = json;
+          setFocusTimer(JSON.parse(json));
+        })
+        .catch(() => { timerHydratedRef.current = true; });
+    };
+
     loadSettings();
     loadEvents();
     loadFocusSessions();
+    pullTimer();
     const settingsPollId = setInterval(loadSettings, 5000);
     const pollId = setInterval(loadEvents, 5000);
     const focusPollId = setInterval(loadFocusSessions, 5000);
+    const timerPollId = setInterval(pullTimer, 2000);
     const clockId = setInterval(() => setNowTick(Date.now()), 1000);
+    // Checkpoint a running session's elapsed time into durable state every few seconds
+    // so closing the app mid-session never loses progress.
+    const checkpointId = setInterval(() => {
+      setFocusTimer(prev => (prev.isRunning && prev.lastStartedAt
+        ? { ...prev, accumulatedSeconds: getFocusTimerElapsedSeconds(prev), lastStartedAt: new Date().toISOString() }
+        : prev));
+    }, 5000);
 
     return () => {
       window.removeEventListener('storage', handleStorage);
       clearInterval(settingsPollId);
       clearInterval(pollId);
       clearInterval(focusPollId);
+      clearInterval(timerPollId);
       clearInterval(clockId);
+      clearInterval(checkpointId);
     };
   }, []);
 
@@ -296,9 +329,13 @@ export default function Widget() {
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
-  const todayFocusSeconds = sumFocusSecondsForDay(focusSessions, today)
-    + (focusTimer.sessionStartedAt && dateKey(focusTimer.sessionStartedAt) === dateKey(today) ? focusElapsedSeconds : 0);
-  const todayFocusSessions = focusSessions.filter(session => dateKey(session.endedAt) === dateKey(today) && isCompletedFocusSession(session)).length;
+  // "Today" for focus stats respects the configurable day-start hour (e.g. before
+  // 3 AM still counts as the previous day).
+  const focusTodayKey = focusDayKey(today, focusDayStartHour);
+  const focusTodayMidnight = new Date(`${focusTodayKey}T00:00:00`);
+  const todayFocusSeconds = sumFocusSecondsForDay(focusSessions, focusTodayMidnight, focusDayStartHour)
+    + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === focusTodayKey ? focusElapsedSeconds : 0);
+  const todayFocusSessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === focusTodayKey && isCompletedFocusSession(session)).length;
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
   // An event "spans the day boundary" when it starts before the configured day-start
@@ -535,6 +572,17 @@ export default function Widget() {
 
   useEffect(() => {
     localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(focusTimer));
+    // Don't push to the backend until we've hydrated from it (avoid clobbering a live
+    // session owned by another window before our first pull).
+    if (!timerHydratedRef.current) return;
+    const json = JSON.stringify(coerceFocusTimer(focusTimer));
+    if (json === lastTimerJsonRef.current) return;
+    lastTimerJsonRef.current = json;
+    fetch('/api/focus-timer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: json,
+    }).catch(() => {});
   }, [focusTimer]);
 
   useEffect(() => {
@@ -610,14 +658,16 @@ export default function Widget() {
   const toggleEventCompleted = (id: string) => {
     const todayDate = new Date();
     const dateStr = format(todayDate, 'yyyy-MM-dd');
+    // `id` may be an occurrence id ("master::date"); completion lives on the master.
+    const { masterId } = parseOccId(id);
     setEvents(prev => {
-      const ev = prev[id];
+      const ev = prev[masterId];
       if (!ev) return prev;
       const completedDates = ev.completedDates || [];
       const updatedDates = completedDates.includes(dateStr)
         ? completedDates.filter(d => d !== dateStr)
         : [...completedDates, dateStr];
-      const updatedEvents = { ...prev, [id]: { ...ev, completedDates: updatedDates } };
+      const updatedEvents = { ...prev, [masterId]: { ...ev, completedDates: updatedDates } };
       
       fetch('/api/events', {
         method: 'POST',

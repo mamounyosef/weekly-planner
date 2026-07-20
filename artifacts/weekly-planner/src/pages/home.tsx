@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import {
   format,
   addWeeks,
@@ -16,7 +16,7 @@ import {
   addDays,
   differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -25,28 +25,56 @@ import {
   type FocusSession,
   type FocusTimerState,
   dateKey,
+  focusDayKey,
   formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
   loadLocalFocusSessions,
   loadLocalFocusTimer,
+  coerceFocusTimer,
   isCompletedFocusSession,
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid as focusUid,
 } from '@/lib/focusSessions';
 import {
-  type EventScope,
-  type CommitCtx,
-  FAR_PAST_WEEK,
+  type Recurrence,
+  type RecurFreq,
+  type Weekday,
+  type DeleteMode,
   weekKeyOf,
   migrateEvents,
   resolveWeek,
-  ensureConcreteTarget,
-  collapseSeriesForward,
-  commitDelete,
+  editSeries,
+  deleteScoped,
   stampNewItem,
+  parseOccId,
 } from '@/lib/recurrence';
+
+// ─── TEMP DEBUG: surface the real error the overlay hides ───────────────────────
+if (typeof window !== 'undefined' && !(window as any).__errDbg) {
+  (window as any).__errDbg = true;
+  window.addEventListener('error', (e) => {
+    // eslint-disable-next-line no-console
+    console.log('%c[DBG error]', 'color:#e11', {
+      message: e.message,
+      filename: e.filename,
+      line: e.lineno,
+      col: e.colno,
+      errorType: e.error?.constructor?.name ?? typeof e.error,
+      stack: e.error?.stack ?? '(no stack — likely ResizeObserver / cross-origin)',
+    });
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => {
+    const r: any = e.reason;
+    // eslint-disable-next-line no-console
+    console.log('%c[DBG unhandledrejection]', 'color:#e11', {
+      reasonType: r?.constructor?.name ?? typeof r,
+      reason: r,
+      stack: r?.stack ?? '(no stack)',
+    });
+  });
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -71,12 +99,15 @@ interface PlannerEvent {
   gCalRecurSig?: string;
   lastSyncedAt?: number;
   updatedAt?: number;
-  // ── Recurrence / modification-domain (see src/lib/recurrence.ts) ──
-  scope?: EventScope;          // 'all' = recurring, 'week' = single-week
-  weekKey?: string;            // 'all': effective-from week · 'week': the pinned week
-  seriesId?: string;           // groups the versions of one recurring item
-  overridesSeriesId?: string;  // a week-record that masks/forks a recurring series
-  deleted?: boolean;           // tombstone (recurring version, or skip-this-week)
+  // ── Recurrence (Google-style, see src/lib/recurrence.ts) ──
+  weekKey?: string;            // week-start date of the anchor (first) occurrence
+  recur?: Recurrence;          // absent = does not repeat
+  exdates?: string[];          // 'yyyy-MM-dd' occurrence dates removed individually
+  locked?: boolean;            // repeating master: edits/moves apply to whole series (default off)
+  deleted?: boolean;           // tombstone awaiting a Google-side delete, then removal
+  // View-only, stamped onto expanded occurrences (never persisted):
+  masterId?: string;
+  occDate?: string;
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -227,7 +258,7 @@ function layoutAllDay(events: Array<PlannerEvent & { visibleDayIndex: number; vi
 // Helper to calculate the visible dayIndex and daysSpan of an all-day event
 // within the viewed week (which starts at weekStart). Returns null if it doesn't overlap.
 function getEventWeekOverlap(ev: PlannerEvent, weekStart: Date): { dayIndex: number; daysSpan: number } | null {
-  const evWeekStart = new Date(ev.weekKey || FAR_PAST_WEEK);
+  const evWeekStart = new Date(ev.weekKey || '0000-01-01');
   const evStart = addDays(evWeekStart, ev.dayIndex);
   const evEnd = addDays(evStart, ev.daysSpan || 1);
   const weekEnd = addDays(weekStart, 7);
@@ -300,6 +331,118 @@ function layoutParallel(
   return result;
 }
 
+// ─── Recurrence editor ───────────────────────────────────────────────────────
+// Google-style repeat controls: a preset row (Does not repeat / Daily / Weekly /
+// Monthly / Yearly / Custom) plus, when Custom, an interval + unit, weekday chips
+// (weekly), and an end condition (Never / On date / After N).
+interface RecurTheme { text: string; sub: string; bdr: string; hover: string; accent: string; accentBg: string; fieldBg: string; }
+function RecurrenceEditor({ recur, anchorWeekday, onChange, theme }: {
+  recur: Recurrence | undefined;
+  anchorWeekday: Weekday;
+  onChange: (r: Recurrence | undefined) => void;
+  theme: RecurTheme;
+}) {
+  const [custom, setCustom] = useState(false);
+  // Which preset is active for the current rule.
+  const preset: string = !recur ? 'none'
+    : recur.freq === 'daily' && recur.interval === 1 && !recur.end ? 'daily'
+    : recur.freq === 'weekly' && recur.interval === 1 && !recur.end && (recur.byWeekday?.length ?? 1) <= 1 ? 'weekly'
+    : recur.freq === 'monthly' && recur.interval === 1 && !recur.end ? 'monthly'
+    : recur.freq === 'yearly' && recur.interval === 1 && !recur.end ? 'yearly'
+    : 'custom';
+  const showCustom = custom || preset === 'custom';
+
+  const setPreset = (p: string) => {
+    setCustom(false);
+    if (p === 'none') return onChange(undefined);
+    if (p === 'daily') return onChange({ freq: 'daily', interval: 1 });
+    if (p === 'weekly') return onChange({ freq: 'weekly', interval: 1, byWeekday: [anchorWeekday] });
+    if (p === 'monthly') return onChange({ freq: 'monthly', interval: 1 });
+    if (p === 'yearly') return onChange({ freq: 'yearly', interval: 1 });
+    if (p === 'custom') { setCustom(true); onChange(recur ?? { freq: 'weekly', interval: 1, byWeekday: [anchorWeekday] }); }
+  };
+
+  const r: Recurrence = recur ?? { freq: 'weekly', interval: 1 };
+  const patch = (d: Partial<Recurrence>) => onChange({ ...r, ...d });
+  const endType: 'never' | 'until' | 'count' = !r.end ? 'never' : 'count' in r.end ? 'count' : 'until';
+
+  const chip = (active: boolean): React.CSSProperties => ({
+    padding: '3px 9px', borderRadius: 7, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+    background: active ? theme.accentBg : 'transparent', color: active ? theme.accent : theme.sub,
+    border: `1px solid ${active ? theme.accent : theme.bdr}`,
+  });
+  const field: React.CSSProperties = { background: theme.fieldBg, color: theme.text, border: `1px solid ${theme.bdr}`, borderRadius: 6, padding: '2px 6px', fontSize: 11 };
+
+  const presets: Array<[string, string]> = [['none', "Doesn't repeat"], ['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly'], ['yearly', 'Yearly'], ['custom', 'Custom…']];
+  const WD = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+  return (
+    <div className="px-3 py-2.5" style={{ borderBottom: `1px solid ${theme.bdr}`, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: theme.sub }}>Repeat</span>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+        {presets.map(([v, label]) => (
+          <button key={v} type="button" onClick={() => setPreset(v)} style={chip(v === 'custom' ? showCustom : preset === v)}>{label}</button>
+        ))}
+      </div>
+
+      {showCustom && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 2 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', color: theme.text, fontSize: 11 }}>
+            <span>Every</span>
+            <input type="number" min={1} value={r.interval} onChange={e => patch({ interval: Math.max(1, parseInt(e.target.value || '1', 10)) })} style={{ ...field, width: 46 }} />
+            <select value={r.freq} onChange={e => patch({ freq: e.target.value as RecurFreq })} style={field}>
+              <option value="daily">day(s)</option>
+              <option value="weekly">week(s)</option>
+              <option value="monthly">month(s)</option>
+              <option value="yearly">year(s)</option>
+            </select>
+          </div>
+
+          {r.freq === 'weekly' && (
+            <div style={{ display: 'flex', gap: 4 }}>
+              {WD.map((d, i) => {
+                const days = r.byWeekday ?? [anchorWeekday];
+                const on = days.includes(i as Weekday);
+                return (
+                  <button key={i} type="button" title={['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][i]}
+                    onClick={() => {
+                      const next = on ? days.filter(x => x !== i) : [...days, i as Weekday];
+                      patch({ byWeekday: (next.length ? next : [anchorWeekday]).sort((a, b) => a - b) });
+                    }}
+                    style={{ ...chip(on), width: 24, padding: '3px 0', textAlign: 'center' }}>{d}</button>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', color: theme.text, fontSize: 11 }}>
+            <span>Ends</span>
+            <select value={endType} onChange={e => {
+              const v = e.target.value;
+              if (v === 'never') patch({ end: undefined });
+              else if (v === 'count') patch({ end: { count: 10 } });
+              else patch({ end: { until: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) } });
+            }} style={field}>
+              <option value="never">Never</option>
+              <option value="until">On date</option>
+              <option value="count">After…</option>
+            </select>
+            {endType === 'until' && r.end && 'until' in r.end && (
+              <input type="date" value={r.end.until} onChange={e => patch({ end: { until: e.target.value } })} style={field} />
+            )}
+            {endType === 'count' && r.end && 'count' in r.end && (
+              <>
+                <input type="number" min={1} value={r.end.count} onChange={e => patch({ end: { count: Math.max(1, parseInt(e.target.value || '1', 10)) } })} style={{ ...field, width: 46 }} />
+                <span>occurrence(s)</span>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 export default function WeeklyPlanner() {
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -309,11 +452,25 @@ export default function WeeklyPlanner() {
   const [hoveredId, setHoveredId]     = useState<string | null>(null);
   const [menuId, setMenuId]           = useState<string | null>(null);
   const [menuPos, setMenuPos]         = useState<{ x: number; y: number } | null>(null);
+  const [deleteExpanded, setDeleteExpanded] = useState(false); // "Delete more…" sub-options
+  useEffect(() => { setDeleteExpanded(false); }, [menuId]);
+  // A brand-new item started from the dedicated "＋" button lives here as an
+  // uncommitted DRAFT — it is NOT in `events` and never touches the grid/Google
+  // until the user presses Save. All popup field edits route into it (see applyEdit).
+  const [draft, setDraft] = useState<PlannerEvent | null>(null);
+  const draftRef = useRef<PlannerEvent | null>(null);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
+  // Whether the user has hand-placed the popup (dragged it, or it opened centered).
+  // While pinned, auto-anchoring to the event is suspended.
+  const [menuPinned, setMenuPinned] = useState(false);
+  const menuPinnedRef = useRef(false);
+  useEffect(() => { menuPinnedRef.current = menuPinned; }, [menuPinned]);
+  // Discard the draft / unpin whenever the popup closes by any path.
+  useEffect(() => { if (menuId === null) { setDraft(null); setMenuPinned(false); } }, [menuId]);
   const [direction, setDirection]     = useState(0);
   const [darkMode, setDarkMode]       = useState(true);
   const [timeFormat, setTimeFormat]     = useState<TimeFormat>('12h');
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
-  const [editDomain, setEditDomain]     = useState<EventScope>('week'); // modification domain toggle
   const [calendarView, setCalendarView] = useState<'week' | 'month'>('week');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
@@ -323,9 +480,13 @@ export default function WeeklyPlanner() {
   const [dayStartH, setDayStartH]       = useState(7);
   const [dayEndH, setDayEndH]           = useState(31);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  // Hour (0–23, local) at which a new "focus day" begins. Sessions before this hour
+  // count toward the previous day. Purely a bucketing setting — all analysis derives
+  // from it live, so changing it re-buckets past sessions on the fly.
+  const [focusDayStartHour, setFocusDayStartHour] = useState(3);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
-  const [focusMinutesDraft, setFocusMinutesDraft]     = useState('25');
+  const [focusMinutesDraft, setFocusMinutesDraft]     = useState('60');
   const focusCompleteRef = useRef(false);
   const [showFocusAnalysis, setShowFocusAnalysis] = useState(false);
   const [analysisTab, setAnalysisTab]       = useState<'month' | 'year'>('month');
@@ -344,6 +505,37 @@ export default function WeeklyPlanner() {
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
+  const handleHeaderCreateClick = (_e: React.MouseEvent<HTMLButtonElement>) => {
+    setSelectedIds(new Set());
+    setMenuId(null);
+
+    // Default dayIndex matching today relative to weekStartsOn setting
+    const todayIdx = (new Date().getDay() - weekStartsOn + 7) % 7;
+
+    // Default hours clamped to calendar views (7:00 AM to 11:00 PM)
+    const currentHour = new Date().getHours();
+    const startHour = Math.min(23, Math.max(7, currentHour));
+    const startTime = minToTime(startHour * 60);
+    const endTime = minToTime((startHour + 1) * 60);
+
+    // Build a fully-anchored DRAFT (stamped to the viewed week) but do NOT add it to
+    // `events` — it stays out of the grid/Google until the user presses Save.
+    const base = stampNewItem(
+      { id: uid(), dayIndex: todayIdx, startTime, endTime, content: '', color: 'sage' } as PlannerEvent,
+      editCtxRef.current.viewedWeekKey,
+    );
+    setDraft(base);
+    // Open the popup centred and pinned so it stays put (no event to anchor to yet).
+    const w = 300, h = 480;
+    setMenuPinned(true);
+    menuPinnedRef.current = true;
+    setMenuId(base.id);
+    setMenuPos({
+      x: Math.max(8, Math.round((window.innerWidth - w) / 2)),
+      y: Math.max(8, Math.round((window.innerHeight - h) / 2)),
+    });
+  };
+
   const dragRef = useRef<{
     eventId: string; durationMin: number; offsetMin: number;
     origDay: number; curDay: number; curStartMin: number;
@@ -359,6 +551,7 @@ export default function WeeklyPlanner() {
   const [clipboard, setClipboard]   = useState<PlannerEvent[]>([]);
 
   const daysGridRef  = useRef<HTMLDivElement>(null);
+  const mainRef      = useRef<HTMLDivElement>(null);
   const editRef      = useRef<HTMLTextAreaElement>(null);
   const menuRef      = useRef<HTMLDivElement>(null);
   const settingsRef    = useRef<HTMLDivElement>(null);
@@ -375,6 +568,7 @@ export default function WeeklyPlanner() {
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
   const menuIdRef    = useRef<string | null>(null);
+  const menuPosRef   = useRef<{ x: number; y: number } | null>(null);
   const eventsRef    = useRef<PlannerData>({});
   // Guards Google sync from running before the initial events load has resolved —
   // syncing an empty map would push a truncated database back to disk (data loss).
@@ -384,32 +578,157 @@ export default function WeeklyPlanner() {
   const clipboardRef = useRef<PlannerEvent[]>([]);
   const mousePosRef  = useRef<{ x: number; y: number } | null>(null);
 
+  // Keep the popup glued to its event: recompute its position from the live
+  // element rect on scroll/resize/content-change (instead of letting it drift or
+  // closing it). Clamps into the viewport so the whole (comprehensive) popup
+  // stays reachable; the popup itself scrolls if it's taller than the screen.
+  const repositionMenu = useCallback(() => {
+    const menuEl = menuRef.current;
+    const id = menuIdRef.current;
+    if (!menuEl || !id) return;
+    const margin = 8;
+    const mw = menuEl.offsetWidth || 200;
+    const mh = menuEl.offsetHeight || 300;
+    const anchor = document.querySelector(`[data-event-id="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`) as HTMLElement | null;
+    let x: number, y: number;
+    if (menuPinnedRef.current) {
+      // Hand-placed (dragged or centered): keep where it is, only re-clamp into view.
+      x = menuEl.offsetLeft;
+      y = menuEl.offsetTop;
+    } else if (anchor) {
+      const r = anchor.getBoundingClientRect();
+      x = r.right + 6;                                   // prefer right of the block
+      if (x + mw > window.innerWidth - margin) x = r.left - mw - 6; // flip left near edge
+      y = r.top;
+    } else {
+      const p = menuPosRef.current;                      // fallback: last known point
+      x = p?.x ?? margin;
+      y = p?.y ?? margin;
+    }
+    x = Math.max(margin, Math.min(x, window.innerWidth - mw - margin));
+    y = Math.max(margin, Math.min(y, window.innerHeight - mh - margin));
+    menuEl.style.left = `${x}px`;
+    menuEl.style.top = `${y}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (menuId === null) return;
+    repositionMenu(); // correct the first paint before it's visible
+    const onChange = () => repositionMenu();
+    const mainEl = mainRef.current;
+    mainEl?.addEventListener('scroll', onChange, { passive: true });
+    window.addEventListener('scroll', onChange, { passive: true, capture: true });
+    window.addEventListener('resize', onChange);
+    // Re-clamp whenever the popup's own height changes (expanding "Custom" repeat,
+    // toggling all-day, opening "Delete more…", etc.). Defer to the next frame so
+    // writing the popup's position inside the observer can't re-trigger it in the
+    // same tick — that's the "ResizeObserver loop completed" browser warning.
+    let roFrame = 0;
+    const ro = menuRef.current
+      ? new ResizeObserver(() => {
+          cancelAnimationFrame(roFrame);
+          roFrame = requestAnimationFrame(onChange);
+        })
+      : null;
+    if (ro && menuRef.current) ro.observe(menuRef.current);
+    return () => {
+      mainEl?.removeEventListener('scroll', onChange);
+      window.removeEventListener('scroll', onChange, { capture: true } as EventListenerOptions);
+      window.removeEventListener('resize', onChange);
+      cancelAnimationFrame(roFrame);
+      ro?.disconnect();
+    };
+  }, [menuId, repositionMenu]);
+
+  // Drag the popup around by its top handle. Pins it so auto-anchoring stops.
+  const startMenuDrag = (e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    const menuEl = menuRef.current;
+    if (!menuEl) return;
+    const r = menuEl.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    setMenuPinned(true);
+    menuPinnedRef.current = true;
+    const onMove = (ev: MouseEvent) => {
+      const margin = 8;
+      const mw = menuEl.offsetWidth, mh = menuEl.offsetHeight;
+      let x = Math.max(margin, Math.min(ev.clientX - dx, window.innerWidth - mw - margin));
+      let y = Math.max(margin, Math.min(ev.clientY - dy, window.innerHeight - mh - margin));
+      menuEl.style.left = `${x}px`;
+      menuEl.style.top = `${y}px`;
+      menuPosRef.current = { x, y };
+    };
+    const onUp = () => {
+      if (menuPosRef.current) setMenuPos(menuPosRef.current);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
   // Google Calendar Integration Functions & Hooks
   // Holds the exact events object returned by the last sync. The post-edit sync
   // effect compares against it by identity to recognise a "sync echo" and skip
   // re-syncing — otherwise applying a sync result would re-trigger a sync forever.
   const gcalEchoRef = useRef<PlannerData | null>(null);
+  // Serialize syncs on the client: the server refuses concurrent runs, so a push that
+  // lands mid-sync would otherwise be silently dropped until the 4-min pull. We run one
+  // at a time and queue exactly one follow-up, guaranteeing the latest state is pushed.
+  const syncInFlightRef = useRef(false);
+  const syncQueuedRef = useRef(false);
   const triggerGCalSync = useCallback((customEvents?: PlannerData) => {
     // Never sync before events have loaded — see eventsLoadedRef.
     if (!customEvents && !eventsLoadedRef.current) return;
+    if (syncInFlightRef.current) { syncQueuedRef.current = true; return; }
+    syncInFlightRef.current = true;
     setGCalSyncing(true);
-    const currentEvents = customEvents || eventsRef.current;
+    // Snapshot of what we send. Anything the user edits while this round-trip is in
+    // flight will differ from this by object identity, and must NOT be clobbered by
+    // the (now stale) server response — that was the "title becomes Untitled" bug.
+    const launched = customEvents || eventsRef.current;
     fetch('/api/google-sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ events: currentEvents, weekStartsOn })
+      body: JSON.stringify({ events: launched, weekStartsOn })
     })
     .then(r => r.json())
     .then(res => {
       if (res.success && res.events) {
-        gcalEchoRef.current = res.events; // mark this state change as a sync echo
+        const serverMap: PlannerData = res.events;
+        const live = eventsRef.current;
+        // Merge, don't replace: for records the user touched mid-flight (live differs
+        // from the snapshot we sent), keep the live content and only adopt the Google
+        // identity fields the server resolved. Untouched records take the server value.
+        const merged: PlannerData = { ...serverMap };
+        // Records we deleted while this (older) sync was in flight are gone from live
+        // but still present in the stale serverMap. Without this, the server's copy
+        // would resurrect them ~seconds later. Anything we *sent* (was in launched)
+        // that no longer exists locally was deleted mid-flight → drop it. Records the
+        // server newly pulled (not in launched, e.g. foreign calendars) are kept.
+        for (const id of Object.keys(serverMap)) {
+          if (launched[id] !== undefined && live[id] === undefined) delete merged[id];
+        }
+        for (const [id, liveEv] of Object.entries(live)) {
+          if (launched[id] === liveEv) continue; // untouched during flight
+          const serverEv = serverMap[id];
+          merged[id] = serverEv
+            ? { ...liveEv, gCalId: serverEv.gCalId, gCalCalendarId: serverEv.gCalCalendarId, gCalETag: serverEv.gCalETag, gCalRecurSig: serverEv.gCalRecurSig, lastSyncedAt: serverEv.lastSyncedAt }
+            : liveEv; // created during flight, server hasn't seen it yet
+        }
+        gcalEchoRef.current = merged; // mark this state change as a sync echo
         skipHistoryRef.current = true;    // and don't record it as an undo step
-        setEvents(res.events);
+        eventsRef.current = merged;       // keep the ref hot (see writeEvents)
+        setEvents(merged);
       }
     })
     .catch(err => console.error('Google Calendar sync failed:', err))
     .finally(() => {
       setGCalSyncing(false);
+      syncInFlightRef.current = false;
+      // Drain a queued follow-up so edits made mid-sync get pushed promptly.
+      if (syncQueuedRef.current) { syncQueuedRef.current = false; triggerGCalSyncRef.current(); }
       fetch('/api/google-auth/status')
         .then(r => r.json())
         .then(status => {
@@ -419,6 +738,9 @@ export default function WeeklyPlanner() {
         });
     });
   }, [weekStartsOn]);
+  // Stable ref so the queue-drain above can call the latest triggerGCalSync.
+  const triggerGCalSyncRef = useRef(triggerGCalSync);
+  useEffect(() => { triggerGCalSyncRef.current = triggerGCalSync; }, [triggerGCalSync]);
 
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -447,17 +769,21 @@ export default function WeeklyPlanner() {
     if (!gCalStatus.authenticated || !gCalStatus.autoSync) return;
     const intervalId = setInterval(() => {
       triggerGCalSync();
-    }, 5 * 60 * 1000);
+    }, 4 * 60 * 1000);
     return () => clearInterval(intervalId);
   }, [gCalStatus.authenticated, gCalStatus.autoSync, triggerGCalSync]);
 
   useEffect(() => {
     if (isInitialMount.current || !gCalStatus.authenticated) return;
+    // Never push mid-edit: while an item is focused for editing (e.g. typing a
+    // title) we hold off. The push fires once editing finishes (editingId → null,
+    // i.e. focus leaves the item) or after a structural change settles.
+    if (editingId !== null) return;
     // If this render is the result of applying a sync response, don't sync again.
     if (gcalEchoRef.current === events) { gcalEchoRef.current = null; return; }
-    const timer = setTimeout(() => { triggerGCalSync(); }, 1500);
+    const timer = setTimeout(() => { triggerGCalSync(); }, 800);
     return () => clearTimeout(timer);
-  }, [events, gCalStatus.authenticated, triggerGCalSync]);
+  }, [events, editingId, gCalStatus.authenticated, triggerGCalSync]);
 
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -527,22 +853,34 @@ export default function WeeklyPlanner() {
   }, [calendarView, currentDate, weekStartsOn, events]);
   const weekEventsRef = useRef<PlannerData>({});
   useEffect(() => { weekEventsRef.current = weekEvents; }, [weekEvents]);
-  // Context handed to the scope-aware committers. A ref keeps the latest value
-  // available inside the long-lived mouse/keyboard handlers.
-  const commitCtx: CommitCtx = { viewedWeekKey, domain: editDomain, isPastWeek, newId: uid };
-  const commitCtxRef = useRef<CommitCtx>(commitCtx);
-  useEffect(() => { commitCtxRef.current = commitCtx; }, [viewedWeekKey, editDomain, isPastWeek]);
+  // The viewed week + week-start are all the resolver needs. Refs keep the latest
+  // values available inside the long-lived mouse/keyboard handlers.
+  const editCtxRef = useRef({ viewedWeekKey, weekStartsOn });
+  useEffect(() => { editCtxRef.current = { viewedWeekKey, weekStartsOn }; }, [viewedWeekKey, weekStartsOn]);
 
-  // Patch the item shown as `id` this week through the scope-aware resolver, then
-  // remap any stale UI references (editing / menu / selection) if the edit landed
-  // on a freshly materialised fork or version. Returns the concrete target id.
+  // Commit a new events map AND update eventsRef synchronously. eventsRef is normally
+  // refreshed by an effect (one render later); during a fast multi-hop drag the next
+  // mutation can fire before that effect runs, so it would build on a STALE map — the
+  // previous move gets re-applied against old state and a repeating occurrence detaches
+  // twice, leaving a duplicate "ghost" at each temporary spot. Writing the ref here
+  // keeps back-to-back mutations chained on the latest result.
+  const writeEvents = useCallback((next: PlannerData) => {
+    eventsRef.current = next;
+    setEvents(next);
+  }, []);
+
+  // Patch the occurrence shown as `id`, routed to its stored master (an edit is to
+  // the whole item). Remaps UI references if the occurrence id shifted (e.g. a
+  // day-move). Returns the new occurrence id.
   const applyEdit = useCallback((id: string, patch: Partial<PlannerEvent>): string => {
-    const ctx = commitCtxRef.current;
-    const { events: prepared, targetId } = ensureConcreteTarget(eventsRef.current, id, ctx);
-    const nowMs = Date.now();
-    let map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch, updatedAt: nowMs } };
-    map = collapseSeriesForward(map, targetId, ctx.viewedWeekKey);
-    setEvents(map);
+    // Draft (dedicated-create) edits stay in local draft state — not committed.
+    if (draftRef.current && id === draftRef.current.id) {
+      setDraft(d => (d ? { ...d, ...patch } : d));
+      return id;
+    }
+    const { viewedWeekKey, weekStartsOn } = editCtxRef.current;
+    const { events: map, targetId } = editSeries(eventsRef.current, id, patch, viewedWeekKey, weekStartsOn);
+    writeEvents(map);
     if (targetId !== id) {
       setEditingId(e => (e === id ? targetId : e));
       setMenuId(m => (m === id ? targetId : m));
@@ -552,23 +890,21 @@ export default function WeeklyPlanner() {
       });
     }
     return targetId;
-  }, []);
+  }, [writeEvents]);
   const applyEditRef = useRef(applyEdit);
   useEffect(() => { applyEditRef.current = applyEdit; }, [applyEdit]);
 
-  // Patch several visible items at once (batch drag) through the resolver.
+  // Patch several visible occurrences at once (batch drag).
   const applyEditMany = useCallback((patches: Record<string, Partial<PlannerEvent>>) => {
-    const ctx = commitCtxRef.current;
+    const { viewedWeekKey, weekStartsOn } = editCtxRef.current;
     let map = eventsRef.current;
     const remap: Record<string, string> = {};
-    const nowMs = Date.now();
     for (const [id, patch] of Object.entries(patches)) {
-      const { events: prepared, targetId } = ensureConcreteTarget(map, id, ctx);
-      map = { ...prepared, [targetId]: { ...prepared[targetId], ...patch, updatedAt: nowMs } };
-      map = collapseSeriesForward(map, targetId, ctx.viewedWeekKey);
-      if (targetId !== id) remap[id] = targetId;
+      const res = editSeries(map, id, patch, viewedWeekKey, weekStartsOn);
+      map = res.events;
+      if (res.targetId !== id) remap[id] = res.targetId;
     }
-    setEvents(map);
+    writeEvents(map);
     if (Object.keys(remap).length) {
       setSelectedIds(prev => {
         const n = new Set<string>();
@@ -576,66 +912,47 @@ export default function WeeklyPlanner() {
         return n;
       });
     }
-  }, []);
+  }, [writeEvents]);
 
-  // Delete the item shown as `id` this week per the unified rule.
-  const applyDelete = useCallback((id: string) => {
-    setEvents(commitDelete(eventsRef.current, id, commitCtxRef.current));
-  }, []);
+  // Delete the occurrence shown as `id`. `mode` scopes a repeating item's delete
+  // ('one' = just this occurrence; 'following'; 'all'). Non-repeating ignores it.
+  const applyDelete = useCallback((id: string, mode: DeleteMode = 'one') => {
+    writeEvents(deleteScoped(eventsRef.current, id, mode));
+  }, [writeEvents]);
   const applyDeleteRef = useRef(applyDelete);
   useEffect(() => { applyDeleteRef.current = applyDelete; }, [applyDelete]);
 
-  // Delete several visible items at once (keyboard delete) per the unified rule.
+  // Delete several visible occurrences at once (keyboard delete = 'one' each).
   const applyDeleteMany = useCallback((ids: Iterable<string>) => {
     let map = eventsRef.current;
-    for (const id of ids) map = commitDelete(map, id, commitCtxRef.current);
-    setEvents(map);
-  }, []);
+    for (const id of ids) map = deleteScoped(map, id, 'one');
+    writeEvents(map);
+  }, [writeEvents]);
   const applyDeleteManyRef = useRef(applyDeleteMany);
   useEffect(() => { applyDeleteManyRef.current = applyDeleteMany; }, [applyDeleteMany]);
 
-  // Create a brand-new item, stamped with the current modification-domain scope.
+  // Create a brand-new item, anchored to the viewed week (recurrence optional).
   const createStamped = useCallback((base: PlannerEvent, opts?: { edit?: boolean; menuAt?: { x: number; y: number } }) => {
-    const stamped = stampNewItem(base, commitCtxRef.current);
-    setEvents(prev => ({ ...prev, [stamped.id]: stamped }));
+    const stamped = stampNewItem(base, editCtxRef.current.viewedWeekKey);
+    writeEvents({ ...eventsRef.current, [stamped.id]: stamped });
     if (opts?.edit) setEditingId(stamped.id);
-    if (opts?.menuAt) { setMenuId(stamped.id); setMenuPos(opts.menuAt); }
+    if (opts?.menuAt) { setMenuPinned(false); setMenuId(stamped.id); setMenuPos(opts.menuAt); }
     return stamped.id;
-  }, []);
+  }, [writeEvents]);
   const createStampedRef = useRef(createStamped);
   useEffect(() => { createStampedRef.current = createStamped; }, [createStamped]);
 
   // Entering edit mode on an existing item materialises the concrete record edits
   // should land on *up front* (so the text box never remounts mid-typing). If the
   // user then makes no real change, `finishEdit` drops the freshly-forked record
-  // so the item stays linked to its recurring series instead of silently splitting.
-  const editForkRef = useRef<{ id: string; origin: PlannerEvent } | null>(null);
-  const sameSchedule = (a: PlannerEvent, b: PlannerEvent) =>
-    a.dayIndex === b.dayIndex && a.startTime === b.startTime && a.endTime === b.endTime &&
-    a.content === b.content && a.color === b.color && !!a.noCheckbox === !!b.noCheckbox;
-
+  // Editing routes directly to the master (an edit is to the whole item), so
+  // entering/leaving edit mode is just toggling the focused occurrence id. The
+  // Google push fires from the post-edit effect once editingId returns to null.
   const enterEdit = useCallback((id: string) => {
-    const src = eventsRef.current[id];
-    const { events: prepared, targetId } = ensureConcreteTarget(eventsRef.current, id, commitCtxRef.current);
-    if (targetId !== id) {
-      setEvents(prepared);
-      setMenuId(m => (m === id ? targetId : m));
-      editForkRef.current = src ? { id: targetId, origin: { ...src } } : null;
-    } else {
-      editForkRef.current = null;
-    }
-    setEditingId(targetId);
+    setEditingId(id);
   }, []);
 
   const finishEdit = useCallback(() => {
-    const fork = editForkRef.current;
-    if (fork) {
-      const cur = eventsRef.current[fork.id];
-      if (cur && sameSchedule(cur, fork.origin)) {
-        setEvents(prev => { const n = { ...prev }; delete n[fork.id]; return n; });
-      }
-    }
-    editForkRef.current = null;
     setEditingId(null);
   }, []);
 
@@ -648,13 +965,14 @@ export default function WeeklyPlanner() {
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
-  const activeFocusDayKey = focusTimer.sessionStartedAt ? dateKey(focusTimer.sessionStartedAt) : '';
+  const activeFocusDayKey = focusTimer.sessionStartedAt ? focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) : '';
   const focusStats = useMemo(() => {
+    const todayFocusKey = focusDayKey(new Date(nowTick), focusDayStartHour);
     const perDay = days.map(day => {
       const key = dateKey(day);
-      const loggedSeconds = sumFocusSecondsForDay(focusSessions, day);
+      const loggedSeconds = sumFocusSecondsForDay(focusSessions, day, focusDayStartHour);
       const activeSeconds = activeFocusDayKey === key ? focusElapsedSeconds : 0;
-      const sessions = focusSessions.filter(session => dateKey(session.endedAt) === key && isCompletedFocusSession(session)).length;
+      const sessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === key && isCompletedFocusSession(session)).length;
       return {
         day,
         key,
@@ -673,16 +991,16 @@ export default function WeeklyPlanner() {
       averageSeconds: Math.floor(weekSeconds / 7),
       bestDay,
       maxSeconds,
-      todaySeconds: perDay.find(day => isToday(day.day))?.seconds ?? 0,
+      todaySeconds: perDay.find(day => day.key === todayFocusKey)?.seconds ?? 0,
     };
-  }, [activeFocusDayKey, focusElapsedSeconds, days, focusSessions]);
+  }, [activeFocusDayKey, focusElapsedSeconds, days, focusSessions, focusDayStartHour, nowTick]);
 
   // ── Focus analysis (month / year) ──────────────────────────────────────────
   const focusAnalysis = useMemo(() => {
     const byDaySeconds = new Map<string, number>();
     const byDaySessions = new Map<string, number>();
     for (const s of focusSessions) {
-      const k = dateKey(s.endedAt);
+      const k = focusDayKey(s.endedAt, focusDayStartHour);
       byDaySeconds.set(k, (byDaySeconds.get(k) ?? 0) + s.durationSeconds);
       if (isCompletedFocusSession(s)) byDaySessions.set(k, (byDaySessions.get(k) ?? 0) + 1);
     }
@@ -724,7 +1042,7 @@ export default function WeeklyPlanner() {
     const activeDayKeys = new Set(Array.from(byDaySeconds.entries()).filter(([, secs]) => secs > 0).map(([k]) => k));
     let currentStreak = 0;
     {
-      let cursorDate = new Date();
+      let cursorDate = new Date(`${focusDayKey(new Date(), focusDayStartHour)}T00:00:00`);
       while (activeDayKeys.has(dateKey(cursorDate))) {
         currentStreak++;
         cursorDate = new Date(cursorDate.getTime() - 86400000);
@@ -751,7 +1069,7 @@ export default function WeeklyPlanner() {
       monthTotals, yearSeconds, yearSessions, yearActiveDays, yearMaxSeconds, yearBestMonth,
       currentStreak, longestStreak, allTimeSeconds, allTimeSessions, avgSessionLength,
     };
-  }, [focusSessions, analysisMonthCursor, analysisYearCursor, weekStartsOn]);
+  }, [focusSessions, analysisMonthCursor, analysisYearCursor, weekStartsOn, focusDayStartHour]);
 
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 1000);
@@ -777,15 +1095,48 @@ export default function WeeklyPlanner() {
     return () => clearInterval(focusPollId);
   }, []);
 
+  // The running timer is shared through the backend so the main window and the
+  // side widget always show the SAME live session (localStorage `storage` events
+  // don't reliably cross separate windows). `lastTimerJsonRef` holds the last
+  // payload we sent or received, so polling never echoes our own write back.
+  const lastTimerJsonRef = useRef<string | null>(null);
+  // Stays false until the backend's running-timer state has been loaded once. While
+  // false we must NOT push our (possibly empty/stale) local state to the backend, or
+  // we'd clobber a live session that another window owns before we've pulled it.
+  const timerHydratedRef = useRef(false);
   useEffect(() => {
     setFocusTimer(loadLocalFocusTimer());
 
     const handleStorage = (event: StorageEvent) => {
       if (!event.key || event.key === FOCUS_TIMER_KEY) setFocusTimer(loadLocalFocusTimer());
     };
-
     window.addEventListener('storage', handleStorage);
-    return () => window.removeEventListener('storage', handleStorage);
+
+    const pullTimer = () => {
+      fetch('/api/focus-timer')
+        .then(r => r.json())
+        .then(data => {
+          if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
+          const json = JSON.stringify(coerceFocusTimer(data));
+          timerHydratedRef.current = true;
+          if (json === lastTimerJsonRef.current) return; // our own echo / no change
+          lastTimerJsonRef.current = json;
+          setFocusTimer(JSON.parse(json));
+        })
+        .catch(() => { timerHydratedRef.current = true; });
+    };
+    pullTimer();
+    const pollId = setInterval(pullTimer, 2000);
+    // Checkpoint a running session's elapsed time into durable state every few seconds
+    // so closing the app mid-session never loses progress (previously it was only
+    // committed when the session ended). Folds elapsed into accumulatedSeconds and
+    // re-anchors lastStartedAt so the persisted number is always current.
+    const checkpointId = setInterval(() => {
+      setFocusTimer(prev => (prev.isRunning && prev.lastStartedAt
+        ? { ...prev, accumulatedSeconds: getFocusTimerElapsedSeconds(prev), lastStartedAt: new Date().toISOString() }
+        : prev));
+    }, 5000);
+    return () => { window.removeEventListener('storage', handleStorage); clearInterval(pollId); clearInterval(checkpointId); };
   }, []);
 
   const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
@@ -827,6 +1178,18 @@ export default function WeeklyPlanner() {
 
   useEffect(() => {
     localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(focusTimer));
+    // Don't push to the backend until we've hydrated from it — otherwise our initial
+    // (empty/stale) state could overwrite a live session owned by another window.
+    if (!timerHydratedRef.current) return;
+    // Push to the shared backend (skip if this value just arrived from a pull).
+    const json = JSON.stringify(coerceFocusTimer(focusTimer));
+    if (json === lastTimerJsonRef.current) return;
+    lastTimerJsonRef.current = json;
+    fetch('/api/focus-timer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: json,
+    }).catch(() => {});
   }, [focusTimer]);
 
   useEffect(() => {
@@ -939,8 +1302,8 @@ export default function WeeklyPlanner() {
           if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (s.editDomain === 'week' || s.editDomain === 'all') setEditDomain(s.editDomain);
           if (s.calendarView === 'week' || s.calendarView === 'month') setCalendarView(s.calendarView);
+          if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         }
       })
       .catch(err => console.error('Failed to load settings from backend:', err))
@@ -967,9 +1330,9 @@ export default function WeeklyPlanner() {
     fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, editDomain, calendarView }),
+      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour }),
     }).catch(err => console.error('Failed to save settings to backend:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, editDomain, calendarView]);
+  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
@@ -1018,6 +1381,7 @@ export default function WeeklyPlanner() {
     redoStack.current.push(eventsRef.current);
     skipHistoryRef.current = true;
     prevEventsRef.current = prevState;
+    eventsRef.current = prevState;
     setEvents(prevState);
     setHistVersion(v => v + 1);
   }, []);
@@ -1028,6 +1392,7 @@ export default function WeeklyPlanner() {
     undoStack.current.push(eventsRef.current);
     skipHistoryRef.current = true;
     prevEventsRef.current = nextState;
+    eventsRef.current = nextState;
     setEvents(nextState);
     setHistVersion(v => v + 1);
   }, []);
@@ -1045,7 +1410,7 @@ export default function WeeklyPlanner() {
       backupFormatVersion: BACKUP_FORMAT_VERSION,
       exportedAt: new Date().toISOString(),
       events,
-      settings: { interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, editDomain, calendarView },
+      settings: { interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour },
       focusSessions,
     };
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backup, null, 2));
@@ -1085,8 +1450,8 @@ export default function WeeklyPlanner() {
           if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (s.editDomain === 'week' || s.editDomain === 'all') setEditDomain(s.editDomain);
           if (s.calendarView === 'week' || s.calendarView === 'month') setCalendarView(s.calendarView);
+          if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         }
 
         if (sessions) {
@@ -1129,6 +1494,7 @@ export default function WeeklyPlanner() {
   useEffect(() => { dayEndRef.current = dayEndH; }, [dayEndH]);
   useEffect(() => { selectedIdsRef.current = selectedIds; }, [selectedIds]);
   useEffect(() => { menuIdRef.current = menuId; }, [menuId]);
+  useEffect(() => { menuPosRef.current = menuPos; }, [menuPos]);
   useEffect(() => { clipboardRef.current = clipboard; }, [clipboard]);
 
   // Close settings on outside click
@@ -1263,140 +1629,106 @@ export default function WeeklyPlanner() {
         return;
       }
 
-      // Ctrl+C / Cmd+C: Copy selected, hovered, menu, or editing events
-      if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
-        let targetIds: string[] = [];
-        if (selectedIdsRef.current.size > 0) {
-          targetIds = Array.from(selectedIdsRef.current);
-        } else if (hoveredIdRef.current) {
-          targetIds = [hoveredIdRef.current];
-        } else if (menuIdRef.current) {
-          targetIds = [menuIdRef.current];
-        } else if (editingIdRef.current) {
-          targetIds = [editingIdRef.current];
+      // Drop copies of `clip` at the slot under the cursor (anchored to the group's
+      // earliest event). Returns false if the cursor isn't over the grid.
+      const pasteAtCursor = (clip: PlannerEvent[]): boolean => {
+        const mp = mousePosRef.current;
+        if (!mp) return false;
+        const coords = getGridCoords(mp.x, mp.y);
+        const el = daysGridRef.current;
+        if (!coords || !el) return false;
+        const rect = el.getBoundingClientRect();
+        if (!(mp.x >= rect.left && mp.x <= rect.right && mp.y >= rect.top + HEADER_PX + allDayHeight && mp.y <= rect.bottom)) {
+          return false;
         }
 
-        if (targetIds.length > 0) {
-          const evsToCopy = targetIds
-            .map(id => eventsRef.current[id])
-            .filter((ev): ev is PlannerEvent => !!ev);
-          if (evsToCopy.length > 0) {
-            setClipboard(evsToCopy);
-            e.preventDefault();
+        // Anchor = earliest (top-left) event so relative layout is preserved.
+        let anchor = clip[0];
+        let minDay = anchor.dayIndex;
+        let minStart = timeToMin(anchor.startTime);
+        for (const ev of clip) {
+          const start = timeToMin(ev.startTime);
+          if (ev.dayIndex < minDay || (ev.dayIndex === minDay && start < minStart)) {
+            anchor = ev; minDay = ev.dayIndex; minStart = start;
           }
         }
+
+        const wk = editCtxRef.current.viewedWeekKey;
+        const stampedNew: PlannerData = {};
+        const pastedIds: string[] = [];
+        for (const ev of clip) {
+          const newId = uid();
+          const evStart = timeToMin(ev.startTime);
+          const duration = timeToMin(ev.endTime) - evStart;
+          const dayOffset = ev.dayIndex - anchor.dayIndex;
+          const timeOffset = evStart - timeToMin(anchor.startTime);
+          const targetDay = clamp(coords.dayIndex + dayOffset, 0, 6);
+          const targetStart = clamp(coords.snappedMin + timeOffset, dayStartRef.current * 60, dayEndRef.current * 60 - duration);
+          // A pasted copy is a fresh, standalone item: strip recurrence + Google
+          // identity so it never mutates the source's series or sync record.
+          stampedNew[newId] = stampNewItem({
+            ...ev, id: newId, dayIndex: targetDay,
+            startTime: minToTime(targetStart), endTime: minToTime(targetStart + duration),
+            recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined,
+            gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined,
+          } as PlannerEvent, wk);
+          pastedIds.push(newId);
+        }
+        writeEvents({ ...eventsRef.current, ...stampedNew });
+        setSelectedIds(new Set(pastedIds)); // highlight the clone(s); no forced edit
+        return true;
+      };
+
+      // Resolve the "source" item(s) for a copy: explicit selection wins, then the
+      // item under the cursor, then the open menu / the item being edited.
+      const resolveSource = (): PlannerEvent[] => {
+        let ids: string[] = [];
+        if (selectedIdsRef.current.size > 0) ids = Array.from(selectedIdsRef.current);
+        else if (hoveredIdRef.current) ids = [hoveredIdRef.current];
+        else if (menuIdRef.current) ids = [menuIdRef.current];
+        else if (editingIdRef.current) ids = [editingIdRef.current];
+        // Resolve against the visible week map first (handles repeating occurrence
+        // ids like "master::date"), falling back to the raw store.
+        return ids
+          .map(id => weekEventsRef.current[id] ?? eventsRef.current[id])
+          .filter((ev): ev is PlannerEvent => !!ev);
+      };
+
+      // Ctrl+C / Cmd+C: copy to the clipboard only. Pasting happens on Ctrl+V.
+      if (e.key === 'c' && (e.ctrlKey || e.metaKey) && !inTextField) {
+        const source = resolveSource();
+        if (source.length === 0) return;
+        setClipboard(source);
+        e.preventDefault();
         return;
       }
 
-      // Ctrl+V / Cmd+V: Paste events
-      if (e.key === 'v' && (e.ctrlKey || e.metaKey)) {
+      // Ctrl+V / Cmd+V: paste at the cursor, or fall back to an in-place offset copy.
+      if (e.key === 'v' && (e.ctrlKey || e.metaKey) && !inTextField) {
         const clip = clipboardRef.current;
         if (!clip || clip.length === 0) return;
-
-        let pastedAtCursor = false;
-        if (mousePosRef.current) {
-          const el = daysGridRef.current;
-          if (el) {
-            const rect = el.getBoundingClientRect();
-            const { x, y } = mousePosRef.current;
-            // Check if cursor is over the grid (excluding the header row)
-            if (x >= rect.left && x <= rect.right && y >= rect.top + HEADER_PX + allDayHeight && y <= rect.bottom) {
-              const coords = getGridCoords(x, y);
-              if (coords) {
-                // Find anchor: earliest event in copied group
-                let anchor = clip[0];
-                let minDay = anchor.dayIndex;
-                let minStart = timeToMin(anchor.startTime);
-
-                for (const ev of clip) {
-                  const start = timeToMin(ev.startTime);
-                  if (ev.dayIndex < minDay || (ev.dayIndex === minDay && start < minStart)) {
-                    anchor = ev;
-                    minDay = ev.dayIndex;
-                    minStart = start;
-                  }
-                }
-
-                const newEvents: PlannerData = {};
-                const pastedIds: string[] = [];
-
-                for (const ev of clip) {
-                  const newId = uid();
-                  const evStart = timeToMin(ev.startTime);
-                  const duration = timeToMin(ev.endTime) - evStart;
-
-                  const dayOffset = ev.dayIndex - anchor.dayIndex;
-                  const timeOffset = evStart - timeToMin(anchor.startTime);
-
-                  const targetDay = clamp(coords.dayIndex + dayOffset, 0, 6);
-                  const targetStart = clamp(
-                    coords.snappedMin + timeOffset,
-                    dayStartRef.current * 60,
-                    dayEndRef.current * 60 - duration
-                  );
-
-                  newEvents[newId] = {
-                    ...ev,
-                    id: newId,
-                    dayIndex: targetDay,
-                    startTime: minToTime(targetStart),
-                    endTime: minToTime(targetStart + duration),
-                  };
-                  pastedIds.push(newId);
-                }
-
-                {
-                  const ctx = commitCtxRef.current;
-                  const stampedNew: PlannerData = {};
-                  for (const [k, v] of Object.entries(newEvents)) stampedNew[k] = stampNewItem(v, ctx);
-                  setEvents(prev => ({ ...prev, ...stampedNew }));
-                }
-
-                if (pastedIds.length === 1) {
-                  setEditingId(pastedIds[0]);
-                } else {
-                  setSelectedIds(new Set(pastedIds));
-                }
-                pastedAtCursor = true;
-                e.preventDefault();
-              }
-            }
-          }
-        }
-
-        // Fallback: paste in-place with offset (+10 min)
-        if (!pastedAtCursor) {
-          const newEvents: PlannerData = {};
+        if (!pasteAtCursor(clip)) {
+          // Not over the grid → drop copies near the originals (+10 min).
+          const wk = editCtxRef.current.viewedWeekKey;
+          const stampedNew: PlannerData = {};
           const pastedIds: string[] = [];
-
           for (const ev of clip) {
             const newId = uid();
             const evStart = timeToMin(ev.startTime);
             const duration = timeToMin(ev.endTime) - evStart;
-            const pasteStart = clamp(
-              evStart + 10,
-              dayStartRef.current * 60,
-              dayEndRef.current * 60 - duration
-            );
-
-            newEvents[newId] = {
-              ...ev,
-              id: newId,
-              startTime: minToTime(pasteStart),
-              endTime: minToTime(pasteStart + duration),
-            };
+            const pasteStart = clamp(evStart + 10, dayStartRef.current * 60, dayEndRef.current * 60 - duration);
+            stampedNew[newId] = stampNewItem({
+              ...ev, id: newId,
+              startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration),
+              recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined,
+              gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined,
+            } as PlannerEvent, wk);
             pastedIds.push(newId);
           }
-
-          setEvents(prev => ({ ...prev, ...newEvents }));
-
-          if (pastedIds.length === 1) {
-            setEditingId(pastedIds[0]);
-          } else {
-            setSelectedIds(new Set(pastedIds));
-          }
-          e.preventDefault();
+          writeEvents({ ...eventsRef.current, ...stampedNew });
+          setSelectedIds(new Set(pastedIds));
         }
+        e.preventDefault();
       }
     };
     document.addEventListener('keydown', onKey);
@@ -1530,7 +1862,7 @@ export default function WeeklyPlanner() {
             const patches: Record<string, Partial<PlannerEvent>> = {};
             for (const id of br.eventIds) {
               const bd = finalBatch[id];
-              const ev = eventsRef.current[id];
+              const ev = weekEventsRef.current[id] ?? eventsRef.current[id];
               if (!ev || !bd) continue;
               const dur = br.durations[id] ?? timeToMin(ev.endTime) - timeToMin(ev.startTime);
               patches[id] = { dayIndex: bd.dayIndex, startTime: minToTime(bd.startMin), endTime: minToTime(bd.startMin + dur) };
@@ -1580,7 +1912,7 @@ export default function WeeklyPlanner() {
 
       if (dr) {
         if (dr.active) {
-          const ev = eventsRef.current[dr.eventId];
+          const ev = weekEventsRef.current[dr.eventId] ?? eventsRef.current[dr.eventId];
           if (ev) {
             applyEditRef.current(dr.eventId, { dayIndex: dr.curDay, startTime: minToTime(dr.curStartMin), endTime: minToTime(dr.curStartMin + dr.durationMin) });
           }
@@ -1589,7 +1921,7 @@ export default function WeeklyPlanner() {
         dragRef.current = null; setDragDisp(null);
       }
       if (rr) {
-        const ev = eventsRef.current[rr.eventId];
+        const ev = weekEventsRef.current[rr.eventId] ?? eventsRef.current[rr.eventId];
         if (ev) {
           applyEditRef.current(rr.eventId, { startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) });
         }
@@ -1630,7 +1962,7 @@ export default function WeeklyPlanner() {
       const baseDays: Record<string, number> = {};
       const durations: Record<string, number> = {};
       for (const id of selectedIds) {
-        const eRef = eventsRef.current[id];
+        const eRef = weekEventsRef.current[id] ?? eventsRef.current[id];
         if (eRef) {
           const s = normalizeMin(timeToMin(eRef.startTime), dayStartH);
           let en = normalizeMin(timeToMin(eRef.endTime), dayStartH);
@@ -1680,29 +2012,30 @@ export default function WeeklyPlanner() {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const x    = rect.right + 6;
     const y    = rect.top;
+    setMenuPinned(false);       // anchor to this event (until the user drags it)
     setMenuId(ev.id);
     setMenuPos({ x, y });
   };
 
   const toggleEventCompleted = (id: string, day: Date) => {
     const dateStr = format(day, 'yyyy-MM-dd');
-    setEvents(prev => {
-      const ev = prev[id];
-      if (!ev) return prev;
-      const completedDates = ev.completedDates || [];
-      const updatedDates = completedDates.includes(dateStr)
-        ? completedDates.filter(d => d !== dateStr)
-        : [...completedDates, dateStr];
-      const updatedEvents = { ...prev, [id]: { ...ev, completedDates: updatedDates } };
-      
-      fetch('/api/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedEvents),
-      }).catch(err => console.error("Failed to save checkbox state:", err));
-      
-      return updatedEvents;
-    });
+    // `id` may be an occurrence id ("master::date"); completion is tracked on the
+    // stored master's completedDates, so resolve to the master before mutating.
+    const { masterId } = parseOccId(id);
+    const prev = eventsRef.current;
+    const ev = prev[masterId];
+    if (!ev) return;
+    const completedDates = ev.completedDates || [];
+    const updatedDates = completedDates.includes(dateStr)
+      ? completedDates.filter(d => d !== dateStr)
+      : [...completedDates, dateStr];
+    const updatedEvents = { ...prev, [masterId]: { ...ev, completedDates: updatedDates } };
+    writeEvents(updatedEvents);
+    fetch('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedEvents),
+    }).catch(err => console.error("Failed to save checkbox state:", err));
   };
 
   const deleteEvent = (id: string) => {
@@ -1712,15 +2045,16 @@ export default function WeeklyPlanner() {
   };
 
   const cloneAcrossWeek = (ev: PlannerEvent) => {
-    const ctx = commitCtxRef.current;
+    const wk = editCtxRef.current.viewedWeekKey;
     const additions: PlannerData = {};
     for (let day = 0; day < 7; day++) {
       if (day === ev.dayIndex) continue;
       const newId = uid();
-      // Each clone is a fresh item stamped with the current modification domain.
-      additions[newId] = stampNewItem({ ...ev, id: newId, dayIndex: day, scope: undefined, weekKey: undefined, seriesId: undefined, overridesSeriesId: undefined, deleted: undefined }, ctx);
+      // Each clone is a fresh, non-repeating copy on that day (recurrence + sync
+      // identity stripped so it stands alone).
+      additions[newId] = stampNewItem({ ...ev, id: newId, dayIndex: day, weekKey: wk, recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined, gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined }, wk);
     }
-    setEvents(prev => ({ ...prev, ...additions }));
+    writeEvents({ ...eventsRef.current, ...additions });
     setMenuId(null); setMenuPos(null);
   };
 
@@ -1769,7 +2103,19 @@ export default function WeeklyPlanner() {
   const headerInactive = darkMode ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.55)';
 
   // ── Current menu event (for popover rendering) ────────────────────────────
-  const menuEvent = menuId ? weekEvents[menuId] : null;
+  const isDraft = !!(draft && menuId === draft.id);
+  const menuEvent = isDraft ? draft : (menuId ? weekEvents[menuId] : null);
+
+  // Commit the draft into the real event map (Save). Closing the popup afterwards
+  // clears the draft via the menuId-null effect.
+  const commitDraft = () => {
+    if (!draftRef.current) return;
+    const d = { ...draftRef.current, updatedAt: Date.now() };
+    writeEvents({ ...eventsRef.current, [d.id]: d });
+    setDraft(null);
+    setMenuId(null);
+    setMenuPos(null);
+  };
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -1824,37 +2170,6 @@ export default function WeeklyPlanner() {
             </button>
             {!showFocusAnalysis && calendarView === 'week' && (
               <>
-                {/* Modification domain: does an edit touch just this week or every week? */}
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: headerLabel }}>Applies to</span>
-                  <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                    {([
-                      { v: 'week' as EventScope, label: 'This week' },
-                      { v: 'all'  as EventScope, label: 'All weeks' },
-                    ]).map(opt => {
-                      const active = (isPastWeek ? 'week' : editDomain) === opt.v;
-                      const lockedOut = isPastWeek && opt.v === 'all';
-                      return (
-                        <button
-                          key={opt.v}
-                          onClick={() => { if (!lockedOut) setEditDomain(opt.v); }}
-                          disabled={lockedOut}
-                          title={lockedOut ? 'Past weeks are frozen — edits here stay in this week only' : opt.v === 'all' ? 'Edits apply to this week and every future week' : 'Edits apply to this week only'}
-                          className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200"
-                          style={{
-                            background: active ? (opt.v === 'all' ? (darkMode ? 'rgba(96,165,250,0.24)' : 'rgba(37,99,235,0.12)') : (darkMode ? 'rgba(255,255,255,0.14)' : '#fff')) : 'transparent',
-                            color: active ? (opt.v === 'all' ? (darkMode ? '#93c5fd' : '#2563eb') : (darkMode ? '#f5f5f5' : 'var(--color-foreground)')) : headerInactive,
-                            boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
-                            opacity: lockedOut ? 0.45 : 1,
-                            cursor: lockedOut ? 'default' : 'pointer',
-                          }}
-                        >
-                          {opt.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: headerLabel }}>Interval</span>
                   <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
@@ -1900,6 +2215,14 @@ export default function WeeklyPlanner() {
             >
               <BarChart3 size={14}/>
             </button>
+            <button
+              onClick={handleHeaderCreateClick}
+              title="Create Event"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-blue-500 hover:bg-blue-600 transition-colors shadow-sm cursor-pointer"
+            >
+              <Plus size={14} />
+              Create
+            </button>
             <button onClick={openWidget} title="Open Floating Widget" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <AppWindow size={14}/>
             </button>
@@ -1911,7 +2234,7 @@ export default function WeeklyPlanner() {
       </header>
 
       {/* ── Grid ────────────────────────────────────────────────────────── */}
-      <main className="flex-1 overflow-auto">
+      <main ref={mainRef} className="flex-1 overflow-auto">
         {!showFocusAnalysis && (
         <div className="min-w-[900px] max-w-[1400px] mx-auto p-4">
           {calendarView === 'week' && (
@@ -2255,6 +2578,13 @@ export default function WeeklyPlanner() {
                           const isMenu   = menuId === ev.id;
                           const isResize = resizeDisp?.id === ev.id;
                           const isSelected = selectedIds.has(ev.id);
+                          // While actively dragging/resizing the block must track the cursor
+                          // 1:1 (no easing, or it lags). The moment it settles, let its
+                          // position/size glide to the snapped target for a smooth landing.
+                          const isMoving = isDrag || isResize || !!(batchDisp && batchDisp[ev.id]);
+                          const blockTransition = isMoving
+                            ? 'box-shadow 150ms ease, opacity 150ms ease'
+                            : 'top 260ms cubic-bezier(0.22,1,0.36,1), height 260ms cubic-bezier(0.22,1,0.36,1), left 260ms cubic-bezier(0.22,1,0.36,1), right 260ms cubic-bezier(0.22,1,0.36,1), box-shadow 150ms ease, opacity 150ms ease, outline-color 150ms ease';
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
                           // Duration always reflects the event's true full start–end, not just this segment.
@@ -2295,9 +2625,11 @@ export default function WeeklyPlanner() {
                               key={itemKey}
                               data-event="1"
                               data-event-id={ev.id}
-                              className={`absolute border overflow-visible transition-shadow duration-150 ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                              className={`absolute border overflow-visible ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
+                                transition: blockTransition,
+                                willChange: isMoving ? 'top, height' : undefined,
                                 left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
                                 right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
                                 backgroundColor: bg,
@@ -2665,20 +2997,46 @@ export default function WeeklyPlanner() {
                     {analysisTab === 'month' ? format(analysisMonthCursor, 'MMMM yyyy') : analysisYearCursor}
                   </span>
                 </div>
-                <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                  {(['month', 'year'] as const).map(tab => (
-                    <button
-                      key={tab}
-                      onClick={() => setAnalysisTab(tab)}
-                      className="px-3 py-1 rounded-md text-[11px] font-semibold capitalize transition-colors"
-                      style={{
-                        background: analysisTab === tab ? (darkMode ? 'rgba(96,165,250,0.20)' : '#ffffff') : 'transparent',
-                        color: analysisTab === tab ? '#60a5fa' : menuSub,
-                      }}
-                    >
-                      {tab}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-3">
+                  {/* Day-start-hour setting — re-buckets all analysis live */}
+                  <div className="flex items-center gap-2" title="The hour a new day begins for focus stats. Sessions before it count toward the previous day.">
+                    <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Day starts</span>
+                    <div className="flex items-center rounded-lg overflow-hidden" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                      <button
+                        onClick={() => setFocusDayStartHour(h => (h + 23) % 24)}
+                        className="px-2 py-1 text-[13px] leading-none transition-colors"
+                        style={{ color: menuSub }}
+                        onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                      >−</button>
+                      <span className="px-2 py-1 text-[11px] font-semibold tabular-nums min-w-[52px] text-center" style={{ color: menuText }}>
+                        {`${focusDayStartHour % 12 === 0 ? 12 : focusDayStartHour % 12} ${focusDayStartHour < 12 ? 'AM' : 'PM'}`}
+                      </span>
+                      <button
+                        onClick={() => setFocusDayStartHour(h => (h + 1) % 24)}
+                        className="px-2 py-1 text-[13px] leading-none transition-colors"
+                        style={{ color: menuSub }}
+                        onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                      >+</button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    {(['month', 'year'] as const).map(tab => (
+                      <button
+                        key={tab}
+                        onClick={() => setAnalysisTab(tab)}
+                        className="px-3 py-1 rounded-md text-[11px] font-semibold capitalize transition-colors"
+                        style={{
+                          background: analysisTab === tab ? (darkMode ? 'rgba(96,165,250,0.20)' : '#ffffff') : 'transparent',
+                          color: analysisTab === tab ? '#60a5fa' : menuSub,
+                        }}
+                      >
+                        {tab}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -3250,14 +3608,21 @@ export default function WeeklyPlanner() {
       </AnimatePresence>
 
       {/* ── Context menu (portal-style fixed popover) ────────────────────── */}
+      <AnimatePresence>
       {menuEvent && menuPos && (
-        <div
+        <motion.div
           ref={menuRef}
-          className="fixed z-[200] rounded-xl shadow-xl overflow-hidden"
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.96 }}
+          transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+          className="fixed z-[200] rounded-xl shadow-xl overflow-y-auto overflow-x-hidden"
           style={{
-            left: Math.min(menuPos.x, window.innerWidth - 220),
-            top:  Math.min(menuPos.y, window.innerHeight - 300),
-            minWidth: 180,
+            left: menuPos.x,
+            top:  menuPos.y,
+            transformOrigin: 'top left',
+            minWidth: 260,
+            maxHeight: 'calc(100vh - 16px)',
             background: menuBg,
             border: `1px solid ${menuBdr}`,
             boxShadow: darkMode
@@ -3266,12 +3631,51 @@ export default function WeeklyPlanner() {
           }}
           onMouseDown={e => e.stopPropagation()}
         >
-          {/* Event label */}
-          <div className="px-3 pt-2.5 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-            <p className="text-[11px] font-semibold truncate" style={{ color: menuText }}>
-              {menuEvent.content || 'Untitled'}
-            </p>
+          {/* Drag handle — move the popup anywhere */}
+          <div
+            onMouseDown={startMenuDrag}
+            className="flex items-center justify-center gap-1 py-1 select-none"
+            style={{ cursor: 'grab', color: menuSub, borderBottom: `1px solid ${menuBdr}` }}
+            title="Drag to move"
+          >
+            <GripHorizontal size={14} style={{ opacity: 0.6 }} />
           </div>
+
+          {/* Title field (works for drafts, which have no grid block, and live items) */}
+          <div className="px-3 pt-2 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+            <input
+              type="text"
+              autoFocus={isDraft}
+              value={menuEvent.content}
+              placeholder="Add title"
+              onChange={(e) => applyEdit(menuEvent.id, { content: e.target.value })}
+              onKeyDown={(e) => { if (e.key === 'Enter' && isDraft) commitDraft(); }}
+              className="w-full text-[13px] font-semibold rounded-md px-2 py-1.5 outline-none"
+              style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+            />
+          </div>
+
+          {/* Day-of-week picker (draft only — the dedicated create has no clicked day) */}
+          {isDraft && (
+            <div className="px-3 py-2 flex items-center gap-1" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              {days.map((d, i) => {
+                const sel = menuEvent.dayIndex === i;
+                return (
+                  <button key={i} type="button"
+                    onClick={() => applyEdit(menuEvent.id, { dayIndex: i })}
+                    className="flex-1 text-[10px] font-semibold rounded-md py-1 transition-colors"
+                    style={{
+                      color: sel ? '#fff' : menuText,
+                      background: sel ? '#5b9d5b' : hoverBg,
+                      border: `1px solid ${menuBdr}`,
+                    }}
+                  >
+                    {format(d, 'EEEEE')}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {/* Precise start/end time editors */}
           {!menuEvent.allDay && (
@@ -3412,30 +3816,75 @@ export default function WeeklyPlanner() {
             })}
           </div>
 
-          {/* Actions */}
-          {[
-            {
-              icon: <Pencil size={13}/>,
-              label: 'Edit',
-              action: () => { enterEdit(menuEvent.id); },
-            },
-            {
-              icon: <CalendarRange size={13}/>,
-              label: 'Clone to whole week',
-              action: () => cloneAcrossWeek(menuEvent),
-            },
-            {
-              icon: <Trash2 size={13}/>,
-              label: 'Delete',
-              danger: true,
-              action: () => deleteEvent(menuEvent.id),
-            },
-          ].map(({ icon, label, action, danger }) => (
+          {/* Repeat */}
+          <RecurrenceEditor
+            recur={menuEvent.recur}
+            anchorWeekday={new Date((menuEvent.occDate || viewedWeekKey) + 'T00:00:00').getDay() as Weekday}
+            onChange={(r) => applyEdit(menuEvent.id, { recur: r })}
+            theme={{ text: menuText, sub: menuSub, bdr: menuBdr, hover: hoverBg, accent: darkMode ? '#93c5fd' : '#2563eb', accentBg: darkMode ? 'rgba(96,165,250,0.18)' : 'rgba(37,99,235,0.10)', fieldBg: darkMode ? 'rgba(255,255,255,0.06)' : '#fff' }}
+          />
+
+          {/* Lock-to-series toggle (repeating items only). OFF (default): editing or
+              moving this occurrence detaches it into a free standalone item. ON: every
+              occurrence stays identical — changes apply to the whole series. */}
+          {!!menuEvent.recur && (
+            <button
+              className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+              style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
+              onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              onClick={() => applyEdit(menuEvent.id, { locked: !menuEvent.locked })}
+              title={menuEvent.locked
+                ? 'Changes apply to every occurrence in this series'
+                : 'Editing or moving this one detaches it from the series'}
+            >
+              <span className="flex items-center gap-2.5">
+                {menuEvent.locked ? <Link2 size={13} style={{ opacity: 0.7 }} /> : <Link2Off size={13} style={{ opacity: 0.7 }} />}
+                Lock to series
+              </span>
+              <span
+                className="flex items-center rounded-full transition-colors"
+                style={{
+                  width: 30, height: 17, padding: 2,
+                  background: menuEvent.locked ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                  justifyContent: menuEvent.locked ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
+              </span>
+            </button>
+          )}
+
+          {/* Draft footer: commit or discard (dedicated create) */}
+          {isDraft && (
+            <div className="flex gap-2 px-3 py-2.5">
+              <button
+                onClick={() => { setMenuId(null); setMenuPos(null); }}
+                className="flex-1 py-1.5 text-[12px] font-semibold rounded-md transition-colors"
+                style={{ color: menuText, background: hoverBg, border: `1px solid ${menuBdr}` }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={commitDraft}
+                className="flex-1 py-1.5 text-[12px] font-semibold rounded-md text-white transition-colors"
+                style={{ background: '#5b9d5b' }}
+              >
+                Save
+              </button>
+            </div>
+          )}
+
+          {/* Actions (live items only — a draft isn't on the grid yet) */}
+          {!isDraft && [
+            { icon: <Pencil size={13}/>, label: 'Edit', action: () => { enterEdit(menuEvent.id); } },
+            { icon: <CalendarRange size={13}/>, label: 'Clone to whole week', action: () => cloneAcrossWeek(menuEvent) },
+          ].map(({ icon, label, action }) => (
             <button
               key={label}
               className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
-              style={{ color: danger ? '#e05555' : menuText }}
-              onMouseEnter={e => (e.currentTarget.style.background = danger ? 'rgba(224,85,85,0.10)' : hoverBg)}
+              style={{ color: menuText }}
+              onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               onClick={action}
             >
@@ -3443,8 +3892,41 @@ export default function WeeklyPlanner() {
               {label}
             </button>
           ))}
-        </div>
+
+          {/* Delete — scoped for repeating items */}
+          {!isDraft && (() => {
+            const repeating = !!menuEvent.recur;
+            const del = (mode: DeleteMode) => { applyDelete(menuEvent.id, mode); if (editingId === menuEvent.id) setEditingId(null); setMenuId(null); setMenuPos(null); };
+            const row = (label: string, onClick: () => void, indent = false) => (
+              <button key={label}
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+                style={{ color: '#e05555', paddingLeft: indent ? 34 : undefined }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(224,85,85,0.10)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                onClick={onClick}
+              >
+                {!indent && <span style={{ opacity: 0.7 }}><Trash2 size={13}/></span>}
+                {label}
+              </button>
+            );
+            if (!repeating) return row('Delete', () => del('all'));
+            return (
+              <>
+                {row('Delete', () => del('one'))}
+                {!deleteExpanded
+                  ? row('Delete more…', () => setDeleteExpanded(true))
+                  : (<>
+                      {row('This and following events', () => del('following'), true)}
+                      {row('All events', () => del('all'), true)}
+                    </>)}
+              </>
+            );
+          })()}
+        </motion.div>
       )}
+      </AnimatePresence>
+
+
 
     </div>
   );

@@ -52,3 +52,6 @@ Thumbs.db
 .chrome-profile/
 database/
 my-made-main-icon.png
+
+# Project-local Claude instructions
+CLAUDE.md

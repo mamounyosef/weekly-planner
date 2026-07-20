@@ -1,58 +1,66 @@
-import { format, startOfWeek } from 'date-fns';
+import { format, addDays, addMonths, addYears, differenceInDays, startOfWeek } from 'date-fns';
 
-// ─── Recurrence / modification-domain model ─────────────────────────────────
-// Every planner item carries a `scope`:
-//   • 'all'  — a recurring item that repeats every week. It is versioned by an
-//              "effective-from" week (`weekKey`): editing it in All-weeks mode
-//              from a given week creates a new version effective from that week
-//              forward, leaving earlier weeks frozen. `seriesId` groups the
-//              versions of one recurring item.
-//   • 'week' — a single-week item pinned to exactly one week (`weekKey`).
-//              It may `overridesSeriesId` a recurring series to mask/fork it for
-//              that one week (a `deleted` week-record is a "skip this week"
-//              tombstone that only suppresses the series, rendering nothing).
+// ─── Google-style recurrence model ──────────────────────────────────────────
+// An item is either NON-REPEATING (no `recur`) or REPEATING (carries a `recur`
+// rule, exactly like a Google Calendar event). A repeating item is stored ONCE
+// (the "master"); the weekly grid expands it into per-day occurrences on the fly.
 //
-// The interface toggle (`domain`) decides how NEW edits behave; the item's own
-// scope decides what an edit can reach. An edit propagates across weeks only
-// when the item is 'all' AND the toggle is 'all' AND the viewed week is not in
-// the past. Everything else stays confined to the viewed week — and the past is
-// never mutated.
+//   • The master's anchor (first occurrence) is `weekKey` (a week-start date) +
+//     `dayIndex` (0–6 within that week) + `startTime`/`endTime` (+ `allDay`/`daysSpan`).
+//   • `recur` describes how it repeats. `exdates` lists occurrence dates that were
+//     individually removed ("delete just this one").
+//
+// Edits to a repeating item affect the whole series (it is one item). Deletes are
+// scoped: this occurrence (exdate), this-and-following (bound the rule with UNTIL),
+// or all (drop the master). This maps 1:1 onto Google's RRULE / EXDATE / delete.
 
-export type EventScope = 'all' | 'week';
+export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 = Sunday … 6 = Saturday
 export type WeekStartsOn = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+export type RecurFreq = 'daily' | 'weekly' | 'monthly' | 'yearly';
+export type DeleteMode = 'one' | 'following' | 'all';
 
-// Sorts lexicographically before any real 'yyyy-MM-dd', so migrated legacy items
-// (effective from "the beginning of time") render in every week.
+export type RecurEnd = { until: string } | { count: number }; // absent = repeats forever
+
+export interface Recurrence {
+  freq: RecurFreq;
+  interval: number;        // every N units (>= 1)
+  byWeekday?: Weekday[];   // weekly only; absent = the anchor's weekday
+  end?: RecurEnd;          // absent = never ends
+}
+
+// Legacy anchor sentinel kept only so `migrateEvents` can recognise old records.
 export const FAR_PAST_WEEK = '0000-01-01';
 
 export interface RecurFields {
   id: string;
-  scope?: EventScope;
-  weekKey?: string;
-  seriesId?: string;
-  overridesSeriesId?: string;
-  deleted?: boolean;
-  dayIndex?: number;
+  weekKey?: string;   // week-start date of the anchor (first) occurrence
+  dayIndex?: number;  // 0–6 within that week
   daysSpan?: number;
   allDay?: boolean;
+  startTime?: string;
+  endTime?: string;
+  deleted?: boolean;  // tombstone awaiting a Google-side delete, then removal
+  recur?: Recurrence;
+  exdates?: string[]; // 'yyyy-MM-dd' occurrence dates removed individually
+  // When true, edits/moves to any occurrence apply to the WHOLE series (they stay
+  // identical). When false/absent (the default), editing or moving one occurrence
+  // detaches it into a standalone non-repeating item, leaving the rest of the series
+  // untouched. Only meaningful on a repeating master.
+  locked?: boolean;
+  // View-only fields stamped onto expanded occurrences (never persisted):
+  masterId?: string;
+  occDate?: string;
+  // Google sync identity:
   gCalId?: string;
   gCalCalendarId?: string;
   gCalETag?: string;
-  gCalRecurSig?: string; // signature of the recurrence spec last pushed to Google
+  gCalRecurSig?: string;
   lastSyncedAt?: number;
   updatedAt?: number;
 }
 
-// One recurring Google event to maintain for a single stored 'all' version record.
-// The version owns the Google event referenced by `recordId`'s gCalId; the fields
-// describe how its native RRULE should be bounded and punched so that the whole
-// series (multiple versions + per-week masks/forks) maps faithfully onto Google.
-export interface DailySeriesSpec {
-  recordId: string;         // the 'all' version record that owns this Google event
-  dtStartWeekKey: string;   // week of the first occurrence (effective-from)
-  untilWeekKey: string | null; // next version's week (exclusive bound); null = open-ended
-  exWeekKeys: string[];     // weeks to exclude — skip-this-week masks AND this-week forks
-}
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WD_CODES = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'] as const;
 
 export function weekKeyOf(date: Date, weekStartsOn: WeekStartsOn): string {
   return format(startOfWeek(date, { weekStartsOn }), 'yyyy-MM-dd');
@@ -62,302 +70,426 @@ function parseDate(d: string): Date {
   if (!d) return new Date(0);
   const parts = d.split('-');
   if (parts.length < 3) return new Date(0);
-  const [y, m, d_] = parts.map(Number);
-  return new Date(y, m - 1, d_);
+  const [y, m, day] = parts.map(Number);
+  return new Date(y, m - 1, day);
 }
 
-const wk = (ev: RecurFields): string => ev.weekKey ?? FAR_PAST_WEEK;
-const seriesOf = (ev: RecurFields): string => ev.seriesId ?? ev.id;
+const ymd = (d: Date): string => format(d, 'yyyy-MM-dd');
+const anchorOf = (ev: RecurFields): Date => addDays(parseDate(ev.weekKey ?? FAR_PAST_WEEK), ev.dayIndex ?? 0);
 
-// A Google-sync identity (gCalId/etag/lastSyncedAt) must belong to exactly one
-// storage record. When the recurrence model derives a NEW record from an existing
-// one (a this-week fork, a skip-this-week mask, a split series version), that new
-// record must NOT inherit the original's Google identity — otherwise two records
-// claim the same Google event, which corrupts pull-matching and could make a
-// mere "skip this week" delete the whole Google series. Callers spread this over
-// any derived record to clear those fields.
-const NO_SYNC_IDENTITY = {
-  gCalId: undefined,
-  gCalCalendarId: undefined,
-  gCalETag: undefined,
-  lastSyncedAt: undefined,
-} as const;
+// ─── Occurrence expansion ────────────────────────────────────────────────────
 
-// Legacy items (no scope) become recurring, effective since forever — preserving
-// exactly the old "every week" behaviour. Returns `changed` so callers can decide
-// whether to persist the upgraded shape.
-export function migrateEvents<T extends RecurFields>(
-  raw: Record<string, T>,
-): { events: Record<string, T>; changed: boolean } {
-  let changed = false;
+// Occurrence START dates of `master` that fall within [rangeStart, rangeEnd).
+// Honours interval, weekly BYDAY, end (until/count) and exclusions (exdates).
+export function occurrenceStarts(master: RecurFields, rangeStart: Date, rangeEnd: Date): Date[] {
+  const anchor = anchorOf(master);
+  const r = master.recur;
+  if (!r) {
+    return anchor < rangeEnd && addDays(anchor, master.daysSpan ?? 1) > rangeStart ? [anchor] : [];
+  }
+
+  const interval = Math.max(1, Math.floor(r.interval || 1));
+  const until = r.end && 'until' in r.end ? parseDate(r.end.until) : null;
+  const count = r.end && 'count' in r.end ? r.end.count : null;
+  const ex = master.exdates && master.exdates.length ? new Set(master.exdates) : null;
+
+  const out: Date[] = [];
+  let produced = 0; // occurrences generated from the anchor (counts toward `count`)
+  const CAP = 8000;
+
+  // Returns false to signal "stop generating".
+  const consider = (d: Date): boolean => {
+    if (d < anchor) return true;                       // before the series began
+    if (until && d > until) return false;
+    if (count != null && produced >= count) return false;
+    produced++;
+    if (d >= rangeStart && d < rangeEnd && !(ex && ex.has(ymd(d)))) out.push(d);
+    return true;
+  };
+
+  if (r.freq === 'weekly') {
+    const byday = (r.byWeekday && r.byWeekday.length ? [...r.byWeekday] : [anchor.getDay() as Weekday]).sort((a, b) => a - b);
+    const anchorSunday = addDays(anchor, -anchor.getDay());
+    for (let k = 0; k < CAP; k++) {
+      const weekSunday = addDays(anchorSunday, k * 7);
+      if (k % interval !== 0) continue;
+      let stop = false;
+      for (const wd of byday) {
+        if (!consider(addDays(weekSunday, wd))) { stop = true; break; }
+      }
+      if (stop) break;
+      if (weekSunday >= rangeEnd && count == null && until == null) break;
+    }
+  } else {
+    for (let k = 0; k < CAP; k++) {
+      const d = r.freq === 'daily' ? addDays(anchor, k * interval)
+        : r.freq === 'monthly' ? addMonths(anchor, k * interval)
+        : addYears(anchor, k * interval);
+      if (!consider(d)) break;
+      if (d >= rangeEnd && count == null && until == null) break;
+    }
+  }
+  return out;
+}
+
+// Upgrade any OLD modification-domain records (they carry a `scope` field) to the
+// Google-style recur model, in place, on load. Idempotent: once upgraded a record
+// has no `scope`, so re-running passes it through. This self-heals if a stale old
+// copy is ever written back. Collapses old per-weekday 'all' records into one
+// weekly/daily master; old 'week' records become plain non-repeating events; old
+// bookkeeping tombstones are dropped (kept only if they still own a Google event).
+const MIGRATE_ANCHOR_WEEK = '2025-01-05'; // a Sunday, in-range for occurrence expansion
+export function migrateEvents<T extends RecurFields>(raw: Record<string, T>): { events: Record<string, T>; changed: boolean } {
+  const anyOld = Object.values(raw).some((e: any) => 'scope' in e || 'seriesId' in e || 'overridesSeriesId' in e);
+  if (!anyOld) return { events: raw, changed: false };
+
+  const strip = (o: any): T => { const n = { ...o }; delete n.scope; delete n.seriesId; delete n.overridesSeriesId; delete n.gCalRecurSig; return n as T; };
   const out: Record<string, T> = {};
-  for (const [id, ev] of Object.entries(raw)) {
-    if (ev.scope === 'all' || ev.scope === 'week') {
-      out[id] = ev;
+  const groups = new Map<string, any[]>();
+
+  for (const ev of Object.values(raw) as any[]) {
+    if (ev.deleted) {
+      if (ev.gCalId) out[ev.id] = strip({ ...ev, deleted: true }); // still needs a Google delete
       continue;
     }
-    changed = true;
-    out[id] = { ...ev, scope: 'all', weekKey: FAR_PAST_WEEK, seriesId: seriesOf(ev) };
+    if (ev.scope === 'all') {
+      const key = [ev.content, ev.startTime, ev.endTime, ev.color, !!ev.noCheckbox, !!ev.allDay, ev.daysSpan || 1].join('|');
+      const g = groups.get(key); if (g) g.push(ev); else groups.set(key, [ev]);
+      continue;
+    }
+    out[ev.id] = strip({ ...ev, deleted: false });
   }
-  return { events: out, changed };
+
+  const now = Date.now();
+  for (const group of groups.values()) {
+    const byWeekday = [...new Set(group.map(r => (r.dayIndex || 0) as Weekday))].sort((a, b) => a - b);
+    const rep = group.find(r => r.gCalId) || group[0];
+    const recur: Recurrence = byWeekday.length >= 7 ? { freq: 'daily', interval: 1 } : { freq: 'weekly', interval: 1, byWeekday };
+    out[rep.id] = strip({ ...rep, weekKey: MIGRATE_ANCHOR_WEEK, dayIndex: byWeekday[0], recur, deleted: false, updatedAt: now });
+    for (const sib of group) {
+      if (sib.id === rep.id) continue;
+      if (sib.gCalId) out[sib.id] = strip({ ...sib, deleted: true, updatedAt: now }); // orphan → delete on next sync
+    }
+  }
+
+  return { events: out, changed: true };
 }
 
-// Resolve raw storage into exactly the items visible in one week, keyed by the
-// storage id of the record actually shown (a recurring version id, or a
-// single-week record id). The rest of the app renders/edits these ids directly.
-export function resolveWeek<T extends RecurFields>(
-  raw: Record<string, T>,
-  viewedWeekKey: string,
-): Record<string, T> {
+// ─── Occurrence ids ──────────────────────────────────────────────────────────
+const OCC_SEP = '::';
+export function makeOccId(masterId: string, occDate: string): string { return `${masterId}${OCC_SEP}${occDate}`; }
+export function parseOccId(id: string): { masterId: string; occDate: string | null } {
+  const i = id.indexOf(OCC_SEP);
+  return i === -1 ? { masterId: id, occDate: null } : { masterId: id.slice(0, i), occDate: id.slice(i + OCC_SEP.length) };
+}
+
+// ─── Resolve one week ─────────────────────────────────────────────────────────
+// Expands every stored item into the concrete occurrences visible in the viewed
+// week, keyed by occurrence id ("<masterId>::<date>" for repeats, plain id for
+// non-repeating items). Each occurrence carries `masterId`/`occDate` so edits and
+// deletes can be routed back to the stored master.
+export function resolveWeek<T extends RecurFields>(raw: Record<string, T>, viewedWeekKey: string): Record<string, T> {
+  const weekStart = parseDate(viewedWeekKey);
+  const weekEnd = new Date(weekStart.getTime() + 7 * DAY_MS);
   const out: Record<string, T> = {};
-  const suppressed = new Set<string>();
 
-  // Single-week records pinned to this week (and the series they mask).
-  const weekStartMs = parseDate(viewedWeekKey).getTime();
-  const weekEndMs = weekStartMs + 7 * 24 * 60 * 60 * 1000;
-
+  // Safety net: if two stored records ever end up pointing at the SAME Google event
+  // (e.g. a foreign event re-pulled under a second id, or a stale merge artifact),
+  // they'd render as two identical items stacked in the same slot. Keep only the
+  // freshest per gCalId so a duplicate can never reach the grid.
+  const freshestByGCal = new Map<string, string>();
   for (const ev of Object.values(raw)) {
-    if (ev.scope !== 'week') continue;
-    
-    // Check if the event overlaps with the viewed week
-    const evStartWeekMs = parseDate(ev.weekKey || FAR_PAST_WEEK).getTime();
-    const evStartMs = evStartWeekMs + (ev.dayIndex || 0) * 24 * 60 * 60 * 1000;
-    const evEndMs = evStartMs + (ev.daysSpan || 1) * 24 * 60 * 60 * 1000;
-    
-    const overlaps = evStartMs < weekEndMs && evEndMs > weekStartMs;
-    if (!overlaps) continue;
-
-    if (ev.overridesSeriesId) suppressed.add(ev.overridesSeriesId);
-    if (ev.deleted) continue; // "skip this week" tombstone: suppress only
-    out[ev.id] = ev;
+    if (ev.deleted || !ev.gCalId || String(ev.id).includes(OCC_SEP)) continue;
+    const prevId = freshestByGCal.get(ev.gCalId);
+    if (!prevId) { freshestByGCal.set(ev.gCalId, ev.id); continue; }
+    const prev = raw[prevId];
+    const score = (r: T) => (r.lastSyncedAt ?? 0) + (r.updatedAt ?? 0);
+    if (score(ev) >= score(prev)) freshestByGCal.set(ev.gCalId, ev.id);
   }
 
-  // Recurring series: pick the version effective for this week (greatest
-  // effective-from that is ≤ the viewed week), unless masked by a week override.
-  const bySeries = new Map<string, T[]>();
-  for (const ev of Object.values(raw)) {
-    if (ev.scope !== 'all') continue;
-    const sid = seriesOf(ev);
-    const list = bySeries.get(sid);
-    if (list) list.push(ev);
-    else bySeries.set(sid, [ev]);
-  }
-  for (const [sid, versions] of bySeries) {
-    if (suppressed.has(sid)) continue;
-    let chosen: T | null = null;
-    for (const v of versions) {
-      if (wk(v) <= viewedWeekKey && (!chosen || wk(chosen) < wk(v))) chosen = v;
+  for (const master of Object.values(raw)) {
+    if (master.deleted) continue;
+    // Never treat a leaked occurrence record (id "master::date") as its own master —
+    // it carries a copy of `recur` and would re-expand into phantom duplicates.
+    if (String(master.id).includes(OCC_SEP)) continue;
+    // Drop the shadowed copy of any duplicated Google event (see freshestByGCal).
+    if (master.gCalId && freshestByGCal.get(master.gCalId) !== master.id) continue;
+
+    if (!master.recur) {
+      // Non-repeating: show if its span overlaps this week (supports multi-day all-day).
+      const start = anchorOf(master);
+      const end = addDays(start, master.daysSpan ?? 1);
+      if (start < weekEnd && end > weekStart) {
+        out[master.id] = { ...master, masterId: master.id, occDate: ymd(start) };
+      }
+      continue;
     }
-    if (!chosen || chosen.deleted) continue;
-    out[chosen.id] = chosen;
+
+    // Repeating: widen the scan backwards for multi-day all-day spill-in.
+    const span = master.allDay ? Math.max(1, master.daysSpan ?? 1) : 1;
+    const scanStart = addDays(weekStart, -(span - 1));
+    for (const d of occurrenceStarts(master, scanStart, weekEnd)) {
+      const occDate = ymd(d);
+      const occId = makeOccId(master.id, occDate);
+      out[occId] = {
+        ...master,
+        id: occId,
+        masterId: master.id,
+        occDate,
+        weekKey: viewedWeekKey,
+        dayIndex: differenceInDays(d, weekStart), // may be < 0 for spill-in; overlap clips it
+      };
+    }
   }
 
   return out;
 }
 
-export interface CommitCtx {
-  viewedWeekKey: string;
-  domain: EventScope;   // interface toggle
-  isPastWeek: boolean;  // viewing a week before the one containing today
-  newId: () => string;
+// ─── Create ────────────────────────────────────────────────────────────────
+// Stamp anchor + timestamp onto a freshly created item (recurrence optional).
+export function stampNewItem<T extends RecurFields>(item: T, viewedWeekKey: string): T {
+  return { ...item, weekKey: item.weekKey ?? viewedWeekKey, deleted: false, updatedAt: Date.now() };
 }
 
-// Editing in the past never propagates, regardless of the toggle.
-function effectiveDomain(ctx: CommitCtx): EventScope {
-  return ctx.isPastWeek ? 'week' : ctx.domain;
-}
-
-// Drop every version of a series effective strictly after the viewed week, so an
-// All-weeks edit makes "this week forward" uniform (later variations collapse).
-function collapseForward<T extends RecurFields>(map: Record<string, T>, sid: string, viewedWeekKey: string): void {
-  for (const [k, v] of Object.entries(map)) {
-    if (v.scope === 'all' && seriesOf(v) === sid && wk(v) > viewedWeekKey) delete map[k];
-  }
-}
-
-// Public form: given the id of a recurring version just edited, collapse any
-// later versions of the same series. Mutates a copy and returns it. Called only
-// on a *real* All-weeks edit (never on merely opening an editor), so opening an
-// item never destroys pre-existing future versions.
-export function collapseSeriesForward<T extends RecurFields>(
-  map: Record<string, T>,
-  targetId: string,
+// ─── Edit (whole series) ───────────────────────────────────────────────────
+// Route a patch on the occurrence shown as `occId` back to its stored master and
+// apply it to the whole item. A day-move on a single-weekday weekly item retargets
+// its weekday; on other repeats the day component is ignored (time still applies).
+// Returns the (possibly new) occurrence id so the UI can re-anchor selection/menu.
+export function editSeries<T extends RecurFields>(
+  raw: Record<string, T>,
+  occId: string,
+  patch: Partial<T>,
   viewedWeekKey: string,
-): Record<string, T> {
-  const target = map[targetId];
-  if (!target || target.scope !== 'all') return map;
-  const next = { ...map };
-  collapseForward(next, seriesOf(target), viewedWeekKey);
-  next[targetId] = target; // never collapse the record we just edited
-  return next;
-}
-
-// Ensure there is a *concrete* record that edits to the item shown as `id` this
-// week should land on, and return its id. Idempotent: calling it repeatedly (e.g.
-// on every keystroke of a live text edit) reuses the same record instead of
-// forking again. After this, callers may patch `targetId` in place with a plain
-// map write and the unified rule still holds.
-//   • single-week item → itself.
-//   • global + This-week → a single-week fork masking the series (reused if it
-//     already exists for this week).
-//   • global + All-weeks → the series version effective from this week (created
-//     by splitting an earlier version if needed; later versions collapse away).
-export function ensureConcreteTarget<T extends RecurFields>(
-  raw: Record<string, T>,
-  id: string,
-  ctx: CommitCtx,
+  weekStartsOn: WeekStartsOn,
 ): { events: Record<string, T>; targetId: string } {
-  const ev = raw[id];
-  if (!ev) return { events: raw, targetId: id };
-  const eff = effectiveDomain(ctx);
+  const { masterId, occDate } = parseOccId(occId);
+  const master = raw[masterId];
+  if (!master) return { events: raw, targetId: occId };
 
-  if (ev.scope === 'week') return { events: raw, targetId: id };
-
-  const sid = seriesOf(ev);
-
-  if (eff === 'all') {
-    // Reuse a version already anchored at the viewed week, else split one off.
-    const existing = Object.values(raw).find(
-      v => v.scope === 'all' && seriesOf(v) === sid && wk(v) === ctx.viewedWeekKey,
-    );
-    if (existing) return { events: raw, targetId: existing.id };
-    // Split a new version off, effective from the viewed week; earlier versions
-    // stay frozen. Later versions are left intact here — a real edit collapses
-    // them via collapseSeriesForward, but merely opening an editor must not.
-    const targetId = ctx.newId();
-    return {
-      events: { ...raw, [targetId]: { ...ev, ...NO_SYNC_IDENTITY, id: targetId, scope: 'all', seriesId: sid, weekKey: ctx.viewedWeekKey, deleted: false } },
-      targetId,
-    };
+  // Non-repeating: plain in-place edit.
+  if (!master.recur) {
+    const next = { ...master, ...patch, updatedAt: Date.now() } as T;
+    return { events: { ...raw, [masterId]: next }, targetId: masterId };
   }
 
-  // This-week fork: reuse an existing override for this series+week if present.
-  const existingOverride = Object.values(raw).find(
-    v => v.scope === 'week' && v.overridesSeriesId === sid && (v.weekKey ?? '') === ctx.viewedWeekKey,
-  );
-  if (existingOverride) {
-    if (existingOverride.deleted) {
-      // A skip-this-week tombstone becomes a real fork again on edit.
-      return {
-        events: { ...raw, [existingOverride.id]: { ...ev, ...NO_SYNC_IDENTITY, id: existingOverride.id, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: sid, deleted: false } },
-        targetId: existingOverride.id,
-      };
-    }
-    return { events: raw, targetId: existingOverride.id };
+  // Series-level fields (the repeat rule itself, or the lock flag) always apply to
+  // the whole master and never detach — they define the series, not one occurrence.
+  const seriesLevel = 'recur' in patch || 'locked' in patch;
+
+  // Repeating + LOCKED (or a series-level change) → edit the whole series in place.
+  if (master.locked || seriesLevel) {
+    return editWholeSeries(raw, master, masterId, occDate, patch, viewedWeekKey, weekStartsOn);
   }
-  const nid = ctx.newId();
-  return {
-    events: {
-      ...raw,
-      [nid]: { ...ev, ...NO_SYNC_IDENTITY, id: nid, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: sid, deleted: false },
-    },
-    targetId: nid,
-  };
+
+  // Repeating + UNLOCKED (the default) → detach THIS occurrence into a standalone,
+  // non-repeating item. The rest of the series is untouched (EXDATE on this date),
+  // and the detached item loses its repeat/lock identity — it's a free normal event.
+  if (!occDate) {
+    // No concrete occurrence date to detach from; fall back to a whole-series edit.
+    return editWholeSeries(raw, master, masterId, occDate, patch, viewedWeekKey, weekStartsOn);
+  }
+  const exdates = master.exdates ?? [];
+  const nextExdates = exdates.includes(occDate) ? exdates : [...exdates, occDate];
+  const masterNext = { ...master, exdates: nextExdates, updatedAt: Date.now() } as T;
+
+  const weekStart = parseDate(viewedWeekKey);
+  const occDay = parseDate(occDate);
+  const newId = newLocalId();
+  const detached = {
+    ...master,
+    id: newId,
+    weekKey: viewedWeekKey,
+    dayIndex: differenceInDays(occDay, weekStart),
+    recur: undefined,
+    exdates: undefined,
+    locked: undefined,
+    masterId: undefined,
+    occDate: undefined,
+    // Fresh Google identity: it becomes its own event on the next sync (the master
+    // keeps its own event, now carrying an EXDATE for this date).
+    gCalId: undefined,
+    gCalCalendarId: undefined,
+    gCalETag: undefined,
+    gCalRecurSig: undefined,
+    lastSyncedAt: undefined,
+    deleted: false,
+    ...patch, // the actual change (move/time/title/color) lands on the detached item
+    updatedAt: Date.now(),
+  } as T;
+
+  return { events: { ...raw, [masterId]: masterNext, [newId]: detached }, targetId: newId };
 }
 
-export function commitDelete<T extends RecurFields>(
+// Edit a repeating master in place (locked series, or a series-level rule change).
+// A day-move relocates the WHOLE series to the new day: weekly shifts every weekday
+// by the drag delta; other freqs shift the anchor date. Time edits apply to all.
+function editWholeSeries<T extends RecurFields>(
   raw: Record<string, T>,
-  id: string,
-  ctx: CommitCtx,
-): Record<string, T> {
-  const ev = raw[id];
-  if (!ev) return raw;
-  const eff = effectiveDomain(ctx);
+  master: T,
+  masterId: string,
+  occDate: string | null,
+  patch: Partial<T>,
+  viewedWeekKey: string,
+  weekStartsOn: WeekStartsOn,
+): { events: Record<string, T>; targetId: string } {
+  const p: Partial<T> = { ...patch };
+  let next = { ...master, updatedAt: Date.now() } as T;
+  let newOccDate = occDate;
 
-  if (ev.scope === 'week') {
-    // A fork of a recurring series must stay masked (become a skip-this-week
-    // tombstone) so the series doesn't pop back; a plain single-week item is gone.
-    if (ev.overridesSeriesId || (ev as any).gCalId) {
-      return { ...raw, [id]: { ...ev, deleted: true } };
-    }
-    const next = { ...raw };
-    delete next[id];
-    return next;
-  }
+  if (master.recur && p.dayIndex != null) {
+    const weekStart = parseDate(viewedWeekKey);
+    const newDate = addDays(weekStart, p.dayIndex);
+    const rec = master.recur;
+    const oldDate = occDate ? parseDate(occDate) : anchorOf(master);
+    const delta = differenceInDays(newDate, oldDate); // whole days moved
 
-  const sid = seriesOf(ev);
-
-  // Global + All-weeks → tombstone this week forward; earlier weeks keep it.
-  if (eff === 'all') {
-    const next = { ...raw };
-    if (wk(ev) === ctx.viewedWeekKey) {
-      next[id] = { ...ev, deleted: true };
+    if (rec.freq === 'weekly') {
+      const oldByday = rec.byWeekday && rec.byWeekday.length ? rec.byWeekday : [anchorOf(master).getDay() as Weekday];
+      const shift = ((delta % 7) + 7) % 7;
+      const newByday = shift === 0
+        ? oldByday
+        : Array.from(new Set(oldByday.map(w => (((w + shift) % 7) as Weekday)))).sort((a, b) => a - b);
+      const newAnchor = addDays(anchorOf(master), delta);
+      next = { ...next, recur: { ...rec, byWeekday: newByday }, weekKey: weekKeyOf(newAnchor, weekStartsOn), dayIndex: differenceInDays(newAnchor, startOfWeek(newAnchor, { weekStartsOn })) };
+      newOccDate = ymd(newDate);
+    } else if (rec.freq === 'daily') {
+      // Daily repeats every day — a day-move is meaningless; keep the anchor.
+      newOccDate = occDate;
     } else {
-      const nid = ctx.newId();
-      next[nid] = { ...ev, ...NO_SYNC_IDENTITY, id: nid, scope: 'all', seriesId: sid, weekKey: ctx.viewedWeekKey, deleted: true };
+      // monthly / yearly → slide the anchor date so the recurring date moves with it.
+      const newAnchor = addDays(anchorOf(master), delta);
+      next = { ...next, weekKey: weekKeyOf(newAnchor, weekStartsOn), dayIndex: differenceInDays(newAnchor, startOfWeek(newAnchor, { weekStartsOn })) };
+      newOccDate = ymd(newDate);
     }
-    collapseForward(next, sid, ctx.viewedWeekKey);
-    return next;
+    delete p.dayIndex;
+    delete (p as Partial<RecurFields>).weekKey;
   }
 
-  // Global + This-week → remove just this week's occurrence (skip-this-week),
-  // reusing an existing override record for this series+week if there is one.
-  const existingOverride = Object.values(raw).find(
-    v => v.scope === 'week' && v.overridesSeriesId === sid && (v.weekKey ?? '') === ctx.viewedWeekKey,
-  );
-  if (existingOverride) {
-    return { ...raw, [existingOverride.id]: { ...existingOverride, deleted: true } };
-  }
-  const nid = ctx.newId();
-  return {
-    ...raw,
-    [nid]: {
-      ...ev, ...NO_SYNC_IDENTITY, id: nid,
-      scope: 'week', weekKey: ctx.viewedWeekKey,
-      seriesId: undefined, overridesSeriesId: sid, deleted: true,
-    },
+  next = { ...next, ...p };
+  const events = { ...raw, [masterId]: next };
+  const targetId = master.recur ? (newOccDate ? makeOccId(masterId, newOccDate) : masterId) : masterId;
+  return { events, targetId };
+}
+
+// UUID for a detached occurrence (crypto when available, Math.random fallback).
+function newLocalId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// ─── Delete (scoped) ──────────────────────────────────────────────────────────
+// Non-repeating: drop it (tombstone first if it has a Google id, so the delete
+// mirrors to Google before the record is removed on the next sync).
+// Repeating: 'one' → exclude this date (EXDATE); 'following' → bound with UNTIL;
+// 'all' → drop the master (tombstone if synced).
+export function deleteScoped<T extends RecurFields>(raw: Record<string, T>, occId: string, mode: DeleteMode): Record<string, T> {
+  const { masterId, occDate } = parseOccId(occId);
+  const master = raw[masterId];
+  if (!master) return raw;
+
+  const dropOrTombstone = (): Record<string, T> => {
+    if (master.gCalId) return { ...raw, [masterId]: { ...master, deleted: true, updatedAt: Date.now() } };
+    const n = { ...raw }; delete n[masterId]; return n;
   };
-}
 
-// Stamp scope/anchor onto a freshly-created item per the current toggle. A new
-// recurring item is effective from the viewed week (so the past never gains it).
-export function stampNewItem<T extends RecurFields>(item: T, ctx: CommitCtx): T {
-  const eff = effectiveDomain(ctx);
-  const nowMs = Date.now();
-  if (eff === 'all') {
-    return { ...item, scope: 'all', seriesId: item.id, weekKey: ctx.viewedWeekKey, overridesSeriesId: undefined, deleted: false, updatedAt: nowMs };
+  if (!master.recur) return dropOrTombstone();
+
+  if (mode === 'all') return dropOrTombstone();
+
+  if (mode === 'following') {
+    if (!occDate) return dropOrTombstone();
+    // Deleting from the anchor onward removes everything → same as 'all'.
+    if (occDate <= ymd(anchorOf(master))) return dropOrTombstone();
+    const until = ymd(addDays(parseDate(occDate), -1));
+    const exdates = (master.exdates ?? []).filter(d => d < occDate);
+    return { ...raw, [masterId]: { ...master, recur: { ...master.recur, end: { until } }, exdates, updatedAt: Date.now() } };
   }
-  return { ...item, scope: 'week', weekKey: ctx.viewedWeekKey, seriesId: undefined, overridesSeriesId: undefined, deleted: false, updatedAt: nowMs };
+
+  // mode === 'one'
+  if (!occDate) return dropOrTombstone();
+  const exdates = master.exdates ?? [];
+  if (exdates.includes(occDate)) return raw;
+  return { ...raw, [masterId]: { ...master, exdates: [...exdates, occDate], updatedAt: Date.now() } };
 }
 
-// Turn a series' stored records into the set of recurring Google events to keep.
-// Each ACTIVE 'all' version becomes one RRULE event, bounded by the next version's
-// week (UNTIL) so consecutive versions never overlap, and punched with EXDATE for
-// every week that carries an override (a skip-this-week mask OR a this-week fork —
-// both replace that week's series occurrence). Deleted 'all' tombstones produce no
-// event but still act as an UNTIL boundary for the version before them, which is how
-// "delete from here forward" (and full-series delete) map onto Google without ever
-// touching earlier occurrences.
-export function computeDailySeriesSpecs<T extends RecurFields>(raw: Record<string, T>): DailySeriesSpec[] {
-  const versionsBySeries = new Map<string, T[]>();
-  const exWeeksBySeries = new Map<string, Set<string>>();
+// ─── Google recurrence formatting (RFC 5545) ─────────────────────────────────
+// Verified against Google Calendar API + RFC 5545 §3.3.10: the recurrence array
+// carries RRULE (+ EXDATE) without DTSTART; start/end fields define the first
+// occurrence. Timed UNTIL is UTC (…Z); all-day uses VALUE=DATE. Timed EXDATE uses
+// TZID + local wall-clock; all-day EXDATE uses VALUE=DATE.
+const two = (n: number) => String(n).padStart(2, '0');
+const basicDate = (d: Date) => `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}`;
+const basicUTC = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
-  for (const ev of Object.values(raw)) {
-    if (ev.scope === 'all') {
-      const sid = seriesOf(ev);
-      const list = versionsBySeries.get(sid);
-      if (list) list.push(ev);
-      else versionsBySeries.set(sid, [ev]);
-    } else if (ev.scope === 'week' && ev.overridesSeriesId) {
-      const set = exWeeksBySeries.get(ev.overridesSeriesId) ?? new Set<string>();
-      set.add(ev.weekKey ?? '');
-      exWeeksBySeries.set(ev.overridesSeriesId, set);
+export function buildGoogleRecurrence(master: RecurFields, tz: string): string[] | undefined {
+  const r = master.recur;
+  if (!r) return undefined;
+  const [sh, sm] = (master.startTime ?? '00:00').split(':').map(Number);
+  const allDay = !!master.allDay;
+
+  let rule = `RRULE:FREQ=${r.freq.toUpperCase()};INTERVAL=${Math.max(1, Math.floor(r.interval || 1))}`;
+  if (r.freq === 'weekly' && r.byWeekday && r.byWeekday.length) {
+    rule += `;BYDAY=${[...r.byWeekday].sort((a, b) => a - b).map(w => WD_CODES[w]).join(',')}`;
+  }
+  if (r.end && 'count' in r.end) {
+    rule += `;COUNT=${r.end.count}`;
+  } else if (r.end && 'until' in r.end) {
+    const u = parseDate(r.end.until);
+    if (allDay) {
+      rule += `;UNTIL=${basicDate(u)}`;
+    } else {
+      const dt = new Date(u); dt.setHours(sh, sm, 0, 0);
+      rule += `;UNTIL=${basicUTC(dt)}`;
     }
   }
 
-  const specs: DailySeriesSpec[] = [];
-  for (const [sid, versionsRaw] of versionsBySeries) {
-    const versions = [...versionsRaw].sort((a, b) => (wk(a) < wk(b) ? -1 : wk(a) > wk(b) ? 1 : 0));
-    const exWeeks = exWeeksBySeries.get(sid);
-    for (let i = 0; i < versions.length; i++) {
-      const v = versions[i];
-      const untilWeekKey = i + 1 < versions.length ? wk(versions[i + 1]) : null;
-      if (v.deleted) continue; // tombstone: no event, but still bounds the previous version
-      const exWeekKeys = exWeeks
-        ? [...exWeeks].filter(w => w >= wk(v) && (untilWeekKey === null || w < untilWeekKey)).sort()
-        : [];
-      specs.push({ recordId: v.id, dtStartWeekKey: wk(v), untilWeekKey, exWeekKeys });
+  const arr = [rule];
+  if (master.exdates && master.exdates.length) {
+    const ds = [...master.exdates].sort();
+    if (allDay) {
+      arr.push(`EXDATE;VALUE=DATE:${ds.map(d => basicDate(parseDate(d))).join(',')}`);
+    } else {
+      arr.push(`EXDATE;TZID=${tz}:${ds.map(d => `${basicDate(parseDate(d))}T${two(sh)}${two(sm)}00`).join(',')}`);
     }
   }
-  return specs;
+  return arr;
+}
+
+// Parse a Google recurrence array back into { recur, exdates } for pull-side sync.
+export function parseGoogleRecurrence(recurrence: string[] | undefined): { recur?: Recurrence; exdates?: string[] } {
+  if (!recurrence || !recurrence.length) return {};
+  let recur: Recurrence | undefined;
+  const exdates: string[] = [];
+  const codeToWd: Record<string, Weekday> = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+
+  for (const line of recurrence) {
+    if (line.startsWith('RRULE:')) {
+      const parts = Object.fromEntries(line.slice(6).split(';').map(kv => { const [k, v] = kv.split('='); return [k.toUpperCase(), v]; }));
+      const freqMap: Record<string, RecurFreq> = { DAILY: 'daily', WEEKLY: 'weekly', MONTHLY: 'monthly', YEARLY: 'yearly' };
+      const freq = freqMap[(parts.FREQ || '').toUpperCase()];
+      if (!freq) continue;
+      recur = { freq, interval: parts.INTERVAL ? Math.max(1, parseInt(parts.INTERVAL, 10)) : 1 };
+      if (freq === 'weekly' && parts.BYDAY) recur.byWeekday = parts.BYDAY.split(',').map(c => codeToWd[c.trim().slice(-2).toUpperCase()]).filter(w => w != null) as Weekday[];
+      if (parts.COUNT) recur.end = { count: parseInt(parts.COUNT, 10) };
+      else if (parts.UNTIL) {
+        const u = parts.UNTIL;
+        const y = u.slice(0, 4), m = u.slice(4, 6), d = u.slice(6, 8);
+        recur.end = { until: `${y}-${m}-${d}` };
+      }
+    } else if (line.startsWith('EXDATE')) {
+      const idx = line.indexOf(':');
+      if (idx !== -1) {
+        for (const raw of line.slice(idx + 1).split(',')) {
+          const v = raw.trim();
+          if (v.length >= 8) exdates.push(`${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`);
+        }
+      }
+    }
+  }
+  return { recur, exdates: exdates.length ? exdates : undefined };
 }
