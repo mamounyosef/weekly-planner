@@ -1751,7 +1751,7 @@ export default function WeeklyPlanner() {
       const isDragging = (dr && dr.active) || (br && br.active) || rr || sr || (cr && cr.moved);
       if (isDragging && mainRef.current) {
         const rect = mainRef.current.getBoundingClientRect();
-        const EDGE = 60;
+        const EDGE = 100;
         const nearTop = e.clientY < rect.top + EDGE;
         const nearBottom = e.clientY > rect.bottom - EDGE;
         if (nearTop || nearBottom) {
@@ -1761,12 +1761,13 @@ export default function WeeklyPlanner() {
               const { clientX, clientY } = autoScrollLastPosRef.current;
               const r = mainRef.current.getBoundingClientRect();
               let dy = 0;
-              if (clientY < r.top + EDGE) dy = -15 * (1 - Math.max(0, clientY - r.top) / EDGE);
-              else if (clientY > r.bottom - EDGE) dy = 15 * (1 - Math.max(0, r.bottom - clientY) / EDGE);
+              if (clientY < r.top + EDGE) dy = -25 * (1 - Math.max(0, clientY - r.top) / EDGE);
+              else if (clientY > r.bottom - EDGE) dy = 25 * (1 - Math.max(0, r.bottom - clientY) / EDGE);
               
               if (dy !== 0) {
                 mainRef.current.scrollTop += dy;
-                document.dispatchEvent(new MouseEvent('mousemove', { clientX, clientY, bubbles: true }));
+                const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
+                onMove(fakeEvent);
               }
             }, 16);
           }
