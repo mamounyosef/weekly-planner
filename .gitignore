@@ -51,6 +51,8 @@ Thumbs.db
 # Local database and cache profiles
 .chrome-profile/
 database/
+# Automated snapshots written by the dev server (see vite.config.ts)
+backups/
 my-made-main-icon.png
 
 # Project-local Claude instructions

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import { flushSync } from 'react-dom';
 import {
   format,
   addWeeks,
@@ -14,9 +15,10 @@ import {
   isSameMonth,
   isSameDay,
   addDays,
+  subDays,
   differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -36,7 +38,25 @@ import {
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid as focusUid,
+  playFocusChime,
+  claimFocusCompletion,
+  autoSessionId,
+  dedupeFocusSessions,
 } from '@/lib/focusSessions';
+import {
+  type ShortcutAction,
+  type ShortcutMap,
+  SHORTCUT_DEFS,
+  DEFAULT_SHORTCUTS,
+  SHORTCUTS_KEY,
+  eventToCombo,
+  matchesCombo,
+  formatCombo,
+  coerceShortcuts,
+  loadShortcuts,
+  findConflicts,
+  isReservedCombo,
+} from '@/lib/shortcuts';
 import {
   type Recurrence,
   type RecurFreq,
@@ -81,6 +101,20 @@ type IntervalMin   = 5 | 15 | 30 | 60;
 type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
 type TimeFormat    = '12h' | '24h';
 type WeekStartsOn  = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0=Sun … 6=Sat
+
+// Calendar zoom levels, narrowest → widest. Ctrl+wheel steps along this axis.
+type CalendarView = 'day' | 'week' | 'month' | 'year';
+const CALENDAR_VIEWS: CalendarView[] = ['day', 'week', 'month', 'year'];
+const isCalendarView = (v: unknown): v is CalendarView =>
+  typeof v === 'string' && (CALENDAR_VIEWS as string[]).includes(v);
+
+// App zoom: a fine 5% step, clamped to something still usable at both ends.
+const ZOOM_MIN  = 0.5;
+const ZOOM_MAX  = 2.0;
+const ZOOM_STEP = 0.05;
+const ZOOM_KEY  = 'planner-app-zoom';
+const clampZoom = (z: number) =>
+  Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z / ZOOM_STEP) * ZOOM_STEP));
 
 interface PlannerEvent {
   id: string;
@@ -448,6 +482,54 @@ export default function WeeklyPlanner() {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [interval, setIntervalOpt]    = useState<IntervalMin>(5);
   const [events, setEvents]           = useState<PlannerData>({});
+  // True until the first load (localStorage or backend) has resolved, so the grid
+  // can show a skeleton instead of flashing an empty week.
+  const [eventsLoading, setEventsLoading] = useState(true);
+  // Automated backups — the dev server writes snapshots into <root>/backups on
+  // this schedule; these are just the knobs, persisted with the other settings.
+  type AutoBackupCfg = { enabled: boolean; intervalHours: number; keep: number };
+  const AUTO_BACKUP_DEFAULT: AutoBackupCfg = { enabled: true, intervalHours: 24, keep: 50 };
+  const coerceAutoBackup = (raw: unknown): AutoBackupCfg => {
+    const cfg = { ...AUTO_BACKUP_DEFAULT };
+    if (raw && typeof raw === 'object') {
+      const r = raw as Record<string, unknown>;
+      if (typeof r.enabled === 'boolean') cfg.enabled = r.enabled;
+      const h = Number(r.intervalHours);
+      if (Number.isFinite(h) && h >= 1) cfg.intervalHours = Math.min(720, Math.round(h));
+      const k = Number(r.keep);
+      if (Number.isFinite(k) && k >= 1) cfg.keep = Math.min(1000, Math.round(k));
+    }
+    return cfg;
+  };
+  const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(AUTO_BACKUP_DEFAULT);
+  const [backupStatus, setBackupStatus] = useState<{ count: number; lastBackupAt: string | null } | null>(null);
+  // User-rebindable keyboard shortcuts (see lib/shortcuts.ts).
+  const [shortcuts, setShortcuts]     = useState<ShortcutMap>(DEFAULT_SHORTCUTS);
+  const shortcutsRef                  = useRef<ShortcutMap>(DEFAULT_SHORTCUTS);
+  useEffect(() => { shortcutsRef.current = shortcuts; }, [shortcuts]);
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
+  const [recordingAction, setRecordingAction]   = useState<ShortcutAction | null>(null);
+  const recordingActionRef = useRef<ShortcutAction | null>(null);
+  useEffect(() => { recordingActionRef.current = recordingAction; }, [recordingAction]);
+  const showShortcutHelpRef = useRef(false);
+  useEffect(() => { showShortcutHelpRef.current = showShortcutHelp; }, [showShortcutHelp]);
+  // Late-bound handles for the shortcut runner: the global keydown effect is set
+  // up long before these functions exist, so it calls through this ref instead.
+  const navRef = useRef({
+    prev: () => {}, next: () => {}, today: () => {}, goToLive: () => {},
+    toggleView: () => {}, toggleAnalysis: () => {}, toggleSettings: () => {},
+    openWidget: () => {}, newEvent: () => {}, toggleTimer: () => {}, toggleHelp: () => {},
+  });
+  // Lightweight toasts — replaces blocking window.alert() for import/export/sync
+  // feedback so nothing ever freezes the UI mid-action.
+  type Toast = { id: number; message: string; tone: 'info' | 'success' | 'error' };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastSeq = useRef(0);
+  const showToast = useCallback((message: string, tone: Toast['tone'] = 'info') => {
+    const id = ++toastSeq.current;
+    setToasts(prev => [...prev.slice(-2), { id, message, tone }]);
+    window.setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4200);
+  }, []);
   const [editingId, setEditingId]     = useState<string | null>(null);
   const [hoveredId, setHoveredId]     = useState<string | null>(null);
   const [menuId, setMenuId]           = useState<string | null>(null);
@@ -471,7 +553,13 @@ export default function WeeklyPlanner() {
   const [darkMode, setDarkMode]       = useState(true);
   const [timeFormat, setTimeFormat]     = useState<TimeFormat>('12h');
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
-  const [calendarView, setCalendarView] = useState<'week' | 'month'>('week');
+  // Zoom levels, narrowest → widest. Ctrl+wheel steps through them.
+  const [calendarView, setCalendarView] = useState<CalendarView>('week');
+  // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
+  // it's applied as CSS `zoom` on the root so layout reflows instead of blurring.
+  const [appZoom, setAppZoom] = useState(1);
+  const [zoomDraft, setZoomDraft] = useState('100');
+  const [editingZoom, setEditingZoom] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
@@ -488,8 +576,11 @@ export default function WeeklyPlanner() {
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft]     = useState('60');
   const focusCompleteRef = useRef(false);
+  // Brief victory flourish on the timer when a session completes naturally.
+  const [focusCelebrate, setFocusCelebrate] = useState(false);
   const [showFocusAnalysis, setShowFocusAnalysis] = useState(false);
-  const [analysisTab, setAnalysisTab]       = useState<'month' | 'year'>('month');
+  const [analysisTab, setAnalysisTab]       = useState<'week' | 'month' | 'year'>('week');
+  const [analysisWeekCursor, setAnalysisWeekCursor]   = useState(() => new Date());
   const [analysisMonthCursor, setAnalysisMonthCursor] = useState(() => new Date());
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
   // Google Calendar Integration State
@@ -505,7 +596,7 @@ export default function WeeklyPlanner() {
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
-  const handleHeaderCreateClick = (_e: React.MouseEvent<HTMLButtonElement>) => {
+  const handleHeaderCreateClick = (_e?: React.MouseEvent<HTMLButtonElement>) => {
     setSelectedIds(new Set());
     setMenuId(null);
 
@@ -553,6 +644,8 @@ export default function WeeklyPlanner() {
 
   const daysGridRef  = useRef<HTMLDivElement>(null);
   const mainRef      = useRef<HTMLDivElement>(null);
+  const nowLineRef   = useRef<HTMLDivElement>(null);
+  const [showLiveBtn, setShowLiveBtn] = useState(false);
   const editRef      = useRef<HTMLTextAreaElement>(null);
   const menuRef      = useRef<HTMLDivElement>(null);
   const settingsRef    = useRef<HTMLDivElement>(null);
@@ -565,6 +658,9 @@ export default function WeeklyPlanner() {
   const batchDispRef   = useRef<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
   const selDragRef     = useRef<{ startX: number; startY: number } | null>(null);
   const createDragRef  = useRef<{ col: number; startY: number; moved: boolean } | null>(null);
+  // Live start/end of the block being drag-created, so the times can be shown
+  // while the drag is still in progress (not just after it commits).
+  const [createDisp, setCreateDisp] = useState<{ startMin: number; endMin: number } | null>(null);
   const didDragRef     = useRef(false);
   const editingIdRef = useRef<string | null>(null);
   const hoveredIdRef = useRef<string | null>(null);
@@ -726,7 +822,10 @@ export default function WeeklyPlanner() {
         setEvents(merged);
       }
     })
-    .catch(err => console.error('Google Calendar sync failed:', err))
+    .catch(err => {
+      console.error('Google Calendar sync failed:', err);
+      showToast('Google Calendar sync failed.', 'error');
+    })
     .finally(() => {
       setGCalSyncing(false);
       syncInFlightRef.current = false;
@@ -740,7 +839,7 @@ export default function WeeklyPlanner() {
           if (status.clientSecret) setClientSecretInput(status.clientSecret);
         });
     });
-  }, [weekStartsOn]);
+  }, [weekStartsOn, showToast]);
   // Stable ref so the queue-drain above can call the latest triggerGCalSync.
   const triggerGCalSyncRef = useRef(triggerGCalSync);
   useEffect(() => { triggerGCalSyncRef.current = triggerGCalSync; }, [triggerGCalSync]);
@@ -792,6 +891,21 @@ export default function WeeklyPlanner() {
   // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn });
   const days        = eachDayOfInterval({ start: weekStart, end: endOfWeek(currentDate, { weekStartsOn }) });
+  // Day view reuses the whole week grid but paints a single column. Events keep
+  // their 0–6 week-relative dayIndex, so everything below works off this mapping
+  // between a *visible slot* and the real day index it stands for.
+  const dayViewColIdx = (currentDate.getDay() - weekStartsOn + 7) % 7;
+  const visibleCols   = calendarView === 'day' ? [dayViewColIdx] : [0, 1, 2, 3, 4, 5, 6];
+  const colCount      = visibleCols.length;
+  /** Visible slot for a week dayIndex, or -1 when that day isn't on screen. */
+  const colSlot = (dayIndex: number) => visibleCols.indexOf(dayIndex);
+  // Grids that render the timeline use these so day view stretches to full width.
+  const isDayView = calendarView === 'day';
+  // Both 'day' and 'week' render the timeline grid.
+  const isTimelineView = calendarView === 'day' || calendarView === 'week';
+  // Long-lived mouse handlers read the visible columns through a ref.
+  const visibleColsRef = useRef<number[]>(visibleCols);
+  visibleColsRef.current = visibleCols;
   const slots       = generateSlots(interval, dayStartH, dayEndH);
   const sh          = SLOT_H[interval];
   const totalH      = slots.length * sh;
@@ -854,6 +968,35 @@ export default function WeeklyPlanner() {
     }
     return weeks;
   }, [calendarView, currentDate, weekStartsOn, events]);
+
+  // Year overview: 12 mini months. Resolving every week of the year is the
+  // expensive bit, so each week is resolved once and shared across its days.
+  const yearMatrix = useMemo(() => {
+    if (calendarView !== 'year') {
+      return [] as Array<{ monthStart: Date; isCurrent: boolean; eventCount: number; cells: Array<{ date: Date; count: number }> }>;
+    }
+    const weekCache = new Map<string, PlannerData>();
+    const resolveCached = (wkey: string) => {
+      let r = weekCache.get(wkey);
+      if (!r) { r = resolveWeek(events, wkey); weekCache.set(wkey, r); }
+      return r;
+    };
+    return Array.from({ length: 12 }, (_, m) => {
+      const monthStart = new Date(currentDate.getFullYear(), m, 1);
+      const gridStart = startOfWeek(startOfMonth(monthStart), { weekStartsOn });
+      const gridEnd   = endOfWeek(endOfMonth(monthStart), { weekStartsOn });
+      let eventCount = 0;
+      const cells = eachDayOfInterval({ start: gridStart, end: gridEnd }).map(date => {
+        const wkey = weekKeyOf(date, weekStartsOn);
+        const col = (date.getDay() - weekStartsOn + 7) % 7;
+        const count = Object.values(resolveCached(wkey)).filter(e => e.dayIndex === col).length;
+        if (isSameMonth(date, monthStart)) eventCount += count;
+        return { date, count };
+      });
+      return { monthStart, isCurrent: isSameMonth(monthStart, new Date()), eventCount, cells };
+    });
+  }, [calendarView, currentDate, weekStartsOn, events]);
+
   const weekEventsRef = useRef<PlannerData>({});
   useEffect(() => { weekEventsRef.current = weekEvents; }, [weekEvents]);
   // The viewed week + week-start are all the resolver needs. Refs keep the latest
@@ -964,7 +1107,86 @@ export default function WeeklyPlanner() {
   const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
-  const todayColIdx = days.findIndex(d => isToday(d));
+  // A day column spans dayStartH → dayStartH+24 (e.g. 7am → 7am). So between
+  // midnight and the day-start hour, "now" belongs to the PREVIOUS calendar day's
+  // column, not today's — otherwise the red line lands a whole day too far right.
+  const nowOwnerDate = nowMin < dayStartMin ? subDays(nowDate, 1) : nowDate;
+  const nowColIdx = days.findIndex(d => isSameDay(d, nowOwnerDate));
+  const liveLineOnScreen = nowColIdx >= 0 && nowInView;
+
+  // Show a "Go to Live" pill whenever the red now-line has scrolled out of the
+  // visible area (mirrors the widget). Clicking it scrolls the line back into view.
+  const recomputeLiveBtn = useCallback(() => {
+    const line = nowLineRef.current;
+    if (!line) { setShowLiveBtn(false); return; }
+    const lineRect = line.getBoundingClientRect();
+    // Fixed viewport bounds: below the sticky app header (~56px), above the bottom.
+    const topBound = 96;
+    const bottomBound = window.innerHeight - 32;
+    const visible = lineRect.top >= topBound && lineRect.top <= bottomBound;
+    setShowLiveBtn(!visible);
+  }, []);
+
+  // Away from "now" entirely → the pill is the way back, so it should always be
+  // offered (there's no now-line on screen to scroll to at all). Day view is away
+  // whenever the shown day isn't today; week view whenever the week differs.
+  const viewingAnotherWeek = calendarView === 'day'
+    ? !isToday(currentDate)
+    : viewedWeekKey !== currentRealWeekKey;
+
+  useEffect(() => {
+    if (viewingAnotherWeek) { setShowLiveBtn(true); return; }
+    if (!liveLineOnScreen) { setShowLiveBtn(false); return; }
+    recomputeLiveBtn();
+    const onScroll = () => recomputeLiveBtn();
+    // Capture true so it also catches scrolling on inner overflow containers.
+    window.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    window.addEventListener('resize', onScroll);
+    return () => {
+      window.removeEventListener('scroll', onScroll, { capture: true } as EventListenerOptions);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [viewingAnotherWeek, liveLineOnScreen, recomputeLiveBtn, nowTick, calendarView, viewedWeekKey]);
+
+  // Set when the pill is pressed from a week that has no now-line: we navigate
+  // home first, then scroll once the line actually exists in the DOM.
+  const pendingLiveScrollRef = useRef(false);
+
+  const scrollToLive = useCallback(() => {
+    if (nowLineRef.current) {
+      nowLineRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setShowLiveBtn(false);
+      return;
+    }
+    // No line on screen (other week / month view / analysis) → jump to now first.
+    pendingLiveScrollRef.current = true;
+    setDirection(0);
+    setCurrentDate(new Date());
+    setCalendarView('week');
+    setShowFocusAnalysis(false);
+  }, []);
+
+  // Finish a pending jump: the week slider animates the new week in, so the line
+  // isn't mounted on the next tick — poll a few frames until it appears.
+  useEffect(() => {
+    if (!pendingLiveScrollRef.current) return;
+    let frames = 0;
+    let raf = 0;
+    const tryScroll = () => {
+      if (!pendingLiveScrollRef.current) return;
+      const line = nowLineRef.current;
+      if (line) {
+        pendingLiveScrollRef.current = false;
+        line.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setShowLiveBtn(false);
+        return;
+      }
+      if (++frames > 90) { pendingLiveScrollRef.current = false; return; } // give up (~1.5s)
+      raf = requestAnimationFrame(tryScroll);
+    };
+    raf = requestAnimationFrame(tryScroll);
+    return () => cancelAnimationFrame(raf);
+  }, [viewedWeekKey, calendarView, showFocusAnalysis, liveLineOnScreen]);
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
@@ -1008,6 +1230,27 @@ export default function WeeklyPlanner() {
       if (isCompletedFocusSession(s)) byDaySessions.set(k, (byDaySessions.get(k) ?? 0) + 1);
     }
     const completedSessions = focusSessions.filter(isCompletedFocusSession);
+
+    // Week view — every day of the cursored week with its exact logged time.
+    const aWeekStart = startOfWeek(analysisWeekCursor, { weekStartsOn });
+    const aWeekEnd   = endOfWeek(analysisWeekCursor, { weekStartsOn });
+    const weekDays = eachDayOfInterval({ start: aWeekStart, end: aWeekEnd }).map(d => {
+      const k = dateKey(d);
+      return {
+        date: d,
+        key: k,
+        seconds: byDaySeconds.get(k) ?? 0,
+        sessions: byDaySessions.get(k) ?? 0,
+      };
+    });
+    const wkSeconds     = weekDays.reduce((s, d) => s + d.seconds, 0);
+    const wkSessions    = weekDays.reduce((s, d) => s + d.sessions, 0);
+    const wkActiveDays  = weekDays.filter(d => d.seconds > 0).length;
+    const wkMaxSeconds  = Math.max(1, ...weekDays.map(d => d.seconds));
+    const wkBestDay     = weekDays.reduce((b, d) => (d.seconds > b.seconds ? d : b), weekDays[0]);
+    // Average across days that actually had focus, not a flat /7 — a blank
+    // Sunday shouldn't drag down what a working day really looks like.
+    const wkAvgActive   = wkActiveDays > 0 ? Math.floor(wkSeconds / wkActiveDays) : 0;
 
     // Month view
     const monthStart = startOfMonth(analysisMonthCursor);
@@ -1068,11 +1311,33 @@ export default function WeeklyPlanner() {
 
     return {
       byDaySeconds, byDaySessions,
+      aWeekStart, aWeekEnd, weekDays, wkSeconds, wkSessions, wkActiveDays, wkMaxSeconds, wkBestDay, wkAvgActive,
       monthGridDays, monthStart, monthEnd, monthSeconds, monthSessions, monthActiveDays, monthMaxSeconds, monthBestDay,
       monthTotals, yearSeconds, yearSessions, yearActiveDays, yearMaxSeconds, yearBestMonth,
       currentStreak, longestStreak, allTimeSeconds, allTimeSessions, avgSessionLength,
     };
-  }, [focusSessions, analysisMonthCursor, analysisYearCursor, weekStartsOn, focusDayStartHour]);
+  }, [focusSessions, analysisWeekCursor, analysisMonthCursor, analysisYearCursor, weekStartsOn, focusDayStartHour]);
+
+  // The memo above only counts *logged* sessions. A session that's still running
+  // hasn't been written yet, so fold its elapsed time into the day it belongs to —
+  // otherwise the week breakdown reads 0m for a day you're actively focusing on
+  // while the header strip (which does include it) shows the real number.
+  const weekAnalysisLive = useMemo(() => {
+    const dayList = focusAnalysis.weekDays.map(d => ({
+      ...d,
+      seconds: d.seconds + (activeFocusDayKey === d.key ? focusElapsedSeconds : 0),
+    }));
+    const total  = dayList.reduce((s, d) => s + d.seconds, 0);
+    const active = dayList.filter(d => d.seconds > 0).length;
+    return {
+      days: dayList,
+      seconds: total,
+      activeDays: active,
+      maxSeconds: Math.max(1, ...dayList.map(d => d.seconds)),
+      avgActive: active > 0 ? Math.floor(total / active) : 0,
+      bestKey: dayList.reduce((b, d) => (d.seconds > b.seconds ? d : b), dayList[0]).key,
+    };
+  }, [focusAnalysis.weekDays, activeFocusDayKey, focusElapsedSeconds]);
 
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 1000);
@@ -1107,6 +1372,11 @@ export default function WeeklyPlanner() {
   // false we must NOT push our (possibly empty/stale) local state to the backend, or
   // we'd clobber a live session that another window owns before we've pulled it.
   const timerHydratedRef = useRef(false);
+  // Timestamp of our last local timer change. Right after we change the timer here
+  // (e.g. Pause), the server hasn't stored our POST yet, so an in-flight pull can
+  // read the OLD state and write it back — resuming a timer we just stopped. For a
+  // short grace window after a local change we ignore differing pulls.
+  const lastLocalTimerChangeRef = useRef(0);
   useEffect(() => {
     setFocusTimer(loadLocalFocusTimer());
 
@@ -1123,6 +1393,10 @@ export default function WeeklyPlanner() {
           const json = JSON.stringify(coerceFocusTimer(data));
           timerHydratedRef.current = true;
           if (json === lastTimerJsonRef.current) return; // our own echo / no change
+          // Don't let a stale server read clobber a change we just made locally
+          // (the server may not have stored our push yet). Once hydrated, ignore
+          // differing pulls for a brief grace window after any local change.
+          if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
           lastTimerJsonRef.current = json;
           setFocusTimer(JSON.parse(json));
         })
@@ -1151,7 +1425,7 @@ export default function WeeklyPlanner() {
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
 
-  const completeFocusSession = useCallback((durationSeconds?: number) => {
+  const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
@@ -1164,7 +1438,9 @@ export default function WeeklyPlanner() {
       : new Date(endedAt.getTime() - duration * 1000);
 
     const session: FocusSession = {
-      id: focusUid(),
+      // Auto-completions get a deterministic id so the main window and the widget
+      // (which both hit zero independently) collapse into a single logged session.
+      id: auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : focusUid(),
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
@@ -1172,7 +1448,7 @@ export default function WeeklyPlanner() {
     };
 
     setFocusSessions(prev => {
-      const next = [session, ...prev].slice(0, 1000);
+      const next = dedupeFocusSessions([session, ...prev]).slice(0, 1000);
       persistFocusSessions(next);
       return next;
     });
@@ -1188,6 +1464,7 @@ export default function WeeklyPlanner() {
     const json = JSON.stringify(coerceFocusTimer(focusTimer));
     if (json === lastTimerJsonRef.current) return;
     lastTimerJsonRef.current = json;
+    lastLocalTimerChangeRef.current = Date.now();
     fetch('/api/focus-timer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1204,7 +1481,13 @@ export default function WeeklyPlanner() {
   useEffect(() => {
     if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
       focusCompleteRef.current = true;
-      completeFocusSession(focusTimer.plannedSeconds);
+      // Only one window chimes / celebrates, even though both hit zero.
+      if (claimFocusCompletion()) {
+        playFocusChime();
+        setFocusCelebrate(true);
+        window.setTimeout(() => setFocusCelebrate(false), 2600);
+      }
+      completeFocusSession(focusTimer.plannedSeconds, true);
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
@@ -1279,7 +1562,7 @@ export default function WeeklyPlanner() {
         }
       })
       .catch(err => console.error('Failed to load events from backend database:', err))
-      .finally(() => { eventsLoadedRef.current = true; });
+      .finally(() => { eventsLoadedRef.current = true; setEventsLoading(false); });
 
     const savedInt = localStorage.getItem(INTERVAL_KEY);
     if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
@@ -1293,6 +1576,9 @@ export default function WeeklyPlanner() {
     if (savedDayStart) setDayStartH(parseInt(savedDayStart));
     const savedDayEnd = localStorage.getItem(DAY_END_KEY);
     if (savedDayEnd) setDayEndH(parseInt(savedDayEnd));
+    setShortcuts(loadShortcuts());
+    const savedZoom = parseFloat(localStorage.getItem(ZOOM_KEY) || '');
+    if (Number.isFinite(savedZoom)) setAppZoom(clampZoom(savedZoom));
 
     // Backend is the source of truth for settings so both windows stay in sync.
     fetch('/api/settings')
@@ -1305,8 +1591,12 @@ export default function WeeklyPlanner() {
           if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (s.calendarView === 'week' || s.calendarView === 'month') setCalendarView(s.calendarView);
+          if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
           if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
+          if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
+          if (s.autoBackup && typeof s.autoBackup === 'object') {
+            setAutoBackup(coerceAutoBackup(s.autoBackup));
+          }
         }
       })
       .catch(err => console.error('Failed to load settings from backend:', err))
@@ -1333,9 +1623,57 @@ export default function WeeklyPlanner() {
     fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour }),
+      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, shortcuts, autoBackup }),
     }).catch(err => console.error('Failed to save settings to backend:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour]);
+  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, shortcuts, autoBackup]);
+
+  useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
+
+  // Shortcut recorder: while a row is armed, the next real keypress becomes its
+  // binding. Capture phase + stopPropagation so nothing else reacts to that key.
+  useEffect(() => {
+    if (!recordingAction) return;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') { setRecordingAction(null); return; }
+      const combo = eventToCombo(e);
+      if (!combo) return; // still holding modifiers — wait for the real key
+      // Refuse combos the OS owns — binding Alt+F4 would make the shortcut close
+      // the app rather than run the action.
+      if (isReservedCombo(combo)) {
+        showToast(`${formatCombo(combo)} is reserved by Windows — pick another key.`, 'error');
+        setRecordingAction(null);
+        return;
+      }
+      setShortcuts(prev => ({ ...prev, [recordingAction]: combo }));
+      setRecordingAction(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [recordingAction, showToast]);
+
+  // Refresh backup status whenever the drawer opens so the counts are current.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    fetch('/api/auto-backup')
+      .then(r => r.json())
+      .then(s => setBackupStatus({ count: Number(s.count) || 0, lastBackupAt: s.lastBackupAt ?? null }))
+      .catch(() => {});
+  }, [settingsOpen]);
+
+  const runBackupNow = useCallback(() => {
+    fetch('/api/auto-backup', { method: 'POST' })
+      .then(r => r.json().then(body => ({ ok: r.ok, body })))
+      .then(({ ok, body }) => {
+        if (!ok) { showToast(body?.error || 'Backup failed.', 'error'); return; }
+        showToast(`Backup saved (${body.count} items).`, 'success');
+        return fetch('/api/auto-backup')
+          .then(r => r.json())
+          .then(s => setBackupStatus({ count: Number(s.count) || 0, lastBackupAt: s.lastBackupAt ?? null }));
+      })
+      .catch(() => showToast('Couldn\'t reach the server to back up.', 'error'));
+  }, [showToast]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
@@ -1423,17 +1761,22 @@ export default function WeeklyPlanner() {
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
+    showToast(`Backup exported (${Object.keys(events).length} items).`, 'success');
   };
 
   const importBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const input = e.target;
+    const file = input.files?.[0];
+    // Always clear the input so re-picking the SAME file fires onChange again.
+    const resetInput = () => { input.value = ''; };
+    if (!file) { resetInput(); return; }
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (!parsed || typeof parsed !== 'object') {
-          alert('Invalid backup file structure.');
+          showToast('That file isn\'t a valid backup.', 'error');
+          resetInput();
           return;
         }
 
@@ -1444,7 +1787,27 @@ export default function WeeklyPlanner() {
         const s = isComprehensive ? parsed.settings : null;
         const sessions = isComprehensive && Array.isArray(parsed.focusSessions) ? parsed.focusSessions : null;
 
-        setEvents(migrateEvents(importedEvents as PlannerData).events);
+        const migrated = migrateEvents(importedEvents as PlannerData).events;
+        const incoming = Object.keys(migrated).length;
+        const existing = Object.keys(eventsRef.current).length;
+
+        // Importing REPLACES everything — make that explicit before it happens.
+        const ok = window.confirm(
+          `Import this backup?\n\n` +
+          `It will replace all ${existing} current item${existing === 1 ? '' : 's'} with ${incoming} item${incoming === 1 ? '' : 's'} from the file` +
+          `${s ? ', and overwrite your settings' : ''}${sessions ? `, and replace your focus session history` : ''}.\n\n` +
+          `This cannot be undone.`
+        );
+        if (!ok) { resetInput(); return; }
+
+        // writeEvents (not setEvents) so eventsRef is hot immediately — a stale ref
+        // here would let the very next edit rebuild from pre-import data.
+        writeEvents(migrated);
+        fetch('/api/events', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(migrated),
+        }).catch(() => showToast('Imported locally, but saving to the server failed.', 'error'));
 
         if (s && typeof s === 'object') {
           if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
@@ -1453,7 +1816,7 @@ export default function WeeklyPlanner() {
           if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (s.calendarView === 'week' || s.calendarView === 'month') setCalendarView(s.calendarView);
+          if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
           if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         }
 
@@ -1463,11 +1826,19 @@ export default function WeeklyPlanner() {
           persistFocusSessions(safeSessions);
         }
 
-        alert(isComprehensive ? 'Full backup (events, settings, focus sessions) imported successfully!' : 'Backup imported successfully!');
+        showToast(
+          isComprehensive
+            ? `Imported ${incoming} item${incoming === 1 ? '' : 's'}, settings and focus history.`
+            : `Imported ${incoming} item${incoming === 1 ? '' : 's'}.`,
+          'success'
+        );
       } catch (err) {
-        alert('Error parsing backup file.');
+        showToast('Couldn\'t read that backup file.', 'error');
+      } finally {
+        resetInput();
       }
     };
+    reader.onerror = () => { showToast('Couldn\'t read that file.', 'error'); resetInput(); };
     reader.readAsText(file);
   };
 
@@ -1554,35 +1925,75 @@ export default function WeeklyPlanner() {
     const el = daysGridRef.current;
     if (!el) return null;
     const rect     = el.getBoundingClientRect();
-    const colW     = rect.width / 7;
-    const dayIndex = clamp(Math.floor((clientX - rect.left) / colW), 0, 6);
+    // Map the cursor to a VISIBLE slot, then back to the real week dayIndex —
+    // in day view there is only one slot but it may stand for any day 0–6.
+    const cols     = visibleColsRef.current;
+    const colW     = rect.width / cols.length;
+    const slot     = clamp(Math.floor((clientX - rect.left) / colW), 0, cols.length - 1);
+    const dayIndex = cols[slot];
     const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX - allDayHeight), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
-    return { dayIndex, snappedMin: snapped };
+    return { dayIndex, slot, snappedMin: snapped };
   }, [interval, dayStartMin, dayEndMin, allDayHeight]);
 
   // ── Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) ─────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // While recording a new binding in Settings, swallow everything.
+      if (recordingActionRef.current) return;
+      const sc = shortcutsRef.current;
+      const hit = (action: ShortcutAction) => matchesCombo(sc[action], e);
+
       // Undo / Redo (works even while focused elsewhere, but not inside text fields)
       const inTextField = document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement;
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z') && !inTextField) {
+      if (hit('undo') && !inTextField) {
         e.preventDefault();
-        if (e.shiftKey) redoRef.current(); else undoRef.current();
+        undoRef.current();
         return;
       }
+      if (hit('redo') && !inTextField) {
+        e.preventDefault();
+        redoRef.current();
+        return;
+      }
+      // Ctrl+Y stays as a permanent alias for redo (Windows convention).
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y') && !inTextField) {
         e.preventDefault();
         redoRef.current();
         return;
       }
 
+      // ── Rebindable navigation / view actions ──────────────────────────────
+      if (!inTextField) {
+        const nav: Array<[ShortcutAction, () => void]> = [
+          ['prevWeek',      () => navRef.current.prev()],
+          ['nextWeek',      () => navRef.current.next()],
+          ['today',         () => navRef.current.today()],
+          ['goToLive',      () => navRef.current.goToLive()],
+          ['toggleView',    () => navRef.current.toggleView()],
+          ['focusAnalysis', () => navRef.current.toggleAnalysis()],
+          ['openSettings',  () => navRef.current.toggleSettings()],
+          ['openWidget',    () => navRef.current.openWidget()],
+          ['newEvent',      () => navRef.current.newEvent()],
+          ['toggleTimer',   () => navRef.current.toggleTimer()],
+          ['help',          () => navRef.current.toggleHelp()],
+        ];
+        for (const [action, run] of nav) {
+          if (hit(action)) { e.preventDefault(); run(); return; }
+        }
+      }
+
       const active = document.activeElement;
       // Do not trigger shortcuts if typing inside text fields
       if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
 
-      // Escape: Clear selection & close menus
+      // Escape: Close the shortcut sheet first, then clear selection & menus
       if (e.key === 'Escape') {
         let changed = false;
+        if (showShortcutHelpRef.current) {
+          setShowShortcutHelp(false);
+          e.preventDefault();
+          return;
+        }
         if (selectedIdsRef.current.size > 0) {
           setSelectedIds(new Set());
           changed = true;
@@ -1598,8 +2009,9 @@ export default function WeeklyPlanner() {
         return;
       }
 
-      // Delete / Backspace: Remove selected, hovered, menu, or editing events
-      if (e.key === 'Delete' || e.key === 'Backspace') {
+      // Delete: Remove selected, hovered, menu, or editing events.
+      // Backspace stays a permanent alias so the key always works as expected.
+      if (hit('delete') || e.key === 'Backspace') {
         const idsToDelete = new Set<string>();
         if (selectedIdsRef.current.size > 0) {
           for (const id of selectedIdsRef.current) idsToDelete.add(id);
@@ -1697,8 +2109,8 @@ export default function WeeklyPlanner() {
           .filter((ev): ev is PlannerEvent => !!ev);
       };
 
-      // Ctrl+C / Cmd+C: copy to the clipboard only. Pasting happens on Ctrl+V.
-      if (e.key === 'c' && (e.ctrlKey || e.metaKey) && !inTextField) {
+      // Copy to the app clipboard only. Pasting happens on the paste binding.
+      if (hit('copy') && !inTextField) {
         const source = resolveSource();
         if (source.length === 0) return;
         setClipboard(source);
@@ -1706,8 +2118,8 @@ export default function WeeklyPlanner() {
         return;
       }
 
-      // Ctrl+V / Cmd+V: paste at the cursor, or fall back to an in-place offset copy.
-      if (e.key === 'v' && (e.ctrlKey || e.metaKey) && !inTextField) {
+      // Paste at the cursor, or fall back to an in-place offset copy.
+      if (hit('paste') && !inTextField) {
         const clip = clipboardRef.current;
         if (!clip || clip.length === 0) return;
         if (!pasteAtCursor(clip)) {
@@ -1749,25 +2161,40 @@ export default function WeeklyPlanner() {
       const cr = createDragRef.current;
 
       const isDragging = (dr && dr.active) || (br && br.active) || rr || sr || (cr && cr.moved);
-      if (isDragging && mainRef.current) {
-        const rect = mainRef.current.getBoundingClientRect();
-        const EDGE = 100;
-        const nearTop = e.clientY < rect.top + EDGE;
-        const nearBottom = e.clientY > rect.bottom - EDGE;
+      if (isDragging) {
+        // The page scrolls on the window (root is min-h-screen), so `main` itself
+        // usually isn't the scroller — pick whichever element actually overflows.
+        const getScroller = (): HTMLElement =>
+          (mainRef.current && mainRef.current.scrollHeight > mainRef.current.clientHeight + 1)
+            ? mainRef.current
+            : ((document.scrollingElement as HTMLElement) || document.documentElement);
+        const EDGE = 110;
+        const vh = window.innerHeight;
+        const nearTop = e.clientY < EDGE;
+        const nearBottom = e.clientY > vh - EDGE;
         if (nearTop || nearBottom) {
           if (!autoScrollTimerRef.current) {
             autoScrollTimerRef.current = window.setInterval(() => {
-              if (!autoScrollLastPosRef.current || !mainRef.current) return;
+              if (!autoScrollLastPosRef.current) return;
               const { clientX, clientY } = autoScrollLastPosRef.current;
-              const r = mainRef.current.getBoundingClientRect();
+              const h = window.innerHeight;
               let dy = 0;
-              if (clientY < r.top + EDGE) dy = -25 * (1 - Math.max(0, clientY - r.top) / EDGE);
-              else if (clientY > r.bottom - EDGE) dy = 25 * (1 - Math.max(0, r.bottom - clientY) / EDGE);
-              
+              // Ramp speed toward the edge, with a floor so it always moves.
+              if (clientY < EDGE) dy = -Math.max(6, 22 * (1 - Math.max(0, clientY) / EDGE));
+              else if (clientY > h - EDGE) dy = Math.max(6, 22 * (1 - Math.max(0, h - clientY) / EDGE));
+
               if (dy !== 0) {
-                mainRef.current.scrollTop += dy;
-                const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
-                onMove(fakeEvent);
+                const el = getScroller();
+                const before = el.scrollTop;
+                el.scrollTop += dy;
+                // Re-run the drag math at the (unchanged) cursor so the item keeps
+                // following as the grid scrolls beneath it.
+                if (el.scrollTop !== before) {
+                  const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
+                  // Apply the position update synchronously in this same frame so the
+                  // item doesn't visually lag a render behind the instant DOM scroll.
+                  flushSync(() => onMove(fakeEvent));
+                }
               }
             }, 16);
           }
@@ -1825,8 +2252,18 @@ export default function WeeklyPlanner() {
         const heightPx = Math.abs(curY - cr.startY);
         if (heightPx >= DRAG_THRESHOLD) { cr.moved = true; didDragRef.current = true; }
         if (cr.moved) {
-          const colW = rect.width / 7;
-          setSelRect({ left: cr.col * colW + 4, top: topPx, width: colW - 8, height: heightPx });
+          // Position against the VISIBLE slot, not the week dayIndex (day view).
+          const cols = visibleColsRef.current;
+          const colW = rect.width / cols.length;
+          const slot = Math.max(0, cols.indexOf(cr.col));
+          setSelRect({ left: slot * colW + 4, top: topPx, width: colW - 8, height: heightPx });
+          // Mirror the exact snapping the commit will use, so the numbers shown
+          // during the drag are the ones the item actually gets.
+          let s = yToMin(Math.max(0, Math.min(cr.startY, curY)), interval, dayStartH);
+          let en = yToMin(Math.max(0, Math.max(cr.startY, curY)), interval, dayStartH);
+          s  = clamp(s, dayStartMin, dayEndMin - POSITION_SNAP);
+          en = clamp(en, s + POSITION_SNAP, dayEndMin);
+          setCreateDisp({ startMin: s, endMin: en });
         }
         e.preventDefault();
         return;
@@ -1876,6 +2313,7 @@ export default function WeeklyPlanner() {
       if (cr) {
         createDragRef.current = null;
         setSelRect(null);
+        setCreateDisp(null);
         if (cr.moved) {
           const rect = daysGridRef.current?.getBoundingClientRect();
           if (rect) {
@@ -2103,9 +2541,104 @@ export default function WeeklyPlanner() {
   const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); setMenuId(null); };
   const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
   const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); setMenuId(null); };
-  // View-aware prev/next: steps a month at a time in month view, a week otherwise.
-  const navPrev = () => calendarView === 'month' ? (setDirection(-1), setCurrentDate(d => subMonths(d, 1)), setEditingId(null), setMenuId(null)) : goBack();
-  const navNext = () => calendarView === 'month' ? (setDirection(1),  setCurrentDate(d => addMonths(d, 1)), setEditingId(null), setMenuId(null)) : goNext();
+  // View-aware prev/next: one unit of whatever is currently on screen.
+  const navStep = (dir: -1 | 1) => {
+    setDirection(dir);
+    setCurrentDate(d => {
+      switch (calendarView) {
+        case 'day':   return addDays(d, dir);
+        case 'month': return dir < 0 ? subMonths(d, 1) : addMonths(d, 1);
+        case 'year':  return dir < 0 ? subMonths(d, 12) : addMonths(d, 12);
+        default:      return dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1);
+      }
+    });
+    setEditingId(null);
+    setMenuId(null);
+  };
+  const navPrev = () => navStep(-1);
+  const navNext = () => navStep(1);
+
+  // Ctrl+wheel steps along day → week → month → year.
+  const stepCalendarZoom = useCallback((dir: -1 | 1) => {
+    setDirection(0);
+    setShowFocusAnalysis(false);
+    setCalendarView(v => {
+      const i = CALENDAR_VIEWS.indexOf(v);
+      return CALENDAR_VIEWS[clamp(i + dir, 0, CALENDAR_VIEWS.length - 1)];
+    });
+    setEditingId(null);
+    setMenuId(null);
+  }, []);
+
+  // Keep the shortcut runner pointed at the current closures.
+  navRef.current = {
+    prev: navPrev,
+    next: navNext,
+    today: goToday,
+    goToLive: () => { setShowFocusAnalysis(false); setCalendarView('week'); scrollToLive(); },
+    toggleView: () => { setDirection(0); setCalendarView(v => (v === 'week' ? 'month' : 'week')); },
+    toggleAnalysis: () => setShowFocusAnalysis(v => !v),
+    toggleSettings: () => setSettingsOpen(s => !s),
+    openWidget: () => openWidget(),
+    newEvent: () => { setShowFocusAnalysis(false); handleHeaderCreateClick(); },
+    toggleTimer: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
+    toggleHelp: () => setShowShortcutHelp(v => !v),
+  };
+
+  // ── Ctrl+wheel = calendar zoom, Ctrl +/− = app zoom ───────────────────────
+  // Both replace the browser's own page zoom, which is why every branch calls
+  // preventDefault. Listeners are non-passive so preventDefault actually applies.
+  const stepZoomRef = useRef(stepCalendarZoom);
+  useEffect(() => { stepZoomRef.current = stepCalendarZoom; }, [stepCalendarZoom]);
+
+  useEffect(() => {
+    const wheelCooldown = { t: 0 };
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault(); // kill the browser's pinch/ctrl zoom
+      // Trackpads emit a burst of small deltas per gesture — throttle so one
+      // gesture moves exactly one level.
+      const now = Date.now();
+      if (now - wheelCooldown.t < 260) return;
+      if (Math.abs(e.deltaY) < 1) return;
+      wheelCooldown.t = now;
+      // Scroll up = zoom IN (toward a single day), down = out (toward the year).
+      stepZoomRef.current(e.deltaY < 0 ? -1 : 1);
+    };
+    const onKeyZoom = (e: KeyboardEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      // '=' carries the unshifted '+' on most layouts; NumpadAdd reports '+'.
+      if (e.key === '+' || e.key === '=' || e.key === 'Add') {
+        e.preventDefault();
+        setAppZoom(z => clampZoom(z + ZOOM_STEP));
+      } else if (e.key === '-' || e.key === '_' || e.key === 'Subtract') {
+        e.preventDefault();
+        setAppZoom(z => clampZoom(z - ZOOM_STEP));
+      } else if (e.key === '0') {
+        e.preventDefault();
+        setAppZoom(1);
+      }
+    };
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('keydown', onKeyZoom);
+    return () => {
+      window.removeEventListener('wheel', onWheel);
+      window.removeEventListener('keydown', onKeyZoom);
+    };
+  }, []);
+
+  // Persist zoom, and keep the editable field in sync when it changes elsewhere.
+  useEffect(() => {
+    localStorage.setItem(ZOOM_KEY, String(appZoom));
+    if (!editingZoom) setZoomDraft(String(Math.round(appZoom * 100)));
+  }, [appZoom, editingZoom]);
+
+  const commitZoomDraft = () => {
+    const pct = parseInt(zoomDraft, 10);
+    if (Number.isFinite(pct) && pct > 0) setAppZoom(clampZoom(pct / 100));
+    else setZoomDraft(String(Math.round(appZoom * 100)));
+    setEditingZoom(false);
+  };
 
   // ── Display props (override during drag/resize/batch) ─────────────────────
   const normDuration = (ev: PlannerEvent) => {
@@ -2142,6 +2675,9 @@ export default function WeeklyPlanner() {
   // Header control text — brighter than muted-foreground so it isn't washed out in dark mode.
   const headerLabel    = darkMode ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.50)';
   const headerInactive = darkMode ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.55)';
+  // Now-line accent: a warmer, less harsh red on dark, a deeper one on light.
+  const nowAccent     = darkMode ? '#ff6b6b' : '#e5484d';
+  const nowAccentSoft = darkMode ? 'rgba(255,107,107,0.22)' : 'rgba(229,72,77,0.18)';
 
   // ── Current menu event (for popover rendering) ────────────────────────────
   const isDraft = !!(draft && menuId === draft.id);
@@ -2162,7 +2698,9 @@ export default function WeeklyPlanner() {
   return (
     <div
       className={`min-h-screen bg-background text-foreground flex flex-col font-sans select-none${darkMode ? ' dark' : ''}`}
-      style={{ cursor: globalCursor }}
+      // CSS `zoom` (not transform: scale) so the layout genuinely reflows and
+      // fixed/sticky positioning keeps working — this replaces browser zoom.
+      style={{ cursor: globalCursor, zoom: appZoom }}
     >
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
@@ -2182,20 +2720,24 @@ export default function WeeklyPlanner() {
               </button>
             ) : (
               <>
-                <span className="text-base font-semibold tracking-tight text-foreground/80">
-                  {format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
+                <span className="text-base font-semibold tracking-tight text-foreground/80 whitespace-nowrap">
+                  {calendarView === 'day'
+                    ? format(currentDate, 'EEEE, MMM d yyyy')
+                    : calendarView === 'year'
+                      ? format(currentDate, 'yyyy')
+                      : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                 </span>
                 <div className="flex items-center rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                  <button onClick={navPrev}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
-                  <button onClick={goToday} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
-                  <button onClick={navNext}  className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
+                  <button onClick={navPrev}  title={`Previous ${calendarView} (${formatCombo(shortcuts.prevWeek)})`} className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
+                  <button onClick={goToday} title={`Jump to today (${formatCombo(shortcuts.today)})`} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
+                  <button onClick={navNext}  title={`Next ${calendarView} (${formatCombo(shortcuts.nextWeek)})`} className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
                 </div>
-                {/* Week / Month view switch */}
-                <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                  {(['week', 'month'] as const).map(v => {
+                {/* Day / Week / Month / Year switch (also Ctrl+wheel) */}
+                <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }} title="Ctrl + scroll to zoom between these">
+                  {CALENDAR_VIEWS.map(v => {
                     const active = calendarView === v;
                     return (
-                      <button key={v} onClick={() => setCalendarView(v)} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 capitalize"
+                      <button key={v} onClick={() => { setDirection(0); setCalendarView(v); }} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 capitalize"
                         style={{ background: active ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent', color: active ? (darkMode ? '#f5f5f5' : 'var(--color-foreground)') : headerInactive, boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                         {v}
                       </button>
@@ -2209,7 +2751,53 @@ export default function WeeklyPlanner() {
             <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
-            {!showFocusAnalysis && calendarView === 'week' && (
+            {/* App zoom stepper — mirrors Ctrl +/− (Ctrl+0 resets). */}
+            <div className="flex items-center rounded-lg shadow-sm overflow-hidden" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }} title="Zoom (Ctrl + / Ctrl − , Ctrl 0 to reset)">
+              <button
+                onClick={() => setAppZoom(z => clampZoom(z - ZOOM_STEP))}
+                disabled={appZoom <= ZOOM_MIN + 1e-9}
+                className="px-1.5 py-1 transition-colors disabled:opacity-30"
+                style={{ color: headerInactive }}
+                onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <Minus size={12}/>
+              </button>
+              {editingZoom ? (
+                <input
+                  autoFocus
+                  value={zoomDraft}
+                  onChange={e => setZoomDraft(e.target.value.replace(/[^\d]/g, ''))}
+                  onBlur={commitZoomDraft}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') commitZoomDraft();
+                    if (e.key === 'Escape') { setZoomDraft(String(Math.round(appZoom * 100))); setEditingZoom(false); }
+                  }}
+                  className="w-[38px] bg-transparent outline-none text-center text-[11px] font-semibold tabular-nums"
+                  style={{ color: 'var(--color-foreground)' }}
+                />
+              ) : (
+                <button
+                  onClick={() => { setZoomDraft(String(Math.round(appZoom * 100))); setEditingZoom(true); }}
+                  className="w-[46px] text-[11px] font-semibold tabular-nums cursor-text"
+                  style={{ color: 'var(--color-foreground)' }}
+                  title="Click to type an exact zoom %"
+                >
+                  {Math.round(appZoom * 100)}%
+                </button>
+              )}
+              <button
+                onClick={() => setAppZoom(z => clampZoom(z + ZOOM_STEP))}
+                disabled={appZoom >= ZOOM_MAX - 1e-9}
+                className="px-1.5 py-1 transition-colors disabled:opacity-30"
+                style={{ color: headerInactive }}
+                onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <Plus size={12}/>
+              </button>
+            </div>
+            {!showFocusAnalysis && isTimelineView && (
               <>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: headerLabel }}>Interval</span>
@@ -2244,17 +2832,40 @@ export default function WeeklyPlanner() {
                 </div>
               </>
             )}
+            {/* Live sync indicator — quiet when idle, spins while syncing. */}
+            <AnimatePresence>
+              {gCalSyncing && (
+                <motion.span
+                  key="sync-spinner"
+                  initial={{ opacity: 0, width: 0 }}
+                  animate={{ opacity: 1, width: 'auto' }}
+                  exit={{ opacity: 0, width: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="flex items-center gap-1.5 overflow-hidden whitespace-nowrap"
+                  title="Syncing with Google Calendar"
+                >
+                  <motion.span
+                    className="inline-block rounded-full flex-shrink-0"
+                    style={{ width: 8, height: 8, border: '1.5px solid #60a5fa', borderTopColor: 'transparent' }}
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+                  />
+                  <span className="text-[10px] font-semibold" style={{ color: '#60a5fa' }}>Syncing</span>
+                </motion.span>
+              )}
+            </AnimatePresence>
             <button
               onClick={() => setShowFocusAnalysis(v => !v)}
-              title={showFocusAnalysis ? 'Back to calendar' : 'Focus Analysis'}
-              className="p-1.5 rounded-lg transition-colors"
+              title={`${showFocusAnalysis ? 'Back to calendar' : 'Focus Analysis'} (${formatCombo(shortcuts.focusAnalysis)})`}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
               style={{
-                background: showFocusAnalysis ? (darkMode?'rgba(96,165,250,0.20)':'rgba(37,99,235,0.10)') : surfaceBg,
-                border: `1px solid ${showFocusAnalysis ? 'rgba(96,165,250,0.40)' : surfaceBdr}`,
-                color: showFocusAnalysis ? '#60a5fa' : 'var(--color-muted-foreground)',
+                background: showFocusAnalysis ? (darkMode?'rgba(96,165,250,0.22)':'rgba(37,99,235,0.12)') : surfaceBg,
+                border: `1px solid ${showFocusAnalysis ? 'rgba(96,165,250,0.50)' : surfaceBdr}`,
+                color: showFocusAnalysis ? '#60a5fa' : 'var(--color-foreground)',
               }}
             >
-              <BarChart3 size={14}/>
+              <BarChart3 size={15}/>
+              Analysis
             </button>
             <button
               onClick={handleHeaderCreateClick}
@@ -2266,6 +2877,14 @@ export default function WeeklyPlanner() {
             </button>
             <button onClick={openWidget} title="Open Floating Widget" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <AppWindow size={14}/>
+            </button>
+            <button
+              onClick={() => setShowShortcutHelp(true)}
+              title={`Keyboard shortcuts (${formatCombo(shortcuts.help)})`}
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
+              style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
+            >
+              <Keyboard size={14}/>
             </button>
             <button onClick={() => setSettingsOpen(s => !s)} title="Settings" className="p-1.5 rounded-lg transition-colors" style={{ background: settingsOpen ? (darkMode?'rgba(255,255,255,0.14)':'rgba(0,0,0,0.08)') : surfaceBg, border: `1px solid ${settingsOpen ? (darkMode?'rgba(255,255,255,0.22)':surfaceBdr) : surfaceBdr}`, color: settingsOpen ? 'var(--color-foreground)' : 'var(--color-muted-foreground)' }}>
               <Settings size={14}/>
@@ -2286,7 +2905,7 @@ export default function WeeklyPlanner() {
               transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
               className="min-w-[900px] max-w-[1400px] mx-auto p-4"
             >
-          {calendarView === 'week' && (
+          {isTimelineView && (
           <section
             className="mb-4 rounded-xl border overflow-hidden"
             style={{
@@ -2318,24 +2937,32 @@ export default function WeeklyPlanner() {
                 ))}
               </div>
 
-              <div className="flex-1 min-w-0 flex items-end gap-2 h-16">
+              <div className="flex-1 min-w-0 flex items-end gap-2 h-20">
                 {focusStats.perDay.map(day => {
-                  const pct = Math.max(5, (day.seconds / focusStats.maxSeconds) * 100);
+                  const pct = day.seconds > 0 ? Math.max(5, (day.seconds / focusStats.maxSeconds) * 100) : 0;
                   const active = isToday(day.day);
                   return (
                     <div key={day.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
+                      {/* Exact hours for this day, right above its bar. */}
+                      <div
+                        className="text-[9px] font-bold tabular-nums text-center truncate leading-none"
+                        style={{ color: day.seconds > 0 ? (active ? '#60a5fa' : menuText) : menuSub, opacity: day.seconds > 0 ? 1 : 0.45 }}
+                      >
+                        {day.seconds > 0 ? formatFocusDuration(day.seconds) : '—'}
+                      </div>
                       <div className="flex-1 flex items-end">
                         <div
                           className="w-full rounded-t-md transition-all duration-300"
-                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}`}
+                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}${day.sessions ? ` · ${day.sessions} session${day.sessions === 1 ? '' : 's'}` : ''}`}
                           style={{
                             height: `${pct}%`,
+                            minHeight: day.seconds > 0 ? 3 : 0,
                             background: active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
                             border: `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
                           }}
                         />
                       </div>
-                      <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: active ? '#60a5fa' : menuSub }}>
+                      <div className="text-[9px] font-semibold text-center uppercase truncate leading-none" style={{ color: active ? '#60a5fa' : menuSub }}>
                         {format(day.day, 'EEE')}
                       </div>
                     </div>
@@ -2361,9 +2988,31 @@ export default function WeeklyPlanner() {
             {/* Focus timer controls */}
             <div className="px-4 pb-3 flex items-center gap-3 border-t" style={{ borderColor: surfaceBdr }}>
               <div className="pt-3 flex items-center gap-3 flex-1 min-w-0">
-                <div className="text-2xl font-semibold tabular-nums leading-none flex-shrink-0" style={{ color: menuText }}>
+                <motion.div
+                  className="relative text-2xl font-semibold tabular-nums leading-none flex-shrink-0"
+                  style={{ color: focusCelebrate ? '#4ade80' : menuText }}
+                  animate={focusCelebrate
+                    ? { scale: [1, 1.16, 1, 1.08, 1], textShadow: ['0 0 0px rgba(74,222,128,0)', '0 0 18px rgba(74,222,128,0.75)', '0 0 0px rgba(74,222,128,0)'] }
+                    : { scale: 1 }}
+                  transition={focusCelebrate ? { duration: 1.5, ease: 'easeInOut' } : { duration: 0.3 }}
+                >
                   {formatCountdown(focusRemainingSeconds)}
-                </div>
+                  <AnimatePresence>
+                    {focusCelebrate && (
+                      <motion.span
+                        key="focus-done"
+                        initial={{ opacity: 0, y: 6, scale: 0.85 }}
+                        animate={{ opacity: 1, y: -18, scale: 1 }}
+                        exit={{ opacity: 0, y: -26 }}
+                        transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+                        className="absolute left-0 top-0 text-[10px] font-bold uppercase tracking-widest whitespace-nowrap"
+                        style={{ color: '#4ade80' }}
+                      >
+                        Session complete
+                      </motion.span>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
                 <div className="flex-1 min-w-[80px] max-w-[220px] h-1.5 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
                   <div
                     className="h-full rounded-full transition-all duration-300"
@@ -2403,9 +3052,9 @@ export default function WeeklyPlanner() {
                     />
                   ) : (
                     <button
-                      onDoubleClick={() => setEditingFocusMinutes(true)}
-                      className="w-full h-full text-xs font-semibold tabular-nums"
-                      title="Double-click to edit focus duration"
+                      onClick={() => setEditingFocusMinutes(true)}
+                      className="w-full h-full text-xs font-semibold tabular-nums cursor-text"
+                      title="Click to type a focus duration"
                     >
                       {Math.max(1, Math.round(focusTimer.plannedSeconds / 60))} min
                     </button>
@@ -2461,7 +3110,7 @@ export default function WeeklyPlanner() {
           </section>
           )}
           <AnimatePresence mode="wait">
-            {calendarView === 'week' ? (
+            {isTimelineView ? (
               <motion.div
                 key="week-view-wrapper"
                 initial={{ opacity: 0, y: 10 }}
@@ -2471,18 +3120,48 @@ export default function WeeklyPlanner() {
               >
                 <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
-              key={weekStart.toISOString()}
+              // Day view slides per day; week view per week.
+              key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : `w:${weekStart.toISOString()}`}
               custom={direction}
               variants={{
-                enter:  (d: number) => ({ x: d>0?20:d<0?-20:0, opacity: 0 }),
+                enter:  (d: number) => ({ x: d>0?14:d<0?-14:0, opacity: 0 }),
                 center: { x: 0, opacity: 1 },
-                exit:   (d: number) => ({ x: d<0?20:d>0?-20:0, opacity: 0 }),
+                exit:   (d: number) => ({ x: d<0?14:d>0?-14:0, opacity: 0 }),
               }}
               initial="enter" animate="center" exit="exit"
-              transition={{ x: { type: 'spring', stiffness: 300, damping: 30 }, opacity: { duration: 0.15 } }}
-              className="flex border border-border/60 rounded-xl overflow-hidden shadow-sm"
+              // Snappy: holding the week keys should feel instant, not springy.
+              transition={{ x: { type: 'spring', stiffness: 900, damping: 48, mass: 0.5 }, opacity: { duration: 0.07 } }}
+              className="flex border border-border/60 rounded-xl overflow-hidden shadow-sm relative"
               style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
             >
+              {/* Loading skeleton — a few shimmering placeholder blocks so the first
+                  paint reads as "loading" rather than "your week is empty". */}
+              <AnimatePresence>
+                {eventsLoading && (
+                  <motion.div
+                    key="grid-skeleton"
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                    transition={{ duration: 0.25 }}
+                    className="absolute inset-0 z-[60] pointer-events-none"
+                    style={{ background: darkMode ? 'rgba(20,22,24,0.72)' : 'rgba(250,250,249,0.78)', backdropFilter: 'blur(1px)' }}
+                  >
+                    {[
+                      { l: '10%', t: 140, h: 70 }, { l: '25%', t: 220, h: 110 },
+                      { l: '40%', t: 120, h: 90 },  { l: '55%', t: 260, h: 60 },
+                      { l: '70%', t: 180, h: 130 }, { l: '85%', t: 150, h: 80 },
+                    ].map((b, i) => (
+                      <motion.div
+                        key={i}
+                        className="absolute rounded-lg"
+                        style={{ left: b.l, top: b.t, width: '11%', height: b.h, background: darkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)' }}
+                        animate={{ opacity: [0.35, 0.85, 0.35] }}
+                        transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut', delay: i * 0.12 }}
+                      />
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {/* Time axis */}
               <div className="flex-shrink-0 border-r border-border/50" style={{ width: 64, background: darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)' }}>
                 <div style={{ height: HEADER_PX }} className="border-b border-border/50" />
@@ -2504,9 +3183,17 @@ export default function WeeklyPlanner() {
               </div>
 
               {/* Day columns */}
-              <div ref={daysGridRef} className="flex-1 grid grid-cols-7 relative">
-                {days.map((day, colIdx) => {
+              <div
+                ref={daysGridRef}
+                className="flex-1 grid relative"
+                style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}
+              >
+                {visibleCols.map((colIdx) => {
+                  const day       = days[colIdx];
                   const today     = isToday(day);
+                  // The column that actually contains "now" (see nowColIdx: before the
+                  // day-start hour that's yesterday's column, not today's).
+                  const isNowCol  = colIdx === nowColIdx;
 
                   // An event "spans the day boundary" when it starts before the configured
                   // day-start hour and ends after it (e.g. sleep from 1:15am to 9:45am with a
@@ -2653,19 +3340,34 @@ export default function WeeklyPlanner() {
                         ))}
 
                         {/* Live time indicator */}
-                        {today && nowInView && colIdx === todayColIdx && (() => {
+                        {isNowCol && nowInView && (() => {
                           const lineTop = minToY(nowMin, interval, dayStartH);
                           return (
-                            <div className="absolute left-0 right-0 z-30 pointer-events-none" style={{ top: lineTop, height: 0 }}>
-                              {/* Circle / arrow dot */}
-                              <motion.div
-                                className="absolute -left-[1.5px]"
-                                style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444', top: -4 }}
-                                animate={{ opacity: [0.5, 1, 0.5], scale: [0.9, 1.1, 0.9] }}
-                                transition={{ duration: 2.5, repeat: Infinity, ease: 'easeInOut' }}
+                            <div ref={nowLineRef} className="absolute left-0 right-0 z-30 pointer-events-none" style={{ top: lineTop, height: 0 }}>
+                              {/* Soft glow behind the line so it reads without shouting */}
+                              <div
+                                className="absolute left-0 right-0"
+                                style={{ height: 12, top: -6, background: `linear-gradient(to bottom, transparent, ${nowAccentSoft}, transparent)` }}
                               />
-                              {/* Thin line */}
-                              <div className="absolute left-0 right-0" style={{ height: 2, background: '#ef4444', opacity: 0.65 }} />
+                              {/* Pulsing dot with a matching halo */}
+                              <motion.div
+                                className="absolute -left-[2px]"
+                                style={{ width: 9, height: 9, borderRadius: '50%', background: nowAccent, top: -3.5, boxShadow: `0 0 0 3px ${nowAccentSoft}` }}
+                                animate={{ opacity: [0.65, 1, 0.65], scale: [0.92, 1.08, 0.92] }}
+                                transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+                              />
+                              {/* Hairline that fades out toward the right edge */}
+                              <div
+                                className="absolute left-0 right-0"
+                                style={{ height: 1.5, background: `linear-gradient(to right, ${nowAccent}, ${nowAccent} 65%, ${nowAccentSoft})`, opacity: 0.9 }}
+                              />
+                              {/* Live time chip */}
+                              <div
+                                className="absolute text-[9px] font-bold tabular-nums px-1.5 py-[1px] rounded-full whitespace-nowrap"
+                                style={{ right: 3, top: -8, background: nowAccent, color: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)', letterSpacing: '0.02em' }}
+                              >
+                                {formatTimeLabel(nowMin, timeFormat)}
+                              </div>
                             </div>
                           );
                         })()}
@@ -2690,7 +3392,7 @@ export default function WeeklyPlanner() {
                           const isMoving = isDrag || isResize || isBatchDrag;
                           const blockTransition = isMoving
                             ? 'none'
-                            : 'box-shadow 75ms ease, outline-color 75ms ease';
+                            : 'box-shadow 140ms ease, outline-color 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), filter 140ms ease';
                           const { bg, border, text } = colorPalette[ev.color];
                           const tooShort = height < sh * 2;
                           // Duration always reflects the event's true full start–end, not just this segment.
@@ -2699,7 +3401,7 @@ export default function WeeklyPlanner() {
                           const spansBoundary = fullStartMin < dayStartMin && fullEndMin >= dayStartMin;
                           // "Live" is scoped to this segment's own on-screen range (each segment lives in a
                           // different day column, so at most one of tail/head is ever the active one).
-                          const isLive   = today && normNowMin >= item.startMin && normNowMin < item.endMin;
+                          const isLive   = isNowCol && normNowMin >= item.startMin && normNowMin < item.endMin;
                           const minutesLeft = Math.max(0, segKind === 'tail'
                             ? fullEndMin + 1440 - normNowMin
                             : segKind === 'head'
@@ -2744,9 +3446,11 @@ export default function WeeklyPlanner() {
                             );
                           }
 
+                          // Hovering lifts the block a hair; it settles back on release.
+                          const lift = !isMoving && (isHov || isMenu || isEdit) ? -1.5 : 0;
                           const transform = (isMoving && dragDelta)
                             ? `translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0)`
-                            : 'translate3d(0, 0, 0)';
+                            : `translate3d(0, ${lift}px, 0)`;
 
                           return (
                             <div
@@ -2769,6 +3473,8 @@ export default function WeeklyPlanner() {
                                 color: text,
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.95 : 1,
+                                // A touch more saturation on hover so the block "wakes up".
+                                filter: lift ? 'saturate(1.12) brightness(1.03)' : undefined,
                                 outline: isMenu ? `2px solid ${text}` : isSelected ? `2px solid ${darkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.45)'}` : 'none',
                                 outlineOffset: 1,
                                 pointerEvents: (isMoving && !isResize) ? 'none' : undefined,
@@ -2958,8 +3664,18 @@ export default function WeeklyPlanner() {
                     const { row } = layoutInfo;
                     const startIdx = ev.visibleDayIndex;
                     const span = ev.visibleDaysSpan;
-                    const leftPct = (startIdx / 7) * 100;
-                    const widthPct = (span / 7) * 100;
+                    // Day view shows one column: clip the banner to that day, and
+                    // skip it entirely when the span doesn't reach the shown day.
+                    let leftPct: number;
+                    let widthPct: number;
+                    if (isDayView) {
+                      if (dayViewColIdx < startIdx || dayViewColIdx >= startIdx + span) return null;
+                      leftPct = 0;
+                      widthPct = 100;
+                    } else {
+                      leftPct = (startIdx / 7) * 100;
+                      widthPct = (span / 7) * 100;
+                    }
 
                     const isEdit = editingId === ev.id;
                     const isSelected = selectedIds.has(ev.id);
@@ -2976,12 +3692,13 @@ export default function WeeklyPlanner() {
                         key={ev.id}
                         data-event="1"
                         data-event-id={ev.id}
-                        className={`absolute rounded-md border text-[11px] font-semibold flex items-center gap-1.5 px-2.5 transition-all duration-150 ${isEdit || isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                        className={`absolute rounded-md border text-[11px] font-semibold flex items-center gap-1.5 px-2.5 hover:-translate-y-[1.5px] ${isEdit || isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                         style={{
                           top: HEADER_PX + row * 28 + 4,
                           height: 24,
                           left: `calc(${leftPct}% + 4px)`,
                           width: `calc(${widthPct}% - 8px)`,
+                          transition: 'top 260ms cubic-bezier(0.22,1,0.36,1), left 260ms cubic-bezier(0.22,1,0.36,1), width 260ms cubic-bezier(0.22,1,0.36,1), box-shadow 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), outline-color 140ms ease',
                           backgroundColor: bg,
                           borderColor: border,
                           color: text,
@@ -3055,12 +3772,149 @@ export default function WeeklyPlanner() {
                     background: darkMode ? 'rgba(120,180,240,0.18)' : 'rgba(60,120,200,0.13)',
                     border: `1.5px solid ${darkMode ? 'rgba(120,180,240,0.40)' : 'rgba(60,120,200,0.30)'}`,
                     borderRadius: 6,
-                  }} />
+                  }}>
+                    {/* Live start/end while drag-creating, pinned to each edge so
+                        the exact times are readable before releasing the mouse. */}
+                    {createDisp && (() => {
+                      const chip = {
+                        background: darkMode ? 'rgba(120,180,240,0.95)' : 'rgba(45,105,190,0.95)',
+                        color: '#fff',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.28)',
+                      } as React.CSSProperties;
+                      const dur = createDisp.endMin - createDisp.startMin;
+                      const durLabel = dur >= 60
+                        ? `${Math.floor(dur / 60)}h${dur % 60 ? ` ${dur % 60}m` : ''}`
+                        : `${dur}m`;
+                      return (
+                        <>
+                          <div className="absolute left-1/2 text-[10px] font-bold tabular-nums px-1.5 py-[2px] rounded whitespace-nowrap"
+                               style={{ ...chip, top: -20, transform: 'translateX(-50%)' }}>
+                            {formatTimeLabel(createDisp.startMin, timeFormat)}
+                          </div>
+                          <div className="absolute left-1/2 text-[10px] font-bold tabular-nums px-1.5 py-[2px] rounded whitespace-nowrap"
+                               style={{ ...chip, bottom: -20, transform: 'translateX(-50%)' }}>
+                            {formatTimeLabel(createDisp.endMin, timeFormat)}
+                          </div>
+                          {selRect.height >= 26 && (
+                            <div className="absolute inset-0 flex items-center justify-center">
+                              <span className="text-[10px] font-bold tabular-nums px-1.5 py-[1px] rounded"
+                                    style={{ background: darkMode ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.75)', color: darkMode ? '#dbeafe' : '#1e40af' }}>
+                                {durLabel}
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
                 )}
+
+                {/* Empty week hint — only once loading has settled, so it never
+                    flashes over data that is still on its way in. */}
+                <AnimatePresence>
+                  {!eventsLoading && Object.keys(weekEvents).length === 0 && (
+                    <motion.div
+                      key="empty-week"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.3, delay: 0.1 }}
+                      className="absolute left-1/2 z-20 pointer-events-none flex flex-col items-center gap-1.5 text-center px-6 py-5 rounded-xl"
+                      style={{
+                        top: HEADER_PX + allDayHeight + 90,
+                        transform: 'translateX(-50%)',
+                        border: `1px dashed ${surfaceBdr}`,
+                        background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.55)',
+                      }}
+                    >
+                      <CalendarRange size={20} style={{ color: menuSub, opacity: 0.6 }} />
+                      <span className="text-xs font-medium" style={{ color: menuText }}>Nothing planned this week</span>
+                      <span className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
+                        Click a slot, or drag down a column, to block out time.
+                      </span>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </motion.div>
           </AnimatePresence>
         </motion.div>
+        ) : calendarView === 'year' ? (
+        /* ── Year overview ──────────────────────────────────────────── */
+        (() => {
+        const yearMaxDayCount = Math.max(1, ...yearMatrix.flatMap(m => m.cells.map(c => c.count)));
+        return (
+        <motion.div
+          key="year-view-wrapper"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          className="rounded-xl border border-border/60 overflow-hidden shadow-sm p-4"
+          style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
+        >
+          <div className="grid grid-cols-4 gap-3 items-start">
+            {yearMatrix.map(m => (
+              <button
+                key={m.monthStart.toISOString()}
+                onClick={() => { setDirection(0); setCurrentDate(m.monthStart); setCalendarView('month'); }}
+                title={`Open ${format(m.monthStart, 'MMMM yyyy')}`}
+                // self-start so months with 5 week-rows don't float vertically
+                // centred next to months with 6.
+                className="rounded-lg p-2.5 text-left transition-all duration-150 hover:-translate-y-[2px] self-start w-full"
+                style={{
+                  background: m.isCurrent ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)') : surfaceBg,
+                  border: `1px solid ${m.isCurrent ? 'rgba(96,165,250,0.45)' : surfaceBdr}`,
+                }}
+              >
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[11px] font-bold" style={{ color: m.isCurrent ? '#60a5fa' : menuText }}>
+                    {format(m.monthStart, 'MMMM')}
+                  </span>
+                  {m.eventCount > 0 && (
+                    <span className="text-[8.5px] font-semibold tabular-nums" style={{ color: menuSub }}>{m.eventCount}</span>
+                  )}
+                </div>
+                {/* Weekday initials */}
+                <div className="grid grid-cols-7 gap-[1px] mb-0.5">
+                  {m.cells.slice(0, 7).map(c => (
+                    <span key={c.date.toISOString()} className="text-[6.5px] font-bold uppercase text-center" style={{ color: menuSub, opacity: 0.7 }}>
+                      {format(c.date, 'EEEEE')}
+                    </span>
+                  ))}
+                </div>
+                {/* Mini month grid: dot density = items that day */}
+                <div className="grid grid-cols-7 gap-[1px]">
+                  {m.cells.map(c => {
+                    const dim = !isSameMonth(c.date, m.monthStart);
+                    const isTodayCell = isToday(c.date);
+                    return (
+                      <span
+                        key={c.date.toISOString()}
+                        className="aspect-square flex items-center justify-center rounded-[2px] text-[7px] tabular-nums relative"
+                        style={{
+                          color: isTodayCell ? '#fff' : dim ? menuSub : menuText,
+                          opacity: dim ? 0.3 : 1,
+                          // Scale against the busiest day of the year so the tint
+                          // actually discriminates instead of saturating everywhere.
+                          background: isTodayCell
+                            ? '#60a5fa'
+                            : c.count > 0
+                              ? `rgba(96,165,250,${(0.07 + 0.33 * (c.count / yearMaxDayCount)).toFixed(3)})`
+                              : 'transparent',
+                        }}
+                      >
+                        {format(c.date, 'd')}
+                      </span>
+                    );
+                  })}
+                </div>
+              </button>
+            ))}
+          </div>
+        </motion.div>
+        );
+        })()
         ) : (
         /* ── Month overview ─────────────────────────────────────────── */
         <motion.div
@@ -3086,32 +3940,72 @@ export default function WeeklyPlanner() {
                 {week.cells.map(({ date, events: cellEvents }) => {
                   const inMonth = isSameMonth(date, currentDate);
                   const cellToday = isToday(date);
-                  const baseBg = cellToday ? (darkMode ? 'rgba(96,165,250,0.08)' : 'rgba(37,99,235,0.05)') : 'transparent';
+                  // Tint the cell by how much focus time it holds — the month grid
+                  // doubles as a heatmap of where the deep work actually landed.
+                  const focusSecs = focusAnalysis.byDaySeconds.get(dateKey(date)) ?? 0;
+                  const focusPct = focusSecs > 0 ? Math.min(1, focusSecs / Math.max(1, focusAnalysis.monthMaxSeconds)) : 0;
+                  const baseBg = cellToday
+                    ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
+                    : focusPct > 0
+                      ? `rgba(96,165,250,${(0.05 + 0.16 * focusPct).toFixed(3)})`
+                      : 'transparent';
+                  const hoverCellBg = cellToday
+                    ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)')
+                    : hoverBg;
+                  // All-day items read as banners and sort above the timed ones.
+                  const ordered = [...cellEvents].sort((a, b) => Number(!!b.allDay) - Number(!!a.allDay));
                   return (
                     <div
                       key={date.toISOString()}
                       onClick={() => { setDirection(0); setCurrentDate(date); setCalendarView('week'); }}
-                      title="Open this week"
-                      className="min-h-[108px] p-1.5 border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1 transition-colors"
+                      title={focusSecs > 0 ? `Open this week · ${formatFocusDuration(focusSecs)} focused` : 'Open this week'}
+                      className="min-h-[108px] p-1.5 border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1 transition-colors duration-200 relative"
                       style={{ background: baseBg, opacity: inMonth ? 1 : 0.4 }}
-                      onMouseEnter={e => (e.currentTarget.style.background = cellToday ? (darkMode ? 'rgba(96,165,250,0.13)' : 'rgba(37,99,235,0.09)') : hoverBg)}
+                      onMouseEnter={e => (e.currentTarget.style.background = hoverCellBg)}
                       onMouseLeave={e => (e.currentTarget.style.background = baseBg)}
                     >
+                      {/* Today gets a real marker, not just a faint tint */}
+                      {cellToday && <span className="absolute left-0 top-0 bottom-0 w-[2.5px]" style={{ background: '#60a5fa' }} />}
                       <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-semibold tabular-nums" style={{ color: cellToday ? '#60a5fa' : (inMonth ? menuText : menuSub) }}>{format(date, 'd')}</span>
-                        {cellEvents.length > 0 && <span className="text-[8.5px] tabular-nums" style={{ color: menuSub }}>{cellEvents.length}</span>}
+                        <span
+                          className={`text-[11px] font-semibold tabular-nums ${cellToday ? 'flex items-center justify-center rounded-full w-[18px] h-[18px]' : ''}`}
+                          style={cellToday
+                            ? { background: '#60a5fa', color: '#fff' }
+                            : { color: inMonth ? menuText : menuSub }}
+                        >
+                          {format(date, 'd')}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          {focusSecs > 0 && (
+                            <span className="text-[8px] font-bold tabular-nums flex items-center gap-0.5" style={{ color: '#60a5fa' }} title={`${formatFocusDuration(focusSecs)} focused`}>
+                              <Target size={7} />{formatFocusDuration(focusSecs)}
+                            </span>
+                          )}
+                          {ordered.length > 0 && <span className="text-[8.5px] tabular-nums" style={{ color: menuSub }}>{ordered.length}</span>}
+                        </span>
                       </div>
                       <div className="flex flex-col gap-0.5 overflow-hidden">
-                        {cellEvents.slice(0, 4).map(ev => {
+                        {ordered.slice(0, 4).map(ev => {
                           const { bg, border, text } = colorPalette[ev.color];
-                          const label = formatTimeLabel(timeToMin(ev.startTime), timeFormat);
+                          const label = ev.allDay ? 'All day' : formatTimeLabel(timeToMin(ev.startTime), timeFormat);
                           return (
-                            <div key={ev.id} className="rounded px-1 py-0.5 truncate text-[9px] font-medium leading-tight" style={{ background: bg, borderLeft: `2px solid ${border}`, color: text }} title={`${label} ${ev.content}`}>
+                            <div
+                              key={ev.id}
+                              className="rounded px-1 py-0.5 truncate text-[9px] font-medium leading-tight transition-transform duration-150 hover:translate-x-[1px]"
+                              style={{
+                                background: bg,
+                                // All-day items get a full outline so they read as banners.
+                                border: ev.allDay ? `1px solid ${border}` : undefined,
+                                borderLeft: `2px solid ${border}`,
+                                color: text,
+                              }}
+                              title={`${label} ${ev.content}`}
+                            >
                               <span className="tabular-nums opacity-80">{label}</span>{ev.content ? ` ${ev.content}` : ''}
                             </div>
                           );
                         })}
-                        {cellEvents.length > 4 && <span className="text-[8.5px] pl-1" style={{ color: menuSub }}>+{cellEvents.length - 4} more</span>}
+                        {ordered.length > 4 && <span className="text-[8.5px] pl-1" style={{ color: menuSub }}>+{ordered.length - 4} more</span>}
                       </div>
                     </div>
                   );
@@ -3158,7 +4052,11 @@ export default function WeeklyPlanner() {
                     <BarChart3 size={14} />
                   </div>
                   <span className="text-sm font-semibold" style={{ color: menuText }}>
-                    {analysisTab === 'month' ? format(analysisMonthCursor, 'MMMM yyyy') : analysisYearCursor}
+                    {analysisTab === 'week'
+                      ? `${format(focusAnalysis.aWeekStart, 'MMM d')} – ${format(focusAnalysis.aWeekEnd, 'MMM d, yyyy')}`
+                      : analysisTab === 'month'
+                        ? format(analysisMonthCursor, 'MMMM yyyy')
+                        : analysisYearCursor}
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
@@ -3187,7 +4085,7 @@ export default function WeeklyPlanner() {
                   </div>
 
                   <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                    {(['month', 'year'] as const).map(tab => (
+                    {(['week', 'month', 'year'] as const).map(tab => (
                       <button
                         key={tab}
                         onClick={() => setAnalysisTab(tab)}
@@ -3205,7 +4103,114 @@ export default function WeeklyPlanner() {
               </div>
 
               <div className="px-5 py-4">
-                {analysisTab === 'month' ? (
+                {analysisTab === 'week' ? (
+                  <div>
+                    {/* Week nav */}
+                    <div className="flex items-center justify-between mb-3">
+                      <button onClick={() => setAnalysisWeekCursor(d => subWeeks(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronLeft size={16} />
+                      </button>
+                      <button
+                        onClick={() => setAnalysisWeekCursor(new Date())}
+                        className="text-xs font-medium px-2 py-1 rounded-md transition-colors"
+                        style={{ color: menuSub }}
+                        onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        title="Jump to this week"
+                      >
+                        Weekly overview
+                      </button>
+                      <button onClick={() => setAnalysisWeekCursor(d => addWeeks(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                        <ChevronRight size={16} />
+                      </button>
+                    </div>
+
+                    {/* Week stats */}
+                    <div className="grid grid-cols-4 gap-3 mb-4">
+                      {[
+                        ['Total', formatFocusDuration(weekAnalysisLive.seconds)],
+                        ['Sessions', `${focusAnalysis.wkSessions}`],
+                        ['Active Days', `${weekAnalysisLive.activeDays}`],
+                        ['Avg / Active Day', formatFocusDuration(weekAnalysisLive.avgActive)],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
+                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Per-day bars with the exact hours spelled out */}
+                    <div className="flex items-end gap-2.5 h-44 mb-2">
+                      {weekAnalysisLive.days.map(d => {
+                        const pct = d.seconds > 0 ? Math.max(4, (d.seconds / weekAnalysisLive.maxSeconds) * 100) : 0;
+                        const isTodayCol = isToday(d.date);
+                        const isBest = d.seconds > 0 && d.key === weekAnalysisLive.bestKey;
+                        return (
+                          <div key={d.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
+                            {/* Exact time above each bar */}
+                            <div className="text-[10px] font-bold tabular-nums text-center truncate"
+                                 style={{ color: d.seconds > 0 ? (isTodayCol ? '#60a5fa' : menuText) : menuSub, opacity: d.seconds > 0 ? 1 : 0.5 }}>
+                              {d.seconds > 0 ? formatFocusDuration(d.seconds) : '—'}
+                            </div>
+                            <div className="flex-1 flex items-end">
+                              <div
+                                className="w-full rounded-t-md transition-all duration-300"
+                                title={`${format(d.date, 'EEEE, MMM d')}: ${formatFocusDuration(d.seconds)}${d.sessions ? ` · ${d.sessions} session${d.sessions === 1 ? '' : 's'}` : ''}`}
+                                style={{
+                                  height: `${pct}%`,
+                                  minHeight: d.seconds > 0 ? 3 : 0,
+                                  background: isTodayCol ? '#60a5fa' : isBest ? 'rgba(96,165,250,0.65)' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
+                                  border: `1px solid ${isTodayCol ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
+                                }}
+                              />
+                            </div>
+                            <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: isTodayCol ? '#60a5fa' : menuSub }}>
+                              {format(d.date, 'EEE')}
+                            </div>
+                            <div className="text-[8.5px] tabular-nums text-center truncate" style={{ color: menuSub }}>
+                              {format(d.date, 'd')}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Exact per-day breakdown */}
+                    <div className="mt-4 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
+                      {weekAnalysisLive.days.map((d, i) => (
+                        <div
+                          key={d.key}
+                          className="flex items-center justify-between px-3.5 py-2 text-xs"
+                          style={{
+                            background: isToday(d.date)
+                              ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
+                              : i % 2 === 0 ? surfaceBg : 'transparent',
+                            borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
+                          }}
+                        >
+                          <span className="font-medium flex items-center gap-1.5" style={{ color: isToday(d.date) ? '#60a5fa' : menuText }}>
+                            <Clock size={11} style={{ opacity: 0.5 }} />
+                            {format(d.date, 'EEEE, MMM d')}
+                            {isToday(d.date) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
+                          </span>
+                          <span className="tabular-nums flex items-center gap-2" style={{ color: d.seconds > 0 ? menuText : menuSub }}>
+                            <span className="font-semibold">{formatFocusDuration(d.seconds)}</span>
+                            <span style={{ color: menuSub }}>· {d.sessions} session{d.sessions === 1 ? '' : 's'}</span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {weekAnalysisLive.seconds === 0 && (
+                      <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px dashed ${surfaceBdr}` }}>
+                        <Target size={18} style={{ color: menuSub, opacity: 0.6 }} />
+                        <span className="text-xs font-medium" style={{ color: menuText }}>No focus logged this week</span>
+                        <span className="text-[10px]" style={{ color: menuSub }}>Run the timer and each day's exact hours show up here.</span>
+                      </div>
+                    )}
+                  </div>
+                ) : analysisTab === 'month' ? (
                   <div>
                     {/* Month nav */}
                     <div className="flex items-center justify-between mb-3">
@@ -3274,6 +4279,13 @@ export default function WeeklyPlanner() {
                         );
                       })}
                     </div>
+                    {focusAnalysis.monthSessions === 0 && (
+                      <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px dashed ${surfaceBdr}` }}>
+                        <Target size={18} style={{ color: menuSub, opacity: 0.6 }} />
+                        <span className="text-xs font-medium" style={{ color: menuText }}>No focus sessions in {format(analysisMonthCursor, 'MMMM')}</span>
+                        <span className="text-[10px]" style={{ color: menuSub }}>Start the timer on the calendar and your days will light up here.</span>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div>
@@ -3359,6 +4371,129 @@ export default function WeeklyPlanner() {
         )}
       </AnimatePresence>
     </main>
+
+      {/* ── Keyboard shortcut help overlay ───────────────────────────────── */}
+      <AnimatePresence>
+        {showShortcutHelp && (
+          <>
+            <motion.div
+              key="shortcut-help-backdrop"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              onClick={() => setShowShortcutHelp(false)}
+              className="fixed inset-0 z-[280] backdrop-blur-[6px]"
+              style={{ background: darkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.25)' }}
+            />
+            {/* Flex-centred wrapper: framer-motion drives `transform` on the panel
+                itself, so centring must not rely on a transform of our own. */}
+            <div
+              key="shortcut-help-wrap"
+              className="fixed inset-0 z-[290] flex items-center justify-center p-4 pointer-events-none"
+            >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+              className="pointer-events-auto w-[560px] max-w-[92vw] max-h-[80vh] overflow-y-auto rounded-2xl"
+              style={{
+                background: menuBg,
+                border: `1px solid ${menuBdr}`,
+                boxShadow: `0 24px 64px rgba(0,0,0,${darkMode ? 0.6 : 0.20})`,
+              }}
+            >
+              <div className="flex items-center justify-between px-5 py-3.5 sticky top-0" style={{ borderBottom: `1px solid ${menuBdr}`, background: menuBg }}>
+                <span className="text-sm font-semibold" style={{ color: menuText }}>Keyboard Shortcuts</span>
+                <button onClick={() => setShowShortcutHelp(false)} className="p-1 rounded-md" style={{ color: menuSub }}>
+                  <X size={15} />
+                </button>
+              </div>
+              <div className="px-5 py-4 grid grid-cols-2 gap-x-6 gap-y-5">
+                {(['Navigation', 'View', 'Editing', 'Focus'] as const).map(group => (
+                  <div key={group} className="flex flex-col gap-1.5">
+                    <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>{group}</span>
+                    {SHORTCUT_DEFS.filter(d => d.group === group).map(def => (
+                      <div key={def.action} className="flex items-center justify-between gap-3">
+                        <span className="text-[11.5px] truncate" style={{ color: menuText }}>{def.label}</span>
+                        <kbd
+                          className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0"
+                          style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText, fontFamily: 'inherit' }}
+                        >
+                          {formatCombo(shortcuts[def.action])}
+                        </kbd>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+                <div className="col-span-2 pt-1 text-[10px] leading-relaxed" style={{ color: menuSub, borderTop: `1px solid ${menuBdr}` }}>
+                  <span className="block pt-2.5">
+                    Rebind any of these in <span style={{ color: menuText }}>Settings → Keyboard Shortcuts</span>.
+                    Always available: <kbd style={{ color: menuText }}>Esc</kbd> to close, <kbd style={{ color: menuText }}>Ctrl + drag</kbd> to box-select,
+                    <kbd style={{ color: menuText }}> drag empty space</kbd> to create.
+                  </span>
+                </div>
+              </div>
+            </motion.div>
+            </div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* ── Toasts ───────────────────────────────────────────────────────── */}
+      <div className="fixed bottom-5 right-5 z-[300] flex flex-col gap-2 items-end pointer-events-none">
+        <AnimatePresence initial={false}>
+          {toasts.map(t => {
+            const tone = t.tone === 'success'
+              ? { accent: '#4ade80', glow: 'rgba(74,222,128,0.30)' }
+              : t.tone === 'error'
+                ? { accent: '#f87171', glow: 'rgba(248,113,113,0.30)' }
+                : { accent: '#60a5fa', glow: 'rgba(96,165,250,0.30)' };
+            return (
+              <motion.div
+                key={t.id}
+                layout
+                initial={{ opacity: 0, x: 24, scale: 0.96 }}
+                animate={{ opacity: 1, x: 0, scale: 1 }}
+                exit={{ opacity: 0, x: 24, scale: 0.96 }}
+                transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                className="pointer-events-auto flex items-center gap-2.5 pl-3 pr-4 py-2.5 rounded-xl text-[12px] font-medium max-w-[340px] backdrop-blur-md"
+                style={{
+                  background: darkMode ? 'rgba(30,32,34,0.92)' : 'rgba(255,255,255,0.94)',
+                  border: `1px solid ${menuBdr}`,
+                  color: menuText,
+                  boxShadow: `0 8px 28px rgba(0,0,0,${darkMode ? 0.45 : 0.14}), 0 0 0 1px ${tone.glow}`,
+                }}
+              >
+                <span className="w-1 self-stretch rounded-full flex-shrink-0" style={{ background: tone.accent }} />
+                <span className="leading-snug">{t.message}</span>
+              </motion.div>
+            );
+          })}
+        </AnimatePresence>
+      </div>
+
+      {/* Floating "Go to Live" button — appears when the red now-line is off-screen. */}
+      <AnimatePresence>
+        {showLiveBtn && isTimelineView && (
+          <motion.button
+            key="go-to-live"
+            onClick={scrollToLive}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[120] flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg backdrop-blur-md active:scale-95"
+            style={{
+              background: darkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.70)',
+              border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.20)' : 'rgba(0, 0, 0, 0.10)'}`,
+              color: '#ffffff',
+            }}
+          >
+            <Clock size={12} />
+            Go to Live
+          </motion.button>
+        )}
+      </AnimatePresence>
 
       {/* ── Settings drawer ─────────────────────────────────────────────── */}
       <AnimatePresence>
@@ -3545,6 +4680,141 @@ export default function WeeklyPlanner() {
                     };
                     return `${formatHourLabel(dayStartH)} – ${formatHourLabel(dayEndH)} (${dayEndH - dayStartH}h visible)`;
                   })()}
+                </p>
+              </div>
+
+              {/* Keyboard shortcuts */}
+              <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
+              <div className="flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Keyboard Shortcuts</span>
+                  <button
+                    onClick={() => setShortcuts({ ...DEFAULT_SHORTCUTS })}
+                    className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded"
+                    style={{ color: menuSub, border: `1px solid ${surfaceBdr}` }}
+                    title="Restore every shortcut to its default"
+                  >
+                    Reset all
+                  </button>
+                </div>
+                <p className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
+                  Click a shortcut, then press the keys you want. Esc cancels.
+                </p>
+                {(['Navigation', 'View', 'Editing', 'Focus'] as const).map(group => (
+                  <div key={group} className="flex flex-col gap-1">
+                    <span className="text-[9px] font-bold uppercase tracking-wider mt-1" style={{ color: menuSub, opacity: 0.75 }}>{group}</span>
+                    {SHORTCUT_DEFS.filter(d => d.group === group).map(def => {
+                      const recording = recordingAction === def.action;
+                      const conflicts = findConflicts(shortcuts, def.action);
+                      return (
+                        <button
+                          key={def.action}
+                          // detail === 0 means the "click" came from Enter/Space on a
+                          // focused button — that must not silently arm the recorder
+                          // and swallow the user's next keystroke as a binding.
+                          onClick={(e) => { if (e.detail === 0) return; setRecordingAction(recording ? null : def.action); }}
+                          title={def.hint}
+                          className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left transition-colors"
+                          style={{
+                            background: recording ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.09)') : 'transparent',
+                            border: `1px solid ${recording ? 'rgba(96,165,250,0.45)' : 'transparent'}`,
+                          }}
+                          onMouseEnter={e => { if (!recording) e.currentTarget.style.background = hoverBg; }}
+                          onMouseLeave={e => { if (!recording) e.currentTarget.style.background = 'transparent'; }}
+                        >
+                          <span className="text-[11px] font-medium truncate" style={{ color: menuText }}>{def.label}</span>
+                          <kbd
+                            className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0"
+                            style={{
+                              background: surfaceBg,
+                              border: `1px solid ${conflicts.length ? 'rgba(248,113,113,0.55)' : surfaceBdr}`,
+                              color: recording ? '#60a5fa' : conflicts.length ? '#f87171' : menuText,
+                              fontFamily: 'inherit',
+                            }}
+                          >
+                            {recording ? 'Press keys…' : formatCombo(shortcuts[def.action])}
+                          </kbd>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+
+              {/* Automatic backup */}
+              <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Automatic Backup</span>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium" style={{ color: menuText }}>Enabled</span>
+                  <button
+                    onClick={() => setAutoBackup(c => ({ ...c, enabled: !c.enabled }))}
+                    className="relative flex-shrink-0 rounded-full transition-colors duration-200"
+                    style={{
+                      width: 36, height: 20,
+                      background: autoBackup.enabled ? 'rgba(120,200,120,0.55)' : surfaceBdr,
+                      border: `1px solid ${surfaceBdr}`,
+                    }}
+                  >
+                    <span
+                      className="absolute rounded-full transition-transform duration-200"
+                      style={{
+                        width: 15, height: 15, top: 2, left: 2,
+                        background: autoBackup.enabled ? '#fff' : menuSub,
+                        transform: autoBackup.enabled ? 'translateX(17px)' : 'translateX(0px)',
+                      }}
+                    />
+                  </button>
+                </div>
+
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[9px] font-medium" style={{ color: menuSub }}>Run every</span>
+                  <select
+                    value={autoBackup.intervalHours}
+                    onChange={e => setAutoBackup(c => ({ ...c, intervalHours: parseInt(e.target.value) }))}
+                    disabled={!autoBackup.enabled}
+                    className="w-full py-1.5 px-2 text-xs font-medium rounded-md transition-all duration-200"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText, outline: 'none', opacity: autoBackup.enabled ? 1 : 0.45 }}
+                  >
+                    {[
+                      [1, 'Hour'], [3, '3 hours'], [6, '6 hours'], [12, '12 hours'],
+                      [24, 'Day'], [72, '3 days'], [168, 'Week'],
+                    ].map(([h, label]) => (
+                      <option key={h as number} value={h as number}>{label as string}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[9px] font-medium" style={{ color: menuSub }}>Keep the last</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={1}
+                      max={1000}
+                      value={autoBackup.keep}
+                      onChange={e => setAutoBackup(c => ({ ...c, keep: Math.max(1, Math.min(1000, parseInt(e.target.value) || 1)) }))}
+                      className="flex-1 py-1.5 px-2 text-xs font-medium tabular-nums rounded-md outline-none"
+                      style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                    />
+                    <span className="text-[10px]" style={{ color: menuSub }}>backups</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={runBackupNow}
+                  className="w-full py-2 px-3 text-xs font-semibold rounded-md text-center transition-all duration-200"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                  onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                  onMouseLeave={e => (e.currentTarget.style.background = surfaceBg)}
+                >
+                  Back Up Now
+                </button>
+                <p className="text-[10px] leading-relaxed" style={{ color: menuSub }}>
+                  Saved to the <span style={{ color: menuText }}>backups</span> folder.
+                  {backupStatus
+                    ? ` ${backupStatus.count} stored${backupStatus.lastBackupAt ? ` · last ${format(new Date(backupStatus.lastBackupAt), 'MMM d, HH:mm')}` : ''}.`
+                    : ''}
                 </p>
               </div>
 

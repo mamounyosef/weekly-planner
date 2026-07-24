@@ -74,6 +74,101 @@ async function safeWriteJsonFile(opts: {
   return { ok: true };
 }
 
+// ─── Automated backups ─────────────────────────────────────────────────────
+// Writes a full, restorable snapshot (same shape as the manual "Export Backup"
+// file, so it can be imported straight back) into <repo root>/backups on a
+// schedule the user controls from Settings. Runs entirely server-side so it
+// keeps working whether or not an app window is open.
+const AUTO_BACKUP_DEFAULTS = { enabled: true, intervalHours: 24, keep: 50 };
+
+function coerceAutoBackupCfg(raw: unknown) {
+  const cfg = { ...AUTO_BACKUP_DEFAULTS };
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    if (typeof r.enabled === 'boolean') cfg.enabled = r.enabled;
+    const hours = Number(r.intervalHours);
+    if (Number.isFinite(hours) && hours >= 1) cfg.intervalHours = Math.min(24 * 30, Math.round(hours));
+    const keep = Number(r.keep);
+    if (Number.isFinite(keep) && keep >= 1) cfg.keep = Math.min(1000, Math.round(keep));
+  }
+  return cfg;
+}
+
+async function readJsonSafe(filePath: string, fallback: unknown) {
+  try {
+    return JSON.parse(await fsp.readFile(filePath, 'utf-8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function autoBackupPaths(rootDir: string) {
+  return {
+    dbPath:       path.resolve(rootDir, 'database', 'database.json'),
+    settingsPath: path.resolve(rootDir, 'database', 'settings.json'),
+    sessionsPath: path.resolve(rootDir, 'database', 'focus-sessions.json'),
+    statePath:    path.resolve(rootDir, 'database', 'auto-backup-state.json'),
+    outDir:       path.resolve(rootDir, 'backups'),
+  };
+}
+
+const AUTO_BACKUP_PREFIX = 'planner-backup.';
+
+async function pruneAutoBackups(outDir: string, keep: number) {
+  try {
+    const files = (await fsp.readdir(outDir))
+      .filter(f => f.startsWith(AUTO_BACKUP_PREFIX) && f.endsWith('.json'))
+      .sort(); // ISO timestamps sort chronologically
+    for (let i = 0; i < files.length - keep; i++) {
+      await fsp.unlink(path.join(outDir, files[i])).catch(() => {});
+    }
+  } catch {
+    // nothing written yet
+  }
+}
+
+async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') {
+  const p = autoBackupPaths(rootDir);
+  const settings = await readJsonSafe(p.settingsPath, {});
+  const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
+  const events = await readJsonSafe(p.dbPath, {});
+
+  // Never write an empty snapshot over a healthy history — a blank backup is
+  // worse than no backup, since it silently consumes a retention slot.
+  if (!events || typeof events !== 'object' || Object.keys(events).length === 0) {
+    return { ok: false as const, reason: 'no events to back up' };
+  }
+
+  const payload = {
+    backupFormatVersion: 2,
+    exportedAt: new Date().toISOString(),
+    source: reason,
+    events,
+    settings,
+    focusSessions: await readJsonSafe(p.sessionsPath, []),
+  };
+
+  await fsp.mkdir(p.outDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const file = path.join(p.outDir, `${AUTO_BACKUP_PREFIX}${stamp}.json`);
+  await fsp.writeFile(file, JSON.stringify(payload, null, 2), 'utf-8');
+  await pruneAutoBackups(p.outDir, cfg.keep);
+  await fsp.writeFile(p.statePath, JSON.stringify({ lastBackupAt: new Date().toISOString() }, null, 2), 'utf-8').catch(() => {});
+  return { ok: true as const, file: path.basename(file), count: Object.keys(events).length };
+}
+
+async function maybeRunAutoBackup(rootDir: string) {
+  const p = autoBackupPaths(rootDir);
+  const settings = await readJsonSafe(p.settingsPath, {});
+  const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
+  if (!cfg.enabled) return;
+  const state = await readJsonSafe(p.statePath, {});
+  const last = Date.parse((state as Record<string, string>).lastBackupAt || '');
+  const dueAfterMs = cfg.intervalHours * 3600_000;
+  if (Number.isFinite(last) && Date.now() - last < dueAfterMs) return;
+  await writeAutoBackup(rootDir, 'scheduled').catch(() => {});
+}
+
 const rawPort = process.env.PORT || '5173';
 const port = Number(rawPort);
 
@@ -876,6 +971,52 @@ export default defineConfig({
             next();
           }
         });
+
+        // ── Automated backups ────────────────────────────────────────────────
+        {
+          const rootDir = path.resolve(import.meta.dirname, '..', '..');
+          // Check on boot, then hourly. The interval itself lives in settings, so
+          // changing it in the UI takes effect at the next hourly check.
+          maybeRunAutoBackup(rootDir).catch(() => {});
+          const backupTimer = setInterval(() => { maybeRunAutoBackup(rootDir).catch(() => {}); }, 3600_000);
+          if (typeof backupTimer.unref === 'function') backupTimer.unref();
+
+          server.middlewares.use('/api/auto-backup', async (req, res, next) => {
+            const p = autoBackupPaths(rootDir);
+            if (req.method === 'GET') {
+              let files: string[] = [];
+              try {
+                files = (await fsp.readdir(p.outDir))
+                  .filter(f => f.startsWith(AUTO_BACKUP_PREFIX) && f.endsWith('.json'))
+                  .sort()
+                  .reverse();
+              } catch { /* no backups yet */ }
+              const state = await readJsonSafe(p.statePath, {});
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({
+                count: files.length,
+                latest: files[0] ?? null,
+                lastBackupAt: (state as Record<string, string>).lastBackupAt ?? null,
+                directory: p.outDir,
+              }));
+              return;
+            }
+            if (req.method === 'POST') {
+              try {
+                const result = await writeAutoBackup(rootDir, 'manual');
+                res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) { res.statusCode = 409; res.end(JSON.stringify({ error: result.reason })); return; }
+                res.end(JSON.stringify({ success: true, ...result }));
+              } catch (err) {
+                res.statusCode = 500;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write backup' }));
+              }
+              return;
+            }
+            next();
+          });
+        }
 
         server.middlewares.use('/api/focus-sessions', async (req, res, next) => {
           const fs = await import('fs/promises');

@@ -7,6 +7,7 @@ import {
   isToday,
 } from 'date-fns';
 import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown } from 'lucide-react';
+import { motion } from 'framer-motion';
 import {
   DEFAULT_FOCUS_TIMER,
   FOCUS_SESSIONS_KEY,
@@ -25,6 +26,10 @@ import {
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid,
+  playFocusChime,
+  claimFocusCompletion,
+  autoSessionId,
+  dedupeFocusSessions,
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId } from '@/lib/recurrence';
 
@@ -204,10 +209,13 @@ export default function Widget() {
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
   const lastTimerJsonRef = useRef<string | null>(null);
   const timerHydratedRef = useRef(false);
+  // Ignore stale server pulls briefly after a local change so they can't undo it.
+  const lastLocalTimerChangeRef = useRef(0);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft] = useState('60');
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const focusCompleteRef = useRef(false);
+  const [focusCelebrate, setFocusCelebrate] = useState(false);
 
   // ── Load Settings and initial events ───────────────────────────────────────
   useEffect(() => {
@@ -272,6 +280,7 @@ export default function Widget() {
           const json = JSON.stringify(coerceFocusTimer(data));
           timerHydratedRef.current = true;
           if (json === lastTimerJsonRef.current) return;
+          if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
           lastTimerJsonRef.current = json;
           setFocusTimer(JSON.parse(json));
         })
@@ -542,7 +551,7 @@ export default function Widget() {
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
 
-  const completeFocusSession = useCallback((durationSeconds?: number) => {
+  const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
@@ -555,7 +564,9 @@ export default function Widget() {
       : new Date(endedAt.getTime() - duration * 1000);
 
     const session: FocusSession = {
-      id: uid(),
+      // Deterministic id for auto-completions so this window and the main window
+      // (both counting down the same shared timer) log ONE session, not two.
+      id: auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : uid(),
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
@@ -563,7 +574,7 @@ export default function Widget() {
     };
 
     setFocusSessions(prev => {
-      const next = [session, ...prev].slice(0, 1000);
+      const next = dedupeFocusSessions([session, ...prev]).slice(0, 1000);
       persistFocusSessions(next);
       return next;
     });
@@ -578,6 +589,7 @@ export default function Widget() {
     const json = JSON.stringify(coerceFocusTimer(focusTimer));
     if (json === lastTimerJsonRef.current) return;
     lastTimerJsonRef.current = json;
+    lastLocalTimerChangeRef.current = Date.now();
     fetch('/api/focus-timer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -594,7 +606,13 @@ export default function Widget() {
   useEffect(() => {
     if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
       focusCompleteRef.current = true;
-      completeFocusSession(focusTimer.plannedSeconds);
+      // Whichever window claims first plays the chime — never both.
+      if (claimFocusCompletion()) {
+        playFocusChime();
+        setFocusCelebrate(true);
+        window.setTimeout(() => setFocusCelebrate(false), 2600);
+      }
+      completeFocusSession(focusTimer.plannedSeconds, true);
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
@@ -796,9 +814,16 @@ export default function Widget() {
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <div className={`${focusCollapsed ? 'text-[18px]' : 'text-[28px]'} leading-none font-semibold tabular-nums tracking-normal transition-all duration-200`} style={{ color: menuText }}>
+              <motion.div
+                className={`${focusCollapsed ? 'text-[18px]' : 'text-[28px]'} leading-none font-semibold tabular-nums tracking-normal transition-all duration-200`}
+                style={{ color: focusCelebrate ? '#4ade80' : menuText }}
+                animate={focusCelebrate
+                  ? { scale: [1, 1.16, 1, 1.08, 1], textShadow: ['0 0 0px rgba(74,222,128,0)', '0 0 18px rgba(74,222,128,0.75)', '0 0 0px rgba(74,222,128,0)'] }
+                  : { scale: 1 }}
+                transition={focusCelebrate ? { duration: 1.5, ease: 'easeInOut' } : { duration: 0.3 }}
+              >
                 {formatCountdown(focusRemainingSeconds)}
-              </div>
+              </motion.div>
               <button
                 onClick={() => setFocusCollapsed(v => !v)}
                 className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
@@ -865,9 +890,9 @@ export default function Widget() {
                 />
               ) : (
                 <button
-                  onDoubleClick={() => setEditingFocusMinutes(true)}
-                  className="w-full h-full text-sm font-semibold tabular-nums"
-                  title="Double-click to edit focus duration"
+                  onClick={() => setEditingFocusMinutes(true)}
+                  className="w-full h-full text-sm font-semibold tabular-nums cursor-text"
+                  title="Click to type a focus duration"
                 >
                   {Math.max(1, Math.round(focusTimer.plannedSeconds / 60))} min
                 </button>

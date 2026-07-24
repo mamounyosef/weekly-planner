@@ -22,6 +22,69 @@ export function isCompletedFocusSession(session: FocusSession): boolean {
   return session.durationSeconds >= MIN_COMPLETED_SESSION_SECONDS;
 }
 
+// ── Cross-window completion coordination ────────────────────────────────────
+// The main window and the side widget each run the same countdown off the same
+// shared timer state, so BOTH notice a session finishing. Without coordination
+// that means a doubled chime and (worse) two logged sessions. localStorage is
+// shared between same-origin windows, so the first one to stamp the key wins and
+// the other backs off. Both are also given a deterministic session id below, so
+// even if they do race, the two records collapse into one on save.
+const CHIME_CLAIM_KEY = 'planner-focus-chime-claim';
+
+export function claimFocusCompletion(withinMs = 6000): boolean {
+  try {
+    const now = Date.now();
+    const last = Number(localStorage.getItem(CHIME_CLAIM_KEY) || 0);
+    if (Number.isFinite(last) && now - last < withinMs) return false;
+    localStorage.setItem(CHIME_CLAIM_KEY, String(now));
+    return true;
+  } catch (_) {
+    return true; // no storage → just act
+  }
+}
+
+// Stable id for an auto-completed session so two windows can't log it twice.
+export function autoSessionId(sessionStartedAt: string | null, plannedSeconds: number): string {
+  return `auto-${sessionStartedAt ?? 'unknown'}-${plannedSeconds}`;
+}
+
+export function dedupeFocusSessions(sessions: FocusSession[]): FocusSession[] {
+  const seen = new Set<string>();
+  return sessions.filter(s => {
+    if (seen.has(s.id)) return false;
+    seen.add(s.id);
+    return true;
+  });
+}
+
+// Short, satisfying rising chime (C6–E6–G6) built with WebAudio — no asset file.
+export function playFocusChime(): void {
+  try {
+    const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const now = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.value = 0.9;
+    master.connect(ctx.destination);
+    [1046.5, 1318.5, 1568.0].forEach((freq, i) => {
+      const t = now + i * 0.14;
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.28, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.55);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(t + 0.6);
+    });
+    setTimeout(() => { ctx.close().catch(() => {}); }, 1200);
+  } catch (_) { /* audio unavailable — ignore */ }
+}
+
 export const DEFAULT_FOCUS_TIMER: FocusTimerState = {
   plannedSeconds: 60 * 60,
   accumulatedSeconds: 0,
