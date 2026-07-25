@@ -2888,7 +2888,7 @@ export default function WeeklyPlanner() {
       // Trackpads emit a burst of small deltas per gesture — throttle so one
       // gesture moves exactly one level.
       const now = Date.now();
-      if (now - wheelCooldown.t < 260) return;
+      if (now - wheelCooldown.t < 90) return;
       if (Math.abs(e.deltaY) < 1) return;
       wheelCooldown.t = now;
       // Scroll up = zoom IN (toward a single day), down = out (toward the year).
@@ -3195,10 +3195,10 @@ export default function WeeklyPlanner() {
           {!showFocusAnalysis ? (
             <motion.div
               key="calendar-view-container"
-              initial={{ opacity: 0, y: 15 }}
+              initial={{ opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.08, ease: 'easeOut' }}
               className="min-w-[900px] max-w-[1400px] mx-auto p-4"
             >
           {isTimelineView && (
@@ -3409,10 +3409,10 @@ export default function WeeklyPlanner() {
             {isTimelineView ? (
               <motion.div
                 key="week-view-wrapper"
-                initial={{ opacity: 0, y: 10 }}
+                initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.08, ease: 'easeOut' }}
               >
                 <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
@@ -3420,13 +3420,13 @@ export default function WeeklyPlanner() {
               key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : `w:${weekStart.toISOString()}`}
               custom={direction}
               variants={{
-                enter:  (d: number) => ({ x: d>0?14:d<0?-14:0, opacity: 0 }),
+                enter:  (d: number) => ({ x: d>0?10:d<0?-10:0, opacity: 0 }),
                 center: { x: 0, opacity: 1 },
-                exit:   (d: number) => ({ x: d<0?14:d>0?-14:0, opacity: 0 }),
+                exit:   (d: number) => ({ x: d<0?10:d>0?-10:0, opacity: 0 }),
               }}
               initial="enter" animate="center" exit="exit"
               // Snappy: holding the week keys should feel instant, not springy.
-              transition={{ x: { type: 'spring', stiffness: 900, damping: 48, mass: 0.5 }, opacity: { duration: 0.07 } }}
+              transition={{ x: { type: 'spring', stiffness: 2200, damping: 65, mass: 0.2 }, opacity: { duration: 0.04 } }}
               className="flex border border-border/60 rounded-xl overflow-hidden shadow-sm relative"
               style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
             >
@@ -4193,10 +4193,10 @@ export default function WeeklyPlanner() {
         return (
         <motion.div
           key="year-view-wrapper"
-          initial={{ opacity: 0, y: 10 }}
+          initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.08, ease: 'easeOut' }}
           className="rounded-xl border border-border/60 overflow-hidden shadow-sm p-4"
           style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
         >
@@ -4266,10 +4266,10 @@ export default function WeeklyPlanner() {
         /* ── Month overview ─────────────────────────────────────────── */
         <motion.div
           key="month-view-wrapper"
-          initial={{ opacity: 0, y: 10 }}
+          initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+          exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.08, ease: 'easeOut' }}
           className="rounded-xl border border-border/60 overflow-hidden shadow-sm"
           style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
         >
