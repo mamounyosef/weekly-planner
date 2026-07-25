@@ -44,10 +44,12 @@ import {
   dedupeFocusSessions,
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId } from '@/lib/recurrence';
+import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
+import { themePalette, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
-type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
+type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac' | 'rose' | 'teal' | 'lavender' | 'emerald' | 'coral' | string;
 type TimeFormat    = '12h' | '24h';
 type WeekStartsOn  = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
@@ -65,6 +67,7 @@ interface PlannerEvent {
   gCalId?: string;
   gCalCalendarId?: string;
   gCalETag?: string;
+  gCalHex?: string;     // exact colour Google renders this event in (foreign events only)
   gCalRecurSig?: string;
   lastSyncedAt?: number;
   updatedAt?: number;
@@ -210,6 +213,10 @@ export default function Widget() {
   const [events, setEvents]           = useState<PlannerData>({});
   const [interval, setIntervalOpt]    = useState<IntervalMin>(5);
   const [darkMode, setDarkMode]       = useState(true);
+  const [eventColorStyle, setEventColorStyle] = useState<EventCardStyle>('tinted');
+  // The side window's own background theme, chosen separately from the main window.
+  const [widgetDarkPreset, setWidgetDarkPreset] = useState<DarkPreset>('neutral-dark');
+  const [widgetLightPreset, setWidgetLightPreset] = useState<LightPreset>('clean-white');
   const [timeFormat, setTimeFormat]   = useState<TimeFormat>('12h');
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
   const [dayStartH, setDayStartH]       = useState(7);
@@ -248,6 +255,9 @@ export default function Widget() {
       if (s && typeof s === 'object') {
         if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
         if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+        if (s.eventColorStyle) setEventColorStyle(s.eventColorStyle as EventCardStyle);
+        if (s.widgetDarkPreset) setWidgetDarkPreset(s.widgetDarkPreset as DarkPreset);
+        if (s.widgetLightPreset) setWidgetLightPreset(s.widgetLightPreset as LightPreset);
         if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
         if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
         if (s.dayStartH != null) setDayStartH(s.dayStartH);
@@ -401,7 +411,11 @@ export default function Widget() {
   const totalH = slots.length * sh;
   const dayStartMin = dayStartH * 60;
   const dayEndMin = dayEndH * 60;
-  const colorPalette = darkMode ? DARK_EVENT_COLORS : EVENT_COLORS;
+  // Identical resolution to the main window, so a card looks the same in both.
+  const widgetTheme = themePalette(darkMode, widgetDarkPreset, widgetLightPreset);
+  const chipColors = (ev: PlannerEvent) =>
+    gcalChipColors(resolveEventHex(ev), { dark: darkMode, style: eventColorStyle, pageBg: widgetTheme.rootBg })
+      ?? { bg: '#dcfce7', border: '#86efac', text: '#14532d', textMuted: '#2f6b45' };
 
   const nowMin = today.getHours() * 60 + today.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
@@ -862,13 +876,13 @@ export default function Widget() {
   };
 
   // ── Style overrides ────────────────────────────────────────────────────────
-  const surfaceBg  = darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.60)';
-  const surfaceBdr = darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.12)';
+  const surfaceBg  = darkMode ? widgetTheme.surfaceBg : 'rgba(255,255,255,0.60)';
+  const surfaceBdr = widgetTheme.surfaceBdr;
   const menuText   = darkMode ? '#e8e8e8' : '#1a1a1a';
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
 
   return (
-    <div className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`} style={{ background: darkMode ? '#20242c' : '#f5f5f7' }}>
+    <div className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`} style={{ background: widgetTheme.rootBg }}>
       <style>{`
         /* Hide scrollbars globally in the widget window */
         html, body, #root {
@@ -1163,7 +1177,7 @@ export default function Widget() {
               {/* Events list */}
               <div className="flex-1 p-2 flex flex-col gap-1">
                 {todayAllDay.map(ev => {
-                  const { bg, border, text } = colorPalette[ev.color];
+                  const { bg, border, text, textMuted } = chipColors(ev);
                   const dateStr = format(today, 'yyyy-MM-dd');
                   const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
                   return (
@@ -1242,7 +1256,7 @@ export default function Widget() {
             const { ev, key: itemKey, segKind } = item;
             const top = minToY(item.startMin, interval, dayStartH);
             const height = Math.max(sh, minToY(item.endMin, interval, dayStartH) - top);
-            const { bg, border, text } = colorPalette[ev.color];
+            const { bg, border, text, textMuted } = chipColors(ev);
             // Live/duration status always reflects the event's true full start–end, not just this segment.
             const fullStartMin = timeToMin(ev.startTime);
             const fullEndMin   = timeToMin(ev.endTime);
@@ -1319,7 +1333,7 @@ export default function Widget() {
                     </p>
                   </div>
                   {height >= sh * 1.5 && (
-                    <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0 flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
+                    <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0 flex items-center gap-1" style={{ color: textMuted }}>
                       {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
                       {isLive ? (
                         <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>

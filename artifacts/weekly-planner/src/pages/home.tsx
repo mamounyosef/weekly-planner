@@ -19,7 +19,7 @@ import {
   subDays,
   differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -85,6 +85,19 @@ import {
   stampNewItem,
   parseOccId,
 } from '@/lib/recurrence';
+import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColor';
+import {
+  broadcastSettingsChange,
+  subscribeSettingsChange,
+  loadSettingsLocal,
+  applyDarkModeClass,
+  coerceSettings,
+  themePalette,
+  type DarkPreset,
+  type LightPreset,
+  type EventCardStyle,
+  type SidebarStyle,
+} from '@/lib/settingsSync';
 
 // ─── TEMP DEBUG: surface the real error the overlay hides ───────────────────────
 if (typeof window !== 'undefined' && !(window as any).__errDbg) {
@@ -113,7 +126,7 @@ if (typeof window !== 'undefined' && !(window as any).__errDbg) {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
-type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac';
+type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac' | 'rose' | 'teal' | 'lavender' | 'emerald' | 'coral' | string;
 type TimeFormat    = '12h' | '24h';
 type WeekStartsOn  = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0=Sun … 6=Sat
 
@@ -145,6 +158,7 @@ interface PlannerEvent {
   gCalId?: string;
   gCalCalendarId?: string;
   gCalETag?: string;
+  gCalHex?: string;     // exact colour Google renders this event in (foreign events only)
   gCalRecurSig?: string;
   lastSyncedAt?: number;
   updatedAt?: number;
@@ -177,23 +191,62 @@ const COL_GAP        = 2; // px gap between parallel events
 
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
-const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#dcfce7', border: '#86efac', text: '#14532d' },
-  peach: { bg: '#ffedd5', border: '#fdba74', text: '#7c2d12' },
-  blue:  { bg: '#dbeafe', border: '#93c5fd', text: '#1e3a8a' },
-  sand:  { bg: '#fef3c7', border: '#fcd34d', text: '#78350f' },
-  lilac: { bg: '#f3e8ff', border: '#d8b4fe', text: '#581c87' },
+const EVENT_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  sage:     { bg: '#dcfce7', border: '#86efac', text: '#14532d' },
+  peach:    { bg: '#ffedd5', border: '#fdba74', text: '#7c2d12' },
+  blue:     { bg: '#dbeafe', border: '#93c5fd', text: '#1e3a8a' },
+  sand:     { bg: '#fef3c7', border: '#fcd34d', text: '#78350f' },
+  lilac:    { bg: '#f3e8ff', border: '#d8b4fe', text: '#581c87' },
+  rose:     { bg: '#ffe4e6', border: '#fda4af', text: '#9f1239' },
+  teal:     { bg: '#ccfbf1', border: '#5eead4', text: '#115e59' },
+  lavender: { bg: '#e0e7ff', border: '#a5b4fc', text: '#3730a3' },
+  emerald:  { bg: '#d1fae5', border: '#6ee7b7', text: '#065f46' },
+  coral:    { bg: '#ffe4e1', border: '#fca5a5', text: '#991b1b' },
 };
 
-const DARK_EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#182818', border: '#365e30', text: '#8ec88e' },
-  peach: { bg: '#2e1810', border: '#6e3820', text: '#d48060' },
-  blue:  { bg: '#101c30', border: '#284878', text: '#78aadd' },
-  sand:  { bg: '#261e0e', border: '#6a4e28', text: '#c8a860' },
-  lilac: { bg: '#1e1228', border: '#523070', text: '#b07ecc' },
+const VIVID_DARK_EVENT_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  sage:     { bg: '#163523', border: '#22c55e', text: '#4ade80' },
+  peach:    { bg: '#3a2016', border: '#f97316', text: '#fb923c' },
+  blue:     { bg: '#162846', border: '#3b82f6', text: '#60a5fa' },
+  sand:     { bg: '#332b14', border: '#eab308', text: '#facc15' },
+  lilac:    { bg: '#2b193f', border: '#a855f7', text: '#c084fc' },
+  rose:     { bg: '#3b1622', border: '#f43f5e', text: '#fb7185' },
+  teal:     { bg: '#123332', border: '#14b8a6', text: '#2dd4bf' },
+  lavender: { bg: '#1e2448', border: '#6366f1', text: '#818cf8' },
+  emerald:  { bg: '#103829', border: '#10b981', text: '#34d399' },
+  coral:    { bg: '#3f1818', border: '#ef4444', text: '#f87171' },
 };
 
-const SWATCHES: EventColor[] = ['sage', 'peach', 'blue', 'sand', 'lilac'];
+const CLASSIC_DARK_EVENT_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  sage:     { bg: '#182818', border: '#365e30', text: '#8ec88e' },
+  peach:    { bg: '#2e1810', border: '#6e3820', text: '#d48060' },
+  blue:     { bg: '#101c30', border: '#284878', text: '#78aadd' },
+  sand:     { bg: '#261e0e', border: '#6a4e28', text: '#c8a860' },
+  lilac:    { bg: '#1e1228', border: '#523070', text: '#b07ecc' },
+  rose:     { bg: '#2b141b', border: '#6e2838', text: '#d46078' },
+  teal:     { bg: '#102625', border: '#255953', text: '#60c4b8' },
+  lavender: { bg: '#161a33', border: '#353a70', text: '#7a82c4' },
+  emerald:  { bg: '#10261e', border: '#245e45', text: '#60c496' },
+  coral:    { bg: '#2d1414', border: '#6e2828', text: '#d46060' },
+};
+
+const SWATCHES: EventColor[] = ['sage', 'peach', 'blue', 'sand', 'lilac', 'rose', 'teal', 'lavender', 'emerald', 'coral'];
+
+
+function matchPresetColor(hex: string | undefined): EventColor | null {
+  if (!hex || typeof hex !== 'string') return null;
+  const clean = hex.trim().toLowerCase();
+  for (const sw of SWATCHES) {
+    if (SWATCH_BASE_HEX[sw]?.toLowerCase() === clean) return sw;
+    const l = EVENT_COLORS[sw];
+    const v = VIVID_DARK_EVENT_COLORS[sw];
+    const c = CLASSIC_DARK_EVENT_COLORS[sw];
+    if ([l?.border, l?.bg, l?.text, v?.border, v?.bg, v?.text, c?.border, c?.bg, c?.text].some(h => h && h.toLowerCase() === clean)) {
+      return sw;
+    }
+  }
+  return null;
+}
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────
 function timeToMin(t: string): number {
@@ -494,8 +547,11 @@ function RecurrenceEditor({ recur, anchorWeekday, onChange, theme }: {
 
 // ─── Main Component ────────────────────────────────────────────────────────────
 export default function WeeklyPlanner() {
+  // Initialize state from local settings cache for instant display
+  const initialSettings = useRef(loadSettingsLocal()).current;
+
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [interval, setIntervalOpt]    = useState<IntervalMin>(5);
+  const [interval, setIntervalOpt]    = useState<IntervalMin>(initialSettings.interval);
   const [events, setEvents]           = useState<PlannerData>({});
   // True until the first load (localStorage or backend) has resolved, so the grid
   // can show a skeleton instead of flashing an empty week.
@@ -516,7 +572,7 @@ export default function WeeklyPlanner() {
     }
     return cfg;
   };
-  const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(AUTO_BACKUP_DEFAULT);
+  const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(initialSettings.autoBackup);
   const [backupStatus, setBackupStatus] = useState<{ count: number; lastBackupAt: string | null } | null>(null);
   // User-rebindable keyboard shortcuts (see lib/shortcuts.ts).
   const [shortcuts, setShortcuts]     = useState<ShortcutMap>(DEFAULT_SHORTCUTS);
@@ -564,11 +620,23 @@ export default function WeeklyPlanner() {
   useEffect(() => { menuPinnedRef.current = menuPinned; }, [menuPinned]);
   // Discard the draft / unpin whenever the popup closes by any path.
   useEffect(() => { if (menuId === null) { setDraft(null); setMenuPinned(false); } }, [menuId]);
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
+  // The settings page is an overlay drawn on top of this one, which stays mounted.
+  // While it is open the planner must not scroll or show its own scrollbar.
+  const settingsRouteOpen = location === '/settings';
   const [direction, setDirection]     = useState(0);
-  const [darkMode, setDarkMode]       = useState(true);
-  const [timeFormat, setTimeFormat]     = useState<TimeFormat>('12h');
-  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(0);
+
+  const [darkMode, setDarkMode]             = useState<boolean>(initialSettings.darkMode);
+  const [darkPreset, setDarkPreset]         = useState<DarkPreset>(initialSettings.darkPreset);
+  const [lightPreset, setLightPreset]       = useState<LightPreset>(initialSettings.lightPreset);
+  // Owned by the side window; the main window only carries them so saving here
+  // never drops the side window's choice.
+  const [widgetDarkPreset, setWidgetDarkPreset]   = useState<DarkPreset>(initialSettings.widgetDarkPreset);
+  const [widgetLightPreset, setWidgetLightPreset] = useState<LightPreset>(initialSettings.widgetLightPreset);
+  const [eventColorStyle, setEventColorStyle] = useState<EventCardStyle>(initialSettings.eventColorStyle);
+  const [sidebarStyle, setSidebarStyle]     = useState<SidebarStyle>(initialSettings.sidebarStyle);
+  const [timeFormat, setTimeFormat]         = useState<TimeFormat>(initialSettings.timeFormat);
+  const [weekStartsOn, setWeekStartsOn]     = useState<WeekStartsOn>(initialSettings.weekStartsOn);
   // Zoom levels, narrowest → widest. Ctrl+wheel steps through them.
   const [calendarView, setCalendarView] = useState<CalendarView>('week');
   // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
@@ -581,8 +649,8 @@ export default function WeeklyPlanner() {
   const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
   const [nowTick, setNowTick]           = useState(Date.now());
-  const [dayStartH, setDayStartH]       = useState(7);
-  const [dayEndH, setDayEndH]           = useState(31);
+  const [dayStartH, setDayStartH]       = useState(initialSettings.dayStartH);
+  const [dayEndH, setDayEndH]           = useState(initialSettings.dayEndH);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   // Hour (0–23, local) at which a new "focus day" begins. Sessions before this hour
   // count toward the previous day. Purely a bucketing setting — all analysis derives
@@ -956,10 +1024,24 @@ export default function WeeklyPlanner() {
         .then(status => {
           setGCalStatus(status);
           if (status.clientId) setClientIdInput(status.clientId);
-          if (status.clientSecret) setClientSecretInput(status.clientSecret);
         });
     });
   }, [weekStartsOn, showToast]);
+
+  useEffect(() => {
+    return subscribeSettingsChange(s => {
+      setIntervalOpt(s.interval);
+      setDarkMode(s.darkMode);
+      setDarkPreset(s.darkPreset);
+      setEventColorStyle(s.eventColorStyle);
+      setSidebarStyle(s.sidebarStyle);
+      setTimeFormat(s.timeFormat);
+      setWeekStartsOn(s.weekStartsOn);
+      setDayStartH(s.dayStartH);
+      setDayEndH(s.dayEndH);
+    });
+  }, []);
+
   // Stable ref so the queue-drain above can call the latest triggerGCalSync.
   const triggerGCalSyncRef = useRef(triggerGCalSync);
   useEffect(() => { triggerGCalSyncRef.current = triggerGCalSync; }, [triggerGCalSync]);
@@ -1031,7 +1113,14 @@ export default function WeeklyPlanner() {
   const totalH      = slots.length * sh;
   const dayEndMin   = dayEndH * 60;
   const dayStartMin = dayStartH * 60;
-  const colorPalette = darkMode ? DARK_EVENT_COLORS : EVENT_COLORS;
+  const darkPalette = (eventColorStyle as string) === 'classic' ? CLASSIC_DARK_EVENT_COLORS : VIVID_DARK_EVENT_COLORS;
+  const colorPalette = darkMode ? darkPalette : EVENT_COLORS;
+  // Universal event card styles (tinted, solid, minimal, glowing) for ALL planner items & Google Calendar.
+  const pageBg = themePalette(darkMode, darkPreset, lightPreset).rootBg;
+  const chipColors = useCallback((ev: PlannerEvent) =>
+    gcalChipColors(resolveEventHex(ev), { dark: darkMode, style: eventColorStyle as EventCardStyle, pageBg })
+      ?? { bg: '#dcfce7', border: '#86efac', text: '#14532d', textMuted: '#2f6b45' },
+    [darkMode, eventColorStyle, pageBg]);
 
   // ── Modification domain / week resolution ──────────────────────────────────
   const viewedWeekKey     = weekKeyOf(currentDate, weekStartsOn);
@@ -1814,6 +1903,10 @@ export default function WeeklyPlanner() {
         if (s && typeof s === 'object') {
           if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
           if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+          if (s.darkPreset) setDarkPreset(s.darkPreset as DarkPreset);
+          if (s.lightPreset) setLightPreset(s.lightPreset as LightPreset);
+          if (s.eventColorStyle) setEventColorStyle(s.eventColorStyle as EventCardStyle);
+          if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle as SidebarStyle);
           if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
           if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
@@ -1862,6 +1955,10 @@ export default function WeeklyPlanner() {
           if (s && typeof s === 'object') {
             if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
             if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+            if (s.darkPreset) setDarkPreset(s.darkPreset as DarkPreset);
+            if (s.lightPreset) setLightPreset(s.lightPreset as LightPreset);
+            if (s.eventColorStyle) setEventColorStyle(s.eventColorStyle as EventCardStyle);
+            if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle as SidebarStyle);
             if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
             if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
             if (s.dayStartH != null) setDayStartH(s.dayStartH);
@@ -1872,24 +1969,44 @@ export default function WeeklyPlanner() {
     }
   }, [location]);
 
+  // Subscribe to live settings updates broadcast from anywhere (Settings page, shortcuts, etc.)
+  useEffect(() => {
+    return subscribeSettingsChange(s => {
+      setIntervalOpt(s.interval);
+      setDarkMode(s.darkMode);
+      setDarkPreset(s.darkPreset);
+      setLightPreset(s.lightPreset);
+      setWidgetDarkPreset(s.widgetDarkPreset);
+      setWidgetLightPreset(s.widgetLightPreset);
+      setEventColorStyle(s.eventColorStyle);
+      setSidebarStyle(s.sidebarStyle);
+      setTimeFormat(s.timeFormat);
+      setWeekStartsOn(s.weekStartsOn);
+      setDayStartH(s.dayStartH);
+      setDayEndH(s.dayEndH);
+      setFocusDayStartHour(s.focusDayStartHour);
+      setFocusChime(s.focusChime);
+      setFocusCues(s.focusCues);
+      setShortcuts(s.shortcuts);
+      setAutoBackup(s.autoBackup);
+    });
+  }, []);
+
   // Sync document root class with darkMode state
   useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    applyDarkModeClass(darkMode);
   }, [darkMode]);
 
   // Persist settings to the shared backend whenever any of them change (after initial load).
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup }),
-    }).catch(err => console.error('Failed to save settings to backend:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
+    broadcastSettingsChange({
+      interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
+      eventColorStyle, sidebarStyle,
+      timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView,
+      focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup
+    });
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -2972,10 +3089,15 @@ export default function WeeklyPlanner() {
   // database change must wait rather than yank state out from under them.
   uiBusyRef.current = !!editingId || !!menuId || isDraggingAnything || isResizingAnything || !!draft;
 
-  const surfaceBg  = darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff';
-  const surfaceBdr = darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.12)';
+  // Background themes live in settingsSync so the main window, the side window and
+  // the settings pickers all paint from one definition.
+  const currentDarkTheme  = themePalette(true, darkPreset, lightPreset);
+  const currentLightTheme = themePalette(false, darkPreset, lightPreset);
+
+  const surfaceBg  = darkMode ? currentDarkTheme.surfaceBg : currentLightTheme.surfaceBg;
+  const surfaceBdr = darkMode ? currentDarkTheme.surfaceBdr : currentLightTheme.surfaceBdr;
   const hoverBg    = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)';
-  const menuBg     = darkMode ? '#1e2022' : '#ffffff';
+  const menuBg     = darkMode ? currentDarkTheme.cardBg : currentLightTheme.cardBg;
   const menuBdr    = darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)';
   const menuText   = darkMode ? '#e8e8e8' : '#0f172a';
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(15,23,42,0.55)';
@@ -2988,7 +3110,9 @@ export default function WeeklyPlanner() {
 
   // ── Current menu event (for popover rendering) ────────────────────────────
   const isDraft = !!(draft && menuId === draft.id);
-  const menuEvent = isDraft ? draft : (menuId ? weekEvents[menuId] : null);
+  const menuEvent = isDraft
+    ? draft
+    : (menuId ? (weekEvents[menuId] ?? events[menuId] ?? events[parseOccId(menuId).masterId] ?? null) : null);
 
   // Commit the draft into the real event map (Save). Closing the popup afterwards
   // clears the draft via the menuId-null effect.
@@ -3004,11 +3128,44 @@ export default function WeeklyPlanner() {
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div
-      className={`min-h-screen bg-background text-foreground flex flex-col font-sans select-none${darkMode ? ' dark' : ''}`}
-      // CSS `zoom` (not transform: scale) so the layout genuinely reflows and
-      // fixed/sticky positioning keeps working — this replaces browser zoom.
-      style={{ cursor: globalCursor, zoom: appZoom }}
+      className={`min-h-screen flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
+        darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
+      }`}
+      style={{ cursor: globalCursor, zoom: appZoom, background: darkMode ? currentDarkTheme.rootBg : currentLightTheme.rootBg }}
     >
+      {/* ── Outer Side Ambient Glow Layer (Zero Banding & Non-interfering) ── */}
+      <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+        {/* Soft Side Ambient Aura - Left */}
+        <div
+          className={`absolute -top-32 -left-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-all duration-500 ${
+            sidebarStyle === 'minimal-flat' ? 'opacity-0' : sidebarStyle === 'accent-aura' ? 'opacity-90' : sidebarStyle === 'glass-translucent' ? 'opacity-35' : 'opacity-50'
+          }`}
+          style={{
+            background: darkMode
+              ? 'radial-gradient(circle, rgba(59,130,246,0.18) 0%, rgba(99,102,241,0.06) 65%, transparent 100%)'
+              : 'radial-gradient(circle, rgba(99,102,241,0.10) 0%, rgba(192,132,252,0.04) 65%, transparent 100%)',
+          }}
+        />
+        {/* Soft Side Ambient Aura - Right */}
+        <div
+          className={`absolute top-1/3 -right-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-all duration-500 ${
+            sidebarStyle === 'minimal-flat' ? 'opacity-0' : sidebarStyle === 'accent-aura' ? 'opacity-80' : sidebarStyle === 'glass-translucent' ? 'opacity-25' : 'opacity-40'
+          }`}
+          style={{
+            background: darkMode
+              ? 'radial-gradient(circle, rgba(16,185,129,0.14) 0%, rgba(59,130,246,0.04) 65%, transparent 100%)'
+              : 'radial-gradient(circle, rgba(16,185,129,0.08) 0%, rgba(59,130,246,0.03) 65%, transparent 100%)',
+          }}
+        />
+        {/* Fine Micro-Dot Pattern on Outer Flanks */}
+        <div
+          className="absolute inset-0 opacity-[0.035] dark:opacity-[0.06] pointer-events-none"
+          style={{
+            backgroundImage: `radial-gradient(${darkMode ? 'rgba(255,255,255,0.8)' : 'rgba(15,23,42,0.8)'} 1px, transparent 1px)`,
+            backgroundSize: '28px 28px',
+          }}
+        />
+      </div>
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
         <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between">
@@ -3201,7 +3358,11 @@ export default function WeeklyPlanner() {
       </header>
 
       {/* ── Grid ────────────────────────────────────────────────────────── */}
-      <main ref={mainRef} className="flex-1 overflow-auto" onScroll={handleMainScroll}>
+      <main
+        ref={mainRef}
+        className={`flex-1 ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'}`}
+        onScroll={handleMainScroll}
+      >
         <AnimatePresence mode="wait">
           {!showFocusAnalysis ? (
             <motion.div
@@ -3438,8 +3599,8 @@ export default function WeeklyPlanner() {
               initial="enter" animate="center" exit="exit"
               // Snappy: holding the week keys should feel instant, not springy.
               transition={{ x: { type: 'spring', stiffness: 2200, damping: 65, mass: 0.2 }, opacity: { duration: 0.04 } }}
-              className="flex border border-border/60 rounded-xl overflow-hidden shadow-sm relative"
-              style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
+              className="flex border border-border/60 rounded-xl overflow-hidden shadow-md relative z-10"
+              style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
             >
               {/* Loading skeleton — a few shimmering placeholder blocks so the first
                   paint reads as "loading" rather than "your week is empty". */}
@@ -3743,7 +3904,7 @@ export default function WeeklyPlanner() {
                           const blockTransition = isMoving
                             ? 'none'
                             : 'box-shadow 140ms ease, outline-color 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), filter 140ms ease';
-                          const { bg, border, text } = colorPalette[ev.color];
+                          const { bg, border, text, textMuted, boxShadow, accentBar } = chipColors(ev);
                           const tooShort = height < sh * 2;
                           // Duration always reflects the event's true full start–end, not just this segment.
                           const fullStartMin = timeToMin(ev.startTime);
@@ -3829,6 +3990,7 @@ export default function WeeklyPlanner() {
                                 borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
                                 borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
                                 color: text,
+                                boxShadow: boxShadow || (lift ? '0 4px 14px rgba(0,0,0,0.18)' : undefined),
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.95 : 1,
                                 // A touch more saturation on hover so the block "wakes up".
@@ -3953,7 +4115,7 @@ export default function WeeklyPlanner() {
                                         </p>
                                       </div>
                                       {!tooShort && (
-                                        <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
+                                        <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: textMuted }}>
                                           {formatTimeLabel(resizeDisp?.id === ev.id ? resizeDisp.startMin % 1440 : fullStartMin, timeFormat)} – {formatTimeLabel(resizeDisp?.id === ev.id ? resizeDisp.endMin % 1440 : fullEndMin, timeFormat)}
                                           {isLive ? (
                                             <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
@@ -4038,7 +4200,7 @@ export default function WeeklyPlanner() {
                     const isEdit = editingId === ev.id;
                     const isSelected = selectedIds.has(ev.id);
                     const isMenu = menuId === ev.id;
-                    const { bg, border, text } = colorPalette[ev.color];
+                    const { bg, border, text, textMuted } = chipColors(ev);
 
                     // Find actual day date string of start day
                     const startDayDate = days[ev.dayIndex];
@@ -4208,8 +4370,8 @@ export default function WeeklyPlanner() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -6 }}
           transition={{ duration: 0.08, ease: 'easeOut' }}
-          className="rounded-xl border border-border/60 overflow-hidden shadow-sm p-4"
-          style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
+          className="rounded-xl border border-border/60 overflow-hidden shadow-md p-4 relative z-10"
+          style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
         >
           <div className="grid grid-cols-4 gap-3 items-start">
             {yearMatrix.map(m => (
@@ -4281,8 +4443,8 @@ export default function WeeklyPlanner() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -6 }}
           transition={{ duration: 0.08, ease: 'easeOut' }}
-          className="rounded-xl border border-border/60 overflow-hidden shadow-sm"
-          style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)' }}
+          className="rounded-xl border border-border/60 overflow-hidden shadow-md relative z-10"
+          style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
         >
             {/* Weekday header row */}
             <div className="grid grid-cols-7 border-b border-border/50">
@@ -4344,7 +4506,7 @@ export default function WeeklyPlanner() {
                       </div>
                       <div className="flex flex-col gap-0.5 overflow-hidden">
                         {ordered.slice(0, 4).map(ev => {
-                          const { bg, border, text } = colorPalette[ev.color];
+                          const { bg, border, text, textMuted } = chipColors(ev);
                           const label = ev.allDay ? 'All day' : formatTimeLabel(timeToMin(ev.startTime), timeFormat);
                           return (
                             <div
@@ -4858,7 +5020,10 @@ export default function WeeklyPlanner() {
             }}
           >
             <Clock size={12} />
-            Go to Live
+            <span>Go to Live</span>
+            <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
+              {formatCombo(shortcuts.goToLive)}
+            </kbd>
           </motion.button>
         )}
       </AnimatePresence>
@@ -5701,19 +5866,70 @@ export default function WeeklyPlanner() {
             </span>
           </button>
 
-          {/* Color picker */}
-          <div className="px-3 py-2.5 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-            <span className="text-[9px] font-bold uppercase tracking-wider mr-1" style={{ color: menuSub }}>Color</span>
-            {SWATCHES.map(c => {
-              const sc = colorPalette[c];
-              return (
-                <button key={c} type="button"
-                  onClick={() => applyEdit(menuEvent.id, { color: c })}
-                  className="rounded-full border transition-transform hover:scale-110"
-                  style={{ width: 15, height: 15, backgroundColor: sc.bg, borderColor: sc.border, outline: menuEvent.color===c ? `2px solid ${sc.text}` : 'none', outlineOffset: 1 }}
+          {/* Expanded Color Section */}
+          <div className="px-3 py-2.5 flex flex-col gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Color Options</span>
+              {menuEvent.gCalHex && (
+                <span className="text-[9px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1" style={{ background: darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(37,99,235,0.1)', color: darkMode ? '#93c5fd' : '#2563eb' }}>
+                  <Sparkles size={9} /> Google Calendar
+                </span>
+              )}
+            </div>
+
+            {/* 10 Preset Swatches Grid */}
+            <div className="grid grid-cols-5 gap-1.5 pt-0.5">
+              {SWATCHES.map(c => {
+                const sc = chipColors({ color: c } as PlannerEvent);
+                const isCustomHex = menuEvent.color?.startsWith('#');
+                const gcalPresetMatch = menuEvent.gCalHex ? matchPresetColor(menuEvent.gCalHex) : null;
+                const isSelected = isCustomHex
+                  ? false
+                  : (menuEvent.gCalHex
+                    ? (gcalPresetMatch === c)
+                    : (menuEvent.color === c));
+                return (
+                  <button key={c} type="button"
+                    title={c.charAt(0).toUpperCase() + c.slice(1)}
+                    onClick={() => applyEdit(menuEvent.id, { color: c })}
+                    className="h-4.5 rounded-full border transition-transform hover:scale-115 flex items-center justify-center cursor-pointer"
+                    style={{
+                      backgroundColor: sc.bg,
+                      borderColor: sc.border,
+                      outline: isSelected ? `2px solid ${sc.text}` : 'none',
+                      outlineOffset: 1,
+                    }}
+                  />
+                );
+              })}
+            </div>
+
+            {/* Custom / RGB Color Panel */}
+            <div className="flex items-center gap-2 pt-2 mt-1 border-t border-dashed" style={{ borderColor: menuBdr }}>
+              <span className="text-[10px] font-medium" style={{ color: menuSub }}>Custom RGB:</span>
+              <div className="flex items-center gap-1.5 flex-1">
+                <input
+                  type="color"
+                  value={menuEvent.color?.startsWith('#') ? menuEvent.color : (menuEvent.gCalHex || '#3b82f6')}
+                  onChange={(e) => applyEdit(menuEvent.id, { color: e.target.value })}
+                  className="w-5 h-5 rounded cursor-pointer border-0 bg-transparent p-0"
+                  title="Choose custom RGB color"
                 />
-              );
-            })}
+                <input
+                  type="text"
+                  value={menuEvent.color?.startsWith('#') ? menuEvent.color : (menuEvent.gCalHex && !matchPresetColor(menuEvent.gCalHex) ? menuEvent.gCalHex : '')}
+                  placeholder="#Hex (e.g. #3b82f6)"
+                  onChange={(e) => {
+                    const val = e.target.value.trim();
+                    if (/^#[0-9a-fA-F]{6}$/.test(val) || val === '') {
+                      applyEdit(menuEvent.id, { color: val || 'sage' });
+                    }
+                  }}
+                  className="px-2 py-0.5 rounded text-[10px] font-mono flex-1 bg-transparent border outline-none"
+                  style={{ color: menuText, borderColor: menuBdr }}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Repeat */}

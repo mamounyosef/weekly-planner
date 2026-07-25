@@ -51,6 +51,22 @@ async function safeWriteJsonFile(opts: {
     existing = null;
   }
 
+  // Never write anything that isn't valid JSON of the expected shape. A truncated
+  // or empty request body would otherwise land on disk verbatim and destroy the
+  // file — and `force` must not be an escape hatch for corrupt data.
+  let parsedBody: unknown;
+  try {
+    parsedBody = JSON.parse(body);
+  } catch {
+    return { ok: false, status: 400, error: `Refused to write ${baseName}: body is not valid JSON.` };
+  }
+  const shapeOk = kind === 'array'
+    ? Array.isArray(parsedBody)
+    : !!parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody);
+  if (!shapeOk) {
+    return { ok: false, status: 400, error: `Refused to write ${baseName}: expected a JSON ${kind}.` };
+  }
+
   const existingIsEmpty = existing === null || isEmptyJsonValue(existing, kind);
   const incomingIsEmpty = isEmptyJsonValue(body, kind);
 
@@ -281,9 +297,10 @@ export default defineConfig({
           // Maps Google event to PlannerEvent. `parseRecur` (from recurrence.ts)
           // turns a Google recurrence array into { recur, exdates } so a repeating
           // event round-trips as a single master.
-          function mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseRecur) {
+          function mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseRecur, palettes, calHex) {
             const isAllDay = !!gEv.start.date;
             const { recur, exdates } = gEv.recurrence ? parseRecur(gEv.recurrence) : {};
+            const gCalHex = resolveGoogleHex(gEv, palettes, calHex || {});
 
             if (isAllDay) {
               const startD = new Date(gEv.start.date + 'T00:00:00');
@@ -301,6 +318,7 @@ export default defineConfig({
                 endTime: '00:30',
                 content: gEv.summary,
                 color: mapGoogleColor(gEv.gCalCalendarId),
+                ...(gCalHex ? { gCalHex } : {}),
                 allDay: true,
                 daysSpan,
                 weekKey,
@@ -328,6 +346,7 @@ export default defineConfig({
                 endTime,
                 content: gEv.summary,
                 color: mapGoogleColor(gEv.gCalCalendarId),
+                ...(gCalHex ? { gCalHex } : {}),
                 weekKey,
                 ...(recur ? { recur } : {}),
                 ...(exdates ? { exdates } : {}),
@@ -338,6 +357,24 @@ export default defineConfig({
             }
           }
 
+          // Google's own colour for an event, as a hex string.
+          //
+          // Precedence matches what Google Calendar itself renders:
+          //   1. the event's own `colorId` (the 11-entry *event* palette), else
+          //   2. the colour of the calendar it lives on.
+          // `palettes` is the /colors resource; `calHex` maps calendarId → hex from
+          // the calendar list. Returns null when neither is known, and the caller
+          // falls back to the app's five-swatch palette.
+          function resolveGoogleHex(gEv, palettes, calHex) {
+            if (gEv.colorId && palettes && palettes.event && palettes.event[gEv.colorId]) {
+              return palettes.event[gEv.colorId].background;
+            }
+            return calHex[gEv.gCalCalendarId] || null;
+          }
+
+          // Fallback swatch, used only when Google gave us no colour at all. Spread
+          // across the palette by calendar id so different calendars stay tellable
+          // apart rather than all landing on one swatch.
           function mapGoogleColor(calendarId) {
             const colors = ['sage', 'peach', 'blue', 'sand', 'lilac'];
             let hash = 0;
@@ -424,6 +461,29 @@ export default defineConfig({
               const listData = await listRes.json();
               const calendars = listData.items || [];
 
+              // Google's actual colours, so pulled events look exactly as they do in
+              // Google Calendar. The calendar list already carries each calendar's
+              // own colour; the /colors palette is only needed to resolve an event's
+              // per-event `colorId` override. A failure here is not fatal — events
+              // simply fall back to the app's own swatches.
+              let palettes = null;
+              try {
+                const colorsRes = await fetch('https://www.googleapis.com/calendar/v3/colors', {
+                  headers: { Authorization: `Bearer ${accessToken}` }
+                });
+                if (colorsRes.ok) palettes = await colorsRes.json();
+              } catch (err) {
+                console.error('Failed to fetch Google colour palette:', err);
+              }
+
+              const calHex = {};
+              for (const c of calendars) {
+                const fromPalette = c.colorId && palettes && palettes.calendar
+                  && palettes.calendar[c.colorId] && palettes.calendar[c.colorId].background;
+                const hex = c.backgroundColor || fromPalette;
+                if (hex) calHex[c.id] = hex;
+              }
+
               // 2. Find or create "Daily calendar"
               let targetCal = calendars.find(c => c.summary === 'Daily calendar');
               let targetCalendarId = '';
@@ -482,6 +542,10 @@ export default defineConfig({
                       end: item.end,
                       recurrence: item.recurrence || null,
                       description: item.description || '',
+                      // Event-level colour override ("1".."11" in Google's event
+                      // palette). Absent means the event just wears its calendar's
+                      // colour, which we resolve from the calendar list instead.
+                      colorId: item.colorId || null,
                       // Set by constructGoogleEventBody on every event this app creates.
                       // Lets us recognise our own event even when the local record lost
                       // its gCalId (create-then-delete-mid-sync), instead of pulling it
@@ -654,12 +718,14 @@ export default defineConfig({
                 if (!seenGCalIds.has(gEv.gCalId)) continue;
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
+                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
                   if (plannerEv) {
                     // Keep the original local id when this event came from the app, so it
                     // returns as itself rather than as a new "gcal-…" import with a
                     // hash-derived colour.
-                    if (gEv.plannerId) plannerEv.id = gEv.plannerId;
+                    // The app authored this one, so the app owns its colour: drop
+                    // Google's hex and let the local swatch stand.
+                    if (gEv.plannerId) { plannerEv.id = gEv.plannerId; delete plannerEv.gCalHex; }
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
                     localByGCalId.set(gEv.gCalId, plannerEv.id);
@@ -672,12 +738,12 @@ export default defineConfig({
                 // A local edit we just pushed wins this round; only pull when Google is ahead.
                 const locallyDirty = ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt);
                 if (!locallyDirty && ev.gCalETag !== gEv.gCalETag) {
-                  const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
+                  const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
                   if (g) {
                     // Daily events are app-owned: the app is the source of truth for
                     // colour (Google doesn't store our palette, so mapGoogleColor would
                     // clobber the user's choice — e.g. green → lilac). Keep ev.color.
-                    localMap[localId] = { ...ev, ...g, id: localId, color: ev.color, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
+                    localMap[localId] = { ...ev, ...g, id: localId, color: ev.color, gCalHex: ev.gCalHex, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
                   }
                 }
               }
@@ -686,7 +752,7 @@ export default defineConfig({
               for (const gEv of otherGoogleEvents) {
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
+                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
                   if (plannerEv) {
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
@@ -695,10 +761,16 @@ export default defineConfig({
                 } else {
                   const ev = localMap[localId];
                   if (ev && !ev.deleted && ev.gCalETag !== gEv.gCalETag) {
-                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
+                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
                     if (g) {
                       localMap[localId] = { ...ev, ...g, id: localId, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
                     }
+                  } else if (ev && !ev.deleted) {
+                    // Unchanged on Google, so nothing above re-maps it — but records
+                    // synced before colours were supported carry no hex at all. Fill it
+                    // in (and follow a recolour) without touching anything else.
+                    const hex = resolveGoogleHex(gEv, palettes, calHex);
+                    if (hex && ev.gCalHex !== hex) localMap[localId] = { ...ev, gCalHex: hex };
                   }
                 }
               }

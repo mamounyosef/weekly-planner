@@ -25,7 +25,12 @@ function Router() {
 
   return (
     <div className="relative min-h-screen">
-      <Home />
+      {/* Home stays mounted under the settings overlay so its state and scroll
+          position survive. While covered it must be inert: no pointer events and
+          hidden from assistive tech, or it keeps reacting behind the overlay. */}
+      <div className={isSettings ? 'pointer-events-none' : undefined} aria-hidden={isSettings}>
+        <Home />
+      </div>
       <AnimatePresence>
         {isSettings && (
           <motion.div
@@ -34,7 +39,9 @@ function Router() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.15, ease: 'easeOut' }}
-            className="fixed inset-0 z-[100] overflow-y-auto bg-background"
+            // overscroll-contain: reaching the end of the settings page must not
+            // hand the remaining scroll to the planner underneath.
+            className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background"
           >
             <Settings />
           </motion.div>

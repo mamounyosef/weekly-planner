@@ -58,7 +58,7 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   prevWeek:      'A',
   nextWeek:      'D',
   today:         'Alt+T',
-  goToLive:      'Alt+L',
+  goToLive:      'S',
   toggleView:    'Alt+M',
   focusAnalysis: 'Alt+A',
   openSettings:  'Alt+S',

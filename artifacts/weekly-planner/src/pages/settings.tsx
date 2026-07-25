@@ -49,6 +49,22 @@ import {
   coerceShortcuts,
 } from '@/lib/shortcuts';
 
+import {
+  broadcastSettingsChange,
+  subscribeSettingsChange,
+  loadSettingsLocal,
+  applyDarkModeClass,
+  coerceSettings,
+  themePalette,
+  DARK_PRESETS,
+  LIGHT_PRESETS,
+  type AppSettings,
+  type DarkPreset,
+  type LightPreset,
+  type EventCardStyle,
+  type SidebarStyle,
+} from '@/lib/settingsSync';
+
 type TimeFormat = '12h' | '24h';
 type IntervalMin = 5 | 15 | 30 | 60;
 type WeekStartsOn = 0 | 1 | 2 | 3 | 4 | 5 | 6;
@@ -60,6 +76,47 @@ interface AutoBackupCfg {
 }
 
 const AUTO_BACKUP_DEFAULT: AutoBackupCfg = { enabled: true, intervalHours: 24, keep: 50 };
+
+/**
+ * The background-theme picker. Each tile paints itself in the theme it selects,
+ * so the grid is a live preview rather than a list of names. Used for both the
+ * main window and the side window, which keep separate choices.
+ */
+function BackgroundPresetGrid({ dark, value, onChange, cardBdr }: {
+  dark: boolean;
+  value: string;
+  onChange: (id: string) => void;
+  cardBdr: string;
+}) {
+  const presets = dark ? DARK_PRESETS : LIGHT_PRESETS;
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      {presets.map(preset => {
+        const selected = value === preset.id;
+        return (
+          <button
+            key={preset.id}
+            onClick={() => onChange(preset.id)}
+            className="p-3.5 rounded-2xl border text-left flex flex-col gap-2 transition-all relative overflow-hidden cursor-pointer hover:scale-[1.02]"
+            style={{
+              background: preset.rootBg,
+              borderColor: selected ? '#3b82f6' : cardBdr,
+              boxShadow: selected ? '0 0 0 2px rgba(59,130,246,0.4)' : 'none',
+            }}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold" style={{ color: dark ? '#f1f5f9' : '#1e293b' }}>{preset.label}</span>
+              {selected && <Check size={14} style={{ color: '#3b82f6' }} />}
+            </div>
+            <span className="text-[10px] leading-snug" style={{ color: dark ? 'rgba(255,255,255,0.5)' : '#64748b' }}>
+              {preset.desc}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   const cfg = { ...AUTO_BACKUP_DEFAULT };
@@ -89,22 +146,32 @@ export default function SettingsPage() {
   // Active Sidebar Tab
   const [activeTab, setActiveTab] = useState<TabCategory>('appearance');
 
+  // Initialize state from local settings cache for instant display
+  const initialSettings = useRef(loadSettingsLocal()).current;
+
   // Settings states
-  const [interval, setIntervalOpt] = useState<IntervalMin>(15);
-  const [darkMode, setDarkMode] = useState<boolean>(true);
-  const [timeFormat, setTimeFormat] = useState<TimeFormat>('12h');
-  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(1);
-  const [dayStartH, setDayStartH] = useState<number>(8);
-  const [dayEndH, setDayEndH] = useState<number>(18);
-  const [focusDayStartHour, setFocusDayStartHour] = useState<number>(4);
-  const [focusChime, setFocusChime] = useState<FocusChimeId>('bowl');
-  const [focusCues, setFocusCues] = useState<{ start: FocusCueId; pause: FocusCueId; resume: FocusCueId }>({
-    start: 'gentle-up',
-    pause: 'gentle-down',
-    resume: 'gentle-up',
-  });
-  const [shortcuts, setShortcuts] = useState<ShortcutMap>(DEFAULT_SHORTCUTS);
-  const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(AUTO_BACKUP_DEFAULT);
+  const [interval, setIntervalOpt] = useState<IntervalMin>(initialSettings.interval);
+  const [darkMode, setDarkMode] = useState<boolean>(initialSettings.darkMode);
+  const [darkPreset, setDarkPreset] = useState<DarkPreset>(initialSettings.darkPreset);
+  const [lightPreset, setLightPreset] = useState<LightPreset>(initialSettings.lightPreset);
+  // The side window keeps its own background theme; every other appearance
+  // setting on this page applies to both windows.
+  const [widgetDarkPreset, setWidgetDarkPreset] = useState<DarkPreset>(initialSettings.widgetDarkPreset);
+  const [widgetLightPreset, setWidgetLightPreset] = useState<LightPreset>(initialSettings.widgetLightPreset);
+  // Owned by the main window. Carried here purely so saving from this page never
+  // resets which view the planner was on.
+  const [calendarView, setCalendarView] = useState<string | undefined>(initialSettings.calendarView);
+  const [eventColorStyle, setEventColorStyle] = useState<EventCardStyle>(initialSettings.eventColorStyle);
+  const [sidebarStyle, setSidebarStyle] = useState<SidebarStyle>(initialSettings.sidebarStyle);
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>(initialSettings.timeFormat);
+  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(initialSettings.weekStartsOn);
+  const [dayStartH, setDayStartH] = useState<number>(initialSettings.dayStartH);
+  const [dayEndH, setDayEndH] = useState<number>(initialSettings.dayEndH);
+  const [focusDayStartHour, setFocusDayStartHour] = useState<number>(initialSettings.focusDayStartHour);
+  const [focusChime, setFocusChime] = useState<FocusChimeId>(initialSettings.focusChime);
+  const [focusCues, setFocusCues] = useState<{ start: FocusCueId; pause: FocusCueId; resume: FocusCueId }>(initialSettings.focusCues);
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(initialSettings.shortcuts);
+  const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(initialSettings.autoBackup);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
 
   // Backup status state
@@ -133,49 +200,65 @@ export default function SettingsPage() {
     window.setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4200);
   }, []);
 
-  const settingsLoaded = useRef(false);
+  const settingsLoaded = useRef(true);
 
-  // Load Initial Settings from backend & LocalStorage
+  // Apply dark mode CSS class whenever darkMode changes
   useEffect(() => {
-    // Sync dark mode class on document element if needed
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    applyDarkModeClass(darkMode);
   }, [darkMode]);
 
+  // Subscribe to live settings changes (e.g. from main page toggle)
+  useEffect(() => {
+    return subscribeSettingsChange(s => {
+      setIntervalOpt(s.interval);
+      setDarkMode(s.darkMode);
+      setDarkPreset(s.darkPreset);
+      setLightPreset(s.lightPreset);
+      setWidgetDarkPreset(s.widgetDarkPreset);
+      setWidgetLightPreset(s.widgetLightPreset);
+      setCalendarView(s.calendarView);
+      setEventColorStyle(s.eventColorStyle);
+      setSidebarStyle(s.sidebarStyle);
+      setTimeFormat(s.timeFormat);
+      setWeekStartsOn(s.weekStartsOn);
+      setDayStartH(s.dayStartH);
+      setDayEndH(s.dayEndH);
+      setFocusDayStartHour(s.focusDayStartHour);
+      setFocusChime(s.focusChime);
+      setFocusCues(s.focusCues);
+      setShortcuts(s.shortcuts);
+      setAutoBackup(s.autoBackup);
+    });
+  }, []);
+
+  // Fetch backend settings to reconcile
   useEffect(() => {
     fetch('/api/settings')
       .then(r => r.json())
       .then((s) => {
         if (s && typeof s === 'object') {
-          if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
-          if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-          if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
-          if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
-          if (s.dayStartH != null) setDayStartH(s.dayStartH);
-          if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
-          if (s.focusChime != null) setFocusChime(coerceFocusChime(s.focusChime));
-          if (s.focusCues && typeof s.focusCues === 'object') {
-            const c = s.focusCues as Record<string, unknown>;
-            setFocusCues({
-              start: coerceFocusCue(c.start, 'start'),
-              pause: coerceFocusCue(c.pause, 'pause'),
-              resume: coerceFocusCue(c.resume, 'resume'),
-            });
-          }
-          if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
-          if (s.autoBackup && typeof s.autoBackup === 'object') {
-            setAutoBackup(coerceAutoBackup(s.autoBackup));
-          }
+          const coerced = coerceSettings(s);
+          setIntervalOpt(coerced.interval);
+          setDarkMode(coerced.darkMode);
+          setDarkPreset(coerced.darkPreset);
+          setLightPreset(coerced.lightPreset);
+          setWidgetDarkPreset(coerced.widgetDarkPreset);
+          setWidgetLightPreset(coerced.widgetLightPreset);
+          setCalendarView(coerced.calendarView);
+          setEventColorStyle(coerced.eventColorStyle);
+          setSidebarStyle(coerced.sidebarStyle);
+          setTimeFormat(coerced.timeFormat);
+          setWeekStartsOn(coerced.weekStartsOn);
+          setDayStartH(coerced.dayStartH);
+          setDayEndH(coerced.dayEndH);
+          setFocusDayStartHour(coerced.focusDayStartHour);
+          setFocusChime(coerced.focusChime);
+          setFocusCues(coerced.focusCues);
+          setShortcuts(coerced.shortcuts);
+          setAutoBackup(coerced.autoBackup);
         }
       })
-      .catch(err => console.error('Failed to load settings:', err))
-      .finally(() => {
-        settingsLoaded.current = true;
-      });
+      .catch(err => console.error('Failed to load settings:', err));
 
     // Fetch Auto Backup Status
     fetch('/api/auto-backup')
@@ -194,27 +277,30 @@ export default function SettingsPage() {
       .catch(() => {});
   }, []);
 
-  // Save Settings whenever state changes
+  // Broadcast settings change live whenever local state changes
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        interval,
-        darkMode,
-        timeFormat,
-        weekStartsOn,
-        dayStartH,
-        dayEndH,
-        focusDayStartHour,
-        focusChime,
-        focusCues,
-        shortcuts,
-        autoBackup,
-      }),
-    }).catch(err => console.error('Failed to save settings:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
+    broadcastSettingsChange({
+      interval,
+      darkMode,
+      darkPreset,
+      lightPreset,
+      widgetDarkPreset,
+      widgetLightPreset,
+      calendarView,
+      eventColorStyle,
+      sidebarStyle,
+      timeFormat,
+      weekStartsOn,
+      dayStartH,
+      dayEndH,
+      focusDayStartHour,
+      focusChime,
+      focusCues,
+      shortcuts,
+      autoBackup,
+    });
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {
@@ -346,10 +432,15 @@ export default function SettingsPage() {
       .finally(() => setGCalSyncing(false));
   };
 
-  // Color tokens
-  const bgMain = darkMode ? '#0f1115' : '#f8fafc';
-  const cardBg = darkMode ? '#181b20' : '#ffffff';
-  const cardBdr = darkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)';
+  // Painted from the same shared preset table as the planner windows, so this
+  // page always matches whatever theme is selected on it.
+  const activeTheme = themePalette(darkMode, darkPreset, lightPreset);
+  const pageBg = activeTheme.rootBg;
+  const cardBg = activeTheme.cardBg;
+  // The sticky header sits over scrolling content, so it takes the card colour at
+  // ~85% and lets the blur behind it do the rest.
+  const headerBg = `${activeTheme.cardBg}d9`;
+  const cardBdr = activeTheme.surfaceBdr;
   const textPrimary = darkMode ? '#f1f5f9' : '#0f172a';
   const textSecondary = darkMode ? '#94a3b8' : '#64748b';
   const accentColor = '#3b82f6';
@@ -366,14 +457,46 @@ export default function SettingsPage() {
 
   return (
     <div
-      className="min-h-screen flex flex-col font-sans transition-colors duration-300"
-      style={{ background: bgMain, color: textPrimary }}
+      className={`min-h-screen flex flex-col font-sans transition-colors duration-300 relative overflow-hidden ${
+        darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
+      }`}
+      style={{ backgroundColor: pageBg }}
     >
+      {/* ── Outer Side Ambient Glow Layer ── */}
+      <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+        <div
+          className={`absolute -top-32 -left-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-all duration-500 ${
+            sidebarStyle === 'minimal-flat' ? 'opacity-0' : sidebarStyle === 'accent-aura' ? 'opacity-90' : sidebarStyle === 'glass-translucent' ? 'opacity-35' : 'opacity-50'
+          }`}
+          style={{
+            background: darkMode
+              ? 'radial-gradient(circle, rgba(59,130,246,0.18) 0%, rgba(99,102,241,0.06) 65%, transparent 100%)'
+              : 'radial-gradient(circle, rgba(99,102,241,0.10) 0%, rgba(192,132,252,0.04) 65%, transparent 100%)',
+          }}
+        />
+        <div
+          className={`absolute top-1/3 -right-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-all duration-500 ${
+            sidebarStyle === 'minimal-flat' ? 'opacity-0' : sidebarStyle === 'accent-aura' ? 'opacity-80' : sidebarStyle === 'glass-translucent' ? 'opacity-25' : 'opacity-40'
+          }`}
+          style={{
+            background: darkMode
+              ? 'radial-gradient(circle, rgba(16,185,129,0.14) 0%, rgba(59,130,246,0.04) 65%, transparent 100%)'
+              : 'radial-gradient(circle, rgba(16,185,129,0.08) 0%, rgba(59,130,246,0.03) 65%, transparent 100%)',
+          }}
+        />
+        <div
+          className="absolute inset-0 opacity-[0.035] dark:opacity-[0.06] pointer-events-none"
+          style={{
+            backgroundImage: `radial-gradient(${darkMode ? 'rgba(255,255,255,0.8)' : 'rgba(15,23,42,0.8)'} 1px, transparent 1px)`,
+            backgroundSize: '28px 28px',
+          }}
+        />
+      </div>
       {/* ── Top Header Navigation Bar ────────────────────────────────────────── */}
       <header
         className="sticky top-0 z-50 flex items-center justify-between px-6 py-4 border-b backdrop-blur-md transition-colors"
         style={{
-          background: darkMode ? 'rgba(24, 27, 32, 0.85)' : 'rgba(255, 255, 255, 0.85)',
+          background: headerBg,
           borderColor: cardBdr,
         }}
       >
@@ -485,10 +608,10 @@ export default function SettingsPage() {
                 <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
-                      Appearance & Theme
+                      Theme & Background
                     </h2>
                     <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                      Choose your preferred color theme and interface layout.
+                      Light or dark, and the base surface tone each window is painted in.
                     </p>
                   </div>
 
@@ -518,6 +641,138 @@ export default function SettingsPage() {
                         }}
                       />
                     </button>
+                  </div>
+
+                  {/* Main window background */}
+                  <div className="flex flex-col gap-3">
+                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>
+                      Main Window {darkMode ? 'Dark' : 'Light'} Background Color Style
+                    </span>
+                    <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                      The base surface tone of the main planner window. The side window has its own, set below.
+                    </span>
+                    <BackgroundPresetGrid
+                      dark={darkMode}
+                      value={darkMode ? darkPreset : lightPreset}
+                      onChange={id => darkMode ? setDarkPreset(id as DarkPreset) : setLightPreset(id as LightPreset)}
+                      cardBdr={cardBdr}
+                    />
+                  </div>
+
+                  {/* Side window background — its own choice, deliberately separate. */}
+                  <div className="flex flex-col gap-3 pt-5 border-t" style={{ borderColor: cardBdr }}>
+                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>
+                      Side Window {darkMode ? 'Dark' : 'Light'} Background Color Style
+                    </span>
+                    <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                      The small always-on-top window has its own background tone. Every other appearance
+                      setting below is shared with the main window.
+                    </span>
+                    <BackgroundPresetGrid
+                      dark={darkMode}
+                      value={darkMode ? widgetDarkPreset : widgetLightPreset}
+                      onChange={id => darkMode ? setWidgetDarkPreset(id as DarkPreset) : setWidgetLightPreset(id as LightPreset)}
+                      cardBdr={cardBdr}
+                    />
+                  </div>
+                </div>
+
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                      Cards & Canvas
+                    </h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      How events and the surrounding canvas are drawn. Shared by both windows.
+                    </p>
+                  </div>
+
+                  {/* Universal Event Card Style Picker */}
+                  <div className="flex flex-col gap-3">
+                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>
+                      Event Card Style (Applies to All Items & Google Calendar)
+                    </span>
+                    <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                      Unified card layout and border styling for every item on your planner.
+                    </span>
+                    <div className="grid grid-cols-2 gap-3">
+                      {[
+                        { id: 'tinted', label: 'Glass & Border Accent', desc: 'Soft translucent fill with a vivid border stroke (Default)' },
+                        { id: 'solid', label: 'Solid Smooth Fill', desc: 'Bold, sleek solid color fill with high-contrast text' },
+                        { id: 'minimal', label: 'Minimal Left Accent', desc: 'Clean surface card with a vivid left vertical accent strip' },
+                        { id: 'glowing', label: 'Luminous Neon Glow', desc: 'Glowing neon border stroke with soft ambient backlight shadow' },
+                      ].map(style => {
+                        const selected = eventColorStyle === style.id;
+                        return (
+                          <button
+                            key={style.id}
+                            onClick={() => setEventColorStyle(style.id as any)}
+                            className="p-3.5 rounded-2xl border text-left flex flex-col gap-1.5 transition-all cursor-pointer hover:scale-[1.01]"
+                            style={{
+                              background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+                              borderColor: selected ? accentColor : cardBdr,
+                              boxShadow: selected ? `0 0 0 2px ${accentLight}` : 'none',
+                            }}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold" style={{ color: textPrimary }}>{style.label}</span>
+                              {selected && <Check size={14} style={{ color: accentColor }} />}
+                            </div>
+                            <span className="text-[10px] leading-snug" style={{ color: textSecondary }}>{style.desc}</span>
+                          </button>
+                        );
+                      })}
+                      </div>
+                    </div>
+
+                  {/* Canvas Ambient Background Aura Style Picker */}
+                  <div className="flex flex-col gap-3">
+                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>
+                      Canvas Ambient Background Style
+                    </span>
+                    <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                      Controls ambient side glow effects and background aura styling across all pages.
+                    </span>
+                    <div className="grid grid-cols-2 gap-3">
+                      {[
+                        { id: 'subtle-glow', label: 'Subtle Ambient Glow', desc: 'Soft side aura glow smoothly fading into canvas (Default)' },
+                        { id: 'accent-aura', label: 'Vivid Luminous Aura', desc: 'Richer, vibrant indigo & emerald side gradients' },
+                        { id: 'minimal-flat', label: 'Minimal Flat Canvas', desc: 'Clean, flat border-aligned surface without ambient side glow' },
+                        { id: 'glass-translucent', label: 'Frosted Glass Surface', desc: 'Translucent frosted glass panels with subtle backdrop blur' },
+                      ].map(style => {
+                        const selected = sidebarStyle === style.id;
+                        return (
+                          <button
+                            key={style.id}
+                            onClick={() => setSidebarStyle(style.id as any)}
+                            className="p-3.5 rounded-2xl border text-left flex flex-col gap-1.5 transition-all cursor-pointer hover:scale-[1.01]"
+                            style={{
+                              background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+                              borderColor: selected ? accentColor : cardBdr,
+                              boxShadow: selected ? `0 0 0 2px ${accentLight}` : 'none',
+                            }}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold" style={{ color: textPrimary }}>{style.label}</span>
+                              {selected && <Check size={14} style={{ color: accentColor }} />}
+                            </div>
+                            <span className="text-[10px] leading-snug" style={{ color: textSecondary }}>{style.desc}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                </div>
+
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                      Display
+                    </h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      How times are written throughout the planner.
+                    </p>
                   </div>
 
                   {/* Time Format */}

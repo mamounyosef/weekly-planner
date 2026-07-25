@@ -161,6 +161,7 @@
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
+    transition: background-color 300ms ease, color 300ms ease;
   }
 }
 
