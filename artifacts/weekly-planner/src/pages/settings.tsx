@@ -351,16 +351,71 @@ export default function SettingsPage() {
       .catch(() => showToast("Couldn't reach server to back up.", 'error'));
   }, [showToast]);
 
+  const currentSettingsSnapshot = (): AppSettings => ({
+    interval,
+    darkMode,
+    darkPreset,
+    lightPreset,
+    widgetDarkPreset,
+    widgetLightPreset,
+    calendarView,
+    eventColorStyle,
+    sidebarStyle,
+    timeFormat,
+    weekStartsOn,
+    dayStartH,
+    dayEndH,
+    focusDayStartHour,
+    focusChime,
+    focusCues,
+    shortcuts,
+    autoBackup,
+  });
+
+  const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
+    const restored = coerceSettings({
+      ...currentSettingsSnapshot(),
+      ...(raw && typeof raw === 'object' ? raw : {}),
+      ...(backupShortcuts ? { shortcuts: backupShortcuts } : {}),
+    });
+
+    setIntervalOpt(restored.interval);
+    setDarkMode(restored.darkMode);
+    setDarkPreset(restored.darkPreset);
+    setLightPreset(restored.lightPreset);
+    setWidgetDarkPreset(restored.widgetDarkPreset);
+    setWidgetLightPreset(restored.widgetLightPreset);
+    setCalendarView(restored.calendarView);
+    setEventColorStyle(restored.eventColorStyle);
+    setSidebarStyle(restored.sidebarStyle);
+    setTimeFormat(restored.timeFormat);
+    setWeekStartsOn(restored.weekStartsOn);
+    setDayStartH(restored.dayStartH);
+    setDayEndH(restored.dayEndH);
+    setFocusDayStartHour(restored.focusDayStartHour);
+    setFocusChime(restored.focusChime);
+    setFocusCues(restored.focusCues);
+    setShortcuts(restored.shortcuts);
+    setAutoBackup(restored.autoBackup);
+    broadcastSettingsChange(restored);
+  };
+
   const exportBackup = async () => {
     try {
-      const res = await fetch('/api/events');
-      const events = await res.json();
+      const [eventsRes, focusSessionsRes] = await Promise.all([
+        fetch('/api/events'),
+        fetch('/api/focus-sessions'),
+      ]);
+      if (!eventsRes.ok || !focusSessionsRes.ok) throw new Error('Failed to read backup sources');
+
+      const events = await eventsRes.json();
+      const focusSessions = await focusSessionsRes.json();
       const backupData = {
         backupFormatVersion: 2,
         exportedAt: new Date().toISOString(),
         events,
-        settings: { interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, autoBackup },
-        shortcuts,
+        settings: currentSettingsSnapshot(),
+        focusSessions: Array.isArray(focusSessions) ? focusSessions : [],
       };
 
       const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(backupData, null, 2));
@@ -392,21 +447,28 @@ export default function SettingsPage() {
           showToast('No valid event data found in file.', 'error');
           return;
         }
-        if (confirm('Import backup? This will merge/update events and restore settings.')) {
-          await fetch('/api/events', {
+        const sessions = Array.isArray(parsed.focusSessions) ? parsed.focusSessions : null;
+        if (confirm(`Import backup? This will replace events${parsed.settings ? ', restore all settings' : ''}${sessions ? ', and replace focus history' : ''}.`)) {
+          const eventsRes = await fetch('/api/events?force=1', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(incomingEvents),
           });
+          if (!eventsRes.ok) throw new Error('Failed to import events');
+
           if (parsed.settings) {
-            const s = parsed.settings;
-            if (s.interval != null) setIntervalOpt(s.interval);
-            if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-            if (s.timeFormat) setTimeFormat(s.timeFormat);
-            if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn);
-            if (s.dayStartH != null) setDayStartH(s.dayStartH);
-            if (s.dayEndH != null) setDayEndH(s.dayEndH);
+            applyImportedSettings(parsed.settings, parsed.shortcuts);
           }
+
+          if (sessions) {
+            const sessionsRes = await fetch('/api/focus-sessions?force=1', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(sessions),
+            });
+            if (!sessionsRes.ok) throw new Error('Failed to import focus sessions');
+          }
+
           showToast('Backup imported successfully!', 'success');
         }
       } catch {
@@ -457,7 +519,7 @@ export default function SettingsPage() {
 
   return (
     <div
-      className={`min-h-screen flex flex-col font-sans transition-colors duration-300 relative overflow-hidden ${
+      className={`min-h-screen flex flex-col font-sans transition-colors duration-300 relative ${
         darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
       }`}
       style={{ backgroundColor: pageBg }}

@@ -8,12 +8,18 @@ export type DarkPreset =
   // Deep tones
   | 'pure-black' | 'pitch-graphite' | 'neutral-dark' | 'midnight' | 'deep-emerald' | 'deep-purple'
   // Lighter tones, for when full black is too harsh
-  | 'soft-charcoal' | 'ash-gray' | 'gunmetal' | 'slate-storm' | 'warm-espresso' | 'muted-indigo';
+  | 'soft-charcoal' | 'ash-gray' | 'gunmetal' | 'slate-storm' | 'warm-espresso' | 'muted-indigo'
+  // Expanded range
+  | 'forest-night' | 'copper-ember' | 'arctic-dusk' | 'plum-wine' | 'carbon-moss' | 'ink-teal'
+  | 'volcanic-ash' | 'night-rose' | 'deep-aubergine' | 'smoked-olive' | 'steel-cyan' | 'black-cherry'
+  | 'luminous-contrast';
 export type EventCardStyle = 'tinted' | 'solid' | 'minimal' | 'glowing';
 export type SidebarStyle = 'subtle-glow' | 'accent-aura' | 'minimal-flat' | 'glass-translucent';
 export type LightPreset =
   | 'clean-white' | 'warm-ivory' | 'cool-slate' | 'soft-lavender' | 'mint-breeze' | 'rose-blush'
-  | 'dim-paper' | 'sky-tint' | 'sand-dune';
+  | 'dim-paper' | 'sky-tint' | 'sand-dune'
+  | 'pearl-blue' | 'sage-paper' | 'buttercream' | 'clay-blush' | 'misty-lilac' | 'seafoam'
+  | 'linen-graphite' | 'frosted-mint' | 'porcelain-rose' | 'pale-apricot' | 'silver-lake' | 'soft-coral';
 
 /** A background theme: page, cards, raised surfaces, hairlines. */
 export interface ThemePalette {
@@ -57,6 +63,32 @@ export const DARK_PRESETS: Array<{ id: DarkPreset; label: string; desc: string }
     rootBg: '#1c1815', cardBg: '#25201c', surfaceBg: 'rgba(255,255,255,0.07)', surfaceBdr: 'rgba(255,255,255,0.11)' },
   { id: 'muted-indigo', label: 'Muted Indigo', desc: 'Lighter dark washed with soft indigo',
     rootBg: '#1a1c2b', cardBg: '#222537', surfaceBg: 'rgba(255,255,255,0.08)', surfaceBdr: 'rgba(255,255,255,0.12)' },
+  { id: 'forest-night', label: 'Forest Night', desc: 'Cool pine-black with grounded green depth',
+    rootBg: '#07110d', cardBg: '#0f1b16', surfaceBg: 'rgba(255,255,255,0.065)', surfaceBdr: 'rgba(187,247,208,0.12)' },
+  { id: 'copper-ember', label: 'Copper Ember', desc: 'Dark mineral copper without heavy brown',
+    rootBg: '#160f0b', cardBg: '#211713', surfaceBg: 'rgba(255,255,255,0.065)', surfaceBdr: 'rgba(251,146,60,0.13)' },
+  { id: 'arctic-dusk', label: 'Arctic Dusk', desc: 'Blue-gray night with crisp icy contrast',
+    rootBg: '#0b1218', cardBg: '#121d25', surfaceBg: 'rgba(255,255,255,0.07)', surfaceBdr: 'rgba(125,211,252,0.13)' },
+  { id: 'plum-wine', label: 'Plum Wine', desc: 'Deep muted plum, softer than violet',
+    rootBg: '#150d16', cardBg: '#211622', surfaceBg: 'rgba(255,255,255,0.065)', surfaceBdr: 'rgba(244,114,182,0.12)' },
+  { id: 'carbon-moss', label: 'Carbon Moss', desc: 'Charcoal base with restrained olive warmth',
+    rootBg: '#121510', cardBg: '#1b2018', surfaceBg: 'rgba(255,255,255,0.07)', surfaceBdr: 'rgba(190,242,100,0.11)' },
+  { id: 'ink-teal', label: 'Ink Teal', desc: 'Dark ink with a clean teal undertone',
+    rootBg: '#061213', cardBg: '#0e1d1f', surfaceBg: 'rgba(255,255,255,0.07)', surfaceBdr: 'rgba(45,212,191,0.13)' },
+  { id: 'volcanic-ash', label: 'Volcanic Ash', desc: 'Soft blackened gray with subtle warmth',
+    rootBg: '#131313', cardBg: '#1e1d1b', surfaceBg: 'rgba(255,255,255,0.075)', surfaceBdr: 'rgba(255,255,255,0.12)' },
+  { id: 'night-rose', label: 'Night Rose', desc: 'Dark rose tone with low-glare contrast',
+    rootBg: '#170c10', cardBg: '#23151a', surfaceBg: 'rgba(255,255,255,0.065)', surfaceBdr: 'rgba(251,113,133,0.13)' },
+  { id: 'deep-aubergine', label: 'Deep Aubergine', desc: 'Blackened eggplant, rich but controlled',
+    rootBg: '#120b18', cardBg: '#1d1426', surfaceBg: 'rgba(255,255,255,0.07)', surfaceBdr: 'rgba(196,181,253,0.12)' },
+  { id: 'smoked-olive', label: 'Smoked Olive', desc: 'Muted green-brown for a quiet desk feel',
+    rootBg: '#15160f', cardBg: '#202116', surfaceBg: 'rgba(255,255,255,0.07)', surfaceBdr: 'rgba(217,249,157,0.10)' },
+  { id: 'steel-cyan', label: 'Steel Cyan', desc: 'Industrial blue-cyan dark, clean and sharp',
+    rootBg: '#0a1317', cardBg: '#111f25', surfaceBg: 'rgba(255,255,255,0.075)', surfaceBdr: 'rgba(103,232,249,0.13)' },
+  { id: 'black-cherry', label: 'Black Cherry', desc: 'Near-black burgundy with polished depth',
+    rootBg: '#14090d', cardBg: '#211116', surfaceBg: 'rgba(255,255,255,0.065)', surfaceBdr: 'rgba(248,113,113,0.12)' },
+  { id: 'luminous-contrast', label: 'Luminous Contrast', desc: 'Very light dark mode with vivid high-contrast surfaces',
+    rootBg: '#384151', cardBg: '#4b5568', surfaceBg: 'rgba(255,255,255,0.16)', surfaceBdr: 'rgba(255,255,255,0.28)' },
 ];
 
 export const LIGHT_PRESETS: Array<{ id: LightPreset; label: string; desc: string } & ThemePalette> = [
@@ -78,6 +110,30 @@ export const LIGHT_PRESETS: Array<{ id: LightPreset; label: string; desc: string
     rootBg: '#eff6ff', cardBg: '#f8fbff', surfaceBg: '#f8fbff', surfaceBdr: 'rgba(29,78,216,0.10)' },
   { id: 'sand-dune', label: 'Sand Dune', desc: 'Warm sandy beige, softer than white',
     rootBg: '#f7f2e8', cardBg: '#fdfaf3', surfaceBg: '#fdfaf3', surfaceBdr: 'rgba(146,109,45,0.12)' },
+  { id: 'pearl-blue', label: 'Pearl Blue', desc: 'Pearl white with a soft blue cast',
+    rootBg: '#f3f8fb', cardBg: '#ffffff', surfaceBg: '#ffffff', surfaceBdr: 'rgba(37,99,235,0.10)' },
+  { id: 'sage-paper', label: 'Sage Paper', desc: 'Muted green-gray, calm and natural',
+    rootBg: '#f1f6ef', cardBg: '#fbfdf9', surfaceBg: '#fbfdf9', surfaceBdr: 'rgba(74,124,89,0.12)' },
+  { id: 'buttercream', label: 'Buttercream', desc: 'Pale creamy yellow without glare',
+    rootBg: '#fff9e8', cardBg: '#fffdf5', surfaceBg: '#fffdf5', surfaceBdr: 'rgba(202,138,4,0.12)' },
+  { id: 'clay-blush', label: 'Clay Blush', desc: 'Warm clay-pink with a handmade feel',
+    rootBg: '#fbf1ed', cardBg: '#fff8f5', surfaceBg: '#fff8f5', surfaceBdr: 'rgba(194,65,12,0.11)' },
+  { id: 'misty-lilac', label: 'Misty Lilac', desc: 'Cool lilac-gray, quieter than lavender',
+    rootBg: '#f4f1f8', cardBg: '#fcfaff', surfaceBg: '#fcfaff', surfaceBdr: 'rgba(126,34,206,0.09)' },
+  { id: 'seafoam', label: 'Seafoam', desc: 'Light aqua green with fresh contrast',
+    rootBg: '#edfdfa', cardBg: '#f8fffd', surfaceBg: '#f8fffd', surfaceBdr: 'rgba(13,148,136,0.10)' },
+  { id: 'linen-graphite', label: 'Linen Graphite', desc: 'Neutral linen with graphite edges',
+    rootBg: '#f4f4f1', cardBg: '#fdfdfb', surfaceBg: '#fdfdfb', surfaceBdr: 'rgba(63,63,70,0.13)' },
+  { id: 'frosted-mint', label: 'Frosted Mint', desc: 'Cool mint-white, clean and airy',
+    rootBg: '#f2fbf6', cardBg: '#fbfffd', surfaceBg: '#fbfffd', surfaceBdr: 'rgba(5,150,105,0.10)' },
+  { id: 'porcelain-rose', label: 'Porcelain Rose', desc: 'Porcelain white with rose undertones',
+    rootBg: '#fff5f7', cardBg: '#fffdfd', surfaceBg: '#fffdfd', surfaceBdr: 'rgba(225,29,72,0.09)' },
+  { id: 'pale-apricot', label: 'Pale Apricot', desc: 'Soft apricot warmth, brighter than sand',
+    rootBg: '#fff4ea', cardBg: '#fffaf5', surfaceBg: '#fffaf5', surfaceBdr: 'rgba(234,88,12,0.10)' },
+  { id: 'silver-lake', label: 'Silver Lake', desc: 'Cool silver-blue gray for lower glare',
+    rootBg: '#edf2f5', cardBg: '#f8fbfd', surfaceBg: '#f8fbfd', surfaceBdr: 'rgba(71,85,105,0.13)' },
+  { id: 'soft-coral', label: 'Soft Coral', desc: 'Warm coral tint with crisp white surfaces',
+    rootBg: '#fff0ed', cardBg: '#fff9f7', surfaceBg: '#fff9f7', surfaceBdr: 'rgba(220,38,38,0.09)' },
 ];
 
 const DARK_PRESET_IDS = DARK_PRESETS.map(p => p.id) as string[];

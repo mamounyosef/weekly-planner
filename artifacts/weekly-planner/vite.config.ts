@@ -149,11 +149,10 @@ async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') 
   const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
   const events = await readJsonSafe(p.dbPath, {});
 
-  // Never write an empty snapshot over a healthy history — a blank backup is
-  // worse than no backup, since it silently consumes a retention slot.
-  if (!events || typeof events !== 'object' || Object.keys(events).length === 0) {
-    return { ok: false as const, reason: 'no events to back up' };
-  }
+  // A planner can have no events and still have settings/history worth backing up.
+  const eventCount = events && typeof events === 'object' && !Array.isArray(events)
+    ? Object.keys(events).length
+    : 0;
 
   const payload = {
     backupFormatVersion: 2,
@@ -170,7 +169,7 @@ async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') 
   await fsp.writeFile(file, JSON.stringify(payload, null, 2), 'utf-8');
   await pruneAutoBackups(p.outDir, cfg.keep);
   await fsp.writeFile(p.statePath, JSON.stringify({ lastBackupAt: new Date().toISOString() }, null, 2), 'utf-8').catch(() => {});
-  return { ok: true as const, file: path.basename(file), count: Object.keys(events).length };
+  return { ok: true as const, file: path.basename(file), count: eventCount };
 }
 
 async function maybeRunAutoBackup(rootDir: string) {

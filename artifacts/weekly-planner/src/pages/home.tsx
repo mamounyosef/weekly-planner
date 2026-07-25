@@ -97,6 +97,7 @@ import {
   type LightPreset,
   type EventCardStyle,
   type SidebarStyle,
+  type AppSettings,
 } from '@/lib/settingsSync';
 
 // ─── TEMP DEBUG: surface the real error the overlay hides ───────────────────────
@@ -1693,9 +1694,9 @@ export default function WeeklyPlanner() {
     };
   }, []);
 
-  const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
+  const persistFocusSessions = useCallback((sessions: FocusSession[], force = false) => {
     localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
-    fetch('/api/focus-sessions', {
+    fetch(`/api/focus-sessions${force ? '?force=1' : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(sessions),
@@ -2128,12 +2129,47 @@ export default function WeeklyPlanner() {
   // single exported file is a complete snapshot of the whole app's data.
   const BACKUP_FORMAT_VERSION = 2;
 
+  const currentSettingsSnapshot = (): AppSettings => ({
+    interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
+    eventColorStyle, sidebarStyle,
+    timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView,
+    focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup
+  });
+
+  const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
+    const restored = coerceSettings({
+      ...currentSettingsSnapshot(),
+      ...(raw && typeof raw === 'object' ? raw : {}),
+      ...(backupShortcuts ? { shortcuts: backupShortcuts } : {}),
+    });
+
+    setIntervalOpt(restored.interval);
+    setDarkMode(restored.darkMode);
+    setDarkPreset(restored.darkPreset);
+    setLightPreset(restored.lightPreset);
+    setWidgetDarkPreset(restored.widgetDarkPreset);
+    setWidgetLightPreset(restored.widgetLightPreset);
+    setEventColorStyle(restored.eventColorStyle);
+    setSidebarStyle(restored.sidebarStyle);
+    setTimeFormat(restored.timeFormat);
+    setWeekStartsOn(restored.weekStartsOn);
+    setDayStartH(restored.dayStartH);
+    setDayEndH(restored.dayEndH);
+    if (isCalendarView(restored.calendarView)) setCalendarView(restored.calendarView);
+    setFocusDayStartHour(restored.focusDayStartHour);
+    setFocusChime(restored.focusChime);
+    setFocusCues(restored.focusCues);
+    setShortcuts(restored.shortcuts);
+    setAutoBackup(restored.autoBackup);
+    broadcastSettingsChange(restored);
+  };
+
   const exportBackup = () => {
     const backup = {
       backupFormatVersion: BACKUP_FORMAT_VERSION,
       exportedAt: new Date().toISOString(),
       events,
-      settings: { interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour },
+      settings: currentSettingsSnapshot(),
       focusSessions,
     };
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backup, null, 2));
@@ -2185,27 +2221,18 @@ export default function WeeklyPlanner() {
         // writeEvents (not setEvents) so eventsRef is hot immediately — a stale ref
         // here would let the very next edit rebuild from pre-import data.
         writeEvents(migrated);
-        fetch('/api/events', {
+        fetch('/api/events?force=1', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(migrated),
         }).catch(() => showToast('Imported locally, but saving to the server failed.', 'error'));
 
-        if (s && typeof s === 'object') {
-          if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
-          if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-          if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
-          if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
-          if (s.dayStartH != null) setDayStartH(s.dayStartH);
-          if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
-          if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
-        }
+        if (s && typeof s === 'object') applyImportedSettings(s, parsed.shortcuts);
 
         if (sessions) {
           const safeSessions = safeFocusSessions(sessions);
           setFocusSessions(safeSessions);
-          persistFocusSessions(safeSessions);
+          persistFocusSessions(safeSessions, true);
         }
 
         showToast(
@@ -3128,7 +3155,7 @@ export default function WeeklyPlanner() {
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div
-      className={`min-h-screen flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
+      className={`h-screen min-h-screen flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
         darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
       }`}
       style={{ cursor: globalCursor, zoom: appZoom, background: darkMode ? currentDarkTheme.rootBg : currentLightTheme.rootBg }}
@@ -3360,7 +3387,7 @@ export default function WeeklyPlanner() {
       {/* ── Grid ────────────────────────────────────────────────────────── */}
       <main
         ref={mainRef}
-        className={`flex-1 ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'}`}
+        className={`flex-1 min-h-0 ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'}`}
         onScroll={handleMainScroll}
       >
         <AnimatePresence mode="wait">
@@ -5004,7 +5031,7 @@ export default function WeeklyPlanner() {
 
       {/* Floating "Go to Live" button — appears when the red now-line is off-screen. */}
       <AnimatePresence>
-        {showLiveBtn && isTimelineView && (
+        {showLiveBtn && isTimelineView && !settingsRouteOpen && (
           <motion.button
             key="go-to-live"
             onClick={scrollToLive}

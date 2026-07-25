@@ -6,6 +6,7 @@ import Home from '@/pages/home';
 import Settings from '@/pages/settings';
 import Widget from '@/pages/widget';
 import { AnimatePresence, motion } from 'framer-motion';
+import { useEffect } from 'react';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 
 const queryClient = new QueryClient();
@@ -22,6 +23,21 @@ function Router() {
   }
 
   const isSettings = location === '/settings';
+
+  useEffect(() => {
+    if (!isSettings) return;
+
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    const previousBodyOverflow = document.body.style.overflow;
+
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.documentElement.style.overflow = previousHtmlOverflow;
+      document.body.style.overflow = previousBodyOverflow;
+    };
+  }, [isSettings]);
 
   return (
     <div className="relative min-h-screen">
