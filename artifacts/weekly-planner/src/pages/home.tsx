@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import { useLocation } from 'wouter';
 import { flushSync } from 'react-dom';
 import {
   format,
@@ -563,6 +564,7 @@ export default function WeeklyPlanner() {
   useEffect(() => { menuPinnedRef.current = menuPinned; }, [menuPinned]);
   // Discard the draft / unpin whenever the popup closes by any path.
   useEffect(() => { if (menuId === null) { setDraft(null); setMenuPinned(false); } }, [menuId]);
+  const [, setLocation] = useLocation();
   const [direction, setDirection]     = useState(0);
   const [darkMode, setDarkMode]       = useState(true);
   const [timeFormat, setTimeFormat]     = useState<TimeFormat>('12h');
@@ -746,6 +748,86 @@ export default function WeeklyPlanner() {
     y = Math.max(margin, Math.min(y, window.innerHeight - mh - margin));
     menuEl.style.left = `${x}px`;
     menuEl.style.top = `${y}px`;
+  }, []);
+
+  // ── Scroll preservation across page navigation ──────────────────────────────
+  const HOME_SCROLL_KEY = 'planner-home-scroll-pos';
+  const isUnmountingRef = useRef(false);
+  const isRestoringScrollRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      isUnmountingRef.current = true;
+    };
+  }, []);
+
+  const navigateToSettings = useCallback(() => {
+    if (mainRef.current) {
+      try {
+        sessionStorage.setItem(HOME_SCROLL_KEY, JSON.stringify({
+          top: mainRef.current.scrollTop,
+          left: mainRef.current.scrollLeft,
+          windowY: window.scrollY || document.documentElement.scrollTop || 0,
+        }));
+      } catch (_) {}
+    }
+    setLocation('/settings');
+  }, [setLocation]);
+
+  const handleMainScroll = useCallback(() => {
+    repositionMenu();
+    if (isUnmountingRef.current || isRestoringScrollRef.current) return;
+    if (mainRef.current) {
+      const top = mainRef.current.scrollTop;
+      const left = mainRef.current.scrollLeft;
+      const windowY = window.scrollY || document.documentElement.scrollTop || 0;
+
+      // Ignore scroll events caused by DOM collapse during unmount/navigation
+      if (top === 0 && mainRef.current.scrollHeight <= mainRef.current.clientHeight) {
+        return;
+      }
+
+      try {
+        sessionStorage.setItem(HOME_SCROLL_KEY, JSON.stringify({ top, left, windowY }));
+      } catch (_) {}
+    }
+  }, [repositionMenu]);
+
+  useLayoutEffect(() => {
+    let t1: number, t2: number, t3: number;
+    const restoreScroll = () => {
+      try {
+        const raw = sessionStorage.getItem(HOME_SCROLL_KEY);
+        if (!raw) return;
+        const pos = JSON.parse(raw);
+        if (pos && typeof pos.top === 'number') {
+          isRestoringScrollRef.current = true;
+          if (mainRef.current) {
+            mainRef.current.scrollTop = pos.top;
+            if (typeof pos.left === 'number') mainRef.current.scrollLeft = pos.left;
+          }
+          if (typeof pos.windowY === 'number' && pos.windowY > 0) {
+            window.scrollTo(0, pos.windowY);
+          }
+        }
+      } catch (_) {}
+    };
+
+    restoreScroll();
+    const rafId = requestAnimationFrame(restoreScroll);
+    t1 = window.setTimeout(restoreScroll, 40);
+    t2 = window.setTimeout(restoreScroll, 120);
+    t3 = window.setTimeout(() => {
+      restoreScroll();
+      isRestoringScrollRef.current = false;
+    }, 300);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -1771,6 +1853,25 @@ export default function WeeklyPlanner() {
       });
   }, []);
 
+  // Sync settings when returning to main planner route
+  useEffect(() => {
+    if (location === '/' && settingsLoaded.current) {
+      fetch('/api/settings')
+        .then(r => r.json())
+        .then((s) => {
+          if (s && typeof s === 'object') {
+            if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
+            if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+            if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
+            if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
+            if (s.dayStartH != null) setDayStartH(s.dayStartH);
+            if (s.dayEndH != null) setDayEndH(s.dayEndH);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [location]);
+
   // Persist settings to the shared backend whenever any of them change (after initial load).
   useEffect(() => {
     if (!settingsLoaded.current) return;
@@ -2724,17 +2825,24 @@ export default function WeeklyPlanner() {
   const navPrev = () => (showFocusAnalysis ? analysisStep(-1) : navStep(-1));
   const navNext = () => (showFocusAnalysis ? analysisStep(1)  : navStep(1));
 
-  // Ctrl+wheel steps along day → week → month → year.
+  // Ctrl+wheel steps along day → week → month → year (or week → month → year on analysis screen).
   const stepCalendarZoom = useCallback((dir: -1 | 1) => {
     setDirection(0);
-    setShowFocusAnalysis(false);
-    setCalendarView(v => {
-      const i = CALENDAR_VIEWS.indexOf(v);
-      return CALENDAR_VIEWS[clamp(i + dir, 0, CALENDAR_VIEWS.length - 1)];
-    });
     setEditingId(null);
     setMenuId(null);
-  }, []);
+    if (showFocusAnalysis) {
+      const tabs = ['week', 'month', 'year'] as const;
+      setAnalysisTab(t => {
+        const i = tabs.indexOf(t);
+        return tabs[clamp(i + dir, 0, tabs.length - 1)];
+      });
+    } else {
+      setCalendarView(v => {
+        const i = CALENDAR_VIEWS.indexOf(v);
+        return CALENDAR_VIEWS[clamp(i + dir, 0, CALENDAR_VIEWS.length - 1)];
+      });
+    }
+  }, [showFocusAnalysis]);
 
   // Keep the shortcut runner pointed at the current closures.
   navRef.current = {
@@ -2750,9 +2858,16 @@ export default function WeeklyPlanner() {
       goToday();
     },
     goToLive: () => { setShowFocusAnalysis(false); setCalendarView('week'); scrollToLive(); },
-    toggleView: () => { setDirection(0); setCalendarView(v => (v === 'week' ? 'month' : 'week')); },
+    toggleView: () => {
+      setDirection(0);
+      if (showFocusAnalysis) {
+        setAnalysisTab(t => (t === 'week' ? 'month' : 'week'));
+      } else {
+        setCalendarView(v => (v === 'week' ? 'month' : 'week'));
+      }
+    },
     toggleAnalysis: () => setShowFocusAnalysis(v => !v),
-    toggleSettings: () => setSettingsOpen(s => !s),
+    toggleSettings: () => navigateToSettings(),
     openWidget: () => openWidget(),
     newEvent: () => { setShowFocusAnalysis(false); handleHeaderCreateClick(); },
     toggleTimer: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
@@ -3067,7 +3182,7 @@ export default function WeeklyPlanner() {
             >
               <Keyboard size={14}/>
             </button>
-            <button onClick={() => setSettingsOpen(s => !s)} title="Settings" className="p-1.5 rounded-lg transition-colors" style={{ background: settingsOpen ? (darkMode?'rgba(255,255,255,0.14)':'rgba(0,0,0,0.08)') : surfaceBg, border: `1px solid ${settingsOpen ? (darkMode?'rgba(255,255,255,0.22)':surfaceBdr) : surfaceBdr}`, color: settingsOpen ? menuText : headerInactive }}>
+            <button onClick={() => navigateToSettings()} title="Settings" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <Settings size={14}/>
             </button>
           </div>
@@ -3075,7 +3190,7 @@ export default function WeeklyPlanner() {
       </header>
 
       {/* ── Grid ────────────────────────────────────────────────────────── */}
-      <main ref={mainRef} className="flex-1 overflow-auto">
+      <main ref={mainRef} className="flex-1 overflow-auto" onScroll={handleMainScroll}>
         <AnimatePresence mode="wait">
           {!showFocusAnalysis ? (
             <motion.div

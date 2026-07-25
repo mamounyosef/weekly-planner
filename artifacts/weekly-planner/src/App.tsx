@@ -3,18 +3,44 @@ import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import Home from '@/pages/home';
+import Settings from '@/pages/settings';
 import Widget from '@/pages/widget';
-import { Route, Switch, Router as WouterRouter } from 'wouter';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 
 const queryClient = new QueryClient();
 
 function Router() {
+  const [location] = useLocation();
+
+  if (location === '/widget') {
+    return <Widget />;
+  }
+
+  if (location !== '/' && location !== '/settings') {
+    return <NotFound />;
+  }
+
+  const isSettings = location === '/settings';
+
   return (
-    <Switch>
-      <Route path="/" component={Home} />
-      <Route path="/widget" component={Widget} />
-      <Route component={NotFound} />
-    </Switch>
+    <div className="relative min-h-screen">
+      <Home />
+      <AnimatePresence>
+        {isSettings && (
+          <motion.div
+            key="settings-overlay"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.15, ease: 'easeOut' }}
+            className="fixed inset-0 z-[100] overflow-y-auto bg-background"
+          >
+            <Settings />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
