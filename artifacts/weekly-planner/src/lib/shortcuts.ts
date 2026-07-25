@@ -71,8 +71,9 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   paste:         'Ctrl+V',
   delete:        'Delete',
   // NOT Alt+Space: Space activates whatever button has focus, and Alt+Space
-  // opens the Windows system menu before the page ever sees it.
-  toggleTimer:   'Alt+P',
+  // opens the Windows system menu before the page ever sees it. This same combo
+  // is registered OS-wide by focus-hotkey.py, so it works off-window too.
+  toggleTimer:   'Alt+Shift+F1',
 };
 
 /**
@@ -83,6 +84,8 @@ const RESERVED_COMBOS = new Set([
   'Alt+F4', 'Ctrl+W', 'Ctrl+Shift+W', 'Ctrl+R', 'Ctrl+Shift+R', 'F5',
   'Ctrl+T', 'Ctrl+N', 'Ctrl+Shift+N', 'Ctrl+Q', 'Alt+Tab', 'Alt+Space',
   'Ctrl+Alt+Delete', 'F11', 'F12',
+  // Windows itself owns these and never lets the page (or a hotkey) see them.
+  'Win+L', 'Win+D', 'Win+E', 'Win+R', 'Win+I', 'Win+S', 'Win+A', 'Win+Tab', 'Win+X',
 ]);
 
 export function isReservedCombo(combo: string): boolean {
@@ -91,7 +94,7 @@ export function isReservedCombo(combo: string): boolean {
 
 export const SHORTCUTS_KEY = 'planner-shortcuts';
 
-const MODIFIER_KEYS = new Set(['Control', 'Meta', 'Alt', 'Shift', 'CapsLock', 'Dead']);
+const MODIFIER_KEYS = new Set(['Control', 'Meta', 'Alt', 'Shift', 'CapsLock', 'Dead', 'OS']);
 
 /**
  * Canonical combo string for a keydown. Returns null while only modifiers are
@@ -100,8 +103,10 @@ const MODIFIER_KEYS = new Set(['Control', 'Meta', 'Alt', 'Shift', 'CapsLock', 'D
 export function eventToCombo(e: KeyboardEvent): string | null {
   if (MODIFIER_KEYS.has(e.key)) return null;
   const parts: string[] = [];
-  // Ctrl and Cmd are treated as the same modifier so bindings are portable.
-  if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+  if (e.ctrlKey) parts.push('Ctrl');
+  // The Windows key is its own modifier — the system-wide hotkey helper can bind
+  // it, so combos like Win+Shift+F1 have to be recordable here too.
+  if (e.metaKey) parts.push('Win');
   if (e.altKey) parts.push('Alt');
   if (e.shiftKey) parts.push('Shift');
   let key = e.key;
@@ -136,6 +141,7 @@ export function formatCombo(binding: string): string {
         case 'Escape':     return 'Esc';
         case 'Delete':     return 'Del';
         case 'Backspace':  return '⌫';
+        case 'Win':        return '⊞ Win';
         default:           return part;
       }
     })

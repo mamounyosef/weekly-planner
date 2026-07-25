@@ -350,7 +350,7 @@ export default defineConfig({
           // Build the Google event body for an app-owned event. The first occurrence
           // is the master's anchor (weekKey + dayIndex); repetition (if any) comes
           // from `ev.recur` via buildGoogleRecurrence, so app and Google agree 1:1.
-          function constructGoogleEventBody(ev, format, addDays, buildRecur) {
+          function constructGoogleEventBody(ev, format, addDays, buildRecur, plannerId) {
             const weekStartDate = new Date((ev.weekKey || '0000-01-01') + 'T00:00:00');
             const eventDate = addDays(weekStartDate, ev.dayIndex || 0);
             const dateStr = format(eventDate, 'yyyy-MM-dd');
@@ -365,6 +365,7 @@ export default defineConfig({
                 end: { date: format(endDate, 'yyyy-MM-dd') }
               };
               if (recurrence) body.recurrence = recurrence;
+              stampPlannerId(body, plannerId || ev.id);
               return body;
             } else {
               const [sh, sm] = (ev.startTime || '00:00').split(':').map(Number);
@@ -377,8 +378,17 @@ export default defineConfig({
                 end: { dateTime: endDate.toISOString(), timeZone: tz }
               };
               if (recurrence) body.recurrence = recurrence;
+              stampPlannerId(body, plannerId || ev.id);
               return body;
             }
+          }
+
+          // Every event this app writes to Google carries the local record id it came
+          // from. That link survives even if the local record loses its gCalId, which is
+          // what lets us clean up orphans instead of re-importing them as new items.
+          function stampPlannerId(body, plannerId) {
+            if (!plannerId) return;
+            body.extendedProperties = { private: { plannerId: String(plannerId) } };
           }
 
           // The concrete calendar date of a single-week event (for sync-window filtering).
@@ -471,7 +481,13 @@ export default defineConfig({
                       start: item.start,
                       end: item.end,
                       recurrence: item.recurrence || null,
-                      description: item.description || ''
+                      description: item.description || '',
+                      // Set by constructGoogleEventBody on every event this app creates.
+                      // Lets us recognise our own event even when the local record lost
+                      // its gCalId (create-then-delete-mid-sync), instead of pulling it
+                      // back in as a brand-new foreign-looking copy.
+                      plannerId: (item.extendedProperties && item.extendedProperties.private
+                        && item.extendedProperties.private.plannerId) || null
                     });
                   }
                   pageToken = data.nextPageToken || '';
@@ -502,6 +518,30 @@ export default defineConfig({
               for (const e of dailyGoogleEvents) seenGCalIds.add(e.gCalId);
               for (const e of otherGoogleEvents) seenGCalIds.add(e.gCalId);
 
+              // Daily events indexed by the local record that authored them. A create
+              // that was deleted before its sync round-trip finished leaves a Google
+              // event whose local record no longer knows the gCalId; this index is how
+              // we still find it.
+              const dailyByPlannerId = new Map();
+              for (const e of dailyGoogleEvents) {
+                if (e.plannerId) dailyByPlannerId.set(e.plannerId, e);
+              }
+              async function deleteFromGoogle(gCalId) {
+                try {
+                  const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(gCalId)}`, {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${accessToken}` }
+                  });
+                  if (delRes.ok || delRes.status === 404 || delRes.status === 410) {
+                    seenGCalIds.delete(gCalId);
+                    return true;
+                  }
+                } catch (err) {
+                  console.error(`Failed to delete event ${gCalId} from Google:`, err);
+                }
+                return false;
+              }
+
               const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
               // A. Mirror local deletions to Google. A tombstone (deleted:true) that
@@ -512,19 +552,17 @@ export default defineConfig({
               for (const [id, ev] of Object.entries(localMap)) {
                 if (!ev.deleted) continue;
                 if (ev.gCalId && ev.gCalCalendarId === targetCalendarId) {
-                  try {
-                    const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
-                      method: 'DELETE',
-                      headers: { Authorization: `Bearer ${accessToken}` }
-                    });
-                    if (delRes.ok || delRes.status === 404 || delRes.status === 410) {
-                      seenGCalIds.delete(ev.gCalId);
-                      delete localMap[id];
-                    }
-                  } catch (err) {
-                    console.error(`Failed to delete event ${ev.gCalId} from Google:`, err);
-                  }
+                  if (await deleteFromGoogle(ev.gCalId)) delete localMap[id];
                 } else {
+                  // No gCalId locally, but this record may still have authored a Google
+                  // event: the create's round-trip landed after the delete. Match by the
+                  // plannerId stamp and remove the orphan, otherwise the next pull would
+                  // re-import it as a new item at Google's own date/colour.
+                  const orphan = !ev.gCalId ? dailyByPlannerId.get(id) : null;
+                  if (orphan) {
+                    await deleteFromGoogle(orphan.gCalId);
+                    dailyByPlannerId.delete(id);
+                  }
                   delete localMap[id];
                 }
               }
@@ -544,9 +582,23 @@ export default defineConfig({
                 const isForeign = ev.gCalId && ev.gCalCalendarId && ev.gCalCalendarId !== targetCalendarId;
                 if (isForeign) continue;
 
+                if (!ev.gCalId && dailyByPlannerId.has(id)) {
+                  // We already created this record on Google in an earlier run; the local
+                  // copy just lost the link (a POST /api/events overwrote the annotated
+                  // map mid-sync). Re-adopt it instead of inserting a second copy.
+                  const existing = dailyByPlannerId.get(id);
+                  localMap[id] = {
+                    ...ev,
+                    gCalId: existing.gCalId,
+                    gCalCalendarId: targetCalendarId,
+                    gCalETag: existing.gCalETag
+                  };
+                  continue;
+                }
+
                 if (!ev.gCalId) {
                   try {
-                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence);
+                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
                     const insRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
                       method: 'POST',
                       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -566,7 +618,7 @@ export default defineConfig({
                 }
                 else if (ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt)) {
                   try {
-                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence);
+                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
                     const updRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
                       method: 'PUT',
                       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
@@ -597,10 +649,17 @@ export default defineConfig({
 
               // C. Pull the Daily calendar back in — Google may also edit/create there.
               for (const gEv of dailyGoogleEvents) {
+                // Deleted during this run (step A orphan cleanup) — it no longer exists
+                // on Google, so importing it back would resurrect what the user removed.
+                if (!seenGCalIds.has(gEv.gCalId)) continue;
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
                   const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence);
                   if (plannerEv) {
+                    // Keep the original local id when this event came from the app, so it
+                    // returns as itself rather than as a new "gcal-…" import with a
+                    // hash-derived colour.
+                    if (gEv.plannerId) plannerEv.id = gEv.plannerId;
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
                     localByGCalId.set(gEv.gCalId, plannerEv.id);
@@ -1060,6 +1119,150 @@ export default defineConfig({
           }
         });
 
+        // Live push for everything else in the file database (events, settings,
+        // focus sessions). The widget used to poll these every 5s, which is why a
+        // change made in the main window took seconds to show up there.
+        server.middlewares.use('/api/db-stream', async (req, res, next) => {
+          if (req.method !== 'GET') return next();
+          const fs = await import('fs');
+          const fsp = await import('fs/promises');
+          const path = await import('path');
+          const dbDir = path.resolve(import.meta.dirname, '..', '..', 'database');
+          // SSE event name → file in database/.
+          const WATCHED: Record<string, string> = {
+            events: 'database.json',
+            settings: 'settings.json',
+            'focus-sessions': 'focus-sessions.json',
+          };
+
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+          });
+
+          const lastSent: Record<string, string> = {};
+          const send = async (name: string) => {
+            const file = WATCHED[name];
+            if (!file) return;
+            try {
+              const data = await fsp.readFile(path.join(dbDir, file), 'utf-8');
+              if (data === lastSent[name]) return;
+              lastSent[name] = data;
+              res.write(`event: ${name}\ndata: ${data.replace(/\s*\n\s*/g, ' ')}\n\n`);
+            } catch (_) { /* not written yet */ }
+          };
+
+          // Watch the directory, not each file: atomic writes replace the inode and
+          // a file-level watcher would go deaf after the first save.
+          let watcher: any = null;
+          try {
+            watcher = fs.watch(dbDir, (_evt, changed) => {
+              if (!changed) return;
+              for (const [name, file] of Object.entries(WATCHED)) {
+                if (String(changed).startsWith(file)) send(name);
+              }
+            });
+          } catch (_) { /* clients fall back to polling */ }
+
+          const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
+          req.on('close', () => {
+            clearInterval(ping);
+            if (watcher) try { watcher.close(); } catch (_) {}
+          });
+        });
+
+        // Live push of the shared timer state. Polling for it meant a start/pause
+        // made elsewhere (widget, system-wide hotkey) only showed up on the next
+        // tick; this delivers it the moment the file changes.
+        server.middlewares.use('/api/focus-timer/stream', async (req, res, next) => {
+          if (req.method !== 'GET') return next();
+          const fs = await import('fs');
+          const fsp = await import('fs/promises');
+          const path = await import('path');
+          const dbDir = path.resolve(import.meta.dirname, '..', '..', 'database');
+          const timerPath = path.join(dbDir, 'focus-timer.json');
+
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+          });
+
+          let lastSent = '';
+          const send = async () => {
+            try {
+              const data = await fsp.readFile(timerPath, 'utf-8');
+              if (data === lastSent) return;
+              lastSent = data;
+              res.write(`data: ${data.replace(/\s*\n\s*/g, ' ')}\n\n`);
+            } catch (_) { /* file not written yet */ }
+          };
+          await send();
+
+          // Watch the directory, not the file: atomic writes replace the inode and
+          // a file-level watcher would go deaf after the first save.
+          let watcher: any = null;
+          try {
+            watcher = fs.watch(dbDir, (_evt, name) => {
+              if (!name || String(name).startsWith('focus-timer.json')) send();
+            });
+          } catch (_) { /* fall back to the client's polling */ }
+
+          // Keep-alive comment so proxies/browsers don't drop an idle stream.
+          const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
+          req.on('close', () => {
+            clearInterval(ping);
+            if (watcher) try { watcher.close(); } catch (_) {}
+          });
+        });
+
+        // Start/pause the focus timer without a browser window in the picture. This is
+        // what the system-wide hotkey helper (focus-hotkey.py) calls, so the shortcut
+        // works from any app on the desktop. Registered BEFORE /api/focus-timer because
+        // connect matches by prefix.
+        server.middlewares.use('/api/focus-timer/toggle', async (req, res, next) => {
+          if (req.method !== 'POST') return next();
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const timerPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-timer.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
+          try {
+            let timer = { plannedSeconds: 3600, accumulatedSeconds: 0, isRunning: false, lastStartedAt: null, sessionStartedAt: null };
+            try {
+              const parsed = JSON.parse(await fs.readFile(timerPath, 'utf-8'));
+              if (parsed && typeof parsed === 'object') {
+                timer = {
+                  plannedSeconds: Number(parsed.plannedSeconds) || 3600,
+                  accumulatedSeconds: Math.max(0, Number(parsed.accumulatedSeconds) || 0),
+                  isRunning: Boolean(parsed.isRunning),
+                  lastStartedAt: typeof parsed.lastStartedAt === 'string' ? parsed.lastStartedAt : null,
+                  sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
+                };
+              }
+            } catch (_) { /* no file yet → defaults */ }
+
+            const nowIso = new Date().toISOString();
+            if (timer.isRunning) {
+              // Pause: bank the time run so far, exactly like pauseFocus() in the app.
+              const ran = timer.lastStartedAt
+                ? Math.max(0, Math.floor((Date.now() - new Date(timer.lastStartedAt).getTime()) / 1000))
+                : 0;
+              timer = { ...timer, accumulatedSeconds: timer.accumulatedSeconds + ran, isRunning: false, lastStartedAt: null };
+            } else {
+              timer = { ...timer, isRunning: true, lastStartedAt: nowIso, sessionStartedAt: timer.sessionStartedAt || nowIso };
+            }
+
+            await safeWriteJsonFile({ filePath: timerPath, backupDir, baseName: 'focus-timer', body: JSON.stringify(timer), kind: 'object', force: true });
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: true, isRunning: timer.isRunning, timer }));
+          } catch (err) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Failed to toggle focus timer' }));
+          }
+        });
+
         // Shared running-timer state so the main window and the side widget reflect
         // the same live focus session (localStorage events don't cross windows).
         server.middlewares.use('/api/focus-timer', async (req, res, next) => {
@@ -1109,22 +1312,19 @@ export default defineConfig({
             const fs = await import('fs/promises');
             const pythonScript = path.resolve(import.meta.dirname, '..', '..', 'widget-window.py');
 
-            const condaExe = 'C:\\ProgramData\\anaconda3\\Scripts\\conda.exe';
+            // Always launch pythonw.exe DIRECTLY. It's a GUI-subsystem binary, so it
+            // opens no console at all. Going through `conda run` used to pop a black
+            // terminal in the user's face every time — conda.exe is a console program
+            // and Node's windowsHide can't suppress it once detached.
             const condaPythonw = 'C:\\ProgramData\\anaconda3\\pythonw.exe';
             let spawnCmd = 'pythonw';
-            let spawnArgs = [pythonScript];
+            const spawnArgs = [pythonScript];
 
             try {
-              await fs.access(condaExe);
-              spawnCmd = condaExe;
-              spawnArgs = ['run', '-n', 'base', 'pythonw', pythonScript];
+              await fs.access(condaPythonw);
+              spawnCmd = condaPythonw;
             } catch (_) {
-              try {
-                await fs.access(condaPythonw);
-                spawnCmd = condaPythonw;
-              } catch (__) {
-                // fallback to path env
-              }
+              // fall back to whatever pythonw is on PATH
             }
 
             try {

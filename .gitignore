@@ -57,3 +57,6 @@ my-made-main-icon.png
 
 # Project-local Claude instructions
 CLAUDE.md
+
+# Python bytecode cache
+__pycache__/

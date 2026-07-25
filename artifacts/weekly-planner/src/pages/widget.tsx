@@ -23,10 +23,15 @@ import {
   loadLocalFocusSessions,
   loadLocalFocusTimer,
   coerceFocusTimer,
+  focusTimerPushKey,
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid,
   playFocusChime,
+  primeFocusAudio,
+  coerceFocusChime,
+  DEFAULT_FOCUS_CHIME,
+  type FocusChimeId,
   claimFocusCompletion,
   autoSessionId,
   dedupeFocusSessions,
@@ -207,10 +212,12 @@ export default function Widget() {
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
+  const focusChimeRef = useRef<FocusChimeId>(DEFAULT_FOCUS_CHIME);
   const lastTimerJsonRef = useRef<string | null>(null);
   const timerHydratedRef = useRef(false);
   // Ignore stale server pulls briefly after a local change so they can't undo it.
   const lastLocalTimerChangeRef = useRef(0);
+  const lastTimerPushKeyRef = useRef<string | null>(null);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft] = useState('60');
   const [focusCollapsed, setFocusCollapsed] = useState(false);
@@ -226,43 +233,48 @@ export default function Widget() {
     setFocusTimer(loadLocalFocusTimer());
 
     // Settings come from the shared backend so the widget always matches the main window.
+    // Each loader is split into "apply this payload" + "go fetch it", so the live
+    // stream and the fallback poll share exactly the same handling.
+    const applySettings = (s: any) => {
+      if (s && typeof s === 'object') {
+        if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
+        if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
+        if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
+        if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
+        if (s.dayStartH != null) setDayStartH(s.dayStartH);
+        if (s.dayEndH != null) setDayEndH(s.dayEndH);
+        if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
+        if (s.focusChime != null) focusChimeRef.current = coerceFocusChime(s.focusChime);
+      }
+    };
     const loadSettings = () => {
       fetch('/api/settings')
         .then(r => r.json())
-        .then((s) => {
-          if (s && typeof s === 'object') {
-            if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
-            if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-            if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
-            if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
-            if (s.dayStartH != null) setDayStartH(s.dayStartH);
-            if (s.dayEndH != null) setDayEndH(s.dayEndH);
-            if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
-          }
-        })
+        .then(applySettings)
         .catch(err => console.error('Failed to sync widget settings:', err));
     };
 
-    // Fetch live from server & poll
+    const applyEvents = (data: any) => {
+      if (data && typeof data === 'object') {
+        setEvents(migrateEvents(data as PlannerData).events);
+      }
+    };
     const loadEvents = () => {
       fetch('/api/events')
         .then(r => r.json())
-        .then(data => {
-          if (data && typeof data === 'object') {
-            setEvents(migrateEvents(data as PlannerData).events);
-          }
-        })
+        .then(applyEvents)
         .catch(err => console.error('Failed to sync widget database:', err));
     };
 
+    const applyFocusSessions = (data: unknown) => {
+      const sessions = safeFocusSessions(data);
+      setFocusSessions(sessions);
+      localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+    };
     const loadFocusSessions = () => {
       fetch('/api/focus-sessions')
         .then(r => r.json())
-        .then(data => {
-          const sessions = safeFocusSessions(data);
-          setFocusSessions(sessions);
-          localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
-        })
+        .then(applyFocusSessions)
         .catch(err => console.error('Failed to sync focus sessions:', err));
     };
 
@@ -272,18 +284,20 @@ export default function Widget() {
     window.addEventListener('storage', handleStorage);
 
     // Shared running-timer state (see home.tsx for the echo-guard rationale).
+    const applyTimerFromServer = (data: unknown) => {
+      if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
+      const json = JSON.stringify(coerceFocusTimer(data));
+      timerHydratedRef.current = true;
+      if (json === lastTimerJsonRef.current) return;
+      if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
+      lastTimerJsonRef.current = json;
+      lastTimerPushKeyRef.current = focusTimerPushKey(JSON.parse(json));
+      setFocusTimer(JSON.parse(json));
+    };
     const pullTimer = () => {
       fetch('/api/focus-timer')
         .then(r => r.json())
-        .then(data => {
-          if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
-          const json = JSON.stringify(coerceFocusTimer(data));
-          timerHydratedRef.current = true;
-          if (json === lastTimerJsonRef.current) return;
-          if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
-          lastTimerJsonRef.current = json;
-          setFocusTimer(JSON.parse(json));
-        })
+        .then(applyTimerFromServer)
         .catch(() => { timerHydratedRef.current = true; });
     };
 
@@ -291,10 +305,42 @@ export default function Widget() {
     loadEvents();
     loadFocusSessions();
     pullTimer();
-    const settingsPollId = setInterval(loadSettings, 5000);
-    const pollId = setInterval(loadEvents, 5000);
-    const focusPollId = setInterval(loadFocusSessions, 5000);
-    const timerPollId = setInterval(pullTimer, 2000);
+    // Live push: an edit in the main window lands here the moment it's saved.
+    let dbStream: EventSource | null = null;
+    try {
+      dbStream = new EventSource('/api/db-stream');
+      const on = (name: string, apply: (data: any) => void) =>
+        dbStream!.addEventListener(name, (evt) => {
+          try { apply(JSON.parse((evt as MessageEvent).data)); } catch (_) { /* ignore */ }
+        });
+      on('events', applyEvents);
+      on('settings', applySettings);
+      on('focus-sessions', applyFocusSessions);
+    } catch (_) { /* fall back to the polls below */ }
+
+    // Safety net only — the stream is what makes this feel instant.
+    const settingsPollId = setInterval(loadSettings, 15000);
+    const pollId = setInterval(loadEvents, 15000);
+    const focusPollId = setInterval(loadFocusSessions, 15000);
+    // Live push of the shared timer; the poll below is only a safety net for a
+    // dropped stream (see home.tsx).
+    let timerStream: EventSource | null = null;
+    try {
+      timerStream = new EventSource('/api/focus-timer/stream');
+      timerStream.onmessage = (evt) => {
+        try { applyTimerFromServer(JSON.parse(evt.data)); } catch (_) { /* ignore */ }
+      };
+    } catch (_) { /* fall back to the poll */ }
+    const timerPollId = setInterval(pullTimer, 1500);
+    // Browsers block audio until the page sees a gesture; unlock on the first one
+    // so the completion chime fires instantly instead of warming up first.
+    const unlockAudio = () => {
+      primeFocusAudio();
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+    window.addEventListener('pointerdown', unlockAudio);
+    window.addEventListener('keydown', unlockAudio);
     const clockId = setInterval(() => setNowTick(Date.now()), 1000);
     // Checkpoint a running session's elapsed time into durable state every few seconds
     // so closing the app mid-session never loses progress.
@@ -312,6 +358,10 @@ export default function Widget() {
       clearInterval(timerPollId);
       clearInterval(clockId);
       clearInterval(checkpointId);
+      if (timerStream) timerStream.close();
+      if (dbStream) dbStream.close();
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
     };
   }, []);
 
@@ -588,6 +638,11 @@ export default function Widget() {
     if (!timerHydratedRef.current) return;
     const json = JSON.stringify(coerceFocusTimer(focusTimer));
     if (json === lastTimerJsonRef.current) return;
+    // Running-session checkpoints carry no new information; pushing them would
+    // stomp a start/pause made elsewhere (main window, system-wide hotkey).
+    const pushKey = focusTimerPushKey(coerceFocusTimer(focusTimer));
+    if (pushKey === lastTimerPushKeyRef.current) return;
+    lastTimerPushKeyRef.current = pushKey;
     lastTimerJsonRef.current = json;
     lastLocalTimerChangeRef.current = Date.now();
     fetch('/api/focus-timer', {
@@ -608,7 +663,7 @@ export default function Widget() {
       focusCompleteRef.current = true;
       // Whichever window claims first plays the chime — never both.
       if (claimFocusCompletion()) {
-        playFocusChime();
+        playFocusChime(focusChimeRef.current);
         setFocusCelebrate(true);
         window.setTimeout(() => setFocusCelebrate(false), 2600);
       }

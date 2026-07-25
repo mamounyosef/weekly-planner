@@ -1,5 +1,5 @@
 @echo off
-ping 127.0.0.1 -n 6 >nul
+call "D:\My Projects\weekly-planner\wait-for-server.bat"
 set "URL=http://localhost:5173"
 set "USER_DATA=D:\My Projects\weekly-planner\.chrome-profile"
 if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (

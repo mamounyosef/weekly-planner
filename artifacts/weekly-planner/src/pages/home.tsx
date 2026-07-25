@@ -18,7 +18,7 @@ import {
   subDays,
   differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -34,11 +34,17 @@ import {
   loadLocalFocusSessions,
   loadLocalFocusTimer,
   coerceFocusTimer,
+  focusTimerPushKey,
   isCompletedFocusSession,
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid as focusUid,
   playFocusChime,
+  primeFocusAudio,
+  coerceFocusChime,
+  FOCUS_CHIMES,
+  DEFAULT_FOCUS_CHIME,
+  type FocusChimeId,
   claimFocusCompletion,
   autoSessionId,
   dedupeFocusSessions,
@@ -572,6 +578,25 @@ export default function WeeklyPlanner() {
   // count toward the previous day. Purely a bucketing setting — all analysis derives
   // from it live, so changing it re-buckets past sessions on the fly.
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
+  const [focusChime, setFocusChime] = useState<FocusChimeId>(DEFAULT_FOCUS_CHIME);
+  // The completion effect is set up once; read the current choice through a ref.
+  const focusChimeRef = useRef<FocusChimeId>(DEFAULT_FOCUS_CHIME);
+  useEffect(() => { focusChimeRef.current = focusChime; }, [focusChime]);
+  // Browsers block audio until the page has seen a gesture. Unlock on the first
+  // one so the completion chime fires instantly instead of warming up first.
+  useEffect(() => {
+    const unlock = () => {
+      primeFocusAudio();
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft]     = useState('60');
@@ -1339,6 +1364,13 @@ export default function WeeklyPlanner() {
     };
   }, [focusAnalysis.weekDays, activeFocusDayKey, focusElapsedSeconds]);
 
+  // Same idea for the month tab's total: the in-progress session isn't logged yet.
+  const monthLiveExtraSeconds = useMemo(() => {
+    if (!activeFocusDayKey || !focusElapsedSeconds) return 0;
+    const d = new Date(`${activeFocusDayKey}T00:00:00`);
+    return isSameMonth(d, analysisMonthCursor) ? focusElapsedSeconds : 0;
+  }, [activeFocusDayKey, focusElapsedSeconds, analysisMonthCursor]);
+
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(id);
@@ -1359,9 +1391,39 @@ export default function WeeklyPlanner() {
     };
 
     loadFocusSessions();
-    const focusPollId = setInterval(loadFocusSessions, 5000);
-    return () => clearInterval(focusPollId);
-  }, []);
+
+    // Live push of the shared file database, so a change made in the widget shows
+    // up here at once instead of on the next poll. Events are only adopted when
+    // this window is idle — applying them mid-edit or mid-drag would yank the item
+    // out from under the user.
+    let dbStream: EventSource | null = null;
+    try {
+      dbStream = new EventSource('/api/db-stream');
+      dbStream.addEventListener('focus-sessions', (evt) => {
+        try {
+          const sessions = safeFocusSessions(JSON.parse((evt as MessageEvent).data));
+          setFocusSessions(sessions);
+          localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+        } catch (_) { /* ignore */ }
+      });
+      dbStream.addEventListener('events', (evt) => {
+        if (uiBusyRef.current) return;
+        // Our own save echoing back, or a save still settling — don't rewind.
+        if (Date.now() - lastLocalEventsWriteRef.current < 3000) return;
+        try {
+          const data = JSON.parse((evt as MessageEvent).data);
+          if (!data || typeof data !== 'object' || Object.keys(data).length === 0) return;
+          const next = migrateEvents(data as PlannerData).events;
+          if (JSON.stringify(next) === JSON.stringify(eventsRef.current)) return;
+          writeEvents(next);
+        } catch (_) { /* ignore */ }
+      });
+    } catch (_) { /* fall back to the poll */ }
+
+    // Safety net only — the stream is what makes this feel instant.
+    const focusPollId = setInterval(loadFocusSessions, 15000);
+    return () => { clearInterval(focusPollId); if (dbStream) dbStream.close(); };
+  }, [writeEvents]);
 
   // The running timer is shared through the backend so the main window and the
   // side widget always show the SAME live session (localStorage `storage` events
@@ -1377,6 +1439,11 @@ export default function WeeklyPlanner() {
   // read the OLD state and write it back — resuming a timer we just stopped. For a
   // short grace window after a local change we ignore differing pulls.
   const lastLocalTimerChangeRef = useRef(0);
+  const lastTimerPushKeyRef = useRef<string | null>(null);
+  // When this window last saved events, and whether the user is mid-interaction —
+  // both gate whether a pushed database change may be adopted here.
+  const lastLocalEventsWriteRef = useRef(0);
+  const uiBusyRef = useRef(false);
   useEffect(() => {
     setFocusTimer(loadLocalFocusTimer());
 
@@ -1385,25 +1452,41 @@ export default function WeeklyPlanner() {
     };
     window.addEventListener('storage', handleStorage);
 
+    const applyTimerFromServer = (data: unknown) => {
+      if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
+      const json = JSON.stringify(coerceFocusTimer(data));
+      timerHydratedRef.current = true;
+      if (json === lastTimerJsonRef.current) return; // our own echo / no change
+      // Don't let a stale server read clobber a change we just made locally
+      // (the server may not have stored our push yet). Once hydrated, ignore
+      // differing pulls for a brief grace window after any local change.
+      if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
+      lastTimerJsonRef.current = json;
+      lastTimerPushKeyRef.current = focusTimerPushKey(JSON.parse(json));
+      setFocusTimer(JSON.parse(json));
+    };
+
     const pullTimer = () => {
       fetch('/api/focus-timer')
         .then(r => r.json())
-        .then(data => {
-          if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
-          const json = JSON.stringify(coerceFocusTimer(data));
-          timerHydratedRef.current = true;
-          if (json === lastTimerJsonRef.current) return; // our own echo / no change
-          // Don't let a stale server read clobber a change we just made locally
-          // (the server may not have stored our push yet). Once hydrated, ignore
-          // differing pulls for a brief grace window after any local change.
-          if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
-          lastTimerJsonRef.current = json;
-          setFocusTimer(JSON.parse(json));
-        })
+        .then(applyTimerFromServer)
         .catch(() => { timerHydratedRef.current = true; });
     };
     pullTimer();
-    const pollId = setInterval(pullTimer, 2000);
+
+    // Live push: a start/pause from the widget or the system-wide hotkey lands
+    // here the instant the shared file changes, with no tick to wait for.
+    let stream: EventSource | null = null;
+    try {
+      stream = new EventSource('/api/focus-timer/stream');
+      stream.onmessage = (evt) => {
+        try { applyTimerFromServer(JSON.parse(evt.data)); } catch (_) { /* ignore */ }
+      };
+    } catch (_) { /* fall back to the poll below */ }
+
+    // Safety net if the stream drops (server restart, HMR); the stream is what
+    // makes it feel instant, so this can stay slow.
+    const pollId = setInterval(pullTimer, 1500);
     // Checkpoint a running session's elapsed time into durable state every few seconds
     // so closing the app mid-session never loses progress (previously it was only
     // committed when the session ended). Folds elapsed into accumulatedSeconds and
@@ -1413,7 +1496,12 @@ export default function WeeklyPlanner() {
         ? { ...prev, accumulatedSeconds: getFocusTimerElapsedSeconds(prev), lastStartedAt: new Date().toISOString() }
         : prev));
     }, 5000);
-    return () => { window.removeEventListener('storage', handleStorage); clearInterval(pollId); clearInterval(checkpointId); };
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      clearInterval(pollId);
+      clearInterval(checkpointId);
+      if (stream) stream.close();
+    };
   }, []);
 
   const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
@@ -1463,6 +1551,11 @@ export default function WeeklyPlanner() {
     // Push to the shared backend (skip if this value just arrived from a pull).
     const json = JSON.stringify(coerceFocusTimer(focusTimer));
     if (json === lastTimerJsonRef.current) return;
+    // A running-session checkpoint isn't a real change — pushing it would stomp a
+    // start/pause made from the widget or the system-wide hotkey.
+    const pushKey = focusTimerPushKey(coerceFocusTimer(focusTimer));
+    if (pushKey === lastTimerPushKeyRef.current) return;
+    lastTimerPushKeyRef.current = pushKey;
     lastTimerJsonRef.current = json;
     lastLocalTimerChangeRef.current = Date.now();
     fetch('/api/focus-timer', {
@@ -1483,7 +1576,7 @@ export default function WeeklyPlanner() {
       focusCompleteRef.current = true;
       // Only one window chimes / celebrates, even though both hit zero.
       if (claimFocusCompletion()) {
-        playFocusChime();
+        playFocusChime(focusChimeRef.current);
         setFocusCelebrate(true);
         window.setTimeout(() => setFocusCelebrate(false), 2600);
       }
@@ -1593,6 +1686,7 @@ export default function WeeklyPlanner() {
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
           if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
           if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
+          if (s.focusChime != null) setFocusChime(coerceFocusChime(s.focusChime));
           if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
           if (s.autoBackup && typeof s.autoBackup === 'object') {
             setAutoBackup(coerceAutoBackup(s.autoBackup));
@@ -1623,9 +1717,9 @@ export default function WeeklyPlanner() {
     fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, shortcuts, autoBackup }),
+      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, shortcuts, autoBackup }),
     }).catch(err => console.error('Failed to save settings to backend:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, shortcuts, autoBackup]);
+  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, shortcuts, autoBackup]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -1684,6 +1778,7 @@ export default function WeeklyPlanner() {
       return;
     }
 
+    lastLocalEventsWriteRef.current = Date.now();
     fetch('/api/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2405,6 +2500,7 @@ export default function WeeklyPlanner() {
           applyEditRef.current(rr.eventId, { startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) });
         }
         resizeRef.current = null; setResizeDisp(null);
+        setTimeout(() => { didDragRef.current = false; }, 80);
       }
     };
     document.addEventListener('mousemove', onMove);
@@ -2482,6 +2578,9 @@ export default function WeeklyPlanner() {
     let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
     if (endMin <= startMin) endMin += 1440;
     resizeRef.current = { eventId: ev.id, edge, startMin, endMin };
+    // Mark this as a drag gesture: releasing over empty grid must not be read as a
+    // click that creates a new item there (cleared shortly after mouseup).
+    didDragRef.current = true;
   };
 
   const openMenu = (e: React.MouseEvent, ev: PlannerEvent) => {
@@ -2555,8 +2654,15 @@ export default function WeeklyPlanner() {
     setEditingId(null);
     setMenuId(null);
   };
-  const navPrev = () => navStep(-1);
-  const navNext = () => navStep(1);
+  // On the analysis screen the same prev/next gesture walks that screen's own
+  // cursor — one week, month or year depending on the active tab.
+  const analysisStep = (dir: -1 | 1) => {
+    if (analysisTab === 'week')       setAnalysisWeekCursor(d => (dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1)));
+    else if (analysisTab === 'month') setAnalysisMonthCursor(d => (dir < 0 ? subMonths(d, 1) : addMonths(d, 1)));
+    else                              setAnalysisYearCursor(y => y + dir);
+  };
+  const navPrev = () => (showFocusAnalysis ? analysisStep(-1) : navStep(-1));
+  const navNext = () => (showFocusAnalysis ? analysisStep(1)  : navStep(1));
 
   // Ctrl+wheel steps along day → week → month → year.
   const stepCalendarZoom = useCallback((dir: -1 | 1) => {
@@ -2574,7 +2680,15 @@ export default function WeeklyPlanner() {
   navRef.current = {
     prev: navPrev,
     next: navNext,
-    today: goToday,
+    today: () => {
+      if (showFocusAnalysis) {
+        setAnalysisWeekCursor(new Date());
+        setAnalysisMonthCursor(new Date());
+        setAnalysisYearCursor(new Date().getFullYear());
+        return;
+      }
+      goToday();
+    },
     goToLive: () => { setShowFocusAnalysis(false); setCalendarView('week'); scrollToLive(); },
     toggleView: () => { setDirection(0); setCalendarView(v => (v === 'week' ? 'month' : 'week')); },
     toggleAnalysis: () => setShowFocusAnalysis(v => !v),
@@ -2664,6 +2778,9 @@ export default function WeeklyPlanner() {
   const isDraggingAnything = !!(dragDisp || batchDisp);
   const isResizingAnything = !!resizeDisp;
   const globalCursor = isDraggingAnything ? 'grabbing' : isResizingAnything ? 'ns-resize' : undefined;
+  // Anything that means "the user is in the middle of something" — a pushed
+  // database change must wait rather than yank state out from under them.
+  uiBusyRef.current = !!editingId || !!menuId || isDraggingAnything || isResizingAnything || !!draft;
 
   const surfaceBg  = darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.60)';
   const surfaceBdr = darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.12)';
@@ -3280,12 +3397,55 @@ export default function WeeklyPlanner() {
                   const layout = layoutParallel(layoutInput);
 
                   return (
-                    <div key={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0"
-                      style={{ background: today ? (darkMode ? 'rgba(100,160,100,0.04)' : 'rgba(100,160,100,0.03)') : 'transparent' }}>
+                    <div key={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0 relative"
+                      style={{
+                        // Today gets a clearly stronger wash plus edge rails, so the column
+                        // reads as "the current day" at a glance instead of a faint tint.
+                        background: today
+                          ? (darkMode ? 'rgba(110,180,120,0.13)' : 'rgba(90,160,100,0.10)')
+                          : 'transparent',
+                        boxShadow: today
+                          ? (darkMode
+                              ? 'inset 1px 0 0 rgba(130,200,140,0.45), inset -1px 0 0 rgba(130,200,140,0.45)'
+                              : 'inset 1px 0 0 rgba(70,140,85,0.35), inset -1px 0 0 rgba(70,140,85,0.35)')
+                          : undefined,
+                      }}>
                       {/* Day header */}
-                      <div className={`flex-shrink-0 flex flex-col items-center justify-center border-b ${today ? 'border-primary/20' : 'border-border/50'}`} style={{ height: HEADER_PX }}>
+                      <div
+                        className={`flex-shrink-0 flex flex-col items-center justify-center border-b relative ${today ? 'border-primary/40' : 'border-border/50'}`}
+                        style={{
+                          height: HEADER_PX,
+                          background: today
+                            ? (darkMode ? 'rgba(110,180,120,0.16)' : 'rgba(90,160,100,0.14)')
+                            : 'transparent',
+                        }}
+                      >
+                        {/* Accent rail across the top of today's column */}
+                        {today && (
+                          <div
+                            className="absolute top-0 left-0 right-0"
+                            style={{ height: 3, background: darkMode ? 'rgb(134,206,145)' : 'rgb(63,138,80)' }}
+                          />
+                        )}
                         <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-primary' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
-                        <span className={`text-lg font-semibold leading-none ${today ? 'text-primary' : 'text-foreground/70'}`}>{format(day, 'd')}</span>
+                        {today ? (
+                          <span
+                            className="text-lg font-bold leading-none flex items-center justify-center rounded-full"
+                            style={{
+                              width: 30,
+                              height: 30,
+                              color: '#fff',
+                              background: darkMode ? 'rgb(88,168,104)' : 'rgb(63,138,80)',
+                              boxShadow: darkMode
+                                ? '0 0 0 3px rgba(134,206,145,0.22)'
+                                : '0 0 0 3px rgba(63,138,80,0.16)',
+                            }}
+                          >
+                            {format(day, 'd')}
+                          </span>
+                        ) : (
+                          <span className="text-lg font-semibold leading-none text-foreground/70">{format(day, 'd')}</span>
+                        )}
                       </div>
 
                       {/* All-day cell placeholder */}
@@ -3402,14 +3562,22 @@ export default function WeeklyPlanner() {
                           // "Live" is scoped to this segment's own on-screen range (each segment lives in a
                           // different day column, so at most one of tail/head is ever the active one).
                           const isLive   = isNowCol && normNowMin >= item.startMin && normNowMin < item.endMin;
-                          const minutesLeft = Math.max(0, segKind === 'tail'
-                            ? fullEndMin + 1440 - normNowMin
-                            : segKind === 'head'
-                              ? fullEndMin - normNowMin
-                              : normalizeMin(fullEndMin, dayStartH) - normNowMin);
-                          const durationMin = Math.max(0, spansBoundary
-                            ? fullEndMin - fullStartMin
-                            : normalizeMin(fullEndMin, dayStartH) - normalizeMin(fullStartMin, dayStartH));
+                          const minutesLeft = Math.max(0, isResize && resizeDisp
+                            // Dragging an edge moves the finish line — the countdown has
+                            // to follow it live, not the stored end time.
+                            ? resizeDisp.endMin - normNowMin
+                            : segKind === 'tail'
+                              ? fullEndMin + 1440 - normNowMin
+                              : segKind === 'head'
+                                ? fullEndMin - normNowMin
+                                : normalizeMin(fullEndMin, dayStartH) - normNowMin);
+                          // While a resize is in flight, the label tracks the dragged edges live
+                          // (resizeDisp is already normalized against the day-start hour).
+                          const durationMin = Math.max(0, resizeDisp?.id === ev.id
+                            ? resizeDisp.endMin - resizeDisp.startMin
+                            : spansBoundary
+                              ? fullEndMin - fullStartMin
+                              : normalizeMin(fullEndMin, dayStartH) - normalizeMin(fullStartMin, dayStartH));
                           const durationLabel = durationMin < 60
                             ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
                             : durationMin % 60 === 0
@@ -3520,7 +3688,7 @@ export default function WeeklyPlanner() {
                               {/* Top resize handle */}
                               {segKind !== 'head' && (
                                 <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 'n-resize', marginTop: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
-                                  <div className="rounded-full transition-opacity duration-150 animate-pulse" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.45 : 0, pointerEvents: 'none' }} />
+                                  <div className="rounded-full" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.55 : 0.3, pointerEvents: 'none' }} />
                                 </div>
                               )}
 
@@ -3596,7 +3764,7 @@ export default function WeeklyPlanner() {
                                       </div>
                                       {!tooShort && (
                                         <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: text, opacity: 0.45 }}>
-                                          {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                          {formatTimeLabel(resizeDisp?.id === ev.id ? resizeDisp.startMin % 1440 : fullStartMin, timeFormat)} – {formatTimeLabel(resizeDisp?.id === ev.id ? resizeDisp.endMin % 1440 : fullEndMin, timeFormat)}
                                           {isLive ? (
                                             <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                               <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
@@ -3615,7 +3783,7 @@ export default function WeeklyPlanner() {
                               {/* Bottom resize handle */}
                               {segKind !== 'tail' && (
                                 <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 's-resize', marginBottom: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
-                                  <div className="rounded-full transition-opacity duration-150 animate-pulse" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.45 : 0, pointerEvents: 'none' }} />
+                                  <div className="rounded-full" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.55 : 0.3, pointerEvents: 'none' }} />
                                 </div>
                               )}
 
@@ -4226,7 +4394,7 @@ export default function WeeklyPlanner() {
                     {/* Month stats */}
                     <div className="grid grid-cols-4 gap-3 mb-4">
                       {[
-                        ['Total', formatFocusDuration(focusAnalysis.monthSeconds)],
+                        ['Total', formatFocusDuration(focusAnalysis.monthSeconds + monthLiveExtraSeconds)],
                         ['Sessions', `${focusAnalysis.monthSessions}`],
                         ['Active Days', `${focusAnalysis.monthActiveDays}`],
                         ['Best Day', format(focusAnalysis.monthBestDay, 'MMM d')],
@@ -4251,11 +4419,14 @@ export default function WeeklyPlanner() {
                     <div className="grid grid-cols-7 gap-1.5">
                       {focusAnalysis.monthGridDays.map(d => {
                         const key = dateKey(d);
-                        const secs = focusAnalysis.byDaySeconds.get(key) ?? 0;
+                        // Fold in the session that's running right now, same as the week tab.
+                        const secs = (focusAnalysis.byDaySeconds.get(key) ?? 0)
+                          + (activeFocusDayKey === key ? focusElapsedSeconds : 0);
                         const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
                         const inMonth = isSameMonth(d, analysisMonthCursor);
                         const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
                         const todayCell = isSameDay(d, nowDate);
+                        const hot = secs > focusAnalysis.monthMaxSeconds * 0.45;
                         return (
                           <div
                             key={key}
@@ -4267,11 +4438,18 @@ export default function WeeklyPlanner() {
                               opacity: inMonth ? 1 : 0.35,
                             }}
                           >
-                            <span className="text-[10px] font-medium tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? '#fff' : menuText }}>
+                            <span className="text-[17px] font-semibold tabular-nums leading-none" style={{ color: hot ? '#fff' : menuText }}>
                               {format(d, 'd')}
                             </span>
+                            {/* Exact time for this day, always visible — not just in the tooltip. */}
+                            <span
+                              className="text-[15px] font-bold tabular-nums leading-none"
+                              style={{ color: secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub, opacity: secs > 0 ? 1 : 0.45 }}
+                            >
+                              {secs > 0 ? formatFocusDuration(secs) : '—'}
+                            </span>
                             {sessions > 0 && (
-                              <span className="text-[7px] font-bold tabular-nums" style={{ color: secs > focusAnalysis.monthMaxSeconds * 0.45 ? 'rgba(255,255,255,0.85)' : menuSub }}>
+                              <span className="text-[11px] font-bold tabular-nums leading-none" style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
                                 {sessions}×
                               </span>
                             )}
@@ -4681,6 +4859,50 @@ export default function WeeklyPlanner() {
                     return `${formatHourLabel(dayStartH)} – ${formatHourLabel(dayEndH)} (${dayEndH - dayStartH}h visible)`;
                   })()}
                 </p>
+              </div>
+
+              {/* Session-complete sound */}
+              <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
+              <div className="flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Session Sound</span>
+                  <button
+                    type="button"
+                    onClick={() => playFocusChime(focusChime)}
+                    className="text-[10px] font-semibold px-2 py-1 rounded-md transition-colors"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                    onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                    onMouseLeave={e => (e.currentTarget.style.background = surfaceBg)}
+                  >
+                    Play
+                  </button>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {FOCUS_CHIMES.map(c => {
+                    const active = focusChime === c.id;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        // Selecting also previews it — comparing them is the point.
+                        onClick={() => { setFocusChime(c.id); playFocusChime(c.id); }}
+                        className="flex items-center justify-between gap-3 text-left px-2.5 py-2 rounded-lg transition-colors"
+                        style={{
+                          background: active ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.09)') : surfaceBg,
+                          border: `1px solid ${active ? 'rgba(96,165,250,0.55)' : surfaceBdr}`,
+                        }}
+                        onMouseEnter={e => { if (!active) e.currentTarget.style.background = hoverBg; }}
+                        onMouseLeave={e => { if (!active) e.currentTarget.style.background = surfaceBg; }}
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-xs font-semibold truncate" style={{ color: active ? '#60a5fa' : menuText }}>{c.label}</span>
+                          <span className="block text-[10px] leading-snug" style={{ color: menuSub }}>{c.hint}</span>
+                        </span>
+                        <Volume2 size={13} style={{ color: active ? '#60a5fa' : menuSub, flexShrink: 0 }} />
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Keyboard shortcuts */}
