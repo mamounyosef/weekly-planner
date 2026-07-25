@@ -12,6 +12,13 @@ export interface FocusTimerState {
   isRunning: boolean;
   lastStartedAt: string | null;
   sessionStartedAt: string | null;
+  /**
+   * When the timer was last paused. Not used for timekeeping — it exists so that
+   * every pause is individually identifiable. Without it, the second pause of a
+   * session was indistinguishable from the first and its cue got suppressed as a
+   * duplicate. See `focusCueKey`.
+   */
+  lastPausedAt?: string | null;
 }
 
 export const FOCUS_SESSIONS_KEY = 'planner-focus-sessions';
@@ -103,6 +110,9 @@ function getCtx(): AudioContext | null {
 export function primeFocusAudio(): void {
   const ctx = getCtx();
   if (!ctx) return;
+  // Cheap to call on every gesture — a context that is already awake needs
+  // nothing, and one that has gone back to sleep gets re-warmed for free.
+  if (ctx.state === 'running') return;
   // A silent blip is enough to move the context out of "suspended".
   try {
     const g = ctx.createGain();
@@ -113,6 +123,16 @@ export function primeFocusAudio(): void {
     osc.start();
     osc.stop(ctx.currentTime + 0.01);
   } catch (_) { /* ignore */ }
+}
+
+/**
+ * Run `fn` only once the context is actually running. Scheduling notes against a
+ * suspended context puts them at a clock that isn't advancing, so by the time it
+ * resumes their start times have passed and nothing is heard.
+ */
+function whenRunning(ctx: AudioContext, fn: () => void): void {
+  if (ctx.state === 'running') { fn(); return; }
+  ctx.resume().then(fn).catch(() => { try { fn(); } catch (_) { /* ignore */ } });
 }
 
 interface ToneOpts {
@@ -180,46 +200,57 @@ function getReverbIR(ctx: AudioContext): AudioBuffer {
   return buf;
 }
 
+/**
+ * Master chain: dry level → gentle lowpass → out, with a parallel reverb send.
+ * The lowpass takes the glassy edge off; the reverb is what gives the sound
+ * depth instead of the flat "computer beep" quality of the old version.
+ */
+function buildChain(ctx: AudioContext, cutoff = 3200): { master: GainNode; send: GainNode } {
+  const master = ctx.createGain();
+  master.gain.value = 0.5;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = cutoff;
+  lp.Q.value = 0.35;
+  // A touch of compression keeps overlapping partials from stacking into a peak.
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -22;
+  comp.knee.value = 26;
+  comp.ratio.value = 3;
+  comp.attack.value = 0.006;
+  comp.release.value = 0.28;
+
+  master.connect(lp);
+  lp.connect(comp);
+  comp.connect(ctx.destination);
+
+  const send = ctx.createGain();
+  send.gain.value = 0;
+  try {
+    const verb = ctx.createConvolver();
+    verb.buffer = getReverbIR(ctx);
+    const verbTone = ctx.createBiquadFilter();
+    verbTone.type = 'lowpass';
+    verbTone.frequency.value = 2200;
+    lp.connect(send);
+    send.connect(verb);
+    verb.connect(verbTone);
+    verbTone.connect(comp);
+  } catch (_) { /* no convolver support — dry only */ }
+
+  return { master, send };
+}
+
 export function playFocusChime(id: FocusChimeId = DEFAULT_FOCUS_CHIME): void {
   const ctx = getCtx();
   if (!ctx) return;
+  whenRunning(ctx, () => renderChime(ctx, id));
+}
+
+function renderChime(ctx: AudioContext, id: FocusChimeId): void {
   try {
-    // Master chain: dry level → gentle lowpass → out, with a parallel reverb send.
-    // The lowpass takes the glassy edge off; the reverb is what gives the sound
-    // depth instead of the flat "computer beep" quality of the old version.
-    const master = ctx.createGain();
-    master.gain.value = 0.5;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = 3200;
-    lp.Q.value = 0.35;
-    // A touch of compression keeps overlapping partials from stacking into a peak.
-    const comp = ctx.createDynamicsCompressor();
-    comp.threshold.value = -22;
-    comp.knee.value = 26;
-    comp.ratio.value = 3;
-    comp.attack.value = 0.006;
-    comp.release.value = 0.28;
-
-    master.connect(lp);
-    lp.connect(comp);
-    comp.connect(ctx.destination);
-
+    const { master, send } = buildChain(ctx);
     let wetAmount = 0.3;
-    const send = ctx.createGain();
-    try {
-      const verb = ctx.createConvolver();
-      verb.buffer = getReverbIR(ctx);
-      const verbTone = ctx.createBiquadFilter();
-      verbTone.type = 'lowpass';
-      verbTone.frequency.value = 2200;
-      lp.connect(send);
-      send.connect(verb);
-      verb.connect(verbTone);
-      verbTone.connect(comp);
-    } catch (_) {
-      wetAmount = 0; // no convolver support — dry only
-    }
 
     switch (coerceFocusChime(id)) {
       case 'marimba': {
@@ -301,12 +332,125 @@ export function playFocusChime(id: FocusChimeId = DEFAULT_FOCUS_CHIME): void {
   } catch (_) { /* audio unavailable — ignore */ }
 }
 
+// ── Start / pause / resume cues ─────────────────────────────────────────────
+// Deliberately much shorter and quieter than the completion chime: these fire
+// several times a session, so anything with a tail would wear thin fast. Every
+// slot can be set to 'none', which plays nothing at all.
+
+export type FocusCueId = 'none' | 'tap' | 'pebble' | 'rise' | 'fall' | 'pop' | 'shimmer';
+
+export const FOCUS_CUES: { id: FocusCueId; label: string; hint: string }[] = [
+  { id: 'none',    label: 'No sound', hint: 'Silent.' },
+  { id: 'tap',     label: 'Tap',      hint: 'Dry wooden tick. Barely there.' },
+  { id: 'pebble',  label: 'Pebble',   hint: 'Rounded low knock.' },
+  { id: 'rise',    label: 'Rise',     hint: 'Two notes stepping up.' },
+  { id: 'fall',    label: 'Fall',     hint: 'Two notes stepping down.' },
+  { id: 'pop',     label: 'Pop',      hint: 'Soft bubble.' },
+  { id: 'shimmer', label: 'Shimmer',  hint: 'Brief airy sparkle.' },
+];
+
+export type FocusCueSlot = 'start' | 'pause' | 'resume';
+
+export const DEFAULT_FOCUS_CUES: Record<FocusCueSlot, FocusCueId> = {
+  start: 'rise',
+  pause: 'fall',
+  resume: 'pebble',
+};
+
+export function coerceFocusCue(value: unknown, slot: FocusCueSlot): FocusCueId {
+  return FOCUS_CUES.some(c => c.id === value) ? (value as FocusCueId) : DEFAULT_FOCUS_CUES[slot];
+}
+
+/**
+ * Both windows watch the same timer, so both would fire the same cue. The server
+ * arbitrates: whoever asks first plays it, the other stays quiet.
+ *
+ * It has to be the server rather than localStorage — the main window is Chrome
+ * and the widget is a WebView2, so they have entirely separate storage and a
+ * local claim would always succeed in both.
+ */
+export function claimFocusCue(key: string, play: () => void): void {
+  const ask = () => {
+    fetch(`/api/focus-cue/claim?key=${encodeURIComponent(key)}`, { method: 'POST' })
+      .then(r => r.json())
+      .then(r => { if (r && r.granted) play(); })
+      .catch(() => play()); // server unreachable → don't swallow the cue
+  };
+
+  // Winning the claim is useless if this window can't actually make a sound —
+  // the other one stays silent and you hear nothing at all. A window with a
+  // sleeping audio context wakes it and defers, so one that is already awake
+  // gets first refusal. This is why the cue went missing at random.
+  const ctx = getCtx();
+  if (ctx && ctx.state !== 'running') {
+    ctx.resume().catch(() => {});
+    setTimeout(ask, 200);
+    return;
+  }
+  ask();
+}
+
+export function playFocusCue(id: FocusCueId): void {
+  if (id === 'none') return;
+  const ctx = getCtx();
+  if (!ctx) return;
+  whenRunning(ctx, () => renderCue(ctx, id));
+}
+
+function renderCue(ctx: AudioContext, id: FocusCueId): void {
+  try {
+    const { master, send } = buildChain(ctx, 4200);
+    let wet = 0.12;
+
+    switch (id) {
+      case 'tap':
+        // Short, high, near-instant attack — reads as a fingernail on wood.
+        tone(ctx, master, { freq: 1180, at: 0, dur: 0.075, peak: 0.075, attack: 0.001, glide: 0.82 });
+        tone(ctx, master, { freq: 2360, at: 0, dur: 0.035, peak: 0.02,  attack: 0.001 });
+        wet = 0.08;
+        break;
+      case 'pebble':
+        tone(ctx, master, { freq: 320, at: 0, dur: 0.19, peak: 0.11, attack: 0.002, glide: 0.72 });
+        tone(ctx, master, { freq: 640, at: 0, dur: 0.07, peak: 0.03, attack: 0.002, glide: 0.72 });
+        wet = 0.16;
+        break;
+      case 'rise':
+        tone(ctx, master, { freq: 523.25, at: 0,    dur: 0.16, peak: 0.09, attack: 0.004, pan: -0.12 });
+        tone(ctx, master, { freq: 783.99, at: 0.07, dur: 0.26, peak: 0.08, attack: 0.004, pan: 0.12 });
+        wet = 0.2;
+        break;
+      case 'fall':
+        tone(ctx, master, { freq: 659.25, at: 0,    dur: 0.16, peak: 0.085, attack: 0.004, pan: 0.12 });
+        tone(ctx, master, { freq: 440.0,  at: 0.07, dur: 0.3,  peak: 0.08,  attack: 0.004, pan: -0.12 });
+        wet = 0.2;
+        break;
+      case 'pop':
+        // A fast upward pitch bend is what the ear hears as a bubble surfacing.
+        tone(ctx, master, { freq: 420, at: 0, dur: 0.1, peak: 0.1, attack: 0.002, glide: 2.1 });
+        wet = 0.1;
+        break;
+      case 'shimmer':
+        [1046.5, 1568.0, 2093.0].forEach((f, i) => {
+          tone(ctx, master, {
+            freq: f, at: i * 0.028, dur: 0.22 - i * 0.05, peak: 0.045 - i * 0.012,
+            attack: 0.003, pan: (i - 1) * 0.3,
+          });
+        });
+        wet = 0.3;
+        break;
+    }
+
+    send.gain.value = wet;
+  } catch (_) { /* audio unavailable — ignore */ }
+}
+
 export const DEFAULT_FOCUS_TIMER: FocusTimerState = {
   plannedSeconds: 60 * 60,
   accumulatedSeconds: 0,
   isRunning: false,
   lastStartedAt: null,
   sessionStartedAt: null,
+  lastPausedAt: null,
 };
 
 export function dateKey(value: Date | string): string {
@@ -376,7 +520,21 @@ export function coerceFocusTimer(parsed: unknown): FocusTimerState {
     isRunning: Boolean(p.isRunning),
     lastStartedAt: typeof p.lastStartedAt === 'string' ? p.lastStartedAt : null,
     sessionStartedAt: typeof p.sessionStartedAt === 'string' ? p.sessionStartedAt : null,
+    lastPausedAt: typeof p.lastPausedAt === 'string' ? p.lastPausedAt : null,
   };
+}
+
+/**
+ * A stable, globally unique name for one start/pause/resume transition.
+ *
+ * Both windows must derive the *same* string for the same transition (so only
+ * one of them sounds it) and a *different* string for every other transition (so
+ * no later cue is ever mistaken for a duplicate). `lastStartedAt` and
+ * `lastPausedAt` are fresh millisecond timestamps written by whoever performed
+ * the toggle, which gives exactly that — no time windows, no guessing.
+ */
+export function focusCueKey(slot: FocusCueSlot, timer: FocusTimerState): string {
+  return `${slot}|${timer.sessionStartedAt ?? ''}|${timer.lastStartedAt ?? ''}|${timer.lastPausedAt ?? ''}`;
 }
 
 export function loadLocalFocusTimer(): FocusTimerState {

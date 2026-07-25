@@ -60,3 +60,5 @@ CLAUDE.md
 
 # Python bytecode cache
 __pycache__/
+
+.venv-launcher/

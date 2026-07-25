@@ -1154,20 +1154,35 @@ export default defineConfig({
           };
 
           // Watch the directory, not each file: atomic writes replace the inode and
-          // a file-level watcher would go deaf after the first save.
+          // a file-level watcher would go deaf after the first save. The watch event
+          // often lands while the temp file is still being renamed into place, so
+          // re-read a couple of times before giving up on it.
+          const sendSoon = (name: string) => {
+            send(name);
+            setTimeout(() => send(name), 40);
+            setTimeout(() => send(name), 150);
+          };
           let watcher: any = null;
           try {
             watcher = fs.watch(dbDir, (_evt, changed) => {
               if (!changed) return;
               for (const [name, file] of Object.entries(WATCHED)) {
-                if (String(changed).startsWith(file)) send(name);
+                if (String(changed).startsWith(file)) sendSoon(name);
               }
             });
-          } catch (_) { /* clients fall back to polling */ }
+          } catch (_) { /* the sweep below still covers it */ }
+
+          // Backstop: fs.watch drops events on Windows often enough to be felt.
+          // Re-reading three small files a few times a second is nothing, and it
+          // caps the worst case at a quarter second instead of seconds.
+          const sweep = setInterval(() => {
+            for (const name of Object.keys(WATCHED)) send(name);
+          }, 250);
 
           const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
           req.on('close', () => {
             clearInterval(ping);
+            clearInterval(sweep);
             if (watcher) try { watcher.close(); } catch (_) {}
           });
         });
@@ -1201,18 +1216,30 @@ export default defineConfig({
           await send();
 
           // Watch the directory, not the file: atomic writes replace the inode and
-          // a file-level watcher would go deaf after the first save.
+          // a file-level watcher would go deaf after the first save. The event often
+          // lands while the temp file is still being renamed in, so re-read a couple
+          // of times rather than trusting the first look.
+          const sendSoon = () => {
+            send();
+            setTimeout(send, 40);
+            setTimeout(send, 150);
+          };
           let watcher: any = null;
           try {
             watcher = fs.watch(dbDir, (_evt, name) => {
-              if (!name || String(name).startsWith('focus-timer.json')) send();
+              if (!name || String(name).startsWith('focus-timer.json')) sendSoon();
             });
-          } catch (_) { /* fall back to the client's polling */ }
+          } catch (_) { /* the sweep below still covers it */ }
+
+          // Backstop: fs.watch drops events on Windows often enough to be felt —
+          // this is what keeps a hotkey press from ever appearing to hang.
+          const sweep = setInterval(send, 200);
 
           // Keep-alive comment so proxies/browsers don't drop an idle stream.
           const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
           req.on('close', () => {
             clearInterval(ping);
+            clearInterval(sweep);
             if (watcher) try { watcher.close(); } catch (_) {}
           });
         });
@@ -1221,14 +1248,44 @@ export default defineConfig({
         // what the system-wide hotkey helper (focus-hotkey.py) calls, so the shortcut
         // works from any app on the desktop. Registered BEFORE /api/focus-timer because
         // connect matches by prefix.
+        // A single physical keypress must never land as two toggles. Key repeat,
+        // a bouncy switch or a duplicate hotkey helper would otherwise start and
+        // immediately pause again, which reads as "it pressed itself twice".
+        let lastToggleAt = 0;
+        const TOGGLE_DEBOUNCE_MS = 300;
+
+        // Both windows watch the same timer, so both would play the same cue.
+        // localStorage can't arbitrate that: the main window is Chrome and the
+        // widget is WebView2, with separate storage. The server is the one thing
+        // they share, so it hands the cue to whoever asks first.
+        const cueClaims = new Map<string, number>();
+
+        server.middlewares.use('/api/focus-cue/claim', (req, res, next) => {
+          if (req.method !== 'POST') return next();
+          const key = new URL(req.url ?? '', 'http://x').searchParams.get('key') ?? '';
+          const now = Date.now();
+          for (const [k, t] of cueClaims) if (now - t > 30000) cueClaims.delete(k);
+          const granted = !cueClaims.has(key);
+          if (granted) cueClaims.set(key, now);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ granted }));
+        });
+
         server.middlewares.use('/api/focus-timer/toggle', async (req, res, next) => {
           if (req.method !== 'POST') return next();
+          const nowMs = Date.now();
+          if (nowMs - lastToggleAt < TOGGLE_DEBOUNCE_MS) {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: true, debounced: true }));
+            return;
+          }
+          lastToggleAt = nowMs;
           const fs = await import('fs/promises');
           const path = await import('path');
           const timerPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-timer.json');
           const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
           try {
-            let timer = { plannedSeconds: 3600, accumulatedSeconds: 0, isRunning: false, lastStartedAt: null, sessionStartedAt: null };
+            let timer: Record<string, unknown> = { plannedSeconds: 3600, accumulatedSeconds: 0, isRunning: false, lastStartedAt: null, sessionStartedAt: null, lastPausedAt: null };
             try {
               const parsed = JSON.parse(await fs.readFile(timerPath, 'utf-8'));
               if (parsed && typeof parsed === 'object') {
@@ -1238,6 +1295,7 @@ export default defineConfig({
                   isRunning: Boolean(parsed.isRunning),
                   lastStartedAt: typeof parsed.lastStartedAt === 'string' ? parsed.lastStartedAt : null,
                   sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
+                  lastPausedAt: typeof parsed.lastPausedAt === 'string' ? parsed.lastPausedAt : null,
                 };
               }
             } catch (_) { /* no file yet → defaults */ }
@@ -1245,12 +1303,14 @@ export default defineConfig({
             const nowIso = new Date().toISOString();
             if (timer.isRunning) {
               // Pause: bank the time run so far, exactly like pauseFocus() in the app.
+              // lastPausedAt stamps this particular pause so its cue is not taken
+              // for a repeat of an earlier one.
               const ran = timer.lastStartedAt
-                ? Math.max(0, Math.floor((Date.now() - new Date(timer.lastStartedAt).getTime()) / 1000))
+                ? Math.max(0, Math.floor((Date.now() - new Date(timer.lastStartedAt as string).getTime()) / 1000))
                 : 0;
-              timer = { ...timer, accumulatedSeconds: timer.accumulatedSeconds + ran, isRunning: false, lastStartedAt: null };
+              timer = { ...timer, accumulatedSeconds: (timer.accumulatedSeconds as number) + ran, isRunning: false, lastStartedAt: null, lastPausedAt: nowIso };
             } else {
-              timer = { ...timer, isRunning: true, lastStartedAt: nowIso, sessionStartedAt: timer.sessionStartedAt || nowIso };
+              timer = { ...timer, isRunning: true, lastStartedAt: nowIso, sessionStartedAt: timer.sessionStartedAt || nowIso, lastPausedAt: null };
             }
 
             await safeWriteJsonFile({ filePath: timerPath, backupDir, baseName: 'focus-timer', body: JSON.stringify(timer), kind: 'object', force: true });
@@ -1316,23 +1376,40 @@ export default defineConfig({
             // opens no console at all. Going through `conda run` used to pop a black
             // terminal in the user's face every time — conda.exe is a console program
             // and Node's windowsHide can't suppress it once detached.
-            const condaPythonw = 'C:\\ProgramData\\anaconda3\\pythonw.exe';
-            let spawnCmd = 'pythonw';
-            const spawnArgs = [pythonScript];
+            // The repo's own interpreter comes first. Anaconda's pythonw.exe was
+            // quarantined by antivirus on this machine, and bare 'pythonw' is not
+            // on PATH — see below for why that mattered so much.
+            const candidates = [
+              path.resolve(import.meta.dirname, '..', '..', '.venv-launcher', 'Scripts', 'pythonw.exe'),
+              'C:\\ProgramData\\anaconda3\\pythonw.exe',
+            ];
+            let spawnCmd: string | null = null;
+            for (const candidate of candidates) {
+              try {
+                await fs.access(candidate);
+                spawnCmd = candidate;
+                break;
+              } catch (_) { /* try the next one */ }
+            }
 
-            try {
-              await fs.access(condaPythonw);
-              spawnCmd = condaPythonw;
-            } catch (_) {
-              // fall back to whatever pythonw is on PATH
+            if (!spawnCmd) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'No pythonw.exe found to launch the widget' }));
+              return;
             }
 
             try {
-              const child = spawn(spawnCmd, spawnArgs, {
+              const child = spawn(spawnCmd, [pythonScript], {
                 detached: true,
                 stdio: 'ignore',
                 windowsHide: true
               });
+              // Without this, a failed spawn raises an unhandled 'error' event on
+              // the child, which takes down the whole dev server — and with it the
+              // app, the widget and the hotkey. A missing interpreter must never
+              // be more than a failed button press.
+              child.on('error', () => { /* reported below via the response */ });
               child.unref();
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ success: true }));

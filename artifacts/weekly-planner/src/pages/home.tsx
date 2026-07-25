@@ -45,6 +45,14 @@ import {
   FOCUS_CHIMES,
   DEFAULT_FOCUS_CHIME,
   type FocusChimeId,
+  playFocusCue,
+  claimFocusCue,
+  focusCueKey,
+  coerceFocusCue,
+  FOCUS_CUES,
+  DEFAULT_FOCUS_CUES,
+  type FocusCueId,
+  type FocusCueSlot,
   claimFocusCompletion,
   autoSessionId,
   dedupeFocusSessions,
@@ -582,17 +590,22 @@ export default function WeeklyPlanner() {
   // The completion effect is set up once; read the current choice through a ref.
   const focusChimeRef = useRef<FocusChimeId>(DEFAULT_FOCUS_CHIME);
   useEffect(() => { focusChimeRef.current = focusChime; }, [focusChime]);
+  // Start / pause / resume cues. Any slot may be 'none' for silence.
+  const [focusCues, setFocusCues] = useState<Record<FocusCueSlot, FocusCueId>>({ ...DEFAULT_FOCUS_CUES });
+  const focusCuesRef = useRef(focusCues);
+  useEffect(() => { focusCuesRef.current = focusCues; }, [focusCues]);
   // Browsers block audio until the page has seen a gesture. Unlock on the first
   // one so the completion chime fires instantly instead of warming up first.
   useEffect(() => {
-    const unlock = () => {
-      primeFocusAudio();
-      window.removeEventListener('pointerdown', unlock);
-      window.removeEventListener('keydown', unlock);
-    };
+    // Stays attached rather than unhooking after the first gesture: the context
+    // can be put back to sleep later, and a re-warm on every interaction is free.
+    const unlock = () => primeFocusAudio();
+    unlock();
     window.addEventListener('pointerdown', unlock);
     window.addEventListener('keydown', unlock);
+    window.addEventListener('focus', unlock);
     return () => {
+      window.removeEventListener('focus', unlock);
       window.removeEventListener('pointerdown', unlock);
       window.removeEventListener('keydown', unlock);
     };
@@ -1452,15 +1465,20 @@ export default function WeeklyPlanner() {
     };
     window.addEventListener('storage', handleStorage);
 
-    const applyTimerFromServer = (data: unknown) => {
+    // `live` = arrived over the stream, i.e. the file's actual content just after
+    // a write. Only a *polled* read can be stale, so only a poll needs the grace
+    // window below. Applying it to stream pushes too was the bug: any local
+    // change in the previous 4s (setting the minutes, a session reset) made an
+    // external start sit unapplied for seconds, and the widget — whose grace
+    // wasn't armed — reacted instantly, so the cue sounded twice.
+    const applyTimerFromServer = (data: unknown, live = false) => {
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
       const json = JSON.stringify(coerceFocusTimer(data));
       timerHydratedRef.current = true;
       if (json === lastTimerJsonRef.current) return; // our own echo / no change
       // Don't let a stale server read clobber a change we just made locally
-      // (the server may not have stored our push yet). Once hydrated, ignore
-      // differing pulls for a brief grace window after any local change.
-      if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
+      // (the server may not have stored our push yet).
+      if (!live && Date.now() - lastLocalTimerChangeRef.current < 4000) return;
       lastTimerJsonRef.current = json;
       lastTimerPushKeyRef.current = focusTimerPushKey(JSON.parse(json));
       setFocusTimer(JSON.parse(json));
@@ -1469,7 +1487,7 @@ export default function WeeklyPlanner() {
     const pullTimer = () => {
       fetch('/api/focus-timer')
         .then(r => r.json())
-        .then(applyTimerFromServer)
+        .then(d => applyTimerFromServer(d))
         .catch(() => { timerHydratedRef.current = true; });
     };
     pullTimer();
@@ -1480,7 +1498,7 @@ export default function WeeklyPlanner() {
     try {
       stream = new EventSource('/api/focus-timer/stream');
       stream.onmessage = (evt) => {
-        try { applyTimerFromServer(JSON.parse(evt.data)); } catch (_) { /* ignore */ }
+        try { applyTimerFromServer(JSON.parse(evt.data), true); } catch (_) { /* ignore */ }
       };
     } catch (_) { /* fall back to the poll below */ }
 
@@ -1516,7 +1534,7 @@ export default function WeeklyPlanner() {
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
-      setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+      setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
     }
 
@@ -1540,7 +1558,7 @@ export default function WeeklyPlanner() {
       persistFocusSessions(next);
       return next;
     });
-    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   }, [focusTimer, persistFocusSessions]);
 
   useEffect(() => {
@@ -1574,17 +1592,49 @@ export default function WeeklyPlanner() {
   useEffect(() => {
     if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
       focusCompleteRef.current = true;
-      // Only one window chimes / celebrates, even though both hit zero.
       if (claimFocusCompletion()) {
-        playFocusChime(focusChimeRef.current);
         setFocusCelebrate(true);
         window.setTimeout(() => setFocusCelebrate(false), 2600);
       }
+      // The chime is claimed through the server for the same reason the cues are:
+      // the two windows are different browser engines and can't see each other's
+      // localStorage, so a local claim would always succeed in both.
+      claimFocusCue(
+        `complete|${focusTimer.sessionStartedAt ?? ''}|${focusTimer.plannedSeconds}`,
+        () => playFocusChime(focusChimeRef.current),
+      );
       completeFocusSession(focusTimer.plannedSeconds, true);
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
   }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds]);
+
+  // Start / pause / resume cues. Driven off the timer state rather than the
+  // buttons, so a toggle from the widget or the system-wide hotkey sounds too.
+  const prevRunningRef = useRef<boolean | null>(null);
+  const prevSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const running = focusTimer.isRunning;
+    const session = focusTimer.sessionStartedAt ?? null;
+    const prevRunning = prevRunningRef.current;
+    const prevSession = prevSessionRef.current;
+    prevRunningRef.current = running;
+    prevSessionRef.current = session;
+    if (prevRunning === null) return; // first render — nothing to compare against
+
+    let slot: FocusCueSlot | null = null;
+    if (running && !prevRunning) {
+      // A fresh session id (or none before) means "start"; same one means "resume".
+      slot = session && session === prevSession ? 'resume' : 'start';
+    } else if (!running && prevRunning) {
+      // Hitting zero is a completion, not a pause — the chime covers that.
+      if (focusRemainingSeconds > 0) slot = 'pause';
+    }
+    if (!slot) return;
+    const cue = focusCuesRef.current[slot];
+    if (cue === 'none') return;
+    claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue));
+  }, [focusTimer, focusRemainingSeconds]);
 
   const startFocus = () => {
     const startedAt = new Date().toISOString();
@@ -1593,6 +1643,7 @@ export default function WeeklyPlanner() {
       isRunning: true,
       lastStartedAt: startedAt,
       sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+      lastPausedAt: null,
     }));
   };
 
@@ -1602,11 +1653,12 @@ export default function WeeklyPlanner() {
       accumulatedSeconds: getFocusTimerElapsedSeconds(prev),
       isRunning: false,
       lastStartedAt: null,
+      lastPausedAt: new Date().toISOString(),
     }));
   };
 
   const resetFocus = () => {
-    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   };
 
   const stopFocus = () => {
@@ -1687,6 +1739,14 @@ export default function WeeklyPlanner() {
           if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
           if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
           if (s.focusChime != null) setFocusChime(coerceFocusChime(s.focusChime));
+          if (s.focusCues && typeof s.focusCues === 'object') {
+            const c = s.focusCues as Record<string, unknown>;
+            setFocusCues({
+              start: coerceFocusCue(c.start, 'start'),
+              pause: coerceFocusCue(c.pause, 'pause'),
+              resume: coerceFocusCue(c.resume, 'resume'),
+            });
+          }
           if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
           if (s.autoBackup && typeof s.autoBackup === 'object') {
             setAutoBackup(coerceAutoBackup(s.autoBackup));
@@ -1717,9 +1777,9 @@ export default function WeeklyPlanner() {
     fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, shortcuts, autoBackup }),
+      body: JSON.stringify({ interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup }),
     }).catch(err => console.error('Failed to save settings to backend:', err));
-  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, shortcuts, autoBackup]);
+  }, [interval, darkMode, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -2791,6 +2851,10 @@ export default function WeeklyPlanner() {
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
   // Header control text — brighter than muted-foreground so it isn't washed out in dark mode.
   const headerLabel    = darkMode ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.50)';
+  // Note: dark mode is driven entirely by these JS values. The stylesheet's
+  // `.dark` class is never applied to the document, so any `var(--color-*)`
+  // resolves to the *light* palette — a dark charcoal that all but disappears
+  // against the dark background. Use these, never the CSS variables.
   const headerInactive = darkMode ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.55)';
   // Now-line accent: a warmer, less harsh red on dark, a deeper one on light.
   const nowAccent     = darkMode ? '#ff6b6b' : '#e5484d';
@@ -2827,7 +2891,7 @@ export default function WeeklyPlanner() {
               <button
                 onClick={() => setShowFocusAnalysis(false)}
                 className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
-                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-foreground)' }}
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
                 onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)}
                 onMouseLeave={e=>(e.currentTarget.style.background=surfaceBg)}
                 title="Back to calendar"
@@ -2855,7 +2919,7 @@ export default function WeeklyPlanner() {
                     const active = calendarView === v;
                     return (
                       <button key={v} onClick={() => { setDirection(0); setCalendarView(v); }} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 capitalize"
-                        style={{ background: active ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent', color: active ? (darkMode ? '#f5f5f5' : 'var(--color-foreground)') : headerInactive, boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
+                        style={{ background: active ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent', color: active ? (darkMode ? '#f5f5f5' : menuText) : headerInactive, boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                         {v}
                       </button>
                     );
@@ -2891,13 +2955,13 @@ export default function WeeklyPlanner() {
                     if (e.key === 'Escape') { setZoomDraft(String(Math.round(appZoom * 100))); setEditingZoom(false); }
                   }}
                   className="w-[38px] bg-transparent outline-none text-center text-[11px] font-semibold tabular-nums"
-                  style={{ color: 'var(--color-foreground)' }}
+                  style={{ color: menuText }}
                 />
               ) : (
                 <button
                   onClick={() => { setZoomDraft(String(Math.round(appZoom * 100))); setEditingZoom(true); }}
                   className="w-[46px] text-[11px] font-semibold tabular-nums cursor-text"
-                  style={{ color: 'var(--color-foreground)' }}
+                  style={{ color: menuText }}
                   title="Click to type an exact zoom %"
                 >
                   {Math.round(appZoom * 100)}%
@@ -2921,7 +2985,7 @@ export default function WeeklyPlanner() {
                   <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                     {([5, 15, 30, 60] as IntervalMin[]).map(v => (
                       <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200"
-                        style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.14)':'#fff') : 'transparent', color: interval===v ? (darkMode ? '#f5f5f5' : 'var(--color-foreground)') : headerInactive, boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
+                        style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.14)':'#fff') : 'transparent', color: interval===v ? (darkMode ? '#f5f5f5' : menuText) : headerInactive, boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                         {v}m
                       </button>
                     ))}
@@ -2933,7 +2997,7 @@ export default function WeeklyPlanner() {
                     disabled={undoStack.current.length === 0}
                     title="Undo (Ctrl+Z)"
                     className="p-1.5 rounded-lg transition-colors"
-                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: undoStack.current.length === 0 ? 0.4 : 1, cursor: undoStack.current.length === 0 ? 'default' : 'pointer' }}
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: headerInactive, opacity: undoStack.current.length === 0 ? 0.4 : 1, cursor: undoStack.current.length === 0 ? 'default' : 'pointer' }}
                   >
                     <Undo2 size={14}/>
                   </button>
@@ -2942,7 +3006,7 @@ export default function WeeklyPlanner() {
                     disabled={redoStack.current.length === 0}
                     title="Redo (Ctrl+Shift+Z)"
                     className="p-1.5 rounded-lg transition-colors"
-                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: 'var(--color-muted-foreground)', opacity: redoStack.current.length === 0 ? 0.4 : 1, cursor: redoStack.current.length === 0 ? 'default' : 'pointer' }}
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: headerInactive, opacity: redoStack.current.length === 0 ? 0.4 : 1, cursor: redoStack.current.length === 0 ? 'default' : 'pointer' }}
                   >
                     <Redo2 size={14}/>
                   </button>
@@ -2978,7 +3042,7 @@ export default function WeeklyPlanner() {
               style={{
                 background: showFocusAnalysis ? (darkMode?'rgba(96,165,250,0.22)':'rgba(37,99,235,0.12)') : surfaceBg,
                 border: `1px solid ${showFocusAnalysis ? 'rgba(96,165,250,0.50)' : surfaceBdr}`,
-                color: showFocusAnalysis ? '#60a5fa' : 'var(--color-foreground)',
+                color: showFocusAnalysis ? '#60a5fa' : menuText,
               }}
             >
               <BarChart3 size={15}/>
@@ -3003,7 +3067,7 @@ export default function WeeklyPlanner() {
             >
               <Keyboard size={14}/>
             </button>
-            <button onClick={() => setSettingsOpen(s => !s)} title="Settings" className="p-1.5 rounded-lg transition-colors" style={{ background: settingsOpen ? (darkMode?'rgba(255,255,255,0.14)':'rgba(0,0,0,0.08)') : surfaceBg, border: `1px solid ${settingsOpen ? (darkMode?'rgba(255,255,255,0.22)':surfaceBdr) : surfaceBdr}`, color: settingsOpen ? 'var(--color-foreground)' : 'var(--color-muted-foreground)' }}>
+            <button onClick={() => setSettingsOpen(s => !s)} title="Settings" className="p-1.5 rounded-lg transition-colors" style={{ background: settingsOpen ? (darkMode?'rgba(255,255,255,0.14)':'rgba(0,0,0,0.08)') : surfaceBg, border: `1px solid ${settingsOpen ? (darkMode?'rgba(255,255,255,0.22)':surfaceBdr) : surfaceBdr}`, color: settingsOpen ? menuText : headerInactive }}>
               <Settings size={14}/>
             </button>
           </div>
@@ -4865,7 +4929,7 @@ export default function WeeklyPlanner() {
               <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
               <div className="flex flex-col gap-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Session Sound</span>
+                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>When The Session Ends</span>
                   <button
                     type="button"
                     onClick={() => playFocusChime(focusChime)}
@@ -4903,6 +4967,43 @@ export default function WeeklyPlanner() {
                     );
                   })}
                 </div>
+              </div>
+
+              {/* Start / pause / resume cues */}
+              <hr className="border-t opacity-10" style={{ borderColor: surfaceBdr }} />
+              <div className="flex flex-col gap-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Timer Cues</span>
+                {([
+                  { slot: 'start' as FocusCueSlot,  label: 'When the timer starts' },
+                  { slot: 'pause' as FocusCueSlot,  label: 'When it is paused or stopped' },
+                  { slot: 'resume' as FocusCueSlot, label: 'When it resumes' },
+                ]).map(({ slot, label }) => (
+                  <div key={slot} className="flex flex-col gap-1">
+                    <span className="text-[10px]" style={{ color: menuSub }}>{label}</span>
+                    <div className="flex flex-wrap gap-1">
+                      {FOCUS_CUES.map(c => {
+                        const active = focusCues[slot] === c.id;
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            title={c.hint}
+                            // Selecting also previews it — comparing them is the point.
+                            onClick={() => { setFocusCues(prev => ({ ...prev, [slot]: c.id })); playFocusCue(c.id); }}
+                            className="text-[10px] font-semibold px-2 py-1 rounded-md transition-colors"
+                            style={{
+                              background: active ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.09)') : surfaceBg,
+                              border: `1px solid ${active ? 'rgba(96,165,250,0.55)' : surfaceBdr}`,
+                              color: active ? '#60a5fa' : menuText,
+                            }}
+                          >
+                            {c.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
 
               {/* Keyboard shortcuts */}

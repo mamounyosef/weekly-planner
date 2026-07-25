@@ -28,6 +28,23 @@ user32.ReleaseCapture.restype = ctypes.wintypes.BOOL
 user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint64, ctypes.c_int64]
 user32.PostMessageW.restype = ctypes.wintypes.BOOL
 
+# ShowWindow / LoadImageW / SendMessageW — used to force a taskbar button and icon
+user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+user32.ShowWindow.restype = ctypes.wintypes.BOOL
+
+user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+user32.LoadImageW.restype = ctypes.c_void_p
+
+user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint64, ctypes.c_void_p]
+user32.SendMessageW.restype = ctypes.c_int64
+
+# Give the widget its own taskbar identity instead of inheriting pythonw.exe's,
+# which is what makes Windows show our icon rather than a generic Python one.
+try:
+    ctypes.WinDLL('shell32').SetCurrentProcessExplicitAppUserModelID('Planner.TodaySchedule.Widget')
+except Exception as _e:
+    pass
+
 # Window Long functions depending on pointer size (64-bit / 32-bit)
 IS_64BIT = ctypes.sizeof(ctypes.c_void_p) == 8
 
@@ -89,7 +106,7 @@ class Api:
         chrome_path1 = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         chrome_path2 = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
         edge_path = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        url = "http://localhost:5173"
+        url = "http://127.0.0.1:5173"
         user_data = r"D:\My Projects\weekly-planner\.chrome-profile"
         
         if os.path.exists(chrome_path1):
@@ -166,6 +183,57 @@ def wndproc(hwnd, msg, wparam, lparam):
 # Create the WNDPROC type callback definition
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_int64, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint64, ctypes.c_int64)
 
+ICON_PATH = r"D:\My Projects\weekly-planner\app-icon.ico"
+
+
+def apply_taskbar_presence(hwnd):
+    """Force the widget onto the taskbar with its own icon.
+
+    Stripping WS_CAPTION below leaves a window Windows no longer considers a
+    taskbar candidate, so the button disappeared entirely. WS_EX_APPWINDOW says
+    "show me regardless"; the ex-style only takes effect across a hide/show, and
+    the icon has to be set explicitly via WM_SETICON or the button comes up blank.
+    """
+    GWL_EXSTYLE = -20
+    WS_EX_APPWINDOW = 0x00040000
+    WS_EX_TOOLWINDOW = 0x00000080
+    SW_HIDE = 0
+    SW_SHOW = 5
+    WM_SETICON = 0x0080
+    ICON_SMALL, ICON_BIG = 0, 1
+    IMAGE_ICON = 1
+    LR_LOADFROMFILE = 0x0010
+
+    SWP_NOMOVE = 0x0002
+    SWP_NOZORDER = 0x0004
+
+    try:
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW)
+        user32.ShowWindow(hwnd, SW_HIDE)
+        user32.ShowWindow(hwnd, SW_SHOW)
+
+        # WebView2 does not reliably repaint after its host window is hidden and
+        # shown again — the window comes back blank white. Nudging the size by a
+        # pixel and back forces the browser view to relayout and draw.
+        rect = ctypes.wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        flags = SWP_NOMOVE | SWP_NOZORDER
+        user32.SetWindowPos(hwnd, 0, 0, 0, w, h + 1, flags)
+        user32.SetWindowPos(hwnd, 0, 0, 0, w, h, flags)
+    except Exception as e:
+        print("Failed to force taskbar presence:", e)
+
+    try:
+        for size, which in ((16, ICON_SMALL), (32, ICON_BIG)):
+            hicon = user32.LoadImageW(None, ICON_PATH, IMAGE_ICON, size, size, LR_LOADFROMFILE)
+            if hicon:
+                user32.SendMessageW(hwnd, WM_SETICON, which, hicon)
+    except Exception as e:
+        print("Failed to set window icon:", e)
+
+
 def on_shown():
     global _old_wndproc, _new_wndproc
     GWL_STYLE = -16
@@ -187,6 +255,8 @@ def on_shown():
         user32.SetWindowLongW(hwnd, GWL_STYLE, new_style)
         user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
 
+        apply_taskbar_presence(hwnd)
+
         # Set up window procedure subclassing
         _new_wndproc = WNDPROC(wndproc)
         if IS_64BIT:
@@ -199,12 +269,24 @@ def on_shown():
     except Exception as e:
         print("Failed to apply native Win32 style:", e)
 
+def already_running():
+    """True if a widget window is already open — launching the app twice used to
+    stack up duplicate widgets, each syncing and sounding independently."""
+    ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.CreateMutexW(None, False, 'Global\\PlannerWidgetWindow')
+    return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+
+
 if __name__ == '__main__':
+    if already_running():
+        import sys as _sys
+        _sys.exit(0)
     api = Api()
     # Create a standard window (not frameless), which we then border-strip in on_shown
     window = webview.create_window(
         title="Today's Schedule",
-        url='http://localhost:5173/widget',
+        url='http://127.0.0.1:5173/widget',
         width=340,
         height=720,
         frameless=False,  # Set to False so OS creates standard window and enables resize borders

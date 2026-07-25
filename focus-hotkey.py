@@ -74,6 +74,20 @@ _NAMED_KEYS = {
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 
+def already_running():
+    """True if another copy of this helper is alive.
+
+    Launching the app twice used to leave several of these running. Only one can
+    ever own the hotkey, so the extras sat in a loop re-attempting the binding
+    every few seconds — and if the owner exited, more than one could end up
+    reacting to the same press.
+    """
+    ERROR_ALREADY_EXISTS = 183
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW(None, False, "Global\\PlannerFocusHotkey")
+    return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+
+
 def parse_combo(combo):
     """'Alt+Shift+F1' -> (modifier bits, virtual key code), or None if unusable."""
     mods = 0
@@ -140,6 +154,8 @@ def bind(combo):
 
 
 def main():
+    if already_running():
+        return 0
     current = None
     wanted = configured_combo() or (sys.argv[1] if len(sys.argv) > 1 else FALLBACK_COMBO)
     current = bind(wanted) or bind(FALLBACK_COMBO)

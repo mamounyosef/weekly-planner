@@ -32,6 +32,13 @@ import {
   coerceFocusChime,
   DEFAULT_FOCUS_CHIME,
   type FocusChimeId,
+  playFocusCue,
+  claimFocusCue,
+  focusCueKey,
+  coerceFocusCue,
+  DEFAULT_FOCUS_CUES,
+  type FocusCueId,
+  type FocusCueSlot,
   claimFocusCompletion,
   autoSessionId,
   dedupeFocusSessions,
@@ -213,6 +220,8 @@ export default function Widget() {
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
   const focusChimeRef = useRef<FocusChimeId>(DEFAULT_FOCUS_CHIME);
+  // Start / pause / resume cues, chosen in the main window's settings.
+  const focusCuesRef = useRef<Record<FocusCueSlot, FocusCueId>>({ ...DEFAULT_FOCUS_CUES });
   const lastTimerJsonRef = useRef<string | null>(null);
   const timerHydratedRef = useRef(false);
   // Ignore stale server pulls briefly after a local change so they can't undo it.
@@ -245,6 +254,14 @@ export default function Widget() {
         if (s.dayEndH != null) setDayEndH(s.dayEndH);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         if (s.focusChime != null) focusChimeRef.current = coerceFocusChime(s.focusChime);
+        if (s.focusCues && typeof s.focusCues === 'object') {
+          const c = s.focusCues as Record<string, unknown>;
+          focusCuesRef.current = {
+            start: coerceFocusCue(c.start, 'start'),
+            pause: coerceFocusCue(c.pause, 'pause'),
+            resume: coerceFocusCue(c.resume, 'resume'),
+          };
+        }
       }
     };
     const loadSettings = () => {
@@ -284,12 +301,14 @@ export default function Widget() {
     window.addEventListener('storage', handleStorage);
 
     // Shared running-timer state (see home.tsx for the echo-guard rationale).
-    const applyTimerFromServer = (data: unknown) => {
+    // `live` = arrived over the stream, so it can't be stale; only a poll needs
+    // the grace window (see home.tsx for the full rationale).
+    const applyTimerFromServer = (data: unknown, live = false) => {
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
       const json = JSON.stringify(coerceFocusTimer(data));
       timerHydratedRef.current = true;
       if (json === lastTimerJsonRef.current) return;
-      if (Date.now() - lastLocalTimerChangeRef.current < 4000) return;
+      if (!live && Date.now() - lastLocalTimerChangeRef.current < 4000) return;
       lastTimerJsonRef.current = json;
       lastTimerPushKeyRef.current = focusTimerPushKey(JSON.parse(json));
       setFocusTimer(JSON.parse(json));
@@ -297,7 +316,7 @@ export default function Widget() {
     const pullTimer = () => {
       fetch('/api/focus-timer')
         .then(r => r.json())
-        .then(applyTimerFromServer)
+        .then(d => applyTimerFromServer(d))
         .catch(() => { timerHydratedRef.current = true; });
     };
 
@@ -328,19 +347,19 @@ export default function Widget() {
     try {
       timerStream = new EventSource('/api/focus-timer/stream');
       timerStream.onmessage = (evt) => {
-        try { applyTimerFromServer(JSON.parse(evt.data)); } catch (_) { /* ignore */ }
+        try { applyTimerFromServer(JSON.parse(evt.data), true); } catch (_) { /* ignore */ }
       };
     } catch (_) { /* fall back to the poll */ }
     const timerPollId = setInterval(pullTimer, 1500);
     // Browsers block audio until the page sees a gesture; unlock on the first one
     // so the completion chime fires instantly instead of warming up first.
-    const unlockAudio = () => {
-      primeFocusAudio();
-      window.removeEventListener('pointerdown', unlockAudio);
-      window.removeEventListener('keydown', unlockAudio);
-    };
+    // Stays attached rather than unhooking after the first gesture: the context
+    // can be put back to sleep later, and a re-warm on every interaction is free.
+    const unlockAudio = () => primeFocusAudio();
+    unlockAudio();
     window.addEventListener('pointerdown', unlockAudio);
     window.addEventListener('keydown', unlockAudio);
+    window.addEventListener('focus', unlockAudio);
     const clockId = setInterval(() => setNowTick(Date.now()), 1000);
     // Checkpoint a running session's elapsed time into durable state every few seconds
     // so closing the app mid-session never loses progress.
@@ -362,6 +381,7 @@ export default function Widget() {
       if (dbStream) dbStream.close();
       window.removeEventListener('pointerdown', unlockAudio);
       window.removeEventListener('keydown', unlockAudio);
+      window.removeEventListener('focus', unlockAudio);
     };
   }, []);
 
@@ -543,6 +563,28 @@ export default function Widget() {
     requestAnimationFrame(scrollInitial);
   }, [slots, dayStartH, interval]);
 
+  // On first launch, act as though Go Live was pressed.
+  //
+  // The centering effect above isn't enough on its own: it can run before the
+  // day's events have arrived and the column has its real height, and the scroll
+  // it performs fires the scroll handler, which reads as "the user scrolled away"
+  // and switches live-tracking off. So re-assert it a few times over the first
+  // second, then leave it alone.
+  const didInitialLive = useRef(false);
+  useEffect(() => {
+    if (didInitialLive.current) return;
+    const container = scrollContainerRef.current;
+    if (!container || slots.length === 0) return;
+    didInitialLive.current = true;
+
+    const timers = [120, 400, 900].map(delay =>
+      window.setTimeout(() => {
+        if (scrollContainerRef.current?.clientHeight) scrollToLive();
+      }, delay),
+    );
+    return () => timers.forEach(window.clearTimeout);
+  }, [slots.length, events]);
+
   // Keep centering dynamically every time the live time updates
   const lastCenteringMin = useRef(-1);
   useEffect(() => {
@@ -604,7 +646,7 @@ export default function Widget() {
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
-      setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+      setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
     }
 
@@ -628,7 +670,7 @@ export default function Widget() {
       persistFocusSessions(next);
       return next;
     });
-    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   }, [focusTimer, persistFocusSessions]);
 
   useEffect(() => {
@@ -661,17 +703,52 @@ export default function Widget() {
   useEffect(() => {
     if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
       focusCompleteRef.current = true;
-      // Whichever window claims first plays the chime — never both.
       if (claimFocusCompletion()) {
-        playFocusChime(focusChimeRef.current);
         setFocusCelebrate(true);
         window.setTimeout(() => setFocusCelebrate(false), 2600);
       }
+      // Claimed through the server, not localStorage — see home.tsx.
+      claimFocusCue(
+        `complete|${focusTimer.sessionStartedAt ?? ''}|${focusTimer.plannedSeconds}`,
+        () => playFocusChime(focusChimeRef.current),
+      );
       completeFocusSession(focusTimer.plannedSeconds, true);
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
   }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds]);
+
+  // Start / pause / resume cues. Driven off the timer state rather than the
+  // buttons, so a toggle from the main window or the hotkey sounds too.
+  const prevRunningRef = useRef<boolean | null>(null);
+  const prevSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const running = focusTimer.isRunning;
+    const session = focusTimer.sessionStartedAt ?? null;
+    const prevRunning = prevRunningRef.current;
+    const prevSession = prevSessionRef.current;
+    prevRunningRef.current = running;
+    prevSessionRef.current = session;
+    if (prevRunning === null) return; // first render — nothing to compare against
+
+    let slot: FocusCueSlot | null = null;
+    if (running && !prevRunning) {
+      slot = session && session === prevSession ? 'resume' : 'start';
+    } else if (!running && prevRunning) {
+      // Hitting zero is a completion, not a pause — the chime covers that.
+      if (focusRemainingSeconds > 0) slot = 'pause';
+    }
+    if (!slot) return;
+
+    // Fold the panel away while running and open it back up when paused, no
+    // matter where the toggle came from — this window's button, the main window,
+    // or the system-wide hotkey.
+    setFocusCollapsed(slot !== 'pause');
+
+    const cue = focusCuesRef.current[slot];
+    if (cue === 'none') return;
+    claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue));
+  }, [focusTimer, focusRemainingSeconds]);
 
   const startFocus = () => {
     const startedAt = new Date().toISOString();
@@ -681,6 +758,7 @@ export default function Widget() {
       isRunning: true,
       lastStartedAt: startedAt,
       sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+      lastPausedAt: null,
     }));
   };
 
@@ -690,11 +768,12 @@ export default function Widget() {
       accumulatedSeconds: getFocusTimerElapsedSeconds(prev),
       isRunning: false,
       lastStartedAt: null,
+      lastPausedAt: new Date().toISOString(),
     }));
   };
 
   const resetFocus = () => {
-    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds }));
+    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   };
 
   const stopFocus = () => {
@@ -806,49 +885,100 @@ export default function Widget() {
           -ms-overflow-style: none !important;
           scrollbar-width: none !important;
         }
+
+        /* ── Window header ──────────────────────────────────────────────── */
+        .wgt-header-btn {
+          width: 26px;
+          height: 26px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 8px;
+          color: rgba(0,0,0,0.45);
+          background: transparent;
+          transition: background-color 140ms ease, color 140ms ease, transform 140ms ease;
+        }
+        .dark .wgt-header-btn { color: rgba(255,255,255,0.50); }
+        .wgt-header-btn:hover {
+          background: rgba(0,0,0,0.07);
+          color: rgba(0,0,0,0.85);
+        }
+        .dark .wgt-header-btn:hover {
+          background: rgba(255,255,255,0.10);
+          color: rgba(255,255,255,0.95);
+        }
+        .wgt-header-btn:active { transform: scale(0.92); }
+
+        /* Pinned is a state, so it reads as a filled pill rather than just a
+           rotated icon — much easier to see at a glance. */
+        .wgt-header-btn.is-active,
+        .wgt-header-btn.is-active:hover {
+          background: rgba(59,130,246,0.16);
+          color: #3b82f6;
+        }
+        .dark .wgt-header-btn.is-active,
+        .dark .wgt-header-btn.is-active:hover {
+          background: rgba(96,165,250,0.20);
+          color: #60a5fa;
+        }
+
+        .wgt-header-btn.is-close:hover {
+          background: #e5484d;
+          color: #ffffff;
+        }
       `}</style>
       {/* Drag handle header for pywebview */}
       <header
         onMouseDown={handleHeaderMouseDown}
-        className="pywebview-drag sticky top-0 z-30 bg-background/80 backdrop-blur-md border-b border-border/50 flex items-center justify-between px-4 h-12 cursor-move"
+        className="pywebview-drag sticky top-0 z-30 backdrop-blur-xl flex items-center justify-between pl-3 pr-2 h-[46px] cursor-move"
+        style={{
+          // A soft top-down wash with a hairline rule, instead of a flat panel
+          // and a hard border — that combination is what read as "old app".
+          background: darkMode
+            ? 'linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0.025) 100%)'
+            : 'linear-gradient(180deg, rgba(255,255,255,0.88) 0%, rgba(255,255,255,0.58) 100%)',
+          boxShadow: darkMode
+            ? 'inset 0 -1px 0 rgba(255,255,255,0.07), 0 1px 12px rgba(0,0,0,0.22)'
+            : 'inset 0 -1px 0 rgba(0,0,0,0.07), 0 1px 12px rgba(0,0,0,0.05)',
+        }}
       >
-        <div className="flex items-center gap-2 pointer-events-none">
-          <Calendar size={15} className="text-primary" />
-          <span className="text-xs font-bold tracking-tight text-foreground/80 tabular-nums">
-            {format(today, 'EEEE, MMMM d • h:mm:ss a')}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5 pointer-events-auto">
-          <button
-            onClick={togglePin}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/15 transition-all duration-200"
-            title={isPinned ? "Unpin Widget" : "Pin Widget"}
+        <div className="flex items-center gap-2.5 pointer-events-none min-w-0">
+          <div
+            className="w-[26px] h-[26px] rounded-lg flex items-center justify-center flex-shrink-0"
             style={{
-              color: isPinned ? '#3b82f6' : 'inherit',
-              transform: isPinned ? 'rotate(45deg)' : 'none'
+              background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(59,130,246,0.10)',
+              color: darkMode ? '#60a5fa' : '#3b82f6',
             }}
           >
-            <Pin size={14} />
-          </button>
+            <Calendar size={14} />
+          </div>
+          {/* Date and clock on their own lines: the date is what you read, the
+              time is glanceable detail. One cramped row of both, separated by a
+              bullet, is the thing that looked dated. */}
+          <div className="flex flex-col min-w-0 leading-none">
+            <span className="text-[12px] font-semibold tracking-tight truncate" style={{ color: menuText }}>
+              {format(today, 'EEEE, MMMM d')}
+            </span>
+            <span className="text-[10.5px] font-medium tabular-nums mt-[3px]" style={{ color: menuSub }}>
+              {format(today, 'h:mm:ss a')}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-0.5 pointer-events-auto flex-shrink-0">
           <button
-            onClick={openMainSite}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/15 transition-colors"
-            title="Open Website"
+            onClick={togglePin}
+            className={`wgt-header-btn ${isPinned ? 'is-active' : ''}`}
+            title={isPinned ? 'Unpin widget' : 'Keep widget on top'}
           >
-            <ExternalLink size={14} />
+            <Pin size={13} style={{ transform: isPinned ? 'none' : 'rotate(45deg)' }} />
           </button>
-          <button
-            onClick={minimizeWidget}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/15 transition-colors"
-            title="Minimize Widget"
-          >
+          <button onClick={openMainSite} className="wgt-header-btn" title="Open the full planner">
+            <ExternalLink size={13} />
+          </button>
+          <button onClick={minimizeWidget} className="wgt-header-btn" title="Minimize widget">
             <Minus size={14} />
           </button>
-          <button
-            onClick={closeWidget}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-destructive/15 transition-colors"
-            title="Close Widget"
-          >
+          <button onClick={closeWidget} className="wgt-header-btn is-close" title="Close widget">
             <X size={14} />
           </button>
         </div>
