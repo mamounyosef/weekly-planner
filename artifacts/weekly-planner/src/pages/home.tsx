@@ -178,11 +178,11 @@ const COL_GAP        = 2; // px gap between parallel events
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
 const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#d9e8d2', border: '#7fae72', text: '#2c4726' },
-  peach: { bg: '#fbe0cf', border: '#e8a274', text: '#7a3d1c' },
-  blue:  { bg: '#d6e4f5', border: '#7ba6dd', text: '#1f3f66' },
-  sand:  { bg: '#f2e2bd', border: '#cba25a', text: '#5c421a' },
-  lilac: { bg: '#e8dcf2', border: '#b48cdb', text: '#4a2a68' },
+  sage:  { bg: '#dcfce7', border: '#86efac', text: '#14532d' },
+  peach: { bg: '#ffedd5', border: '#fdba74', text: '#7c2d12' },
+  blue:  { bg: '#dbeafe', border: '#93c5fd', text: '#1e3a8a' },
+  sand:  { bg: '#fef3c7', border: '#fcd34d', text: '#78350f' },
+  lilac: { bg: '#f3e8ff', border: '#d8b4fe', text: '#581c87' },
 };
 
 const DARK_EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
@@ -1872,6 +1872,15 @@ export default function WeeklyPlanner() {
     }
   }, [location]);
 
+  // Sync document root class with darkMode state
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [darkMode]);
+
   // Persist settings to the shared backend whenever any of them change (after initial load).
   useEffect(() => {
     if (!settingsLoaded.current) return;
@@ -2922,6 +2931,12 @@ export default function WeeklyPlanner() {
     if (!editingZoom) setZoomDraft(String(Math.round(appZoom * 100)));
   }, [appZoom, editingZoom]);
 
+  // Sync dark mode class with document root
+  useEffect(() => {
+    if (darkMode) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+  }, [darkMode]);
+
   const commitZoomDraft = () => {
     const pct = parseInt(zoomDraft, 10);
     if (Number.isFinite(pct) && pct > 0) setAppZoom(clampZoom(pct / 100));
@@ -2957,20 +2972,16 @@ export default function WeeklyPlanner() {
   // database change must wait rather than yank state out from under them.
   uiBusyRef.current = !!editingId || !!menuId || isDraggingAnything || isResizingAnything || !!draft;
 
-  const surfaceBg  = darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.60)';
+  const surfaceBg  = darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff';
   const surfaceBdr = darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.12)';
-  const hoverBg    = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)';
+  const hoverBg    = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)';
   const menuBg     = darkMode ? '#1e2022' : '#ffffff';
-  const menuBdr    = darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.10)';
-  const menuText   = darkMode ? '#e8e8e8' : '#1a1a1a';
-  const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
+  const menuBdr    = darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)';
+  const menuText   = darkMode ? '#e8e8e8' : '#0f172a';
+  const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(15,23,42,0.55)';
   // Header control text — brighter than muted-foreground so it isn't washed out in dark mode.
-  const headerLabel    = darkMode ? 'rgba(255,255,255,0.62)' : 'rgba(0,0,0,0.50)';
-  // Note: dark mode is driven entirely by these JS values. The stylesheet's
-  // `.dark` class is never applied to the document, so any `var(--color-*)`
-  // resolves to the *light* palette — a dark charcoal that all but disappears
-  // against the dark background. Use these, never the CSS variables.
-  const headerInactive = darkMode ? 'rgba(255,255,255,0.72)' : 'rgba(0,0,0,0.55)';
+  const headerLabel    = darkMode ? 'rgba(255,255,255,0.62)' : '#475569';
+  const headerInactive = darkMode ? 'rgba(255,255,255,0.72)' : '#334155';
   // Now-line accent: a warmer, less harsh red on dark, a deeper one on light.
   const nowAccent     = darkMode ? '#ff6b6b' : '#e5484d';
   const nowAccentSoft = darkMode ? 'rgba(255,107,107,0.22)' : 'rgba(229,72,77,0.18)';
