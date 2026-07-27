@@ -1341,7 +1341,7 @@ export default function WeeklyPlanner() {
   // offered (there's no now-line on screen to scroll to at all). Day view is away
   // whenever the shown day isn't today; week view whenever the week differs.
   const viewingAnotherWeek = calendarView === 'day'
-    ? !isToday(currentDate)
+    ? !isSameDay(currentDate, nowOwnerDate)
     : viewedWeekKey !== currentRealWeekKey;
 
   useEffect(() => {
@@ -2953,7 +2953,7 @@ export default function WeeklyPlanner() {
   // ── Navigation ────────────────────────────────────────────────────────────
   const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); setMenuId(null); };
   const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
-  const goToday = () => { setDirection(0);  setCurrentDate(new Date());            setEditingId(null); setMenuId(null); };
+  const goToday = () => { setDirection(0);  setCurrentDate(nowOwnerDate);          setEditingId(null); setMenuId(null); };
   // View-aware prev/next: one unit of whatever is currently on screen.
   const navStep = (dir: -1 | 1) => {
     setDirection(dir);
@@ -3435,7 +3435,7 @@ export default function WeeklyPlanner() {
               <div className="flex-1 min-w-0 flex items-end gap-2 h-20">
                 {focusStats.perDay.map(day => {
                   const pct = day.seconds > 0 ? Math.max(5, (day.seconds / focusStats.maxSeconds) * 100) : 0;
-                  const active = isToday(day.day);
+                  const active = isSameDay(day.day, nowOwnerDate);
                   return (
                     <div key={day.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
                       {/* Exact hours for this day, right above its bar. */}
@@ -3685,7 +3685,7 @@ export default function WeeklyPlanner() {
               >
                 {visibleCols.map((colIdx) => {
                   const day       = days[colIdx];
-                  const today     = isToday(day);
+                  const today     = isSameDay(day, nowOwnerDate);
                   // The column that actually contains "now" (see nowColIdx: before the
                   // day-start hour that's yesterday's column, not today's).
                   const isNowCol  = colIdx === nowColIdx;
@@ -4434,7 +4434,7 @@ export default function WeeklyPlanner() {
                 <div className="grid grid-cols-7 gap-[1px]">
                   {m.cells.map(c => {
                     const dim = !isSameMonth(c.date, m.monthStart);
-                    const isTodayCell = isToday(c.date);
+                    const isTodayCell = isSameDay(c.date, nowOwnerDate);
                     return (
                       <span
                         key={c.date.toISOString()}
@@ -4486,7 +4486,7 @@ export default function WeeklyPlanner() {
               <div key={week.weekKey} className="grid grid-cols-7 border-b border-border/40 last:border-b-0">
                 {week.cells.map(({ date, events: cellEvents }) => {
                   const inMonth = isSameMonth(date, currentDate);
-                  const cellToday = isToday(date);
+                  const cellToday = isSameDay(date, nowOwnerDate);
                   // Tint the cell by how much focus time it holds — the month grid
                   // doubles as a heatmap of where the deep work actually landed.
                   const focusSecs = focusAnalysis.byDaySeconds.get(dateKey(date)) ?? 0;
@@ -4691,7 +4691,7 @@ export default function WeeklyPlanner() {
                     <div className="flex items-end gap-2.5 h-44 mb-2">
                       {weekAnalysisLive.days.map(d => {
                         const pct = d.seconds > 0 ? Math.max(4, (d.seconds / weekAnalysisLive.maxSeconds) * 100) : 0;
-                        const isTodayCol = isToday(d.date);
+                        const isTodayCol = isSameDay(d.date, nowOwnerDate);
                         const isBest = d.seconds > 0 && d.key === weekAnalysisLive.bestKey;
                         return (
                           <div key={d.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
@@ -4730,16 +4730,16 @@ export default function WeeklyPlanner() {
                           key={d.key}
                           className="flex items-center justify-between px-3.5 py-2 text-xs"
                           style={{
-                            background: isToday(d.date)
+                            background: isSameDay(d.date, nowOwnerDate)
                               ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
                               : i % 2 === 0 ? surfaceBg : 'transparent',
                             borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
                           }}
                         >
-                          <span className="font-medium flex items-center gap-1.5" style={{ color: isToday(d.date) ? '#60a5fa' : menuText }}>
+                          <span className="font-medium flex items-center gap-1.5" style={{ color: isSameDay(d.date, nowOwnerDate) ? '#60a5fa' : menuText }}>
                             <Clock size={11} style={{ opacity: 0.5 }} />
                             {format(d.date, 'EEEE, MMM d')}
-                            {isToday(d.date) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
+                            {isSameDay(d.date, nowOwnerDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
                           </span>
                           <span className="tabular-nums flex items-center gap-2" style={{ color: d.seconds > 0 ? menuText : menuSub }}>
                             <span className="font-semibold">{formatFocusDuration(d.seconds)}</span>
@@ -4804,7 +4804,7 @@ export default function WeeklyPlanner() {
                         const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
                         const inMonth = isSameMonth(d, analysisMonthCursor);
                         const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
-                        const todayCell = isSameDay(d, nowDate);
+                        const todayCell = isSameDay(d, nowOwnerDate);
                         const hot = secs > focusAnalysis.monthMaxSeconds * 0.45;
                         return (
                           <div

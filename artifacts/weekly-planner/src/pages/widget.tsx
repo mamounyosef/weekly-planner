@@ -5,6 +5,8 @@ import {
   endOfWeek,
   eachDayOfInterval,
   isToday,
+  subDays,
+  isSameDay,
 } from 'date-fns';
 import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -399,7 +401,12 @@ export default function Widget() {
   const today = new Date(nowTick);
   const weekStart = startOfWeek(today, { weekStartsOn });
   const days = eachDayOfInterval({ start: weekStart, end: endOfWeek(today, { weekStartsOn }) });
-  const todayColIdx = days.findIndex(d => isToday(d));
+  
+  const dayStartMin = dayStartH * 60;
+  const dayEndMin = dayEndH * 60;
+  const nowMin = today.getHours() * 60 + today.getMinutes();
+  const nowOwnerDate = nowMin < dayStartMin ? subDays(today, 1) : today;
+  const todayColIdx = days.findIndex(d => isSameDay(d, nowOwnerDate));
 
   // Resolve raw storage into the items visible in the current (real) week, so the
   // widget honours single-week items, recurring versions and per-week overrides.
@@ -409,15 +416,12 @@ export default function Widget() {
   const slots = generateSlots(interval, dayStartH, dayEndH);
   const sh = SLOT_H[interval];
   const totalH = slots.length * sh;
-  const dayStartMin = dayStartH * 60;
-  const dayEndMin = dayEndH * 60;
   // Identical resolution to the main window, so a card looks the same in both.
   const widgetTheme = themePalette(darkMode, widgetDarkPreset, widgetLightPreset);
   const chipColors = (ev: PlannerEvent) =>
     gcalChipColors(resolveEventHex(ev), { dark: darkMode, style: eventColorStyle, pageBg: widgetTheme.rootBg })
       ?? { bg: '#dcfce7', border: '#86efac', text: '#14532d', textMuted: '#2f6b45' };
 
-  const nowMin = today.getHours() * 60 + today.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
