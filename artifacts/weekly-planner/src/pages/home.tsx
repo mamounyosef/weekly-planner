@@ -737,7 +737,7 @@ export default function WeeklyPlanner() {
   };
 
   const dragRef = useRef<{
-    eventId: string; durationMin: number; offsetMin: number;
+    eventId: string; durationMin: number; offsetMin: number; isHeadClick?: boolean;
     origDay: number; curDay: number; curStartMin: number;
     active: boolean; initX: number; initY: number;
   } | null>(null);
@@ -2686,9 +2686,16 @@ export default function WeeklyPlanner() {
         }
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
-        const newStart = clamp(snapMin(coords.snappedMin - dr.offsetMin, POSITION_SNAP), dayStartMin, dayEndMin - dr.durationMin);
-        dr.curDay = coords.dayIndex; dr.curStartMin = newStart;
-        setDragDisp({ id: dr.eventId, day: coords.dayIndex, startMin: newStart });
+        let targetDay = coords.dayIndex;
+        let rawStart = coords.snappedMin - dr.offsetMin;
+        if (dr.isHeadClick) {
+          targetDay = (coords.dayIndex - 1 + 7) % 7;
+          rawStart = coords.snappedMin + 1440 - dr.offsetMin;
+        }
+        const maxStart = dayStartMin + 1440 - dr.durationMin;
+        const newStart = clamp(snapMin(rawStart, POSITION_SNAP), dayStartMin, maxStart);
+        dr.curDay = targetDay; dr.curStartMin = newStart;
+        setDragDisp({ id: dr.eventId, day: targetDay, startMin: newStart });
         setDragDelta({ x: e.clientX - dr.initX, y: e.clientY - dr.initY });
       }
       if (rr) {
@@ -2802,7 +2809,13 @@ export default function WeeklyPlanner() {
         if (dr.active) {
           const ev = weekEventsRef.current[dr.eventId] ?? eventsRef.current[dr.eventId];
           if (ev) {
-            applyEditRef.current(dr.eventId, { dayIndex: dr.curDay, startTime: minToTime(dr.curStartMin), endTime: minToTime(dr.curStartMin + dr.durationMin) });
+            const start24 = dr.curStartMin >= 1440 ? dr.curStartMin - 1440 : dr.curStartMin;
+            const end24 = (start24 + dr.durationMin) % 1440;
+            applyEditRef.current(dr.eventId, {
+              dayIndex: dr.curDay,
+              startTime: minToTime(start24),
+              endTime: minToTime(end24)
+            });
           }
           setTimeout(() => { didDragRef.current = false; }, 80);
         } else { didDragRef.current = false; }
@@ -2838,7 +2851,7 @@ export default function WeeklyPlanner() {
     );
   };
 
-  const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent) => {
+  const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent, segKind?: 'normal' | 'tail' | 'head') => {
     if (editingId === ev.id) return;
     e.preventDefault(); e.stopPropagation();
     if (e.ctrlKey || e.metaKey) return; // toggle selection in onClick, don't drag
@@ -2878,9 +2891,17 @@ export default function WeeklyPlanner() {
     let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
     if (endMin <= startMin) endMin += 1440;
     const duration = endMin - startMin;
+
+    const isHead = segKind === 'head';
+    let offsetMin = clamp(coords.snappedMin - startMin, 0, duration);
+    if (isHead) {
+      offsetMin = clamp(coords.snappedMin + 1440 - startMin, 0, duration);
+    }
+
     dragRef.current = {
       eventId: ev.id, durationMin: duration,
-      offsetMin: clamp(coords.snappedMin - startMin, 0, duration),
+      offsetMin,
+      isHeadClick: isHead,
       origDay: ev.dayIndex, curDay: ev.dayIndex, curStartMin: startMin,
       active: false, initX: e.clientX, initY: e.clientY,
     };
@@ -3710,61 +3731,46 @@ export default function WeeklyPlanner() {
                     const isDragging  = isDrag || isBatchDrag;
                     const isResizing  = resizeDisp?.id === ev.id;
 
-                    if (isDragging) {
-                      const dp = dispProps(ev);
-                      // 1. Push a visual placeholder to the snapped column
-                      if (dp.dayIndex === colIdx) {
-                        renderItems.push({
-                          ev: { ...ev, isPlaceholder: true } as PlannerEvent,
-                          key: `${ev.id}__placeholder`,
-                          startMin: dp.startMin,
-                          endMin: dp.endMin,
-                          segKind: 'normal'
-                        });
-                      }
-                      
-                      // 2. Push the original element to its original column so it can be translated
-                      const startMinOrig = normalizeMin(timeToMin(ev.startTime), dayStartH);
-                      let endMinOrig = normalizeMin(timeToMin(ev.endTime), dayStartH);
-                      if (endMinOrig <= startMinOrig) endMinOrig += 1440;
-                      if (ev.dayIndex === colIdx) {
-                        renderItems.push({
-                          ev,
-                          key: ev.id,
-                          startMin: startMinOrig,
-                          endMin: endMinOrig,
-                          segKind: 'normal'
-                        });
-                      }
-                      continue;
+                    let effDayIndex = ev.dayIndex;
+                    let effStart24  = timeToMin(ev.startTime);
+                    let effEnd24    = timeToMin(ev.endTime);
+
+                    if (isDrag && dragDisp) {
+                      effDayIndex = dragDisp.day;
+                      effStart24  = dragDisp.startMin >= 1440 ? dragDisp.startMin - 1440 : dragDisp.startMin;
+                      const dur   = normDuration(ev);
+                      effEnd24    = (effStart24 + dur) % 1440;
+                    } else if (isBatchDrag && batchDisp?.[ev.id]) {
+                      const bd    = batchDisp[ev.id];
+                      effDayIndex = bd.dayIndex;
+                      effStart24  = bd.startMin >= 1440 ? bd.startMin - 1440 : bd.startMin;
+                      const dur   = normDuration(ev);
+                      effEnd24    = (effStart24 + dur) % 1440;
+                    } else if (isResizing && resizeDisp) {
+                      effStart24  = resizeDisp.startMin >= 1440 ? resizeDisp.startMin - 1440 : resizeDisp.startMin;
+                      const dur   = resizeDisp.endMin - resizeDisp.startMin;
+                      effEnd24    = (effStart24 + dur) % 1440;
                     }
 
-                    if (isResizing) {
-                      const dp = dispProps(ev);
-                      if (dp.dayIndex === colIdx) {
-                        renderItems.push({
-                          ev,
-                          key: ev.id,
-                          startMin: dp.startMin,
-                          endMin: dp.endMin,
-                          segKind: 'normal'
-                        });
-                      }
-                      continue;
-                    }
+                    const isSpanning = effStart24 < dayStartMin && effEnd24 >= dayStartMin;
 
-                    if (isBoundarySpanning(ev)) {
-                      if (ev.dayIndex === colIdx) {
-                        renderItems.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayEndMin, segKind: 'tail' });
+                    if (isSpanning) {
+                      if (effDayIndex === colIdx) {
+                        renderItems.push({ ev, key: isDragging ? `${ev.id}__tail_drag` : ev.id, startMin: effStart24 + 1440, endMin: dayStartMin + 1440, segKind: 'tail' });
                       }
-                      if ((ev.dayIndex + 1) % 7 === colIdx) {
-                        renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: timeToMin(ev.endTime), segKind: 'head' });
+                      if ((effDayIndex + 1) % 7 === colIdx) {
+                        renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: effEnd24, segKind: 'head' });
                       }
                       continue;
                     }
                     
-                    const dp = dispProps(ev);
-                    if (dp.dayIndex === colIdx) renderItems.push({ ev, key: ev.id, startMin: dp.startMin, endMin: dp.endMin, segKind: 'normal' });
+                    const sNorm = normalizeMin(effStart24, dayStartH);
+                    let eNorm   = normalizeMin(effEnd24, dayStartH);
+                    if (eNorm <= sNorm) eNorm += 1440;
+
+                    if (effDayIndex === colIdx) {
+                      renderItems.push({ ev, key: ev.id, startMin: sNorm, endMin: eNorm, segKind: 'normal' });
+                    }
                   }
                   const colEvents = renderItems;
 
@@ -4026,7 +4032,7 @@ export default function WeeklyPlanner() {
                                 outlineOffset: 1,
                                 pointerEvents: (isMoving && !isResize) ? 'none' : undefined,
                               }}
-                              onMouseDown={(e) => handleEventMouseDown(e, ev)}
+                              onMouseDown={(e) => handleEventMouseDown(e, ev, segKind)}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 if (e.ctrlKey || e.metaKey) {

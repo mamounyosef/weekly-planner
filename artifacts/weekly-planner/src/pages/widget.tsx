@@ -451,7 +451,7 @@ export default function Widget() {
       if (ev.allDay) continue; // Skip all-day events in the timeline scroll area
       if (isBoundarySpanning(ev)) {
         if (ev.dayIndex === todayColIdx) {
-          items.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayEndMin, segKind: 'tail' });
+          items.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayStartMin + 1440, segKind: 'tail' });
         }
         if ((ev.dayIndex + 1) % 7 === todayColIdx) {
           items.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: timeToMin(ev.endTime), segKind: 'head' });
