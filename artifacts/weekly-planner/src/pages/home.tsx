@@ -1988,19 +1988,20 @@ export default function WeeklyPlanner() {
       .catch(err => console.error('Failed to load events from backend database:', err))
       .finally(() => { eventsLoadedRef.current = true; setEventsLoading(false); });
 
-    const savedInt = localStorage.getItem(INTERVAL_KEY);
-    if (savedInt) setIntervalOpt(parseInt(savedInt) as IntervalMin);
-    const savedDark = localStorage.getItem(DARK_MODE_KEY);
-    if (savedDark === 'false') setDarkMode(false);
-    const savedFmt = localStorage.getItem(TIME_FORMAT_KEY);
-    if (savedFmt === '24h') setTimeFormat('24h');
-    const savedWeek = localStorage.getItem(WEEK_START_KEY);
-    if (savedWeek) setWeekStartsOn(parseInt(savedWeek) as WeekStartsOn);
-    const savedDayStart = localStorage.getItem(DAY_START_KEY);
-    if (savedDayStart) setDayStartH(parseInt(savedDayStart));
-    const savedDayEnd = localStorage.getItem(DAY_END_KEY);
-    if (savedDayEnd) setDayEndH(parseInt(savedDayEnd));
-    setShortcuts(loadShortcuts());
+    const localS = loadSettingsLocal();
+    setIntervalOpt(localS.interval);
+    setDarkMode(localS.darkMode);
+    setDarkPreset(localS.darkPreset);
+    setLightPreset(localS.lightPreset);
+    setWidgetDarkPreset(localS.widgetDarkPreset);
+    setWidgetLightPreset(localS.widgetLightPreset);
+    setEventColorStyle(localS.eventColorStyle);
+    setSidebarStyle(localS.sidebarStyle);
+    setTimeFormat(localS.timeFormat);
+    setWeekStartsOn(localS.weekStartsOn);
+    setDayStartH(localS.dayStartH);
+    setDayEndH(localS.dayEndH);
+    setShortcuts(localS.shortcuts);
     const savedZoom = parseFloat(localStorage.getItem(ZOOM_KEY) || '');
     if (Number.isFinite(savedZoom)) setAppZoom(clampZoom(savedZoom));
 

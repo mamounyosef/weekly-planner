@@ -1274,8 +1274,8 @@ export default function Widget() {
                 />
                 {/* Live time chip */}
                 <div
-                  className="absolute text-[9px] font-bold tabular-nums px-1.5 py-[1px] rounded-full whitespace-nowrap"
-                  style={{ right: 3, top: -8, background: nowAccent, color: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)', letterSpacing: '0.02em' }}
+                  className="absolute text-[9.5px] font-semibold tabular-nums px-1.5 py-[0.5px] rounded-full whitespace-nowrap tracking-tight"
+                  style={{ right: 3, top: -8.5, background: nowAccent, color: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)', letterSpacing: '0.03em' }}
                 >
                   {formatTimeLabel(nowMin, timeFormat)}
                 </div>
