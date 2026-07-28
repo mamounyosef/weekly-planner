@@ -3776,6 +3776,22 @@ export default function WeeklyPlanner() {
 
                     const isSpanning = sNorm < dayStartMin + 1440 && eNorm > dayStartMin + 1440;
 
+                    if (isDragging) {
+                      const phEv = { ...ev, isPlaceholder: true } as PlannerEvent;
+                      if (isSpanning) {
+                        if (effDayIndex === colIdx) {
+                          renderItems.push({ ev: phEv, key: `${ev.id}__tail_ph`, startMin: sNorm, endMin: dayStartMin + 1440, segKind: 'tail' });
+                        }
+                        if ((effDayIndex + 1) % 7 === colIdx) {
+                          renderItems.push({ ev: phEv, key: `${ev.id}__head_ph`, startMin: dayStartMin, endMin: eNorm - 1440, segKind: 'head' });
+                        }
+                      } else {
+                        if (effDayIndex === colIdx) {
+                          renderItems.push({ ev: phEv, key: `${ev.id}__ph`, startMin: sNorm, endMin: eNorm, segKind: 'normal' });
+                        }
+                      }
+                    }
+
                     if (isSpanning) {
                       if (effDayIndex === colIdx) {
                         renderItems.push({ ev, key: isDragging ? `${ev.id}__tail_drag` : ev.id, startMin: sNorm, endMin: dayStartMin + 1440, segKind: 'tail' });
@@ -3960,10 +3976,32 @@ export default function WeeklyPlanner() {
                           // Duration always reflects the event's true full start–end, not just this segment.
                           const fullStartMin = timeToMin(ev.startTime);
                           const fullEndMin   = timeToMin(ev.endTime);
-                          const sNormEv = normalizeMin(fullStartMin, dayStartH);
-                          let eNormEv = normalizeMin(fullEndMin, dayStartH);
+
+                          let activeStart24 = fullStartMin;
+                          let activeEnd24   = fullEndMin;
+
+                          if (isDrag && dragDisp) {
+                            const normS   = dragDisp.startMin;
+                            activeStart24 = normS >= 1440 ? normS - 1440 : normS;
+                            const dur     = normDuration(ev);
+                            activeEnd24   = (activeStart24 + dur) % 1440;
+                          } else if (isBatchDrag && batchDisp?.[ev.id]) {
+                            const normS   = batchDisp[ev.id].startMin;
+                            activeStart24 = normS >= 1440 ? normS - 1440 : normS;
+                            const dur     = normDuration(ev);
+                            activeEnd24   = (activeStart24 + dur) % 1440;
+                          } else if (isResize && resizeDisp) {
+                            const normS   = resizeDisp.startMin;
+                            activeStart24 = normS >= 1440 ? normS - 1440 : normS;
+                            const normE   = resizeDisp.endMin;
+                            activeEnd24   = normE >= 1440 ? normE - 1440 : normE;
+                          }
+
+                          const sNormEv = normalizeMin(activeStart24, dayStartH);
+                          let eNormEv   = normalizeMin(activeEnd24, dayStartH);
                           if (eNormEv <= sNormEv) eNormEv += 1440;
                           const spansBoundary = sNormEv < dayStartMin + 1440 && eNormEv > dayStartMin + 1440;
+
                           // "Live" is scoped to this segment's own on-screen range (each segment lives in a
                           // different day column, so at most one of tail/head is ever the active one).
                           const isLive   = isNowCol && normNowMin >= item.startMin && normNowMin < item.endMin;
@@ -3976,13 +4014,13 @@ export default function WeeklyPlanner() {
                               : segKind === 'head'
                                 ? fullEndMin - normNowMin
                                 : normalizeMin(fullEndMin, dayStartH) - normNowMin);
-                          // While a resize is in flight, the label tracks the dragged edges live
-                          // (resizeDisp is already normalized against the day-start hour).
-                          const durationMin = Math.max(0, resizeDisp?.id === ev.id
-                            ? resizeDisp.endMin - resizeDisp.startMin
-                            : spansBoundary
-                              ? fullEndMin - fullStartMin
-                              : normalizeMin(fullEndMin, dayStartH) - normalizeMin(fullStartMin, dayStartH));
+
+                          const durationMin = Math.max(0, (isDrag && dragDisp) || (isBatchDrag && batchDisp?.[ev.id])
+                            ? normDuration(ev)
+                            : isResize && resizeDisp
+                              ? resizeDisp.endMin - resizeDisp.startMin
+                              : eNormEv - sNormEv);
+
                           const durationLabel = durationMin < 60
                             ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
                             : durationMin % 60 === 0
@@ -4070,7 +4108,7 @@ export default function WeeklyPlanner() {
                               {isDrag && dragDisp && (
                                 <div className="absolute z-50 pointer-events-none" style={{ top: -24, left: '50%', transform: 'translateX(-50%)' }}>
                                   <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
-                                    {formatTimeLabel(dragDisp.startMin, timeFormat)} – {formatTimeLabel(dragDisp.startMin + durationMin, timeFormat)}
+                                    {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)} ({durationLabel})
                                   </div>
                                 </div>
                               )}
@@ -4170,7 +4208,7 @@ export default function WeeklyPlanner() {
                                       </div>
                                       {!tooShort && (
                                         <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: textMuted }}>
-                                          {formatTimeLabel(resizeDisp?.id === ev.id ? resizeDisp.startMin % 1440 : fullStartMin, timeFormat)} – {formatTimeLabel(resizeDisp?.id === ev.id ? resizeDisp.endMin % 1440 : fullEndMin, timeFormat)}
+                                          {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)}
                                           {isLive ? (
                                             <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                               <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
