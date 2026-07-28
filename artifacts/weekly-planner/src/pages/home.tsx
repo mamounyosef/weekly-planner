@@ -107,6 +107,14 @@ function formatDetailedDuration(seconds: number): string {
     return `${mins} minute${mins === 1 ? '' : 's'}`;
   }
 }
+
+function formatTimeLeft(mins: number): string {
+  if (mins <= 0) return '0m left';
+  if (mins < 60) return `${mins}m left`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `${h}h left` : `${h}h ${m}m left`;
+}
 import {
   type ShortcutAction,
   type ShortcutMap,
@@ -4296,7 +4304,7 @@ export default function WeeklyPlanner() {
                                         {isLive ? (
                                           <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                             <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
-                                            {minutesLeft}m left
+                                            {formatTimeLeft(minutesLeft)}
                                           </span>
                                         ) : (
                                           <span>({durationLabel})</span>

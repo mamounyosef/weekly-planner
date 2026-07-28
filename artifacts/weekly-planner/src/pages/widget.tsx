@@ -138,6 +138,14 @@ function formatSlotLabel(slot: string, fmt: TimeFormat): string {
   return formatTimeLabel(h * 60 + m, fmt);
 }
 
+function formatTimeLeft(mins: number): string {
+  if (mins <= 0) return '0m left';
+  if (mins < 60) return `${mins}m left`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `${h}h left` : `${h}h ${m}m left`;
+}
+
 function generateSlots(interval: IntervalMin, startH: number, endH: number): string[] {
   const slots: string[] = [];
   for (let h = startH; h < endH; h++) {
@@ -1347,7 +1355,7 @@ export default function Widget() {
                     {isLive ? (
                       <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                         <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
-                        {minutesLeft}m left
+                        {formatTimeLeft(minutesLeft)}
                       </span>
                     ) : (
                       <span>({durationLabel})</span>
@@ -1382,7 +1390,7 @@ export default function Widget() {
                       {isLive ? (
                         <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                           <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
-                          {minutesLeft}m left
+                          {formatTimeLeft(minutesLeft)}
                         </span>
                       ) : (
                         <span>({durationLabel})</span>
