@@ -19,7 +19,7 @@ import {
   subDays,
   differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -58,6 +58,40 @@ import {
   autoSessionId,
   dedupeFocusSessions,
 } from '@/lib/focusSessions';
+
+function parseDurationInput(str: string): number {
+  const cleaned = str.trim().toLowerCase();
+  if (!cleaned || cleaned === '0' || cleaned === '—' || cleaned === '-') return 0;
+
+  if (cleaned.includes(':')) {
+    const parts = cleaned.split(':');
+    const h = parseInt(parts[0], 10) || 0;
+    const m = parseInt(parts[1], 10) || 0;
+    return (h * 60 + m) * 60;
+  }
+
+  if (cleaned.includes('h') || cleaned.includes('m')) {
+    let totalSec = 0;
+    const hMatch = cleaned.match(/([\d.]+)\s*h/);
+    const mMatch = cleaned.match(/([\d.]+)\s*m/);
+    if (hMatch) totalSec += Math.round(parseFloat(hMatch[1]) * 3600);
+    if (mMatch) totalSec += Math.round(parseFloat(mMatch[1]) * 60);
+    return totalSec;
+  }
+
+  if (cleaned.includes('.')) {
+    const hours = parseFloat(cleaned);
+    return isNaN(hours) ? 0 : Math.round(hours * 3600);
+  }
+
+  const num = parseInt(cleaned, 10);
+  if (isNaN(num) || num <= 0) return 0;
+  if (num <= 12) {
+    return num * 3600;
+  } else {
+    return num * 60;
+  }
+}
 import {
   type ShortcutAction,
   type ShortcutMap,
@@ -692,6 +726,15 @@ export default function WeeklyPlanner() {
   const [analysisWeekCursor, setAnalysisWeekCursor]   = useState(() => new Date());
   const [analysisMonthCursor, setAnalysisMonthCursor] = useState(() => new Date());
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
+  const [editingFocusDayKey, setEditingFocusDayKey]   = useState<string | null>(null);
+  const [editingFocusInput, setEditingFocusInput]     = useState<string>('');
+  const [confirmFocusModal, setConfirmFocusModal]     = useState<{
+    date: Date;
+    dateKey: string;
+    label: string;
+    oldSeconds: number;
+    newSeconds: number;
+  } | null>(null);
   // Google Calendar Integration State
   const [gCalStatus, setGCalStatus] = useState<{
     configured: boolean;
@@ -1703,6 +1746,47 @@ export default function WeeklyPlanner() {
       body: JSON.stringify(sessions),
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
+
+  const commitFocusDayDuration = useCallback((dateKeyVal: string, dateVal: Date, newSeconds: number) => {
+    const remaining = focusSessions.filter(s => focusDayKey(s.endedAt, focusDayStartHour) !== dateKeyVal);
+    const updated = [...remaining];
+
+    if (newSeconds > 0) {
+      const endIso = `${dateKeyVal}T12:00:00.000Z`;
+      const startIso = new Date(new Date(endIso).getTime() - newSeconds * 1000).toISOString();
+      const newSession: FocusSession = {
+        id: `manual-${dateKeyVal}-${newSeconds}`,
+        startedAt: startIso,
+        endedAt: endIso,
+        durationSeconds: newSeconds,
+        plannedSeconds: newSeconds,
+      };
+      updated.push(newSession);
+    }
+
+    setFocusSessions(updated);
+    persistFocusSessions(updated, true);
+  }, [focusSessions, focusDayStartHour, persistFocusSessions]);
+
+  const startEditingFocusDay = (dKey: string, dDate: Date, currentSecs: number) => {
+    setEditingFocusDayKey(dKey);
+    setEditingFocusInput(currentSecs > 0 ? formatFocusDuration(currentSecs) : '');
+  };
+
+  const submitFocusDayEdit = (dKey: string, dDate: Date, currentSecs: number) => {
+    if (editingFocusDayKey !== dKey) return;
+    const parsedSecs = parseDurationInput(editingFocusInput);
+    setEditingFocusDayKey(null);
+    if (parsedSecs !== currentSecs) {
+      setConfirmFocusModal({
+        date: dDate,
+        dateKey: dKey,
+        label: format(dDate, 'EEEE, MMMM d, yyyy'),
+        oldSeconds: currentSecs,
+        newSeconds: parsedSecs,
+      });
+    }
+  };
 
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
@@ -4761,9 +4845,28 @@ export default function WeeklyPlanner() {
                         return (
                           <div key={d.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
                             {/* Exact time above each bar */}
-                            <div className="text-[10px] font-bold tabular-nums text-center truncate"
-                                 style={{ color: d.seconds > 0 ? (isTodayCol ? '#60a5fa' : menuText) : menuSub, opacity: d.seconds > 0 ? 1 : 0.5 }}>
-                              {d.seconds > 0 ? formatFocusDuration(d.seconds) : '—'}
+                            <div
+                              onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
+                              className="text-[10px] font-bold tabular-nums text-center truncate cursor-pointer"
+                              style={{ color: d.seconds > 0 ? (isTodayCol ? '#60a5fa' : menuText) : menuSub, opacity: d.seconds > 0 ? 1 : 0.5 }}
+                            >
+                              {editingFocusDayKey === d.key ? (
+                                <input
+                                  autoFocus
+                                  onFocus={e => e.target.select()}
+                                  value={editingFocusInput}
+                                  onChange={e => setEditingFocusInput(e.target.value)}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') submitFocusDayEdit(d.key, d.date, d.seconds);
+                                    if (e.key === 'Escape') setEditingFocusDayKey(null);
+                                  }}
+                                  onBlur={() => submitFocusDayEdit(d.key, d.date, d.seconds)}
+                                  className="w-16 text-center text-[10px] font-bold bg-transparent border-b outline-none"
+                                  style={{ color: menuText, borderColor: '#60a5fa' }}
+                                />
+                              ) : (
+                                <span>{d.seconds > 0 ? formatFocusDuration(d.seconds) : '—'}</span>
+                              )}
                             </div>
                             <div className="flex-1 flex items-end">
                               <div
@@ -4806,9 +4909,31 @@ export default function WeeklyPlanner() {
                             {format(d.date, 'EEEE, MMM d')}
                             {isSameDay(d.date, nowOwnerDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
                           </span>
-                          <span className="tabular-nums flex items-center gap-2" style={{ color: d.seconds > 0 ? menuText : menuSub }}>
-                            <span className="font-semibold">{formatFocusDuration(d.seconds)}</span>
-                            <span style={{ color: menuSub }}>· {d.sessions} session{d.sessions === 1 ? '' : 's'}</span>
+                          <span
+                            onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
+                            className="tabular-nums flex items-center gap-2 cursor-pointer"
+                            style={{ color: d.seconds > 0 ? menuText : menuSub }}
+                          >
+                            {editingFocusDayKey === d.key ? (
+                              <input
+                                autoFocus
+                                onFocus={e => e.target.select()}
+                                value={editingFocusInput}
+                                onChange={e => setEditingFocusInput(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') submitFocusDayEdit(d.key, d.date, d.seconds);
+                                  if (e.key === 'Escape') setEditingFocusDayKey(null);
+                                }}
+                                onBlur={() => submitFocusDayEdit(d.key, d.date, d.seconds)}
+                                className="w-20 text-right text-xs font-semibold bg-transparent border-b outline-none"
+                                style={{ color: menuText, borderColor: '#60a5fa' }}
+                              />
+                            ) : (
+                              <>
+                                <span className="font-semibold">{formatFocusDuration(d.seconds)}</span>
+                                <span style={{ color: menuSub }}>· {d.sessions} session{d.sessions === 1 ? '' : 's'}</span>
+                              </>
+                            )}
                           </span>
                         </div>
                       ))}
@@ -4887,10 +5012,31 @@ export default function WeeklyPlanner() {
                             </span>
                             {/* Exact time for this day, always visible — not just in the tooltip. */}
                             <span
-                              className="text-[15px] font-bold tabular-nums leading-none"
+                              onDoubleClick={(e) => {
+                                e.stopPropagation();
+                                startEditingFocusDay(key, d, secs);
+                              }}
+                              className="text-[15px] font-bold tabular-nums leading-none cursor-pointer"
                               style={{ color: secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub, opacity: secs > 0 ? 1 : 0.45 }}
                             >
-                              {secs > 0 ? formatFocusDuration(secs) : '—'}
+                              {editingFocusDayKey === key ? (
+                                <input
+                                  autoFocus
+                                  onFocus={e => e.target.select()}
+                                  value={editingFocusInput}
+                                  onChange={e => setEditingFocusInput(e.target.value)}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') submitFocusDayEdit(key, d, secs);
+                                    if (e.key === 'Escape') setEditingFocusDayKey(null);
+                                  }}
+                                  onBlur={() => submitFocusDayEdit(key, d, secs)}
+                                  className="w-14 text-center text-xs font-bold bg-transparent border-b outline-none"
+                                  style={{ color: hot ? '#fff' : menuText, borderColor: '#60a5fa' }}
+                                  onClick={e => e.stopPropagation()}
+                                />
+                              ) : (
+                                <span>{secs > 0 ? formatFocusDuration(secs) : '—'}</span>
+                              )}
                             </span>
                             {sessions > 0 && (
                               <span className="text-[11px] font-bold tabular-nums leading-none" style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
@@ -4993,6 +5139,82 @@ export default function WeeklyPlanner() {
         )}
       </AnimatePresence>
     </main>
+
+      {/* Focus Day Edit Confirmation Modal */}
+      {confirmFocusModal && (
+        <div
+          className="fixed inset-0 z-[300] flex items-center justify-center p-4"
+          style={{ backgroundColor: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)' }}
+          onClick={() => setConfirmFocusModal(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl p-6 border shadow-2xl relative"
+            style={{ background: surfaceBg, borderColor: surfaceBdr, color: menuText }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-blue-500/10 text-blue-400">
+                <Clock size={20} />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold">Modify Focus Time</h3>
+                <p className="text-xs" style={{ color: menuSub }}>{confirmFocusModal.label}</p>
+              </div>
+            </div>
+
+            <div className="rounded-xl p-3.5 mb-4 space-y-2 border" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderColor: surfaceBdr }}>
+              <div className="flex items-center justify-between text-xs font-medium">
+                <span style={{ color: menuSub }}>Previous value:</span>
+                <span className="tabular-nums font-semibold">
+                  {formatFocusDuration(confirmFocusModal.oldSeconds)}
+                  <span style={{ color: menuSub }} className="ml-1 font-normal">
+                    ({Math.round(confirmFocusModal.oldSeconds / 60)} minutes)
+                  </span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs font-medium">
+                <span style={{ color: menuSub }}>New value:</span>
+                <span className="tabular-nums font-bold text-blue-400">
+                  {formatFocusDuration(confirmFocusModal.newSeconds)}
+                  <span style={{ color: menuSub }} className="ml-1 font-normal">
+                    ({Math.round(confirmFocusModal.newSeconds / 60)} minutes)
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-xl p-3 mb-5 border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs flex items-start gap-2.5">
+              <AlertTriangle size={16} className="flex-shrink-0 mt-0.5 text-amber-400" />
+              <div>
+                <span className="font-semibold block mb-0.5">Permanent Database Action</span>
+                This action directly updates your focus-sessions.json database for this specific day. This change cannot be undone.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setConfirmFocusModal(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: menuText }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => {
+                  commitFocusDayDuration(confirmFocusModal.dateKey, confirmFocusModal.date, confirmFocusModal.newSeconds);
+                  setConfirmFocusModal(null);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white shadow-md transition-colors cursor-pointer"
+              >
+                Confirm & Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Keyboard shortcut help overlay ───────────────────────────────── */}
       <AnimatePresence>
