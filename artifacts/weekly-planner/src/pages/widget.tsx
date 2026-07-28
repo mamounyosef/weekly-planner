@@ -1251,10 +1251,34 @@ export default function Widget() {
           {/* Live time indicator */}
           {nowInView && (() => {
             const lineTop = minToY(normNowMin, interval, dayStartH);
+            const nowAccent     = darkMode ? '#ff6b6b' : '#e5484d';
+            const nowAccentSoft = darkMode ? 'rgba(255,107,107,0.22)' : 'rgba(229,72,77,0.18)';
             return (
               <div className="absolute left-0 right-0 z-30 pointer-events-none" style={{ top: lineTop, height: 0 }}>
-                <div className="absolute -left-[1.5px]" style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', top: -3 }} />
-                <div className="absolute left-0 right-0" style={{ height: 1.5, background: '#ef4444', opacity: 0.65 }} />
+                {/* Soft glow behind the line so it reads without shouting */}
+                <div
+                  className="absolute left-0 right-0"
+                  style={{ height: 12, top: -6, background: `linear-gradient(to bottom, transparent, ${nowAccentSoft}, transparent)` }}
+                />
+                {/* Pulsing dot with a matching halo */}
+                <motion.div
+                  className="absolute -left-[2px]"
+                  style={{ width: 9, height: 9, borderRadius: '50%', background: nowAccent, top: -3.5, boxShadow: `0 0 0 3px ${nowAccentSoft}` }}
+                  animate={{ opacity: [0.65, 1, 0.65], scale: [0.92, 1.08, 0.92] }}
+                  transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
+                />
+                {/* Hairline that fades out toward the right edge */}
+                <div
+                  className="absolute left-0 right-0"
+                  style={{ height: 1.5, background: `linear-gradient(to right, ${nowAccent}, ${nowAccent} 65%, ${nowAccentSoft})`, opacity: 0.9 }}
+                />
+                {/* Live time chip */}
+                <div
+                  className="absolute text-[9px] font-bold tabular-nums px-1.5 py-[1px] rounded-full whitespace-nowrap"
+                  style={{ right: 3, top: -8, background: nowAccent, color: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)', letterSpacing: '0.02em' }}
+                >
+                  {formatTimeLabel(nowMin, timeFormat)}
+                </div>
               </div>
             );
           })()}
