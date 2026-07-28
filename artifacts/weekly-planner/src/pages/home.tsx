@@ -744,6 +744,7 @@ export default function WeeklyPlanner() {
 
   const resizeRef = useRef<{
     eventId: string; edge: 'top' | 'bottom'; startMin: number; endMin: number;
+    isHeadClick?: boolean; isTailClick?: boolean;
   } | null>(null);
 
   const [dragDisp, setDragDisp]     = useState<{ id: string; day: number; startMin: number } | null>(null);
@@ -2692,7 +2693,7 @@ export default function WeeklyPlanner() {
           targetDay = (coords.dayIndex - 1 + 7) % 7;
           rawStart = coords.snappedMin + 1440 - dr.offsetMin;
         }
-        const maxStart = dayStartMin + 1440 - dr.durationMin;
+        const maxStart = dayEndMin - POSITION_SNAP;
         const newStart = clamp(snapMin(rawStart, POSITION_SNAP), dayStartMin, maxStart);
         dr.curDay = targetDay; dr.curStartMin = newStart;
         setDragDisp({ id: dr.eventId, day: targetDay, startMin: newStart });
@@ -2702,11 +2703,23 @@ export default function WeeklyPlanner() {
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
         if (rr.edge === 'bottom') {
-          const newEnd = clamp(snapMin(coords.snappedMin + POSITION_SNAP, POSITION_SNAP), rr.startMin + POSITION_SNAP, dayEndMin);
+          let targetEnd = coords.snappedMin;
+          if (rr.isHeadClick || coords.dayIndex === ((weekEventsRef.current[rr.eventId] ?? eventsRef.current[rr.eventId])?.dayIndex ?? 0) + 1) {
+            targetEnd = coords.snappedMin + 1440;
+          }
+          const minEnd = rr.startMin + POSITION_SNAP;
+          const maxEnd = rr.startMin + 1440;
+          const newEnd = clamp(snapMin(targetEnd, POSITION_SNAP), minEnd, maxEnd);
           rr.endMin = newEnd;
           setResizeDisp({ id: rr.eventId, startMin: rr.startMin, endMin: newEnd });
         } else {
-          const newStart = clamp(snapMin(coords.snappedMin, POSITION_SNAP), dayStartMin, rr.endMin - POSITION_SNAP);
+          let targetStart = coords.snappedMin;
+          if (rr.isHeadClick) {
+            targetStart = coords.snappedMin + 1440;
+          }
+          const minStart = dayStartMin;
+          const maxStart = rr.endMin - POSITION_SNAP;
+          const newStart = clamp(snapMin(targetStart, POSITION_SNAP), minStart, maxStart);
           rr.startMin = newStart;
           setResizeDisp({ id: rr.eventId, startMin: newStart, endMin: rr.endMin });
         }
@@ -2907,12 +2920,16 @@ export default function WeeklyPlanner() {
     };
   };
 
-  const handleResizeMouseDown = (e: React.MouseEvent, ev: PlannerEvent, edge: 'top' | 'bottom') => {
+  const handleResizeMouseDown = (e: React.MouseEvent, ev: PlannerEvent, edge: 'top' | 'bottom', segKind?: 'normal' | 'tail' | 'head') => {
     e.preventDefault(); e.stopPropagation();
     const startMin = normalizeMin(timeToMin(ev.startTime), dayStartH);
     let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
     if (endMin <= startMin) endMin += 1440;
-    resizeRef.current = { eventId: ev.id, edge, startMin, endMin };
+    resizeRef.current = {
+      eventId: ev.id, edge, startMin, endMin,
+      isHeadClick: segKind === 'head',
+      isTailClick: segKind === 'tail'
+    };
     // Mark this as a drag gesture: releasing over empty grid must not be read as a
     // click that creates a new item there (cleared shortly after mouseup).
     didDragRef.current = true;
@@ -4076,7 +4093,7 @@ export default function WeeklyPlanner() {
 
                               {/* Top resize handle */}
                               {segKind !== 'head' && (
-                                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 'n-resize', marginTop: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top')}>
+                                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 'n-resize', marginTop: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top', segKind)}>
                                   <div className="rounded-full" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.55 : 0.3, pointerEvents: 'none' }} />
                                 </div>
                               )}
@@ -4171,7 +4188,7 @@ export default function WeeklyPlanner() {
 
                               {/* Bottom resize handle */}
                               {segKind !== 'tail' && (
-                                <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 's-resize', marginBottom: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom')}>
+                                <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center" style={{ height: 10, cursor: 's-resize', marginBottom: -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom', segKind)}>
                                   <div className="rounded-full" style={{ width: 28, height: 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.55 : 0.3, pointerEvents: 'none' }} />
                                 </div>
                               )}
