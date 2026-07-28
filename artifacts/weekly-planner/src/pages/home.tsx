@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { useLocation } from 'wouter';
-import { flushSync } from 'react-dom';
+import { createPortal, flushSync } from 'react-dom';
 import {
   format,
   addWeeks,
@@ -90,6 +90,21 @@ function parseDurationInput(str: string): number {
     return num * 3600;
   } else {
     return num * 60;
+  }
+}
+
+function formatDetailedDuration(seconds: number): string {
+  if (seconds <= 0) return '0 minutes (Cleared)';
+  const totalMins = Math.round(seconds / 60);
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+
+  if (hours > 0 && mins > 0) {
+    return `${hours} hour${hours === 1 ? '' : 's'}, ${mins} minute${mins === 1 ? '' : 's'} (${totalMins} mins total)`;
+  } else if (hours > 0) {
+    return `${hours} hour${hours === 1 ? '' : 's'} (${totalMins} mins total)`;
+  } else {
+    return `${mins} minute${mins === 1 ? '' : 's'}`;
   }
 }
 import {
@@ -1768,15 +1783,22 @@ export default function WeeklyPlanner() {
     persistFocusSessions(updated, true);
   }, [focusSessions, focusDayStartHour, persistFocusSessions]);
 
-  const startEditingFocusDay = (dKey: string, dDate: Date, currentSecs: number) => {
+  const submittingEditRef = useRef(false);
+
+  const startEditingFocusDay = useCallback((dKey: string, dDate: Date, currentSecs: number) => {
+    submittingEditRef.current = false;
     setEditingFocusDayKey(dKey);
     setEditingFocusInput(currentSecs > 0 ? formatFocusDuration(currentSecs) : '');
-  };
+  }, []);
 
-  const submitFocusDayEdit = (dKey: string, dDate: Date, currentSecs: number) => {
-    if (editingFocusDayKey !== dKey) return;
-    const parsedSecs = parseDurationInput(editingFocusInput);
+  const submitFocusDayEdit = useCallback((dKey: string, dDate: Date, currentSecs: number, rawVal?: string) => {
+    if (submittingEditRef.current) return;
+    submittingEditRef.current = true;
+
+    const textToParse = rawVal !== undefined ? rawVal : editingFocusInput;
+    const parsedSecs = parseDurationInput(textToParse);
     setEditingFocusDayKey(null);
+
     if (parsedSecs !== currentSecs) {
       setConfirmFocusModal({
         date: dDate,
@@ -1786,7 +1808,7 @@ export default function WeeklyPlanner() {
         newSeconds: parsedSecs,
       });
     }
-  };
+  }, [editingFocusInput]);
 
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
@@ -4857,10 +4879,16 @@ export default function WeeklyPlanner() {
                                   value={editingFocusInput}
                                   onChange={e => setEditingFocusInput(e.target.value)}
                                   onKeyDown={e => {
-                                    if (e.key === 'Enter') submitFocusDayEdit(d.key, d.date, d.seconds);
-                                    if (e.key === 'Escape') setEditingFocusDayKey(null);
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      submitFocusDayEdit(d.key, d.date, d.seconds, e.currentTarget.value);
+                                    }
+                                    if (e.key === 'Escape') {
+                                      submittingEditRef.current = true;
+                                      setEditingFocusDayKey(null);
+                                    }
                                   }}
-                                  onBlur={() => submitFocusDayEdit(d.key, d.date, d.seconds)}
+                                  onBlur={e => submitFocusDayEdit(d.key, d.date, d.seconds, e.target.value)}
                                   className="w-16 text-center text-[10px] font-bold bg-transparent border-b outline-none"
                                   style={{ color: menuText, borderColor: '#60a5fa' }}
                                 />
@@ -4921,10 +4949,16 @@ export default function WeeklyPlanner() {
                                 value={editingFocusInput}
                                 onChange={e => setEditingFocusInput(e.target.value)}
                                 onKeyDown={e => {
-                                  if (e.key === 'Enter') submitFocusDayEdit(d.key, d.date, d.seconds);
-                                  if (e.key === 'Escape') setEditingFocusDayKey(null);
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    submitFocusDayEdit(d.key, d.date, d.seconds, e.currentTarget.value);
+                                  }
+                                  if (e.key === 'Escape') {
+                                    submittingEditRef.current = true;
+                                    setEditingFocusDayKey(null);
+                                  }
                                 }}
-                                onBlur={() => submitFocusDayEdit(d.key, d.date, d.seconds)}
+                                onBlur={e => submitFocusDayEdit(d.key, d.date, d.seconds, e.target.value)}
                                 className="w-20 text-right text-xs font-semibold bg-transparent border-b outline-none"
                                 style={{ color: menuText, borderColor: '#60a5fa' }}
                               />
@@ -5026,10 +5060,16 @@ export default function WeeklyPlanner() {
                                   value={editingFocusInput}
                                   onChange={e => setEditingFocusInput(e.target.value)}
                                   onKeyDown={e => {
-                                    if (e.key === 'Enter') submitFocusDayEdit(key, d, secs);
-                                    if (e.key === 'Escape') setEditingFocusDayKey(null);
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      submitFocusDayEdit(key, d, secs, e.currentTarget.value);
+                                    }
+                                    if (e.key === 'Escape') {
+                                      submittingEditRef.current = true;
+                                      setEditingFocusDayKey(null);
+                                    }
                                   }}
-                                  onBlur={() => submitFocusDayEdit(key, d, secs)}
+                                  onBlur={e => submitFocusDayEdit(key, d, secs, e.target.value)}
                                   className="w-14 text-center text-xs font-bold bg-transparent border-b outline-none"
                                   style={{ color: hot ? '#fff' : menuText, borderColor: '#60a5fa' }}
                                   onClick={e => e.stopPropagation()}
@@ -5141,15 +5181,15 @@ export default function WeeklyPlanner() {
     </main>
 
       {/* Focus Day Edit Confirmation Modal */}
-      {confirmFocusModal && (
+      {confirmFocusModal && createPortal(
         <div
-          className="fixed inset-0 z-[300] flex items-center justify-center p-4"
+          className="fixed inset-0 z-[99999] flex items-center justify-center p-4"
           style={{ backgroundColor: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)' }}
           onClick={() => setConfirmFocusModal(null)}
         >
           <div
-            className="w-full max-w-md rounded-2xl p-6 border shadow-2xl relative"
-            style={{ background: surfaceBg, borderColor: surfaceBdr, color: menuText }}
+            className="w-full max-w-md rounded-2xl p-6 border shadow-2xl relative animate-in fade-in zoom-in-95 duration-150"
+            style={{ background: darkMode ? '#18181b' : '#ffffff', borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)', color: darkMode ? '#ffffff' : '#09090b' }}
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center gap-3 mb-4">
@@ -5158,32 +5198,26 @@ export default function WeeklyPlanner() {
               </div>
               <div>
                 <h3 className="text-base font-semibold">Modify Focus Time</h3>
-                <p className="text-xs" style={{ color: menuSub }}>{confirmFocusModal.label}</p>
+                <p className="text-xs" style={{ color: darkMode ? '#a1a1aa' : '#71717a' }}>{confirmFocusModal.label}</p>
               </div>
             </div>
 
-            <div className="rounded-xl p-3.5 mb-4 space-y-2 border" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderColor: surfaceBdr }}>
+            <div className="rounded-xl p-3.5 mb-4 space-y-2.5 border" style={{ background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)', borderColor: darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.10)' }}>
               <div className="flex items-center justify-between text-xs font-medium">
-                <span style={{ color: menuSub }}>Previous value:</span>
-                <span className="tabular-nums font-semibold">
-                  {formatFocusDuration(confirmFocusModal.oldSeconds)}
-                  <span style={{ color: menuSub }} className="ml-1 font-normal">
-                    ({Math.round(confirmFocusModal.oldSeconds / 60)} minutes)
-                  </span>
+                <span style={{ color: darkMode ? '#a1a1aa' : '#71717a' }}>Previous value:</span>
+                <span className="tabular-nums font-semibold text-right">
+                  {formatDetailedDuration(confirmFocusModal.oldSeconds)}
                 </span>
               </div>
               <div className="flex items-center justify-between text-xs font-medium">
-                <span style={{ color: menuSub }}>New value:</span>
-                <span className="tabular-nums font-bold text-blue-400">
-                  {formatFocusDuration(confirmFocusModal.newSeconds)}
-                  <span style={{ color: menuSub }} className="ml-1 font-normal">
-                    ({Math.round(confirmFocusModal.newSeconds / 60)} minutes)
-                  </span>
+                <span style={{ color: darkMode ? '#a1a1aa' : '#71717a' }}>New value:</span>
+                <span className="tabular-nums font-bold text-blue-400 text-right">
+                  {formatDetailedDuration(confirmFocusModal.newSeconds)}
                 </span>
               </div>
             </div>
 
-            <div className="rounded-xl p-3 mb-5 border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs flex items-start gap-2.5">
+            <div className="rounded-xl p-3 mb-5 border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs flex items-start gap-2.5">
               <AlertTriangle size={16} className="flex-shrink-0 mt-0.5 text-amber-400" />
               <div>
                 <span className="font-semibold block mb-0.5">Permanent Database Action</span>
@@ -5196,7 +5230,7 @@ export default function WeeklyPlanner() {
                 type="button"
                 onClick={() => setConfirmFocusModal(null)}
                 className="px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
-                style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: menuText }}
+                style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: darkMode ? '#ffffff' : '#09090b' }}
               >
                 Cancel
               </button>
@@ -5213,7 +5247,8 @@ export default function WeeklyPlanner() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ── Keyboard shortcut help overlay ───────────────────────────────── */}
