@@ -4289,6 +4289,18 @@ export default function WeeklyPlanner() {
                                   const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
                                   return (
                                     <>
+                                      {/* Top time label */}
+                                      <span className="text-[9.5px] font-semibold tabular-nums flex-shrink-0 mb-0.5 flex items-center gap-1 opacity-90" style={{ color: textMuted }}>
+                                        {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)}
+                                        {isLive ? (
+                                          <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                            <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
+                                            {minutesLeft}m left
+                                          </span>
+                                        ) : (
+                                          <span>({durationLabel})</span>
+                                        )}
+                                      </span>
                                       <div className="flex items-start gap-1.5 flex-1 min-h-0">
                                         {today && !ev.noCheckbox && (
                                           <button
