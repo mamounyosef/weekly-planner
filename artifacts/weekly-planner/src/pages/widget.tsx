@@ -439,10 +439,11 @@ export default function Widget() {
   // hour and ends after it (e.g. sleep from 1:15am to 9:45am with a 7am day cutoff) —
   // it renders as a linked tail (in its own day) + head (in the next day) segment.
   const isBoundarySpanning = useCallback((ev: PlannerEvent) => {
-    const s = timeToMin(ev.startTime);
-    const e = timeToMin(ev.endTime);
-    return s < dayStartMin && e >= dayStartMin;
-  }, [dayStartMin]);
+    const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
+    let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
+    if (e <= s) e += 1440;
+    return s < dayStartMin + 1440 && e > dayStartMin + 1440;
+  }, [dayStartH, dayStartMin]);
 
   const colEvents = useMemo(() => {
     if (todayColIdx === -1) return [];
@@ -450,11 +451,14 @@ export default function Widget() {
     for (const ev of Object.values(weekEvents)) {
       if (ev.allDay) continue; // Skip all-day events in the timeline scroll area
       if (isBoundarySpanning(ev)) {
+        const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
+        let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
+        if (e <= s) e += 1440;
         if (ev.dayIndex === todayColIdx) {
-          items.push({ ev, key: ev.id, startMin: timeToMin(ev.startTime) + 1440, endMin: dayStartMin + 1440, segKind: 'tail' });
+          items.push({ ev, key: ev.id, startMin: s, endMin: dayStartMin + 1440, segKind: 'tail' });
         }
         if ((ev.dayIndex + 1) % 7 === todayColIdx) {
-          items.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: timeToMin(ev.endTime), segKind: 'head' });
+          items.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: e - 1440, segKind: 'head' });
         }
         continue;
       }

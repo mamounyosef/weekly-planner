@@ -3716,9 +3716,10 @@ export default function WeeklyPlanner() {
                   // 7am day cutoff) — it can't be drawn as one block in a single column, so it
                   // renders as a linked tail (in its own day) + head (in the next day) segment.
                   const isBoundarySpanning = (ev: PlannerEvent) => {
-                    const s = timeToMin(ev.startTime);
-                    const e = timeToMin(ev.endTime);
-                    return s < dayStartMin && e >= dayStartMin;
+                    const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
+                    let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
+                    if (e <= s) e += 1440;
+                    return s < dayStartMin + 1440 && e > dayStartMin + 1440;
                   };
 
                   type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
@@ -3752,21 +3753,21 @@ export default function WeeklyPlanner() {
                       effEnd24    = (effStart24 + dur) % 1440;
                     }
 
-                    const isSpanning = effStart24 < dayStartMin && effEnd24 >= dayStartMin;
-
-                    if (isSpanning) {
-                      if (effDayIndex === colIdx) {
-                        renderItems.push({ ev, key: isDragging ? `${ev.id}__tail_drag` : ev.id, startMin: effStart24 + 1440, endMin: dayStartMin + 1440, segKind: 'tail' });
-                      }
-                      if ((effDayIndex + 1) % 7 === colIdx) {
-                        renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: effEnd24, segKind: 'head' });
-                      }
-                      continue;
-                    }
-                    
                     const sNorm = normalizeMin(effStart24, dayStartH);
                     let eNorm   = normalizeMin(effEnd24, dayStartH);
                     if (eNorm <= sNorm) eNorm += 1440;
+
+                    const isSpanning = sNorm < dayStartMin + 1440 && eNorm > dayStartMin + 1440;
+
+                    if (isSpanning) {
+                      if (effDayIndex === colIdx) {
+                        renderItems.push({ ev, key: isDragging ? `${ev.id}__tail_drag` : ev.id, startMin: sNorm, endMin: dayStartMin + 1440, segKind: 'tail' });
+                      }
+                      if ((effDayIndex + 1) % 7 === colIdx) {
+                        renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: eNorm - 1440, segKind: 'head' });
+                      }
+                      continue;
+                    }
 
                     if (effDayIndex === colIdx) {
                       renderItems.push({ ev, key: ev.id, startMin: sNorm, endMin: eNorm, segKind: 'normal' });
@@ -3942,7 +3943,10 @@ export default function WeeklyPlanner() {
                           // Duration always reflects the event's true full start–end, not just this segment.
                           const fullStartMin = timeToMin(ev.startTime);
                           const fullEndMin   = timeToMin(ev.endTime);
-                          const spansBoundary = fullStartMin < dayStartMin && fullEndMin >= dayStartMin;
+                          const sNormEv = normalizeMin(fullStartMin, dayStartH);
+                          let eNormEv = normalizeMin(fullEndMin, dayStartH);
+                          if (eNormEv <= sNormEv) eNormEv += 1440;
+                          const spansBoundary = sNormEv < dayStartMin + 1440 && eNormEv > dayStartMin + 1440;
                           // "Live" is scoped to this segment's own on-screen range (each segment lives in a
                           // different day column, so at most one of tail/head is ever the active one).
                           const isLive   = isNowCol && normNowMin >= item.startMin && normNowMin < item.endMin;
