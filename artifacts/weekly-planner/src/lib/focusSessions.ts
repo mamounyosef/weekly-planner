@@ -25,6 +25,84 @@ export const FOCUS_SESSIONS_KEY = 'planner-focus-sessions';
 export const FOCUS_TIMER_KEY = 'planner-focus-timer';
 export const MIN_COMPLETED_SESSION_SECONDS = 20 * 60;
 
+// ── Shutdown / sleep recovery ───────────────────────────────────────────────
+// The running timer is just a start timestamp, so a PC that is switched off
+// mid-session leaves it "running" for as long as the machine is away. On the
+// next launch the countdown was already past zero, so the session auto-completed
+// for its FULL planned length and got stamped with the current time — a whole
+// hour of focus landing on the wrong day, hours after the machine went to sleep.
+//
+// The fix is a heartbeat: while a session runs, every live window tells the
+// server "this session was still alive at <time>, with <n> seconds on it". If
+// that stamp is old, nobody was watching, and the true end of the session is the
+// heartbeat — not now, and not the planned duration.
+export interface FocusHeartbeat {
+  at: string;
+  sessionStartedAt: string | null;
+  elapsedSeconds: number;
+}
+
+export const FOCUS_HEARTBEAT_INTERVAL_MS = 10_000;
+/** Older than this and we treat the machine as having been away. */
+export const FOCUS_HEARTBEAT_STALE_MS = 90_000;
+/** Anything shorter than this isn't worth logging as a session. */
+export const MIN_RECOVERED_SESSION_SECONDS = 60;
+
+export function safeFocusHeartbeat(value: unknown): FocusHeartbeat | null {
+  if (!value || typeof value !== 'object') return null;
+  const b = value as Partial<FocusHeartbeat>;
+  if (typeof b.at !== 'string' || Number.isNaN(Date.parse(b.at))) return null;
+  return {
+    at: b.at,
+    sessionStartedAt: typeof b.sessionStartedAt === 'string' ? b.sessionStartedAt : null,
+    elapsedSeconds: Math.max(0, Number(b.elapsedSeconds) || 0),
+  };
+}
+
+export interface FocusRecovery {
+  /** When the session actually stopped — the last moment a window saw it alive. */
+  endedAt: string;
+  durationSeconds: number;
+}
+
+/**
+ * Decide whether the "running" timer is actually the ghost of a session that
+ * died with the machine, and if so where it really ended. Returns null for a
+ * genuinely live session.
+ */
+export function focusRecoveryFor(
+  timer: FocusTimerState,
+  beat: FocusHeartbeat | null,
+  now = Date.now(),
+): FocusRecovery | null {
+  if (!timer.isRunning || !timer.sessionStartedAt) return null;
+
+  const matched = beat && beat.sessionStartedAt === timer.sessionStartedAt ? beat : null;
+  if (matched) {
+    if (now - Date.parse(matched.at) <= FOCUS_HEARTBEAT_STALE_MS) return null; // alive
+    return {
+      endedAt: matched.at,
+      durationSeconds: Math.min(Math.floor(matched.elapsedSeconds), timer.plannedSeconds),
+    };
+  }
+
+  // No heartbeat for this session (it predates the heartbeat, or the file was
+  // lost). We can't know when it stopped, so only act once it has overrun well
+  // past its planned length — which only happens unattended — and credit it at
+  // the moment it would have finished rather than now.
+  const elapsed = getFocusTimerElapsedSeconds(timer, now);
+  if (elapsed <= timer.plannedSeconds + FOCUS_HEARTBEAT_STALE_MS / 1000) return null;
+  return {
+    endedAt: new Date(Date.parse(timer.sessionStartedAt) + timer.plannedSeconds * 1000).toISOString(),
+    durationSeconds: timer.plannedSeconds,
+  };
+}
+
+/** Deterministic, so two windows recovering the same session log it once. */
+export function recoveredSessionId(sessionStartedAt: string | null): string {
+  return `recovered-${sessionStartedAt ?? 'unknown'}`;
+}
+
 export function isCompletedFocusSession(session: FocusSession): boolean {
   return session.durationSeconds >= MIN_COMPLETED_SESSION_SECONDS;
 }

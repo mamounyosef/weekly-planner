@@ -123,6 +123,7 @@ function autoBackupPaths(rootDir: string) {
     dbPath:       path.resolve(rootDir, 'database', 'database.json'),
     settingsPath: path.resolve(rootDir, 'database', 'settings.json'),
     sessionsPath: path.resolve(rootDir, 'database', 'focus-sessions.json'),
+    tasksPath:    path.resolve(rootDir, 'database', 'tasks.json'),
     statePath:    path.resolve(rootDir, 'database', 'auto-backup-state.json'),
     outDir:       path.resolve(rootDir, 'backups'),
   };
@@ -155,12 +156,14 @@ async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') 
     : 0;
 
   const payload = {
-    backupFormatVersion: 2,
+    // v3 adds `tasks`. Readers must accept 2 (no tasks) and 3.
+    backupFormatVersion: 3,
     exportedAt: new Date().toISOString(),
     source: reason,
     events,
     settings,
     focusSessions: await readJsonSafe(p.sessionsPath, []),
+    tasks: await readJsonSafe(p.tasksPath, {}),
   };
 
   await fsp.mkdir(p.outDir, { recursive: true });
@@ -276,6 +279,10 @@ export default defineConfig({
                 tokens.refresh_token = tokenData.refresh_token;
               }
               tokens.expires_at = Date.now() + tokenData.expires_in * 1000;
+              // Record which scopes this token actually carries. Tokens minted before
+              // Tasks support have calendar-only scope, and every Tasks call made with
+              // one 403s — persisting this is how the UI knows to ask for a reconnect.
+              if (tokenData.scope) tokens.scope = tokenData.scope;
 
               await safeWriteJsonFile({
                 filePath: tokensPath,
@@ -433,6 +440,399 @@ export default defineConfig({
             if (ev.recur || !ev.weekKey) return null;
             const weekStartDate = new Date(ev.weekKey + 'T00:00:00');
             return addDays(weekStartDate, ev.dayIndex || 0);
+          }
+
+          // ── Google Tasks sync ──────────────────────────────────────────────
+          // Mirrors runGoogleSync's contract: returns the IDENTICAL input object
+          // when it bails, so the endpoint knows not to persist.
+          //
+          // Two API limits shape everything here:
+          //   • `due` is date-only — "the time portion of the timestamp is
+          //     discarded… It isn't possible to read or write the time that a task
+          //     is scheduled for using the API". Time travels as a `⏰ HH:MM`
+          //     marker line in `notes` (see lib/tasks.ts).
+          //   • There is NO recurrence field. The repeat rule lives only in the
+          //     planner; Google holds exactly ONE task per series — the next due
+          //     occurrence — which the roll-forward pass advances.
+          const TASK_LIST_TITLE = 'Daily Tasks';
+          const TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
+          let isTasksSyncing = false;
+
+          async function runGoogleTasksSync(clientTasks, todayYmdOpt, weekStartsOnOpt = 0) {
+            if (isTasksSyncing) return clientTasks;
+            isTasksSyncing = true;
+            try {
+              const accessToken = await getGoogleToken();
+              if (!accessToken) return clientTasks;
+
+              // Bail before making a single call if Tasks wasn't authorised — the
+              // alternative is a 403 on every request, every four minutes.
+              try {
+                const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+                if (!String(toks.scope || '').includes('/auth/tasks')) return clientTasks;
+              } catch (_) { return clientTasks; }
+
+              const { addDays, differenceInDays, format, startOfWeek } = await import('date-fns');
+              const {
+                composeTaskNotes, parseTaskNotes, nextOpenOccurrence, dueDateOf,
+              } = await server.ssrLoadModule('/src/lib/tasks.ts');
+              const { weekKeyOf } = await server.ssrLoadModule('/src/lib/recurrence.ts');
+
+              // Write a due date onto a task in the anchor form the app stores
+              // (weekKey + dayIndex). Doing it here rather than shipping a
+              // `dueDate` field back keeps one representation of the date.
+              const setDue = (t, ymd) => {
+                if (!ymd) return { ...t, weekKey: undefined, dayIndex: undefined };
+                const d = new Date(`${ymd}T00:00:00`);
+                return {
+                  ...t,
+                  weekKey: weekKeyOf(d, weekStartsOnOpt),
+                  dayIndex: differenceInDays(d, startOfWeek(d, { weekStartsOn: weekStartsOnOpt })),
+                };
+              };
+
+              const auth = { Authorization: `Bearer ${accessToken}` };
+              const jsonAuth = { ...auth, 'Content-Type': 'application/json' };
+              const today = todayYmdOpt || format(new Date(), 'yyyy-MM-dd');
+              const now = Date.now();
+              const localMap = { ...clientTasks };
+              let changed = false;
+
+              // ── 0. Find (or create) the "Daily Tasks" list ─────────────────
+              let listId = null;
+              let pageToken = '';
+              do {
+                const res = await fetch(`${TASKS_API}/users/@me/lists?maxResults=100${pageToken ? `&pageToken=${pageToken}` : ''}`, { headers: auth });
+                if (!res.ok) throw new Error(`Failed to list task lists: ${res.status}`);
+                const data = await res.json();
+                for (const l of data.items || []) if (l.title === TASK_LIST_TITLE) listId = l.id;
+                pageToken = data.nextPageToken || '';
+              } while (pageToken && !listId);
+
+              if (!listId) {
+                const res = await fetch(`${TASKS_API}/users/@me/lists`, {
+                  method: 'POST', headers: jsonAuth, body: JSON.stringify({ title: TASK_LIST_TITLE }),
+                });
+                if (!res.ok) throw new Error(`Failed to create task list: ${res.status}`);
+                listId = (await res.json()).id;
+              }
+
+              // ── 1. Fetch every task in the list ────────────────────────────
+              // maxResults caps at 100 here (Calendar allows 2500), so the
+              // pageToken loop is mandatory, not an optimisation.
+              const remote = new Map();
+              let fetchIncomplete = false;
+              pageToken = '';
+              do {
+                const url = `${TASKS_API}/lists/${listId}/tasks?maxResults=100&showCompleted=true&showHidden=true${pageToken ? `&pageToken=${pageToken}` : ''}`;
+                const res = await fetch(url, { headers: auth });
+                if (!res.ok) { fetchIncomplete = true; break; }
+                const data = await res.json();
+                for (const t of data.items || []) {
+                  if (t.deleted) continue;
+                  remote.set(t.id, t);
+                }
+                pageToken = data.nextPageToken || '';
+              } while (pageToken);
+
+              // ── 2. Dedupe: never let two local records own one Google task ──
+              const byGTaskId = new Map();
+              for (const t of Object.values(localMap)) {
+                if (!t.gTaskId || t.deleted) continue;
+                const prev = byGTaskId.get(t.gTaskId);
+                const score = r => (r.lastSyncedAt || 0) + (r.updatedAt || 0);
+                if (!prev) { byGTaskId.set(t.gTaskId, t); continue; }
+                const loser = score(t) >= score(prev) ? prev : t;
+                byGTaskId.set(t.gTaskId, score(t) >= score(prev) ? t : prev);
+                localMap[loser.id] = { ...loser, gTaskId: undefined, gTaskETag: undefined, gTaskSeriesDate: undefined };
+                changed = true;
+              }
+
+              const justPushed = new Set();
+              const seenGTaskIds = new Set();
+              const locallyDirty = t => !!t.updatedAt && (!t.lastSyncedAt || t.updatedAt > t.lastSyncedAt);
+
+              const deleteRemote = async (id) => {
+                const res = await fetch(`${TASKS_API}/lists/${listId}/tasks/${id}`, { method: 'DELETE', headers: auth });
+                return res.ok || res.status === 404 || res.status === 410;
+              };
+              const patchRemote = async (id, body) => {
+                const res = await fetch(`${TASKS_API}/lists/${listId}/tasks/${id}`, {
+                  method: 'PATCH', headers: jsonAuth, body: JSON.stringify(body),
+                });
+                return res.ok ? await res.json() : null;
+              };
+              const insertRemote = async (body, parentId) => {
+                const url = `${TASKS_API}/lists/${listId}/tasks${parentId ? `?parent=${encodeURIComponent(parentId)}` : ''}`;
+                const res = await fetch(url, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) });
+                return res.ok ? await res.json() : null;
+              };
+              // Google normalises `due` and throws the time away; only ever read the
+              // date half back out.
+              const dueBody = ymd => (ymd ? `${ymd}T00:00:00.000Z` : null);
+              const bodyFor = (t, ymd) => ({
+                title: t.title || 'Untitled task',
+                notes: composeTaskNotes(t),
+                ...(ymd ? { due: dueBody(ymd) } : {}),
+                status: 'needsAction',
+              });
+
+              // ── A. Local deletions → Google ────────────────────────────────
+              for (const t of Object.values(localMap)) {
+                if (!t.deleted) continue;
+                if (t.gTaskId) {
+                  if (!(await deleteRemote(t.gTaskId))) continue; // retry next run
+                  remote.delete(t.gTaskId);
+                }
+                delete localMap[t.id];
+                changed = true;
+              }
+
+              // ── B. Local creates / updates → Google ────────────────────────
+              // Repeating masters are skipped: pass R owns their single live task.
+              // Parents before children so a subtask always has a parent to attach to.
+              const pushable = Object.values(localMap)
+                .filter(t => !t.deleted && !t.recur)
+                .sort((a, b) => (a.parentId ? 1 : 0) - (b.parentId ? 1 : 0));
+
+              for (const t of pushable) {
+                const cur = localMap[t.id];
+                if (!cur || cur.deleted || cur.recur) continue;
+                const ymd = dueDateOf(cur);
+
+                if (!cur.gTaskId) {
+                  // Weak re-adoption: Tasks has no extendedProperties, so there is no
+                  // plannerId to match on. Title + due is the best available signal
+                  // against creating a duplicate of a task we already pushed.
+                  const orphan = [...remote.values()].find(g =>
+                    !seenGTaskIds.has(g.id) && !byGTaskId.has(g.id)
+                    && g.title === (cur.title || 'Untitled task')
+                    && (g.due ? g.due.slice(0, 10) : null) === ymd);
+                  const created = orphan || await insertRemote(bodyFor(cur, ymd), cur.parentId ? localMap[cur.parentId]?.gTaskId : undefined);
+                  if (!created) continue;
+                  localMap[t.id] = { ...cur, gTaskId: created.id, gTaskListId: listId, gTaskETag: created.etag, lastSyncedAt: now };
+                  remote.set(created.id, created);
+                  seenGTaskIds.add(created.id);
+                  justPushed.add(created.id);
+                  changed = true;
+                  continue;
+                }
+
+                seenGTaskIds.add(cur.gTaskId);
+                const g = remote.get(cur.gTaskId);
+                if (!g) continue; // handled by pass E / re-created next run
+
+                if (locallyDirty(cur)) {
+                  // PATCH, not PUT: fields we don't model (position, links,
+                  // assignmentInfo) must survive our write untouched.
+                  const updated = await patchRemote(cur.gTaskId, {
+                    ...bodyFor(cur, ymd),
+                    status: cur.completed ? 'completed' : 'needsAction',
+                    ...(ymd ? {} : { due: null }),
+                  });
+                  if (!updated) continue;
+                  localMap[t.id] = { ...cur, gTaskETag: updated.etag, lastSyncedAt: now };
+                  remote.set(updated.id, updated);
+                  justPushed.add(cur.gTaskId);
+                  changed = true;
+                }
+              }
+
+              // ── C. Pull Google → local ────────────────────────────────────
+              const claimed = new Set(Object.values(localMap).map(t => t.gTaskId).filter(Boolean));
+              for (const g of remote.values()) {
+                if (justPushed.has(g.id)) continue;
+
+                const local = Object.values(localMap).find(t => t.gTaskId === g.id);
+                if (!local) {
+                  if (claimed.has(g.id)) continue;
+                  // New on Google. A "repeating" task made in the Google UI arrives
+                  // as N unrelated one-off tasks with no recurrence field — each
+                  // imports as its own dated task. We never infer `recur` from
+                  // Google, so no existing series can be corrupted.
+                  const { startTime, endTime, body } = parseTaskNotes(g.notes);
+                  const dueYmd = g.due ? g.due.slice(0, 10) : null;
+                  const id = `gtask-${g.id}`;
+                  localMap[id] = setDue({
+                    id,
+                    title: g.title || 'Untitled task',
+                    notes: body || undefined,
+                    // A time is only meaningful with a date to anchor it to.
+                    ...(startTime && dueYmd ? { startTime, endTime: endTime || undefined } : {}),
+                    completed: g.status === 'completed',
+                    gTaskId: g.id,
+                    gTaskListId: listId,
+                    gTaskETag: g.etag,
+                    gTaskParentId: g.parent || undefined,
+                    updatedAt: now,
+                    lastSyncedAt: now,
+                  }, dueYmd);
+                  seenGTaskIds.add(g.id);
+                  changed = true;
+                  continue;
+                }
+
+                seenGTaskIds.add(g.id);
+                if (local.recur) continue;             // pass R owns repeating series
+                if (locallyDirty(local)) continue;     // local wins when newer
+                if (local.gTaskETag === g.etag) continue;
+
+                const { startTime, endTime, body } = parseTaskNotes(g.notes);
+                const dueYmd = g.due ? g.due.slice(0, 10) : null;
+                localMap[local.id] = setDue({
+                  ...local,
+                  title: g.title || local.title,
+                  notes: body || undefined,
+                  // A missing marker is NOT an instruction to clear the time — an
+                  // unrelated edit on the phone must not silently unschedule a task.
+                  ...(startTime ? { startTime, endTime: endTime || local.endTime } : {}),
+                  completed: g.status === 'completed',
+                  gTaskETag: g.etag,
+                  gTaskParentId: g.parent || undefined,
+                  lastSyncedAt: now,
+                }, dueYmd);
+                changed = true;
+              }
+
+              // ── R. Roll repeating series forward ──────────────────────────
+              for (const master of Object.values(localMap)) {
+                if (!master.recur || master.deleted) continue;
+                let m = { ...master };
+                const live = m.gTaskId ? remote.get(m.gTaskId) : null;
+                let cur = m.gTaskSeriesDate || null;
+                let needsRoll = !m.gTaskId;
+                const done = new Set(m.completedDates || []);
+
+                // 1. Completed on the phone.
+                if (live && live.status === 'completed' && cur) {
+                  if (!done.has(cur)) {
+                    m.completedDates = [...done, cur].sort();
+                    m.updatedAt = now;
+                  }
+                  needsRoll = true;
+                // 2. Completed in the planner. Under the PATCH strategy we skip
+                //    marking it completed first — the very next PATCH re-dates and
+                //    reopens it, so the phone never observes the intermediate state.
+                } else if (cur && done.has(cur)) {
+                  needsRoll = true;
+                // 3. Un-completed in the planner → reopen, and cancel the roll.
+                } else if (cur && !done.has(cur) && live && live.status === 'completed') {
+                  const reopened = await patchRemote(m.gTaskId, { status: 'needsAction' });
+                  if (reopened) { m.gTaskETag = reopened.etag; m.lastSyncedAt = now; }
+                  needsRoll = false;
+                }
+
+                // 4. Deleted on the phone → skip THIS occurrence, never end the
+                //    series. Skipped entirely when the fetch was incomplete: a
+                //    transient 500 must never EXDATE a day.
+                if (m.gTaskId && !live && !fetchIncomplete) {
+                  if (cur && !done.has(cur)) {
+                    m.exdates = [...new Set([...(m.exdates || []), cur])].sort();
+                    m.updatedAt = now;
+                  }
+                  m.gTaskId = undefined; m.gTaskETag = undefined; m.gTaskSeriesDate = undefined;
+                  cur = null;
+                  needsRoll = true;
+                }
+
+                // 5. Edited on the phone.
+                if (live && live.etag !== m.gTaskETag && !locallyDirty(m)) {
+                  const { startTime, endTime, body } = parseTaskNotes(live.notes);
+                  m.title = live.title || m.title;
+                  m.notes = body || undefined;
+                  if (startTime) { m.startTime = startTime; m.endTime = endTime || m.endTime; }
+
+                  const dueYmd = live.due ? live.due.slice(0, 10) : null;
+                  if (dueYmd && cur && dueYmd !== cur) {
+                    // A one-off reschedule of THIS occurrence: EXDATE it out of the
+                    // series and hand the Google task to a detached standalone copy.
+                    // Mirrors the unlocked-detach semantics of editSeries.
+                    m.exdates = [...new Set([...(m.exdates || []), cur])].sort();
+                    const detachedId = `gtask-detached-${live.id}`;
+                    localMap[detachedId] = setDue({
+                      ...m,
+                      id: detachedId,
+                      recur: undefined, exdates: undefined, locked: undefined,
+                      completedDates: undefined, seriesDone: undefined,
+                      gTaskId: live.id, gTaskListId: listId, gTaskETag: live.etag,
+                      gTaskSeriesDate: undefined,
+                      updatedAt: now, lastSyncedAt: now,
+                    }, dueYmd);
+                    m.gTaskId = undefined; m.gTaskETag = undefined; m.gTaskSeriesDate = undefined;
+                    cur = null;
+                    needsRoll = true;
+                  } else {
+                    m.gTaskETag = live.etag;
+                    m.lastSyncedAt = now;
+                  }
+                  m.updatedAt = now;
+                }
+
+                // 6. Roll to the next open occurrence.
+                if (needsRoll) {
+                  // Scan from today, or the day after the occurrence just retired —
+                  // whichever is LATER. This is what collapses "offline for three
+                  // weeks" into ONE push instead of one per missed day. Missed
+                  // occurrences stay uncompleted locally and surface under Overdue.
+                  const after = cur ? format(addDays(new Date(`${cur}T00:00:00`), 1), 'yyyy-MM-dd') : today;
+                  const from = after > today ? after : today;
+                  const next = nextOpenOccurrence(m, from);
+
+                  if (!next) {
+                    if (m.gTaskId) { await deleteRemote(m.gTaskId); remote.delete(m.gTaskId); }
+                    m.gTaskId = undefined; m.gTaskETag = undefined; m.gTaskSeriesDate = undefined;
+                    m.seriesDone = true;
+                  } else if (m.gTaskId && cur === next) {
+                    // Already correct — nothing to do.
+                  } else {
+                    const body = bodyFor(m, next);
+                    const res = m.gTaskId
+                      ? await patchRemote(m.gTaskId, body)
+                      : await insertRemote(body, m.parentId ? localMap[m.parentId]?.gTaskId : undefined);
+                    if (res) {
+                      // State written LAST, only on success: a crash before this
+                      // point simply re-derives on the next run.
+                      m.gTaskId = res.id;
+                      m.gTaskListId = listId;
+                      m.gTaskETag = res.etag;
+                      m.gTaskSeriesDate = next;
+                      m.lastSyncedAt = now;
+                      remote.set(res.id, res);
+                      seenGTaskIds.add(res.id);
+                    }
+                  }
+                }
+
+                if (JSON.stringify(m) !== JSON.stringify(master)) {
+                  localMap[master.id] = m;
+                  changed = true;
+                }
+                if (m.gTaskId) seenGTaskIds.add(m.gTaskId);
+              }
+
+              // ── E. Mirror Google-side deletions ───────────────────────────
+              // Skipped wholesale on an incomplete fetch — the same policy the
+              // calendar sync uses, and for the same reason.
+              if (!fetchIncomplete) {
+                for (const t of Object.values(localMap)) {
+                  if (!t.gTaskId || t.recur || t.deleted) continue;
+                  if (justPushed.has(t.gTaskId) || seenGTaskIds.has(t.gTaskId)) continue;
+                  if (remote.has(t.gTaskId)) continue;
+                  delete localMap[t.id];
+                  changed = true;
+                }
+              }
+
+              // Returning the identical reference is the signal to the endpoint
+              // that nothing needs persisting.
+              if (!changed) return clientTasks;
+              return localMap;
+            } catch (err) {
+              console.error('Google Tasks sync failed:', err);
+              return clientTasks;
+            } finally {
+              isTasksSyncing = false;
+            }
           }
 
           // Main sync logic
@@ -822,13 +1222,15 @@ export default defineConfig({
 
               let authenticated = false;
               let email = '';
+              let hasTasksScope = false;
               try {
                 const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
                 authenticated = !!toks.refresh_token;
                 email = toks.email || '';
+                hasTasksScope = String(toks.scope || '').includes('/auth/tasks');
               } catch (_) {}
 
-              res.end(JSON.stringify({ configured, authenticated, email, autoSync, clientId, clientSecret }));
+              res.end(JSON.stringify({ configured, authenticated, email, autoSync, clientId, clientSecret, hasTasksScope }));
             } catch (err) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: 'Failed to read auth status' }));
@@ -884,7 +1286,15 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Missing redirectUri parameter' }));
                 return;
               }
-              const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=https://www.googleapis.com/auth/calendar&access_type=offline&prompt=consent`;
+              // Calendar + Tasks. An existing refresh token was minted calendar-only,
+              // so adding Tasks requires a reconnect — `prompt=consent` already forces
+              // the consent screen and reissues a refresh token, so a plain reconnect
+              // is enough. `include_granted_scopes` keeps it incremental.
+              const scope = [
+                'https://www.googleapis.com/auth/calendar',
+                'https://www.googleapis.com/auth/tasks',
+              ].join(' ');
+              const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent&include_granted_scopes=true`;
               res.end(JSON.stringify({ url: authUrl }));
             } catch (err) {
               res.statusCode = 500;
@@ -931,6 +1341,8 @@ export default defineConfig({
                   access_token: tokenData.access_token,
                   refresh_token: tokenData.refresh_token,
                   expires_at: Date.now() + tokenData.expires_in * 1000,
+                  // What Google actually granted — checked before any Tasks call.
+                  scope: tokenData.scope || '',
                   email: ''
                 };
 
@@ -1015,6 +1427,46 @@ export default defineConfig({
             });
           });
 
+          // Note the registration order: connect matches by prefix, and
+          // '/api/google-sync' is not a prefix of '/api/google-tasks-sync', so
+          // these two don't shadow each other.
+          server.middlewares.use('/api/google-tasks-sync', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+              try {
+                const { tasks: clientTasks, today, weekStartsOn: wso } = JSON.parse(body);
+                const synced = await runGoogleTasksSync(clientTasks || {}, today, wso || 0);
+
+                // Same contract as /api/google-sync: an identical reference back
+                // means the run bailed and merged nothing — writing it would
+                // clobber a concurrent real merge.
+                if (synced !== clientTasks) {
+                  await safeWriteJsonFile({
+                    filePath: path.resolve(import.meta.dirname, '..', '..', 'database', 'tasks.json'),
+                    backupDir,
+                    baseName: 'tasks',
+                    body: JSON.stringify(synced),
+                    kind: 'object',
+                    force: true,
+                  });
+                }
+
+                res.end(JSON.stringify({ success: true, tasks: synced }));
+              } catch (err) {
+                console.error('Error in google-tasks-sync endpoint:', err);
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: `Tasks sync failed: ${err.message}` }));
+              }
+            });
+          });
+
           server.middlewares.use('/api/events', async (req, res, next) => {
             const fs = await import('fs/promises');
             const path = await import('path');
@@ -1053,6 +1505,49 @@ export default defineConfig({
                 res.statusCode = 500;
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ error: 'Failed to write to file database' }));
+              }
+            });
+          } else {
+            next();
+          }
+        });
+
+        // Tasks live in their OWN file, never in database.json. Mixing them would
+        // hand them to runGoogleSync, which pushes everything it is given to the
+        // Daily calendar — tasks belong to Google TASKS, not Google Calendar.
+        server.middlewares.use('/api/tasks', async (req, res, next) => {
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const tasksPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'tasks.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
+
+          if (req.method === 'GET') {
+            try {
+              const data = await fs.readFile(tasksPath, 'utf-8');
+              res.setHeader('Content-Type', 'application/json');
+              res.end(data);
+            } catch {
+              res.setHeader('Content-Type', 'application/json');
+              res.end('{}');
+            }
+          } else if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', async () => {
+              try {
+                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                const result = await safeWriteJsonFile({ filePath: tasksPath, backupDir, baseName: 'tasks', body, kind: 'object', force });
+                res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) {
+                  res.statusCode = result.status;
+                  res.end(JSON.stringify({ error: result.error }));
+                  return;
+                }
+                res.end(JSON.stringify({ success: true }));
+              } catch {
+                res.statusCode = 500;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write tasks' }));
               }
             });
           } else {
@@ -1204,6 +1699,7 @@ export default defineConfig({
             events: 'database.json',
             settings: 'settings.json',
             'focus-sessions': 'focus-sessions.json',
+            tasks: 'tasks.json',
           };
 
           res.writeHead(200, {
@@ -1244,7 +1740,7 @@ export default defineConfig({
           } catch (_) { /* the sweep below still covers it */ }
 
           // Backstop: fs.watch drops events on Windows often enough to be felt.
-          // Re-reading three small files a few times a second is nothing, and it
+          // Re-reading a handful of small files a few times a second is nothing, and it
           // caps the worst case at a quarter second instead of seconds.
           const sweep = setInterval(() => {
             for (const name of Object.keys(WATCHED)) send(name);
@@ -1340,6 +1836,50 @@ export default defineConfig({
           if (granted) cueClaims.set(key, now);
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ granted }));
+        });
+
+        // Liveness stamp for a running focus session. Every open window refreshes
+        // it every few seconds; it lives on disk so it survives the machine being
+        // switched off. On the next launch a stale stamp is how the app knows the
+        // session died with the PC, and exactly when — see focusRecoveryFor().
+        // Written straight (no backup rotation): it's disposable, high-frequency
+        // state, not user data.
+        server.middlewares.use('/api/focus-heartbeat', async (req, res, next) => {
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const beatPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-heartbeat.json');
+
+          if (req.method === 'GET') {
+            try {
+              res.setHeader('Content-Type', 'application/json');
+              res.end(await fs.readFile(beatPath, 'utf-8'));
+            } catch (_) {
+              res.setHeader('Content-Type', 'application/json');
+              res.end('null');
+            }
+          } else if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', async () => {
+              try {
+                const parsed = JSON.parse(body || 'null');
+                if (!parsed || typeof parsed !== 'object') throw new Error('bad body');
+                await fs.writeFile(beatPath, JSON.stringify({
+                  at: typeof parsed.at === 'string' ? parsed.at : new Date().toISOString(),
+                  sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
+                  elapsedSeconds: Math.max(0, Number(parsed.elapsedSeconds) || 0),
+                }), 'utf-8');
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ success: true }));
+              } catch (_) {
+                res.statusCode = 400;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write focus heartbeat' }));
+              }
+            });
+          } else {
+            next();
+          }
         });
 
         server.middlewares.use('/api/focus-timer/toggle', async (req, res, next) => {

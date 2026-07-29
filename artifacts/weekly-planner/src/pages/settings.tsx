@@ -172,6 +172,14 @@ export default function SettingsPage() {
   const [focusCues, setFocusCues] = useState<{ start: FocusCueId; pause: FocusCueId; resume: FocusCueId }>(initialSettings.focusCues);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(initialSettings.shortcuts);
   const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(initialSettings.autoBackup);
+  // Tasks. `tasksPanelOpen`/`tasksPanelWidth`/`taskFilters` are owned by the main
+  // window — carried here only so saving from this page never resets them.
+  const [tasksPanelOpen, setTasksPanelOpen] = useState<boolean>(initialSettings.tasksPanelOpen);
+  const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
+  const [taskFilters, setTaskFilters] = useState<string[]>(initialSettings.taskFilters);
+  const [showTaskRow, setShowTaskRow] = useState<boolean>(initialSettings.showTaskRow);
+  const [taskColor, setTaskColor] = useState<string>(initialSettings.taskColor);
+  const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
 
   // Backup status state
@@ -185,6 +193,7 @@ export default function SettingsPage() {
     email?: string;
     clientId?: string;
     clientSecret?: string;
+    hasTasksScope?: boolean;
   }>({ configured: false, authenticated: false, autoSync: true });
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
@@ -228,6 +237,12 @@ export default function SettingsPage() {
       setFocusCues(s.focusCues);
       setShortcuts(s.shortcuts);
       setAutoBackup(s.autoBackup);
+      setTasksPanelOpen(s.tasksPanelOpen);
+      setTasksPanelWidth(s.tasksPanelWidth);
+      setTaskFilters(s.taskFilters);
+      setShowTaskRow(s.showTaskRow);
+      setTaskColor(s.taskColor);
+      setGoogleTasksSync(s.googleTasksSync);
     });
   }, []);
 
@@ -256,6 +271,12 @@ export default function SettingsPage() {
           setFocusCues(coerced.focusCues);
           setShortcuts(coerced.shortcuts);
           setAutoBackup(coerced.autoBackup);
+          setTasksPanelOpen(coerced.tasksPanelOpen);
+          setTasksPanelWidth(coerced.tasksPanelWidth);
+          setTaskFilters(coerced.taskFilters);
+          setShowTaskRow(coerced.showTaskRow);
+          setTaskColor(coerced.taskColor);
+          setGoogleTasksSync(coerced.googleTasksSync);
         }
       })
       .catch(err => console.error('Failed to load settings:', err));
@@ -299,8 +320,14 @@ export default function SettingsPage() {
       focusCues,
       shortcuts,
       autoBackup,
+      tasksPanelOpen,
+      tasksPanelWidth,
+      taskFilters,
+      showTaskRow,
+      taskColor,
+      googleTasksSync,
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor, googleTasksSync]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {
@@ -370,6 +397,12 @@ export default function SettingsPage() {
     focusCues,
     shortcuts,
     autoBackup,
+    tasksPanelOpen,
+    tasksPanelWidth,
+    taskFilters,
+    showTaskRow,
+    taskColor,
+    googleTasksSync,
   });
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
@@ -397,25 +430,35 @@ export default function SettingsPage() {
     setFocusCues(restored.focusCues);
     setShortcuts(restored.shortcuts);
     setAutoBackup(restored.autoBackup);
+    setTasksPanelOpen(restored.tasksPanelOpen);
+    setTasksPanelWidth(restored.tasksPanelWidth);
+    setTaskFilters(restored.taskFilters);
+    setShowTaskRow(restored.showTaskRow);
+    setTaskColor(restored.taskColor);
+    setGoogleTasksSync(restored.googleTasksSync);
     broadcastSettingsChange(restored);
   };
 
   const exportBackup = async () => {
     try {
-      const [eventsRes, focusSessionsRes] = await Promise.all([
+      const [eventsRes, focusSessionsRes, tasksRes] = await Promise.all([
         fetch('/api/events'),
         fetch('/api/focus-sessions'),
+        fetch('/api/tasks'),
       ]);
       if (!eventsRes.ok || !focusSessionsRes.ok) throw new Error('Failed to read backup sources');
 
       const events = await eventsRes.json();
       const focusSessions = await focusSessionsRes.json();
+      const tasks = tasksRes.ok ? await tasksRes.json().catch(() => ({})) : {};
       const backupData = {
-        backupFormatVersion: 2,
+        // v3 adds `tasks`. Importers accept 2 (no tasks) and 3.
+        backupFormatVersion: 3,
         exportedAt: new Date().toISOString(),
         events,
         settings: currentSettingsSnapshot(),
         focusSessions: Array.isArray(focusSessions) ? focusSessions : [],
+        tasks: tasks && typeof tasks === 'object' && !Array.isArray(tasks) ? tasks : {},
       };
 
       const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(backupData, null, 2));
@@ -448,7 +491,14 @@ export default function SettingsPage() {
           return;
         }
         const sessions = Array.isArray(parsed.focusSessions) ? parsed.focusSessions : null;
-        if (confirm(`Import backup? This will replace events${parsed.settings ? ', restore all settings' : ''}${sessions ? ', and replace focus history' : ''}.`)) {
+        // Absent in v2 backups — leave existing tasks alone rather than wiping them.
+        const tasks = parsed.tasks && typeof parsed.tasks === 'object' && !Array.isArray(parsed.tasks) ? parsed.tasks : null;
+        const parts = [
+          parsed.settings ? 'restore all settings' : '',
+          sessions ? 'replace focus history' : '',
+          tasks ? 'replace tasks' : '',
+        ].filter(Boolean);
+        if (confirm(`Import backup? This will replace events${parts.length ? `, ${parts.join(', ')}` : ''}.`)) {
           const eventsRes = await fetch('/api/events?force=1', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -469,6 +519,15 @@ export default function SettingsPage() {
             if (!sessionsRes.ok) throw new Error('Failed to import focus sessions');
           }
 
+          if (tasks) {
+            const tasksRes = await fetch('/api/tasks?force=1', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(tasks),
+            });
+            if (!tasksRes.ok) throw new Error('Failed to import tasks');
+          }
+
           showToast('Backup imported successfully!', 'success');
         }
       } catch {
@@ -479,18 +538,34 @@ export default function SettingsPage() {
     e.target.value = '';
   };
 
+  // Syncs calendar AND tasks. Both engines take the current store, merge, and
+  // write the result back themselves, so this page can hand them what's on disk
+  // rather than holding its own copy.
   const triggerGCalSync = () => {
     setGCalSyncing(true);
-    fetch('/api/google-auth/sync', { method: 'POST' })
-      .then(r => r.json())
-      .then(res => {
-        if (res.success) {
-          showToast(`Google Calendar synced (${res.synced || 0} events).`, 'success');
-        } else {
-          showToast(res.error || 'Google Sync failed.', 'error');
-        }
+    Promise.all([
+      fetch('/api/events').then(r => r.json()).then(events =>
+        fetch('/api/google-sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ events, weekStartsOn }),
+        }).then(r => r.json())),
+      googleTasksSync && gCalStatus.hasTasksScope
+        ? fetch('/api/tasks').then(r => r.json()).then(tasks =>
+            fetch('/api/google-tasks-sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tasks, today: new Date().toISOString().slice(0, 10), weekStartsOn }),
+            }).then(r => r.json()))
+        : Promise.resolve({ success: true, tasks: {} }),
+    ])
+      .then(([cal, tsk]) => {
+        if (!cal.success) { showToast(cal.error || 'Google sync failed.', 'error'); return; }
+        const events = Object.keys(cal.events || {}).length;
+        const taskCount = Object.keys(tsk.tasks || {}).length;
+        showToast(`Google synced — ${events} event${events === 1 ? '' : 's'}, ${taskCount} task${taskCount === 1 ? '' : 's'}.`, 'success');
       })
-      .catch(() => showToast('Failed to connect to Google Sync server.', 'error'))
+      .catch(() => showToast('Failed to reach the sync server.', 'error'))
       .finally(() => setGCalSyncing(false));
   };
 
@@ -992,6 +1067,70 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Tasks */}
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Tasks</h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      How tasks appear on the weekly grid. Tasks that live only in the side panel have no colour unless you give them one.
+                    </p>
+                  </div>
+
+                  <label className="flex items-center justify-between gap-4 cursor-pointer">
+                    <span className="flex flex-col">
+                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Show the task row</span>
+                      <span className="text-[11px]" style={{ color: textSecondary }}>
+                        A band directly under All Day holding tasks that have a date but no time.
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowTaskRow(v => !v)}
+                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                      style={{ background: showTaskRow ? taskColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={showTaskRow}
+                    >
+                      <span
+                        className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                        style={{ left: showTaskRow ? 22 : 2 }}
+                      />
+                    </button>
+                  </label>
+
+                  <div className="flex flex-col gap-3">
+                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task colour on the calendar</span>
+                    <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                      Every task drawn on the grid uses this one colour — that uniformity is what makes a task read as a task at a glance.
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {['#7dd3fc', '#67e8f9', '#a5b4fc', '#c4b5fd', '#86efac', '#fcd34d', '#fda4af', '#94a3b8'].map(hex => (
+                        <button
+                          key={hex}
+                          onClick={() => setTaskColor(hex)}
+                          className="w-8 h-8 rounded-lg transition-transform hover:scale-110"
+                          style={{
+                            background: hex,
+                            border: `2px solid ${taskColor.toLowerCase() === hex ? textPrimary : 'transparent'}`,
+                          }}
+                          title={hex}
+                        />
+                      ))}
+                      <label
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border cursor-pointer"
+                        style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }}
+                      >
+                        <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>Custom</span>
+                        <input
+                          type="color"
+                          value={taskColor}
+                          onChange={e => setTaskColor(e.target.value)}
+                          className="w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
               </motion.div>
             )}
 
@@ -1428,6 +1567,66 @@ export default function SettingsPage() {
                       </div>
                     )}
                   </div>
+                </div>
+
+                {/* Google Tasks */}
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Google Tasks Integration</h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      Two-way sync with your <strong>Daily Tasks</strong> list — create, edit, complete or delete from either side.
+                    </p>
+                  </div>
+
+                  {gCalStatus.authenticated && !gCalStatus.hasTasksScope && (
+                    <div
+                      className="p-4 rounded-2xl border flex items-start gap-3"
+                      style={{ background: 'rgba(245,158,11,0.08)', borderColor: 'rgba(245,158,11,0.35)' }}
+                    >
+                      <AlertCircle size={17} className="text-amber-500 flex-shrink-0 mt-0.5" />
+                      <div className="flex flex-col gap-2.5 min-w-0">
+                        <div>
+                          <span className="text-xs font-bold block" style={{ color: textPrimary }}>
+                            One more permission needed
+                          </span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                            Your Google connection was authorised for Calendar only, so tasks sync is paused.
+                            Reconnecting grants both — nothing else changes and your events are untouched.
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            const redirectUri = window.location.origin;
+                            fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
+                              .then(r => r.json())
+                              .then(res => { if (res.url) window.location.href = res.url; });
+                          }}
+                          className="self-start py-2 px-4 rounded-xl text-xs font-bold transition-all text-white bg-amber-600 hover:bg-amber-700"
+                        >
+                          Reconnect Google
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <label className="flex items-center justify-between gap-4 cursor-pointer">
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sync tasks with Google</span>
+                      <span className="text-[11px]" style={{ color: textSecondary }}>
+                        Repeating tasks can't be expressed in the Tasks API, so the repeat rule stays in the planner
+                        and Google always holds just the next due occurrence. Times ride along as a “⏰ HH:MM” line in the notes.
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setGoogleTasksSync(v => !v)}
+                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                      style={{ background: googleTasksSync ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={googleTasksSync}
+                    >
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: googleTasksSync ? 22 : 2 }} />
+                    </button>
+                  </label>
                 </div>
               </motion.div>
             )}

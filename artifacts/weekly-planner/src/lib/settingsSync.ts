@@ -174,6 +174,13 @@ export interface AppSettings {
   focusCues: Record<FocusCueSlot, FocusCueId>;
   shortcuts: ShortcutMap;
   autoBackup: AutoBackupCfg;
+  // ── Tasks ──────────────────────────────────────────────────────────────────
+  tasksPanelOpen: boolean;   // the right-hand tasks panel; open by default
+  tasksPanelWidth: number;   // 260–520
+  showTaskRow: boolean;      // the dated-task band under All Day
+  taskColor: string;         // '#rrggbb' — the one colour tasks wear on the grid
+  taskFilters: string[];     // panel filter selection; empty = show everything
+  googleTasksSync: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -195,7 +202,22 @@ export const DEFAULT_SETTINGS: AppSettings = {
   focusCues: DEFAULT_FOCUS_CUES,
   shortcuts: DEFAULT_SHORTCUTS,
   autoBackup: { enabled: true, intervalHours: 24, keep: 50 },
+  tasksPanelOpen: true,
+  tasksPanelWidth: 340,
+  showTaskRow: true,
+  taskColor: '#7dd3fc',
+  taskFilters: [],
+  googleTasksSync: true,
 };
+
+export const TASK_PANEL_MIN_W = 260;
+export const TASK_PANEL_MAX_W = 520;
+// Canonical filter order. `taskFilters` MUST always be stored in this order:
+// the echo guard below stringifies arrays without sorting them, so the same
+// selection in two different orders would make the pages overwrite each other
+// forever. (Mirrors ALL_TASK_FILTERS in lib/tasks.ts — kept local to avoid a
+// settings ⇄ tasks import cycle.)
+const TASK_FILTER_ORDER = ['today', 'overdue', 'upcoming', 'general', 'completed'];
 
 const SETTINGS_STORAGE_KEY = 'planner-app-settings-v2';
 const SETTINGS_EVENT = 'planner-settings-updated';
@@ -257,6 +279,17 @@ export function coerceSettings(raw: unknown): AppSettings {
       keep: typeof b.keep === 'number' ? b.keep : 50,
     };
   }
+  if (typeof r.tasksPanelOpen === 'boolean') s.tasksPanelOpen = r.tasksPanelOpen;
+  if (typeof r.tasksPanelWidth === 'number' && Number.isFinite(r.tasksPanelWidth)) {
+    s.tasksPanelWidth = Math.max(TASK_PANEL_MIN_W, Math.min(TASK_PANEL_MAX_W, Math.round(r.tasksPanelWidth)));
+  }
+  if (typeof r.showTaskRow === 'boolean') s.showTaskRow = r.showTaskRow;
+  if (typeof r.taskColor === 'string' && /^#[0-9a-f]{6}$/i.test(r.taskColor)) s.taskColor = r.taskColor;
+  if (Array.isArray(r.taskFilters)) {
+    // Re-derived in canonical order, so an out-of-order array can never round-trip.
+    s.taskFilters = TASK_FILTER_ORDER.filter(f => (r.taskFilters as unknown[]).includes(f));
+  }
+  if (typeof r.googleTasksSync === 'boolean') s.googleTasksSync = r.googleTasksSync;
   return s;
 }
 

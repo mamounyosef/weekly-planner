@@ -44,6 +44,11 @@ import {
   claimFocusCompletion,
   autoSessionId,
   dedupeFocusSessions,
+  FOCUS_HEARTBEAT_INTERVAL_MS,
+  MIN_RECOVERED_SESSION_SECONDS,
+  focusRecoveryFor,
+  recoveredSessionId,
+  safeFocusHeartbeat,
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
@@ -673,14 +678,16 @@ export default function Widget() {
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
 
-  const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
+  const completeFocusSession = useCallback((durationSeconds?: number, auto = false, opts?: { endedAt?: Date; id?: string }) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
     }
 
-    const endedAt = new Date();
+    // `opts.endedAt` is for a session recovered after the machine was switched
+    // off: it ended when the PC did, not when we noticed on the next launch.
+    const endedAt = opts?.endedAt ?? new Date();
     const startedAt = focusTimer.sessionStartedAt
       ? new Date(focusTimer.sessionStartedAt)
       : new Date(endedAt.getTime() - duration * 1000);
@@ -688,7 +695,7 @@ export default function Widget() {
     const session: FocusSession = {
       // Deterministic id for auto-completions so this window and the main window
       // (both counting down the same shared timer) log ONE session, not two.
-      id: auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : uid(),
+      id: opts?.id ?? (auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : uid()),
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
@@ -702,6 +709,58 @@ export default function Widget() {
     });
     setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   }, [focusTimer, persistFocusSessions]);
+
+  // Shutdown / sleep recovery — see the matching block in home.tsx. Both windows
+  // refresh the same shared heartbeat, so "stale" means no window was alive.
+  const focusTimerRef = useRef(focusTimer);
+  focusTimerRef.current = focusTimer;
+  const completeFocusSessionRef = useRef(completeFocusSession);
+  completeFocusSessionRef.current = completeFocusSession;
+  const [focusLiveSession, setFocusLiveSession] = useState<string | null>(null);
+
+  const runFocusHeartbeat = useCallback(() => {
+    const timer = focusTimerRef.current;
+    if (!timer.isRunning || !timer.sessionStartedAt) return;
+    const session = timer.sessionStartedAt;
+    fetch('/api/focus-heartbeat')
+      .then(r => r.json())
+      .then(data => {
+        const current = focusTimerRef.current;
+        if (!current.isRunning || current.sessionStartedAt !== session) return; // moved on
+        const recovery = focusRecoveryFor(current, safeFocusHeartbeat(data));
+        if (!recovery) {
+          setFocusLiveSession(session);
+          fetch('/api/focus-heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              at: new Date().toISOString(),
+              sessionStartedAt: session,
+              elapsedSeconds: getFocusTimerElapsedSeconds(current),
+            }),
+          }).catch(() => {});
+          return;
+        }
+        if (recovery.durationSeconds >= MIN_RECOVERED_SESSION_SECONDS) {
+          completeFocusSessionRef.current(recovery.durationSeconds, false, {
+            endedAt: new Date(recovery.endedAt),
+            id: recoveredSessionId(session),
+          });
+        } else {
+          setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
+        }
+      })
+      .catch(() => setFocusLiveSession(session));
+  }, []);
+
+  useEffect(() => {
+    runFocusHeartbeat();
+  }, [runFocusHeartbeat, focusTimer.isRunning, focusTimer.sessionStartedAt]);
+
+  useEffect(() => {
+    const id = setInterval(runFocusHeartbeat, FOCUS_HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [runFocusHeartbeat]);
 
   useEffect(() => {
     localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(focusTimer));
@@ -731,7 +790,11 @@ export default function Widget() {
   }, [editingFocusMinutes, focusTimer.plannedSeconds]);
 
   useEffect(() => {
-    if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
+    // Stand down until the heartbeat has confirmed this session is really live —
+    // otherwise a session the PC was switched off during gets logged at full
+    // length, stamped with the moment the app was reopened.
+    const liveSession = focusLiveSession === focusTimer.sessionStartedAt;
+    if (focusTimer.isRunning && liveSession && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
       focusCompleteRef.current = true;
       if (claimFocusCompletion()) {
         setFocusCelebrate(true);
@@ -746,7 +809,7 @@ export default function Widget() {
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
-  }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds]);
+  }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds, focusTimer.sessionStartedAt, focusLiveSession]);
 
   // Start / pause / resume cues. Driven off the timer state rather than the
   // buttons, so a toggle from the main window or the hotkey sounds too.

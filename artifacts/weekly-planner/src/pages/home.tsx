@@ -19,7 +19,7 @@ import {
   subDays,
   differenceInDays,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -57,6 +57,11 @@ import {
   claimFocusCompletion,
   autoSessionId,
   dedupeFocusSessions,
+  FOCUS_HEARTBEAT_INTERVAL_MS,
+  MIN_RECOVERED_SESSION_SECONDS,
+  focusRecoveryFor,
+  recoveredSessionId,
+  safeFocusHeartbeat,
 } from '@/lib/focusSessions';
 
 function parseDurationInput(str: string): number {
@@ -143,6 +148,7 @@ import {
   parseOccId,
 } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColor';
+import TasksPanel, { type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -155,7 +161,37 @@ import {
   type EventCardStyle,
   type SidebarStyle,
   type AppSettings,
+  TASK_PANEL_MIN_W,
+  TASK_PANEL_MAX_W,
 } from '@/lib/settingsSync';
+import {
+  type Task,
+  type TaskData,
+  type TaskFilter,
+  ALL_TASK_FILTERS,
+  canonicalFilters,
+  coerceTasks,
+  composeTaskNotes,
+  deleteTaskScoped,
+  dueDateOf,
+  editTaskSeries,
+  isTaskDone,
+  makeTask,
+  resolveWeekTasks,
+  TASKS_STORAGE_KEY,
+  taskKind,
+  toggleTaskDone,
+  todayYmd,
+  withDueDate,
+  withTime,
+} from '@/lib/tasks';
+
+// Dated-task band under All Day.
+const TASK_CHIP_H = 22;
+const TASK_ROW_MIN_H = 30;
+
+const clampPanelWidth = (w: number) =>
+  Math.max(TASK_PANEL_MIN_W, Math.min(TASK_PANEL_MAX_W, Math.round(Number.isFinite(w) ? w : 340)));
 
 // ─── TEMP DEBUG: surface the real error the overlay hides ───────────────────────
 if (typeof window !== 'undefined' && !(window as any).__errDbg) {
@@ -611,6 +647,9 @@ export default function WeeklyPlanner() {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [interval, setIntervalOpt]    = useState<IntervalMin>(initialSettings.interval);
   const [events, setEvents]           = useState<PlannerData>({});
+  // Tasks live in their own store (database/tasks.json) and sync to Google TASKS,
+  // never to Google Calendar. See lib/tasks.ts for why they aren't PlannerEvents.
+  const [tasks, setTasks]             = useState<TaskData>({});
   // True until the first load (localStorage or backend) has resolved, so the grid
   // can show a skeleton instead of flashing an empty week.
   const [eventsLoading, setEventsLoading] = useState(true);
@@ -703,6 +742,15 @@ export default function WeeklyPlanner() {
   const [zoomDraft, setZoomDraft] = useState('100');
   const [editingZoom, setEditingZoom] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // ── Tasks ──────────────────────────────────────────────────────────────────
+  const [tasksPanelOpen, setTasksPanelOpen]   = useState<boolean>(initialSettings.tasksPanelOpen);
+  const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
+  const [showTaskRow, setShowTaskRow]         = useState<boolean>(initialSettings.showTaskRow);
+  const [taskColor, setTaskColor]             = useState<string>(initialSettings.taskColor);
+  const [taskFilters, setTaskFilters]         = useState<TaskFilter[]>(canonicalFilters(initialSettings.taskFilters));
+  const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
+  const [taskMenuId, setTaskMenuId]   = useState<string | null>(null);
+  const [taskMenuPos, setTaskMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
@@ -766,6 +814,9 @@ export default function WeeklyPlanner() {
     autoSync?: boolean;
     clientId?: string;
     clientSecret?: string;
+    // False for tokens minted before Tasks support � every Tasks call with one
+    // returns 403, so a reconnect is required before tasks sync can run.
+    hasTasksScope?: boolean;
   }>({ configured: false, authenticated: false });
   const [gCalSyncing, setGCalSyncing] = useState(false);
   const [clientIdInput, setClientIdInput] = useState('');
@@ -843,6 +894,8 @@ export default function WeeklyPlanner() {
   const menuIdRef    = useRef<string | null>(null);
   const menuPosRef   = useRef<{ x: number; y: number } | null>(null);
   const eventsRef    = useRef<PlannerData>({});
+  const tasksRef     = useRef<TaskData>({});
+  const tasksLoadedRef = useRef(false);
   // Guards Google sync from running before the initial events load has resolved —
   // syncing an empty map would push a truncated database back to disk (data loss).
   const eventsLoadedRef = useRef(false);
@@ -1032,6 +1085,16 @@ export default function WeeklyPlanner() {
   // lands mid-sync would otherwise be silently dropped until the 4-min pull. We run one
   // at a time and queue exactly one follow-up, guaranteeing the latest state is pushed.
   const syncInFlightRef = useRef(false);
+  // -- Task mutations ---------------------------------------------------------
+  // Deliberately NOT routed through writeEvents/undo: tasks are a separate store
+  // with a separate Google backend, and mixing them into the event undo stack
+  // would let Ctrl+Z on the calendar silently resurrect a deleted task. Declared
+  // up here because the tasks sync driver below closes over it.
+  const writeTasks = useCallback((next: TaskData) => {
+    tasksRef.current = next;
+    setTasks(next);
+  }, []);
+
   const syncQueuedRef = useRef(false);
   const triggerGCalSync = useCallback((customEvents?: PlannerData) => {
     // Never sync before events have loaded — see eventsLoadedRef.
@@ -1096,6 +1159,53 @@ export default function WeeklyPlanner() {
     });
   }, [weekStartsOn, showToast]);
 
+  // -- Google Tasks sync driver ------------------------------------------------
+  // Same in-flight serialisation + mid-flight merge as the calendar sync above.
+  // The merge matters more here than for events: Google Tasks has no
+  // extendedProperties, so there is no plannerId to re-adopt an orphan by � if we
+  // clobbered a gTaskId that the server just assigned, the next run would create
+  // a duplicate task rather than recover.
+  const tasksSyncInFlightRef = useRef(false);
+  const tasksSyncQueuedRef = useRef(false);
+  const triggerTasksSync = useCallback(() => {
+    if (!tasksLoadedRef.current) return;
+    if (tasksSyncInFlightRef.current) { tasksSyncQueuedRef.current = true; return; }
+    tasksSyncInFlightRef.current = true;
+    const launched = tasksRef.current;
+    fetch('/api/google-tasks-sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tasks: launched, today: todayYmd(), weekStartsOn }),
+    })
+      .then(r => r.json())
+      .then(res => {
+        if (!res.success || !res.tasks) return;
+        const serverMap: TaskData = res.tasks;
+        const live = tasksRef.current;
+        const merged: TaskData = { ...serverMap };
+        // Anything we sent that no longer exists locally was deleted mid-flight �
+        // the stale server copy must not resurrect it.
+        for (const id of Object.keys(serverMap)) {
+          if (launched[id] !== undefined && live[id] === undefined) delete merged[id];
+        }
+        for (const [id, liveTask] of Object.entries(live)) {
+          if (launched[id] === liveTask) continue; // untouched during the flight
+          const s = serverMap[id];
+          merged[id] = s
+            ? { ...liveTask, gTaskId: s.gTaskId, gTaskListId: s.gTaskListId, gTaskETag: s.gTaskETag, gTaskSeriesDate: s.gTaskSeriesDate, gTaskParentId: s.gTaskParentId, lastSyncedAt: s.lastSyncedAt }
+            : liveTask; // created during the flight; the server hasn't seen it
+        }
+        if (JSON.stringify(merged) !== JSON.stringify(live)) writeTasks(merged);
+      })
+      .catch(err => console.error('Google Tasks sync failed:', err))
+      .finally(() => {
+        tasksSyncInFlightRef.current = false;
+        if (tasksSyncQueuedRef.current) { tasksSyncQueuedRef.current = false; triggerTasksSyncRef.current(); }
+      });
+  }, [weekStartsOn, writeTasks]);
+  const triggerTasksSyncRef = useRef(triggerTasksSync);
+  useEffect(() => { triggerTasksSyncRef.current = triggerTasksSync; }, [triggerTasksSync]);
+
   useEffect(() => {
     return subscribeSettingsChange(s => {
       setIntervalOpt(s.interval);
@@ -1107,6 +1217,12 @@ export default function WeeklyPlanner() {
       setWeekStartsOn(s.weekStartsOn);
       setDayStartH(s.dayStartH);
       setDayEndH(s.dayEndH);
+      setTasksPanelOpen(s.tasksPanelOpen);
+      setTasksPanelWidth(s.tasksPanelWidth);
+      setShowTaskRow(s.showTaskRow);
+      setTaskColor(s.taskColor);
+      setTaskFilters(canonicalFilters(s.taskFilters));
+      setGoogleTasksSync(s.googleTasksSync);
     });
   }, []);
 
@@ -1157,6 +1273,24 @@ export default function WeeklyPlanner() {
     return () => clearTimeout(timer);
   }, [events, editingId, gCalStatus.authenticated, triggerGCalSync]);
 
+  // Tasks: the same pair of triggers. Gated additionally on the Tasks scope
+  // actually having been granted � an old calendar-only token would 403 on
+  // every call. The server bails silently too; this just avoids the round-trip.
+  const tasksSyncReady = gCalStatus.authenticated && !!gCalStatus.hasTasksScope && googleTasksSync;
+  useEffect(() => {
+    if (!tasksSyncReady || !gCalStatus.autoSync) return;
+    triggerTasksSync();
+    const intervalId = setInterval(() => triggerTasksSync(), 4 * 60 * 1000);
+    return () => clearInterval(intervalId);
+  }, [tasksSyncReady, gCalStatus.autoSync, triggerTasksSync]);
+
+  useEffect(() => {
+    if (isInitialMount.current || !tasksSyncReady) return;
+    if (taskMenuId !== null) return; // don't push mid-edit
+    const timer = setTimeout(() => { triggerTasksSync(); }, 1200);
+    return () => clearTimeout(timer);
+  }, [tasks, taskMenuId, tasksSyncReady, triggerTasksSync]);
+
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn });
@@ -1189,6 +1323,12 @@ export default function WeeklyPlanner() {
     gcalChipColors(resolveEventHex(ev), { dark: darkMode, style: eventColorStyle as EventCardStyle, pageBg })
       ?? { bg: '#dcfce7', border: '#86efac', text: '#14532d', textMuted: '#2f6b45' },
     [darkMode, eventColorStyle, pageBg]);
+  // Tasks always paint in the one colour from settings, never a per-item swatch �
+  // that uniformity is what makes a task read as a task on the grid.
+  const taskChipColors = useCallback((hex?: string) =>
+    gcalChipColors(hex || taskColor, { dark: darkMode, style: eventColorStyle as EventCardStyle, pageBg })
+      ?? { bg: '#e0f2fe', border: '#7dd3fc', text: '#0c4a6e', textMuted: '#0369a1' },
+    [darkMode, eventColorStyle, pageBg, taskColor]);
 
   // ── Modification domain / week resolution ──────────────────────────────────
   const viewedWeekKey     = weekKeyOf(currentDate, weekStartsOn);
@@ -1222,6 +1362,52 @@ export default function WeeklyPlanner() {
     return maxR + 1;
   }, [allDayLayout]);
   const allDayHeight = maxAllDayRowIndex > 0 ? (maxAllDayRowIndex * 28 + 8) : 36;
+
+  // ── Task bands ─────────────────────────────────────────────────────────────
+  // Tasks visible in the viewed week, split by kind. Unlike all-day events a task
+  // never spans days, so the dated band needs no packing layout — each chip sits
+  // in its own day column.
+  const weekTasks = useMemo(() => resolveWeekTasks(tasks, viewedWeekKey), [tasks, viewedWeekKey]);
+  const datedTasksByCol = useMemo(() => {
+    const cols: Task[][] = [[], [], [], [], [], [], []];
+    for (const t of Object.values(weekTasks)) {
+      if (t.deleted || t.startTime) continue;
+      const i = t.dayIndex ?? 0;
+      if (i >= 0 && i < 7) cols[i].push(t);
+    }
+    for (const c of cols) c.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title));
+    return cols;
+  }, [weekTasks]);
+  const timedTasksByCol = useMemo(() => {
+    const cols: Task[][] = [[], [], [], [], [], [], []];
+    for (const t of Object.values(weekTasks)) {
+      if (t.deleted || !t.startTime) continue;
+      const i = t.dayIndex ?? 0;
+      if (i >= 0 && i < 7) cols[i].push(t);
+    }
+    return cols;
+  }, [weekTasks]);
+  const maxTasksInAnyCol = useMemo(
+    () => datedTasksByCol.reduce((m, c) => Math.max(m, c.length), 0),
+    [datedTasksByCol],
+  );
+  // The band is only drawn in week/day view — month and year lay themselves out.
+  const showTaskBand = showTaskRow && (calendarView === 'week' || calendarView === 'day');
+  const taskRowHeight = showTaskBand
+    ? Math.max(TASK_ROW_MIN_H, maxTasksInAnyCol * (TASK_CHIP_H + 2) + 8)
+    : 0;
+
+  /**
+   * Total height of every fixed band above the scrollable time grid: the day
+   * header, the All Day row and the task row.
+   *
+   * EVERY mouse-Y → minute conversion and every absolutely-positioned overlay
+   * inside `daysGridRef` MUST use this instead of adding the pieces up itself —
+   * that is what keeps a new band from silently breaking drag, resize, marquee
+   * select and click-to-create. There must be no `HEADER_PX + allDayHeight`
+   * anywhere else in this file.
+   */
+  const topBandsHeight = HEADER_PX + allDayHeight + taskRowHeight;
 
   // Month overview: full weeks covering the current month, each day resolved to the
   // events actually visible that week (recurring versions + single-week overrides).
@@ -1364,6 +1550,45 @@ export default function WeeklyPlanner() {
   }, [writeEvents]);
   const createStampedRef = useRef(createStamped);
   useEffect(() => { createStampedRef.current = createStamped; }, [createStamped]);
+
+  /**
+   * Create a task. The default � enforced here rather than at each call site �
+   * is today's date with no time. Passing `dueDate: null` makes it general
+   * (panel only); a `startTime` makes it a timed task drawn in the day column.
+   */
+  const createTask = useCallback((input: NewTaskInput & Partial<Task>) => {
+    const title = (input.title ?? '').trim();
+    if (!title) return null;
+    const wso = editCtxRef.current.weekStartsOn;
+    const { dueDate, startTime, ...rest } = input;
+    let t = makeTask({ ...rest, title }, wso);
+    if (dueDate !== undefined) t = withDueDate(t, dueDate, wso);
+    if (startTime) t = withTime(t, startTime);
+    writeTasks({ ...tasksRef.current, [t.id]: t });
+    return t.id;
+  }, [writeTasks]);
+
+  const editTask = useCallback((occId: string, patch: Partial<Task>) => {
+    const { viewedWeekKey, weekStartsOn } = editCtxRef.current;
+    const { events: map, targetId } = editTaskSeries(tasksRef.current, occId, patch, viewedWeekKey, weekStartsOn);
+    writeTasks(map);
+    return targetId;
+  }, [writeTasks]);
+
+  const deleteTask = useCallback((occId: string, mode: DeleteMode = 'one') => {
+    writeTasks(deleteTaskScoped(tasksRef.current, occId, mode));
+    setTaskMenuId(m => (m === occId ? null : m));
+  }, [writeTasks]);
+
+  const handleToggleTaskDone = useCallback((occId: string) => {
+    writeTasks(toggleTaskDone(tasksRef.current, occId));
+  }, [writeTasks]);
+
+  const openTaskMenu = useCallback((occId: string, at: { x: number; y: number }) => {
+    setTaskMenuId(occId);
+    setTaskMenuPos(at);
+    setMenuId(null); // never two popovers at once
+  }, []);
 
   // Entering edit mode on an existing item materialises the concrete record edits
   // should land on *up front* (so the text box never remounts mid-typing). If the
@@ -1670,12 +1895,25 @@ export default function WeeklyPlanner() {
           writeEvents(next);
         } catch (_) { /* ignore */ }
       });
+      dbStream.addEventListener('tasks', (evt) => {
+        if (uiBusyRef.current) return;
+        if (Date.now() - lastLocalTasksWriteRef.current < 3000) return;
+        try {
+          const data = JSON.parse((evt as MessageEvent).data);
+          if (!data || typeof data !== 'object') return;
+          // Unlike events an EMPTY map is legitimate here (every task done and
+          // cleared), so this only guards against a malformed payload.
+          const next = coerceTasks(data);
+          if (JSON.stringify(next) === JSON.stringify(tasksRef.current)) return;
+          writeTasks(next);
+        } catch (_) { /* ignore */ }
+      });
     } catch (_) { /* fall back to the poll */ }
 
     // Safety net only — the stream is what makes this feel instant.
     const focusPollId = setInterval(loadFocusSessions, 15000);
     return () => { clearInterval(focusPollId); if (dbStream) dbStream.close(); };
-  }, [writeEvents]);
+  }, [writeEvents, writeTasks]);
 
   // The running timer is shared through the backend so the main window and the
   // side widget always show the SAME live session (localStorage `storage` events
@@ -1695,6 +1933,7 @@ export default function WeeklyPlanner() {
   // When this window last saved events, and whether the user is mid-interaction —
   // both gate whether a pushed database change may be adopted here.
   const lastLocalEventsWriteRef = useRef(0);
+  const lastLocalTasksWriteRef = useRef(0);
   const uiBusyRef = useRef(false);
   useEffect(() => {
     setFocusTimer(loadLocalFocusTimer());
@@ -1818,14 +2057,16 @@ export default function WeeklyPlanner() {
     }
   }, [editingFocusInput]);
 
-  const completeFocusSession = useCallback((durationSeconds?: number, auto = false) => {
+  const completeFocusSession = useCallback((durationSeconds?: number, auto = false, opts?: { endedAt?: Date; id?: string }) => {
     const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
     }
 
-    const endedAt = new Date();
+    // `opts.endedAt` is for a session recovered after the machine was switched
+    // off: it ended when the PC did, not when we noticed on the next launch.
+    const endedAt = opts?.endedAt ?? new Date();
     const startedAt = focusTimer.sessionStartedAt
       ? new Date(focusTimer.sessionStartedAt)
       : new Date(endedAt.getTime() - duration * 1000);
@@ -1833,7 +2074,7 @@ export default function WeeklyPlanner() {
     const session: FocusSession = {
       // Auto-completions get a deterministic id so the main window and the widget
       // (which both hit zero independently) collapse into a single logged session.
-      id: auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : focusUid(),
+      id: opts?.id ?? (auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : focusUid()),
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
@@ -1847,6 +2088,72 @@ export default function WeeklyPlanner() {
     });
     setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   }, [focusTimer, persistFocusSessions]);
+
+  // ── Shutdown / sleep recovery ───────────────────────────────────────────────
+  // Nothing of ours runs while the PC is off, so a session that was interrupted
+  // by a shutdown has to be reconstructed on the next launch — from the
+  // heartbeat, which is the last moment any window saw the session alive. The
+  // session is then STOPPED at that moment with the time it had actually run,
+  // instead of being resumed and auto-completed for its full planned length
+  // hours later (which credited a whole hour to the wrong day).
+  const focusTimerRef = useRef(focusTimer);
+  focusTimerRef.current = focusTimer;
+  const completeFocusSessionRef = useRef(completeFocusSession);
+  completeFocusSessionRef.current = completeFocusSession;
+  // The sessionStartedAt we've confirmed is genuinely live. The completion
+  // effect below stands down until this matches — otherwise, on launch, it would
+  // fire before the check and log the ghost session at full length. State rather
+  // than a ref so confirming it re-runs that effect immediately.
+  const [focusLiveSession, setFocusLiveSession] = useState<string | null>(null);
+
+  const runFocusHeartbeat = useCallback(() => {
+    const timer = focusTimerRef.current;
+    if (!timer.isRunning || !timer.sessionStartedAt) return;
+    const session = timer.sessionStartedAt;
+    fetch('/api/focus-heartbeat')
+      .then(r => r.json())
+      .then(data => {
+        const current = focusTimerRef.current;
+        if (!current.isRunning || current.sessionStartedAt !== session) return; // moved on
+        const recovery = focusRecoveryFor(current, safeFocusHeartbeat(data));
+        if (!recovery) {
+          setFocusLiveSession(session);
+          fetch('/api/focus-heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              at: new Date().toISOString(),
+              sessionStartedAt: session,
+              elapsedSeconds: getFocusTimerElapsedSeconds(current),
+            }),
+          }).catch(() => {});
+          return;
+        }
+        if (recovery.durationSeconds >= MIN_RECOVERED_SESSION_SECONDS) {
+          completeFocusSessionRef.current(recovery.durationSeconds, false, {
+            endedAt: new Date(recovery.endedAt),
+            id: recoveredSessionId(session),
+          });
+        } else {
+          // Too short to be worth a record — just stop the timer.
+          setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
+        }
+      })
+      // No server to ask → don't hold the normal completion hostage.
+      .catch(() => setFocusLiveSession(session));
+  }, []);
+
+  // Check the moment a session appears (launch, or a start from the widget), and
+  // keep the stamp fresh after that. The interval also catches the machine
+  // sleeping with the windows open: the heartbeat goes stale either way.
+  useEffect(() => {
+    runFocusHeartbeat();
+  }, [runFocusHeartbeat, focusTimer.isRunning, focusTimer.sessionStartedAt]);
+
+  useEffect(() => {
+    const id = setInterval(runFocusHeartbeat, FOCUS_HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [runFocusHeartbeat]);
 
   useEffect(() => {
     localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(focusTimer));
@@ -1877,7 +2184,12 @@ export default function WeeklyPlanner() {
   }, [editingFocusMinutes, focusTimer.plannedSeconds]);
 
   useEffect(() => {
-    if (focusTimer.isRunning && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
+    // A session we haven't confirmed as live may be the ghost of one the PC was
+    // switched off during; the heartbeat check decides, and it stops the timer
+    // itself if so. Completing here first would credit the full planned time to
+    // whenever the app happened to be reopened.
+    const liveSession = focusLiveSession === focusTimer.sessionStartedAt;
+    if (focusTimer.isRunning && liveSession && focusRemainingSeconds <= 0 && !focusCompleteRef.current) {
       focusCompleteRef.current = true;
       if (claimFocusCompletion()) {
         setFocusCelebrate(true);
@@ -1894,7 +2206,7 @@ export default function WeeklyPlanner() {
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
-  }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds]);
+  }, [completeFocusSession, focusRemainingSeconds, focusTimer.isRunning, focusTimer.plannedSeconds, focusTimer.sessionStartedAt, focusLiveSession]);
 
   // Start / pause / resume cues. Driven off the timer state rather than the
   // buttons, so a toggle from the widget or the system-wide hotkey sounds too.
@@ -1996,6 +2308,18 @@ export default function WeeklyPlanner() {
       .catch(err => console.error('Failed to load events from backend database:', err))
       .finally(() => { eventsLoadedRef.current = true; setEventsLoading(false); });
 
+    // Tasks: same shape of load. localStorage first for an instant paint, then
+    // the file DB, which is the source of truth shared with the other window.
+    const savedTasks = localStorage.getItem(TASKS_STORAGE_KEY);
+    if (savedTasks) { try { writeTasks(coerceTasks(JSON.parse(savedTasks))); } catch (_) {} }
+    fetch('/api/tasks')
+      .then(r => r.json())
+      .then(data => {
+        if (data && typeof data === 'object') writeTasks(coerceTasks(data));
+      })
+      .catch(err => console.error('Failed to load tasks from backend database:', err))
+      .finally(() => { tasksLoadedRef.current = true; });
+
     const localS = loadSettingsLocal();
     setIntervalOpt(localS.interval);
     setDarkMode(localS.darkMode);
@@ -2010,6 +2334,12 @@ export default function WeeklyPlanner() {
     setDayStartH(localS.dayStartH);
     setDayEndH(localS.dayEndH);
     setShortcuts(localS.shortcuts);
+    setTasksPanelOpen(localS.tasksPanelOpen);
+    setTasksPanelWidth(localS.tasksPanelWidth);
+    setShowTaskRow(localS.showTaskRow);
+    setTaskColor(localS.taskColor);
+    setTaskFilters(canonicalFilters(localS.taskFilters));
+    setGoogleTasksSync(localS.googleTasksSync);
     const savedZoom = parseFloat(localStorage.getItem(ZOOM_KEY) || '');
     if (Number.isFinite(savedZoom)) setAppZoom(clampZoom(savedZoom));
 
@@ -2043,6 +2373,12 @@ export default function WeeklyPlanner() {
           if (s.autoBackup && typeof s.autoBackup === 'object') {
             setAutoBackup(coerceAutoBackup(s.autoBackup));
           }
+          if (typeof s.tasksPanelOpen === 'boolean') setTasksPanelOpen(s.tasksPanelOpen);
+          if (s.tasksPanelWidth != null) setTasksPanelWidth(clampPanelWidth(Number(s.tasksPanelWidth)));
+          if (typeof s.showTaskRow === 'boolean') setShowTaskRow(s.showTaskRow);
+          if (typeof s.taskColor === 'string' && /^#[0-9a-f]{6}$/i.test(s.taskColor)) setTaskColor(s.taskColor);
+          if (Array.isArray(s.taskFilters)) setTaskFilters(canonicalFilters(s.taskFilters));
+          if (typeof s.googleTasksSync === 'boolean') setGoogleTasksSync(s.googleTasksSync);
         }
       })
       .catch(err => console.error('Failed to load settings from backend:', err))
@@ -2106,6 +2442,12 @@ export default function WeeklyPlanner() {
       setFocusCues(s.focusCues);
       setShortcuts(s.shortcuts);
       setAutoBackup(s.autoBackup);
+      setTasksPanelOpen(s.tasksPanelOpen);
+      setTasksPanelWidth(s.tasksPanelWidth);
+      setShowTaskRow(s.showTaskRow);
+      setTaskColor(s.taskColor);
+      setTaskFilters(canonicalFilters(s.taskFilters));
+      setGoogleTasksSync(s.googleTasksSync);
     });
   }, []);
 
@@ -2121,9 +2463,10 @@ export default function WeeklyPlanner() {
       interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
       eventColorStyle, sidebarStyle,
       timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView,
-      focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup
+      focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
+      tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskFilters, googleTasksSync
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup]);
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskFilters, googleTasksSync]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -2190,6 +2533,21 @@ export default function WeeklyPlanner() {
     }).catch(err => console.error('Failed to save events to backend database:', err));
   }, [events]);
 
+  // Same for tasks. Gated on the initial load having resolved so an empty map is
+  // never written over a populated tasks.json.
+  const isInitialTasksMount = useRef(true);
+  useEffect(() => {
+    if (isInitialTasksMount.current) { isInitialTasksMount.current = false; return; }
+    if (!tasksLoadedRef.current) return;
+    localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks));
+    lastLocalTasksWriteRef.current = Date.now();
+    fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tasks),
+    }).catch(err => console.error('Failed to save tasks to backend database:', err));
+  }, [tasks]);
+
   // ── Undo / Redo history ────────────────────────────────────────────────────
   const undoStack      = useRef<PlannerData[]>([]);
   const redoStack      = useRef<PlannerData[]>([]);
@@ -2249,7 +2607,8 @@ export default function WeeklyPlanner() {
     interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
     eventColorStyle, sidebarStyle,
     timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView,
-    focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup
+    focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
+    tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskFilters, googleTasksSync
   });
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
@@ -2277,6 +2636,12 @@ export default function WeeklyPlanner() {
     setFocusCues(restored.focusCues);
     setShortcuts(restored.shortcuts);
     setAutoBackup(restored.autoBackup);
+    setTasksPanelOpen(restored.tasksPanelOpen);
+    setTasksPanelWidth(restored.tasksPanelWidth);
+    setShowTaskRow(restored.showTaskRow);
+    setTaskColor(restored.taskColor);
+    setTaskFilters(canonicalFilters(restored.taskFilters));
+    setGoogleTasksSync(restored.googleTasksSync);
     broadcastSettingsChange(restored);
   };
 
@@ -2456,9 +2821,9 @@ export default function WeeklyPlanner() {
     const colW     = rect.width / cols.length;
     const slot     = clamp(Math.floor((clientX - rect.left) / colW), 0, cols.length - 1);
     const dayIndex = cols[slot];
-    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - HEADER_PX - allDayHeight), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
+    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - topBandsHeight), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, slot, snappedMin: snapped };
-  }, [interval, dayStartMin, dayEndMin, allDayHeight]);
+  }, [interval, dayStartMin, dayEndMin, topBandsHeight]);
 
   // ── Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) ─────────────
   useEffect(() => {
@@ -2578,7 +2943,7 @@ export default function WeeklyPlanner() {
         const el = daysGridRef.current;
         if (!coords || !el) return false;
         const rect = el.getBoundingClientRect();
-        if (!(mp.x >= rect.left && mp.x <= rect.right && mp.y >= rect.top + HEADER_PX + allDayHeight && mp.y <= rect.bottom)) {
+        if (!(mp.x >= rect.left && mp.x <= rect.right && mp.y >= rect.top + topBandsHeight && mp.y <= rect.bottom)) {
           return false;
         }
 
@@ -2673,7 +3038,7 @@ export default function WeeklyPlanner() {
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [getGridCoords, allDayHeight]);
+  }, [getGridCoords, topBandsHeight]);
 
   // ── Global mouse move / up ────────────────────────────────────────────────
   useEffect(() => {
@@ -2758,7 +3123,7 @@ export default function WeeklyPlanner() {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
         const curX = e.clientX - rect.left;
-        const curY = e.clientY - rect.top - HEADER_PX - allDayHeight;
+        const curY = e.clientY - rect.top - topBandsHeight;
         const left = Math.min(sr.startX, curX);
         const top = Math.min(sr.startY, curY);
         const width = Math.abs(curX - sr.startX);
@@ -2772,7 +3137,7 @@ export default function WeeklyPlanner() {
       if (cr) {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const curY = e.clientY - rect.top - HEADER_PX - allDayHeight;
+        const curY = e.clientY - rect.top - topBandsHeight;
         const topPx = Math.min(cr.startY, curY);
         const heightPx = Math.abs(curY - cr.startY);
         if (heightPx >= DRAG_THRESHOLD) { cr.moved = true; didDragRef.current = true; }
@@ -2861,7 +3226,7 @@ export default function WeeklyPlanner() {
         if (cr.moved) {
           const rect = daysGridRef.current?.getBoundingClientRect();
           if (rect) {
-            const curY = e.clientY - rect.top - HEADER_PX - allDayHeight;
+            const curY = e.clientY - rect.top - topBandsHeight;
             let startMin = yToMin(Math.max(0, Math.min(cr.startY, curY)), interval, dayStartH);
             let endMin   = yToMin(Math.max(0, Math.max(cr.startY, curY)), interval, dayStartH);
             startMin = clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP);
@@ -2904,7 +3269,7 @@ export default function WeeklyPlanner() {
         if (gridRect) {
           const colW = gridRect.width / 7;
           const curX = e.clientX - gridRect.left;
-          const curY = e.clientY - gridRect.top - HEADER_PX - allDayHeight;
+          const curY = e.clientY - gridRect.top - topBandsHeight;
           const left = Math.min(sr.startX, curX);
           const right = Math.max(sr.startX, curX);
           const topPx = Math.min(sr.startY, curY);
@@ -2963,10 +3328,41 @@ export default function WeeklyPlanner() {
     return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
   }, [getGridCoords, interval, dayStartMin, dayEndMin]);
 
+  // Clear multi-selection when clicking/pressing on empty space anywhere
+  useEffect(() => {
+    if (selectedIds.size === 0) return;
+    const onGlobalMouseDown = (e: MouseEvent) => {
+      if (e.ctrlKey || e.metaKey) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('[data-event]') || target.closest('[data-menu]') || target.closest('input, textarea, button, select, [role="dialog"]')) return;
+      setSelectedIds(new Set());
+    };
+    window.addEventListener('mousedown', onGlobalMouseDown, true);
+    return () => window.removeEventListener('mousedown', onGlobalMouseDown, true);
+  }, [selectedIds.size]);
+
+  // Dismiss the task popover on an outside click or Escape.
+  useEffect(() => {
+    if (!taskMenuId) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest('[data-menu]') || t?.closest('[data-task]')) return;
+      setTaskMenuId(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setTaskMenuId(null); };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [taskMenuId]);
+
   // ── Event CRUD helpers ────────────────────────────────────────────────────
   const handleColClick = (e: React.MouseEvent<HTMLDivElement>, dayIdx: number) => {
     if (didDragRef.current) return;
-    if ((e.target as HTMLElement).closest('[data-event]')) return;
+    if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
     if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
     setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
@@ -3288,6 +3684,23 @@ export default function WeeklyPlanner() {
   const nowAccent     = darkMode ? '#ff6b6b' : '#e5484d';
   const nowAccentSoft = darkMode ? 'rgba(255,107,107,0.22)' : 'rgba(229,72,77,0.18)';
 
+  // Everything the tasks panel and popover need to paint, bundled once so they
+  // stay in step with the calendar's theme without importing the palettes.
+  const taskPanelTheme: TaskTheme = {
+    darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, surfaceBdr, hoverBg,
+    accent: taskColor,
+    chip: taskChipColors,
+  };
+
+  // The task the popover is editing. Occurrence ids ("master::date") aren't in the
+  // raw store, so resolve through the week expansion first � same rule as events.
+  const menuTask = taskMenuId
+    ? (weekTasks[taskMenuId] ?? tasks[taskMenuId] ?? tasks[parseOccId(taskMenuId).masterId] ?? null)
+    : null;
+  const menuTaskDue = menuTask ? dueDateOf(menuTask) : null;
+  const menuTaskKind = menuTask ? taskKind(menuTask) : 'general';
+  const menuTaskDone = menuTask ? isTaskDone(menuTask, menuTaskDue) : false;
+
   // ── Current menu event (for popover rendering) ────────────────────────────
   const isDraft = !!(draft && menuId === draft.id);
   const menuEvent = isDraft
@@ -3346,6 +3759,15 @@ export default function WeeklyPlanner() {
           }}
         />
       </div>
+      {/* ── Content column + tasks panel ───────────────────────────────────
+          The tasks panel sits in normal flow beside the content rather than
+          overlaying it, so opening it NARROWS the header, the focus banner and
+          the grid together (they all centre themselves with `mx-auto` inside
+          this column). Keeping it in flow also matters because the root carries
+          `zoom: appZoom` � a `position: fixed` panel would be laid out in scaled
+          coordinates and drift away from the edge at anything but 100%. */}
+      <div className="flex-1 min-h-0 flex relative z-10">
+        <div className="flex-1 min-w-0 flex flex-col">
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
         <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between">
@@ -3510,6 +3932,19 @@ export default function WeeklyPlanner() {
             >
               <BarChart3 size={15}/>
               Analysis
+            </button>
+            <button
+              onClick={() => setTasksPanelOpen(v => !v)}
+              title={tasksPanelOpen ? 'Hide tasks' : 'Show tasks'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
+              style={{
+                background: tasksPanelOpen ? `${taskColor}22` : surfaceBg,
+                border: `1px solid ${tasksPanelOpen ? `${taskColor}88` : surfaceBdr}`,
+                color: tasksPanelOpen ? taskColor : menuText,
+              }}
+            >
+              <ListTodo size={15}/>
+              Tasks
             </button>
             <button
               onClick={handleHeaderCreateClick}
@@ -3816,6 +4251,12 @@ export default function WeeklyPlanner() {
                 <div style={{ height: allDayHeight }} className="border-b border-border/50 flex items-center justify-center">
                   <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider text-center">All Day</span>
                 </div>
+                {showTaskBand && (
+                  <div style={{ height: taskRowHeight }} className="border-b border-border/50 flex items-center justify-center gap-1">
+                    <ListTodo size={10} style={{ color: taskColor, opacity: 0.8 }} />
+                    <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider">Tasks</span>
+                  </div>
+                )}
                 <div className="relative" style={{ height: totalH }}>
                   {slots.map((time, i) => {
                     const isHour = time.endsWith(':00');
@@ -3854,79 +4295,128 @@ export default function WeeklyPlanner() {
                     return s < dayStartMin + 1440 && e > dayStartMin + 1440;
                   };
 
-                  type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
-                  const renderItems: RenderItem[] = [];
-                  for (const ev of Object.values(weekEvents)) {
-                    if (ev.allDay) continue; // Skip all-day events in the timeline grid
-                    
-                    const isDrag      = dragDisp?.id === ev.id;
-                    const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
-                    const isDragging  = isDrag || isBatchDrag;
-                    const isResizing  = resizeDisp?.id === ev.id;
+                    type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
+                    const renderItems: RenderItem[] = [];
+                    for (const ev of Object.values(weekEvents)) {
+                      if (ev.allDay) continue; // Skip all-day events in the timeline grid
+                      
+                      const isDrag      = dragDisp?.id === ev.id;
+                      const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
+                      const isDragging  = isDrag || isBatchDrag;
+                      const isResizing  = resizeDisp?.id === ev.id;
 
-                    let effDayIndex = ev.dayIndex;
-                    let effStart24  = timeToMin(ev.startTime);
-                    let effEnd24    = timeToMin(ev.endTime);
+                      const origStart24 = timeToMin(ev.startTime);
+                      const origEnd24   = timeToMin(ev.endTime);
+                      const origS       = normalizeMin(origStart24, dayStartH);
+                      let origE         = normalizeMin(origEnd24, dayStartH);
+                      if (origE <= origS) origE += 1440;
 
-                    if (isDrag && dragDisp) {
-                      effDayIndex = dragDisp.day;
-                      effStart24  = dragDisp.startMin >= 1440 ? dragDisp.startMin - 1440 : dragDisp.startMin;
-                      const dur   = normDuration(ev);
-                      effEnd24    = (effStart24 + dur) % 1440;
-                    } else if (isBatchDrag && batchDisp?.[ev.id]) {
-                      const bd    = batchDisp[ev.id];
-                      effDayIndex = bd.dayIndex;
-                      effStart24  = bd.startMin >= 1440 ? bd.startMin - 1440 : bd.startMin;
-                      const dur   = normDuration(ev);
-                      effEnd24    = (effStart24 + dur) % 1440;
-                    } else if (isResizing && resizeDisp) {
-                      effStart24  = resizeDisp.startMin >= 1440 ? resizeDisp.startMin - 1440 : resizeDisp.startMin;
-                      const dur   = resizeDisp.endMin - resizeDisp.startMin;
-                      effEnd24    = (effStart24 + dur) % 1440;
-                    }
+                      let targetDayIndex = ev.dayIndex;
+                      let targetStart24  = origStart24;
+                      let targetEnd24    = origEnd24;
 
-                    const sNorm = normalizeMin(effStart24, dayStartH);
-                    let eNorm   = normalizeMin(effEnd24, dayStartH);
-                    if (eNorm <= sNorm) eNorm += 1440;
+                      if (isDrag && dragDisp) {
+                        targetDayIndex = dragDisp.day;
+                        targetStart24  = dragDisp.startMin >= 1440 ? dragDisp.startMin - 1440 : dragDisp.startMin;
+                        const dur      = normDuration(ev);
+                        targetEnd24    = (targetStart24 + dur) % 1440;
+                      } else if (isBatchDrag && batchDisp?.[ev.id]) {
+                        const bd       = batchDisp[ev.id];
+                        targetDayIndex = bd.dayIndex;
+                        targetStart24  = bd.startMin >= 1440 ? bd.startMin - 1440 : bd.startMin;
+                        const dur      = normDuration(ev);
+                        targetEnd24    = (targetStart24 + dur) % 1440;
+                      } else if (isResizing && resizeDisp) {
+                        targetStart24  = resizeDisp.startMin >= 1440 ? resizeDisp.startMin - 1440 : resizeDisp.startMin;
+                        const dur      = resizeDisp.endMin - resizeDisp.startMin;
+                        targetEnd24    = (targetStart24 + dur) % 1440;
+                      }
 
-                    const isSpanning = sNorm < dayStartMin + 1440 && eNorm > dayStartMin + 1440;
+                      const targetS = normalizeMin(targetStart24, dayStartH);
+                      let targetE   = normalizeMin(targetEnd24, dayStartH);
+                      if (targetE <= targetS) targetE += 1440;
 
-                    if (isDragging) {
-                      const phEv = { ...ev, isPlaceholder: true } as PlannerEvent;
-                      if (isSpanning) {
-                        if (effDayIndex === colIdx) {
-                          renderItems.push({ ev: phEv, key: `${ev.id}__tail_ph`, startMin: sNorm, endMin: dayStartMin + 1440, segKind: 'tail' });
+                      if (isDragging) {
+                        // 1. Dashed placeholder preview at the target drop location
+                        const phEv = { ...ev, isPlaceholder: true } as PlannerEvent;
+                        const phSpanning = targetS < dayStartMin + 1440 && targetE > dayStartMin + 1440;
+                        if (phSpanning) {
+                          if (targetDayIndex === colIdx) {
+                            renderItems.push({ ev: phEv, key: `${ev.id}__tail_ph`, startMin: targetS, endMin: dayStartMin + 1440, segKind: 'tail' });
+                          }
+                          if ((targetDayIndex + 1) % 7 === colIdx) {
+                            renderItems.push({ ev: phEv, key: `${ev.id}__head_ph`, startMin: dayStartMin, endMin: targetE - 1440, segKind: 'head' });
+                          }
+                        } else {
+                          if (targetDayIndex === colIdx) {
+                            renderItems.push({ ev: phEv, key: `${ev.id}__ph`, startMin: targetS, endMin: targetE, segKind: 'normal' });
+                          }
                         }
-                        if ((effDayIndex + 1) % 7 === colIdx) {
-                          renderItems.push({ ev: phEv, key: `${ev.id}__head_ph`, startMin: dayStartMin, endMin: eNorm - 1440, segKind: 'head' });
+
+                        // 2. Active floating element anchored to its original position (translated via dragDelta 1:1 with mouse)
+                        const origSpanning = origS < dayStartMin + 1440 && origE > dayStartMin + 1440;
+                        if (origSpanning) {
+                          if (ev.dayIndex === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__tail_drag`, startMin: origS, endMin: dayStartMin + 1440, segKind: 'tail' });
+                          }
+                          if ((ev.dayIndex + 1) % 7 === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__head_drag`, startMin: dayStartMin, endMin: origE - 1440, segKind: 'head' });
+                          }
+                        } else {
+                          if (ev.dayIndex === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__drag`, startMin: origS, endMin: origE, segKind: 'normal' });
+                          }
+                        }
+                      } else if (isResizing) {
+                        const isSpanning = targetS < dayStartMin + 1440 && targetE > dayStartMin + 1440;
+                        if (isSpanning) {
+                          if (targetDayIndex === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__tail_resize`, startMin: targetS, endMin: dayStartMin + 1440, segKind: 'tail' });
+                          }
+                          if ((targetDayIndex + 1) % 7 === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__head_resize`, startMin: dayStartMin, endMin: targetE - 1440, segKind: 'head' });
+                          }
+                        } else {
+                          if (targetDayIndex === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__resize`, startMin: targetS, endMin: targetE, segKind: 'normal' });
+                          }
                         }
                       } else {
-                        if (effDayIndex === colIdx) {
-                          renderItems.push({ ev: phEv, key: `${ev.id}__ph`, startMin: sNorm, endMin: eNorm, segKind: 'normal' });
+                        // Stationary static event
+                        const isSpanning = origS < dayStartMin + 1440 && origE > dayStartMin + 1440;
+                        if (isSpanning) {
+                          if (ev.dayIndex === colIdx) {
+                            renderItems.push({ ev, key: ev.id, startMin: origS, endMin: dayStartMin + 1440, segKind: 'tail' });
+                          }
+                          if ((ev.dayIndex + 1) % 7 === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: origE - 1440, segKind: 'head' });
+                          }
+                        } else {
+                          if (ev.dayIndex === colIdx) {
+                            renderItems.push({ ev, key: ev.id, startMin: origS, endMin: origE, segKind: 'normal' });
+                          }
                         }
                       }
                     }
+                    const colEvents = renderItems;
 
-                    if (isSpanning) {
-                      if (effDayIndex === colIdx) {
-                        renderItems.push({ ev, key: isDragging ? `${ev.id}__tail_drag` : ev.id, startMin: sNorm, endMin: dayStartMin + 1440, segKind: 'tail' });
-                      }
-                      if ((effDayIndex + 1) % 7 === colIdx) {
-                        renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: eNorm - 1440, segKind: 'head' });
-                      }
-                      continue;
-                    }
-
-                    if (effDayIndex === colIdx) {
-                      renderItems.push({ ev, key: ev.id, startMin: sNorm, endMin: eNorm, segKind: 'normal' });
-                    }
-                  }
-                  const colEvents = renderItems;
+                  // Timed tasks share this column's sub-column layout with events, so
+                  // a task overlapping a meeting sits beside it instead of on top.
+                  // `layoutParallel` is structurally typed, so they can just join the
+                  // same input list.
+                  const colTimedTasks = showTaskBand ? timedTasksByCol[colIdx] : [];
+                  const timedTaskItems = colTimedTasks.map(t => {
+                    const s = normalizeMin(timeToMin(t.startTime!), dayStartH);
+                    let e = normalizeMin(timeToMin(t.endTime || t.startTime!), dayStartH);
+                    if (e <= s) e = s + 30;
+                    return { task: t, key: `task:${t.id}`, startMin: s, endMin: e };
+                  });
 
                   // Compute parallel layout for this column, excluding placeholders to prevent shrinking
                   const layoutInput = colEvents
                     .filter(item => !(item.ev as any).isPlaceholder)
-                    .map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }));
+                    .map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }))
+                    .concat(timedTaskItems.map(t => ({ id: t.key, startMin: t.startMin, endMin: t.endMin })));
                   const layout = layoutParallel(layoutInput);
 
                   return (
@@ -4005,19 +4495,88 @@ export default function WeeklyPlanner() {
                         </button>
                       </div>
 
+                      {/* Task band — dated tasks with no time. A task never spans
+                          days, so each chip lives in its own column cell; there is
+                          no absolute overlay to keep in sync. */}
+                      {showTaskBand && (
+                        <div
+                          style={{ height: taskRowHeight }}
+                          className="flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] overflow-hidden"
+                        >
+                          {datedTasksByCol[colIdx].map(t => {
+                            const occ = t.occDate ?? null;
+                            const done = isTaskDone(t, occ);
+                            const c = taskChipColors(t.color || undefined);
+                            return (
+                              <button
+                                key={t.id}
+                                data-task="1"
+                                onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
+                                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity"
+                                style={{
+                                  height: TASK_CHIP_H,
+                                  background: c.bg,
+                                  border: `1px dashed ${c.border}`,
+                                  opacity: done ? 0.5 : 1,
+                                  filter: done ? 'saturate(0.4)' : 'none',
+                                }}
+                                title={t.title}
+                              >
+                                <span
+                                  role="button"
+                                  tabIndex={-1}
+                                  onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }}
+                                  className="flex-shrink-0 flex items-center justify-center"
+                                  style={{ color: c.text }}
+                                >
+                                  {done ? <CheckSquare size={10} /> : <Square size={10} />}
+                                </span>
+                                <span
+                                  className="text-[10.5px] font-medium truncate leading-none"
+                                  style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}
+                                >
+                                  {t.title || 'Untitled task'}
+                                </span>
+                                {t.recur && <Repeat size={8} style={{ color: c.textMuted, flexShrink: 0 }} />}
+                              </button>
+                            );
+                          })}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const id = createTask({
+                                title: 'New task',
+                                dueDate: format(days[colIdx], 'yyyy-MM-dd'),
+                              });
+                              if (id) openTaskMenu(id, { x: e.clientX + 10, y: e.clientY });
+                            }}
+                            className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-all bg-background/70 hover:bg-background border border-border/40 opacity-0 group-hover:opacity-100 shadow-sm active:scale-95 z-20"
+                            style={{ color: menuSub }}
+                            title="Add a task on this day"
+                          >
+                            <Plus size={11} />
+                          </button>
+                        </div>
+                      )}
+
                       {/* Content area */}
                       <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
                         onClick={(e) => handleColClick(e, colIdx)}
                         onMouseDown={(e) => {
-                          if ((e.target as HTMLElement).closest('[data-event]')) return;
+                          if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
                           if (e.button !== 0) return;
+                          if (!e.ctrlKey && !e.metaKey) {
+                            setSelectedIds(new Set());
+                          }
                           const rect = e.currentTarget.getBoundingClientRect();
                           const y = e.clientY - rect.top;
                           if (e.ctrlKey || e.metaKey) {
                             const gr = daysGridRef.current?.getBoundingClientRect();
                             if (gr) {
                               const sx = e.clientX - gr.left;
-                              const sy = e.clientY - gr.top - HEADER_PX - allDayHeight;
+                              const sy = e.clientY - gr.top - topBandsHeight;
                               selDragRef.current = { startX: sx, startY: sy };
                               setSelRect({ left: sx, top: sy, width: 0, height: 0 });
                             }
@@ -4390,6 +4949,68 @@ export default function WeeklyPlanner() {
                             </div>
                           );
                         })}
+
+                        {/* Timed tasks. Drawn after the event cards so they sit on
+                            top when they overlap, and marked `data-task` (never
+                            `data-event`) so the drag/resize/marquee machinery, which
+                            is all PlannerData-typed, leaves them alone. */}
+                        {timedTaskItems.map(({ task: t, key, startMin, endMin }) => {
+                          const occ = t.occDate ?? null;
+                          const done = isTaskDone(t, occ);
+                          const c = taskChipColors(t.color || undefined);
+                          const top = minToY(startMin, interval, dayStartH);
+                          const h = Math.max(18, minToY(endMin, interval, dayStartH) - top);
+                          const { col, numCols } = layout.get(key) ?? { col: 0, numCols: 1 };
+                          const colW = 100 / numCols;
+                          const EDGE = 3;
+                          const gapOffset = numCols > 1 ? COL_GAP / 2 : 0;
+                          return (
+                            <div
+                              key={key}
+                              data-task="1"
+                              onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
+                              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                              className="absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
+                              style={{
+                                top, height: h,
+                                left:  `calc(${col * colW}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
+                                right: `calc(${100 - (col + 1) * colW}% + ${EDGE + (col < numCols - 1 ? gapOffset : 0)}px)`,
+                                background: c.bg,
+                                // Dashed border + a solid left rail: the two cues that
+                                // survive every card style, including `minimal`.
+                                border: `1.5px dashed ${c.border}`,
+                                borderLeft: `3px solid ${c.border}`,
+                                opacity: done ? 0.45 : 1,
+                                filter: done ? 'saturate(0.4)' : 'none',
+                              }}
+                              title={t.title}
+                            >
+                              <div className="flex items-start gap-1 px-1.5 py-1">
+                                <span
+                                  role="button"
+                                  tabIndex={-1}
+                                  onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }}
+                                  className="flex-shrink-0 mt-[1px]"
+                                  style={{ color: c.text }}
+                                >
+                                  {done ? <CheckSquare size={11} /> : <Square size={11} />}
+                                </span>
+                                <span
+                                  className="text-[11px] font-medium leading-tight break-words min-w-0"
+                                  style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}
+                                >
+                                  {t.title || 'Untitled task'}
+                                </span>
+                                {t.recur && <Repeat size={9} style={{ color: c.textMuted, flexShrink: 0, marginTop: 2 }} />}
+                              </div>
+                              {h >= 38 && (
+                                <div className="px-1.5 text-[9.5px] tabular-nums" style={{ color: c.textMuted }}>
+                                  {formatTimeLabel(startMin, timeFormat)}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -4506,7 +5127,7 @@ export default function WeeklyPlanner() {
                 {selRect && (
                   <div className="absolute pointer-events-none z-20" style={{
                     left: selRect.left,
-                    top: HEADER_PX + allDayHeight + selRect.top,
+                    top: topBandsHeight + selRect.top,
                     width: Math.max(2, selRect.width),
                     height: Math.max(2, selRect.height),
                     background: darkMode ? 'rgba(120,180,240,0.18)' : 'rgba(60,120,200,0.13)',
@@ -4561,7 +5182,7 @@ export default function WeeklyPlanner() {
                       transition={{ duration: 0.3, delay: 0.1 }}
                       className="absolute left-1/2 z-20 pointer-events-none flex flex-col items-center gap-1.5 text-center px-6 py-5 rounded-xl"
                       style={{
-                        top: HEADER_PX + allDayHeight + 90,
+                        top: topBandsHeight + 90,
                         transform: 'translateX(-50%)',
                         border: `1px dashed ${surfaceBdr}`,
                         background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.55)',
@@ -4890,33 +5511,10 @@ export default function WeeklyPlanner() {
                           <div key={d.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
                             {/* Exact time above each bar */}
                             <div
-                              onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
-                              className="text-[10px] font-bold tabular-nums text-center truncate cursor-pointer"
+                              className="text-[10px] font-bold tabular-nums text-center truncate"
                               style={{ color: d.seconds > 0 ? (isTodayCol ? '#60a5fa' : menuText) : menuSub, opacity: d.seconds > 0 ? 1 : 0.5 }}
                             >
-                              {editingFocusDayKey === d.key ? (
-                                <input
-                                  autoFocus
-                                  onFocus={e => e.target.select()}
-                                  value={editingFocusInput}
-                                  onChange={e => setEditingFocusInput(e.target.value)}
-                                  onKeyDown={e => {
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      submitFocusDayEdit(d.key, d.date, d.seconds, e.currentTarget.value);
-                                    }
-                                    if (e.key === 'Escape') {
-                                      submittingEditRef.current = true;
-                                      setEditingFocusDayKey(null);
-                                    }
-                                  }}
-                                  onBlur={e => submitFocusDayEdit(d.key, d.date, d.seconds, e.target.value)}
-                                  className="w-16 text-center text-[10px] font-bold bg-transparent border-b outline-none"
-                                  style={{ color: menuText, borderColor: '#60a5fa' }}
-                                />
-                              ) : (
-                                <span>{d.seconds > 0 ? formatFocusDuration(d.seconds) : '—'}</span>
-                              )}
+                              <span>{d.seconds > 0 ? formatFocusDuration(d.seconds) : '—'}</span>
                             </div>
                             <div className="flex-1 flex items-end">
                               <div
@@ -4941,12 +5539,13 @@ export default function WeeklyPlanner() {
                       })}
                     </div>
 
-                    {/* Exact per-day breakdown */}
+                    {/* Exact per-day breakdown table (double-click row or duration to modify) */}
                     <div className="mt-4 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
                       {weekAnalysisLive.days.map((d, i) => (
                         <div
                           key={d.key}
-                          className="flex items-center justify-between px-3.5 py-2 text-xs"
+                          onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
+                          className="flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5"
                           style={{
                             background: isSameDay(d.date, nowOwnerDate)
                               ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
@@ -4960,8 +5559,7 @@ export default function WeeklyPlanner() {
                             {isSameDay(d.date, nowOwnerDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
                           </span>
                           <span
-                            onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
-                            className="tabular-nums flex items-center gap-2 cursor-pointer"
+                            className="tabular-nums flex items-center gap-2"
                             style={{ color: d.seconds > 0 ? menuText : menuSub }}
                           >
                             {editingFocusDayKey === d.key ? (
@@ -4981,8 +5579,9 @@ export default function WeeklyPlanner() {
                                   }
                                 }}
                                 onBlur={e => submitFocusDayEdit(d.key, d.date, d.seconds, e.target.value)}
-                                className="w-20 text-right text-xs font-semibold bg-transparent border-b outline-none"
+                                className="w-24 text-right text-xs font-bold bg-transparent border-b-2 outline-none"
                                 style={{ color: menuText, borderColor: '#60a5fa' }}
+                                onClick={e => e.stopPropagation()}
                               />
                             ) : (
                               <>
@@ -5201,6 +5800,27 @@ export default function WeeklyPlanner() {
         )}
       </AnimatePresence>
     </main>
+        </div>
+
+        <TasksPanel
+          open={tasksPanelOpen && !showFocusAnalysis}
+          width={tasksPanelWidth}
+          tasks={tasks}
+          filters={taskFilters}
+          timeFormat={timeFormat}
+          weekStartsOn={weekStartsOn}
+          taskColor={taskColor}
+          theme={taskPanelTheme}
+          onFiltersChange={setTaskFilters}
+          onCreate={createTask}
+          onToggleDone={handleToggleTaskDone}
+          onEdit={editTask}
+          onDelete={deleteTask}
+          onOpenMenu={openTaskMenu}
+          onResize={(w: number) => setTasksPanelWidth(clampPanelWidth(w))}
+          onClose={() => setTasksPanelOpen(false)}
+        />
+      </div>
 
       {/* Focus Day Edit Confirmation Modal */}
       {confirmFocusModal && createPortal(
@@ -6042,6 +6662,156 @@ export default function WeeklyPlanner() {
         </>
       )}
     </AnimatePresence>
+
+      {/* ── Task popover ──────────────────────────────────────────────────
+          A parallel to the event popover rather than a fork of it: that one is
+          370 lines of event-specific fields. The recurrence editor is shared. */}
+      <AnimatePresence>
+      {menuTask && taskMenuPos && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.96 }}
+          transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+          data-menu="1"
+          className="fixed z-[200] rounded-xl shadow-xl overflow-y-auto overflow-x-hidden"
+          style={{
+            left: Math.min(taskMenuPos.x, Math.max(8, window.innerWidth - 300)),
+            top:  Math.min(taskMenuPos.y, Math.max(8, window.innerHeight - 420)),
+            transformOrigin: 'top left',
+            width: 284,
+            maxHeight: 'calc(100vh - 16px)',
+            background: menuBg,
+            border: `1px solid ${menuBdr}`,
+            boxShadow: darkMode
+              ? '0 8px 32px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.06) inset'
+              : '0 8px 32px rgba(0,0,0,0.14), 0 1px 0 rgba(255,255,255,0.9) inset',
+          }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+            <div className="flex items-center gap-1.5">
+              <ListTodo size={13} style={{ color: taskColor }} />
+              <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Task</span>
+            </div>
+            <button onClick={() => setTaskMenuId(null)} className="p-0.5 rounded" style={{ color: menuSub }}>
+              <X size={13} />
+            </button>
+          </div>
+
+          <div className="p-3 flex flex-col gap-2.5">
+            <input
+              value={menuTask.title}
+              onChange={e => editTask(taskMenuId!, { title: e.target.value })}
+              placeholder="Task title"
+              autoFocus
+              className="w-full bg-transparent outline-none text-[13px] font-medium rounded-md px-2 py-1.5"
+              style={{ color: menuText, background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
+            />
+
+            {/* Scheduling: no date (general) → date only → date + time. */}
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => editTask(taskMenuId!, withDueDate(menuTask, null, weekStartsOn))}
+                className="px-2 py-1 rounded-md text-[11px] font-medium"
+                style={{
+                  background: menuTaskKind === 'general' ? `${taskColor}22` : surfaceBg,
+                  border: `1px solid ${menuTaskKind === 'general' ? taskColor : surfaceBdr}`,
+                  color: menuTaskKind === 'general' ? taskColor : menuSub,
+                }}
+              >
+                No date
+              </button>
+              <input
+                type="date"
+                value={menuTaskDue ?? ''}
+                onChange={e => e.target.value && editTask(taskMenuId!, withDueDate(menuTask, e.target.value, weekStartsOn))}
+                className="flex-1 min-w-0 rounded-md px-2 py-1 text-[11px] outline-none"
+                style={{ background: surfaceBg, color: menuText, border: `1px solid ${surfaceBdr}` }}
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5" style={{ opacity: menuTaskKind === 'general' ? 0.4 : 1, pointerEvents: menuTaskKind === 'general' ? 'none' : 'auto' }}>
+              <Clock size={12} style={{ color: menuSub }} />
+              <input
+                type="time"
+                value={menuTask.startTime ?? ''}
+                onChange={e => editTask(taskMenuId!, withTime(menuTask, e.target.value || null))}
+                className="flex-1 min-w-0 rounded-md px-2 py-1 text-[11px] outline-none"
+                style={{ background: surfaceBg, color: menuText, border: `1px solid ${surfaceBdr}` }}
+              />
+              {menuTask.startTime && (
+                <>
+                  <span className="text-[11px]" style={{ color: menuSub }}>–</span>
+                  <input
+                    type="time"
+                    value={menuTask.endTime ?? ''}
+                    onChange={e => editTask(taskMenuId!, { endTime: e.target.value || undefined })}
+                    className="flex-1 min-w-0 rounded-md px-2 py-1 text-[11px] outline-none"
+                    style={{ background: surfaceBg, color: menuText, border: `1px solid ${surfaceBdr}` }}
+                  />
+                  <button
+                    onClick={() => editTask(taskMenuId!, withTime(menuTask, null))}
+                    className="p-1 rounded" style={{ color: menuSub }} title="Clear time"
+                  >
+                    <X size={11} />
+                  </button>
+                </>
+              )}
+            </div>
+
+            <textarea
+              value={menuTask.notes ?? ''}
+              onChange={e => editTask(taskMenuId!, { notes: e.target.value })}
+              placeholder="Notes…"
+              rows={2}
+              className="w-full rounded-md px-2 py-1.5 text-[11.5px] outline-none resize-y"
+              style={{ background: surfaceBg, color: menuText, border: `1px solid ${surfaceBdr}` }}
+            />
+
+            {menuTaskKind !== 'general' && (
+              <div style={{ borderTop: `1px solid ${menuBdr}`, paddingTop: 8 }}>
+                <RecurrenceEditor
+                  recur={menuTask.recur}
+                  anchorWeekday={((menuTask.dayIndex ?? 0) + weekStartsOn) % 7 as Weekday}
+                  onChange={r => editTask(taskMenuId!, { recur: r })}
+                  theme={{ text: menuText, sub: menuSub, bdr: menuBdr, hover: hoverBg, accent: taskColor, accentBg: `${taskColor}22`, fieldBg: surfaceBg }}
+                />
+              </div>
+            )}
+
+            <div className="flex items-center gap-1.5 pt-1" style={{ borderTop: `1px solid ${menuBdr}` }}>
+              <button
+                onClick={() => { handleToggleTaskDone(taskMenuId!); }}
+                className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-[11.5px] font-semibold"
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+              >
+                {menuTaskDone ? <Square size={12} /> : <CheckSquare size={12} />}
+                {menuTaskDone ? 'Mark undone' : 'Mark done'}
+              </button>
+              <button
+                onClick={() => deleteTask(taskMenuId!, menuTask.recur ? 'one' : 'all')}
+                className="px-2 py-1.5 rounded-md text-[11.5px] font-semibold"
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: nowAccent }}
+                title={menuTask.recur ? 'Delete this occurrence' : 'Delete task'}
+              >
+                <Trash2 size={12} />
+              </button>
+              {menuTask.recur && (
+                <button
+                  onClick={() => deleteTask(taskMenuId!, 'all')}
+                  className="px-2 py-1.5 rounded-md text-[10.5px] font-semibold"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: nowAccent }}
+                  title="Delete the whole series"
+                >
+                  All
+                </button>
+              )}
+            </div>
+          </div>
+        </motion.div>
+      )}
+      </AnimatePresence>
 
       {/* ── Context menu (portal-style fixed popover) ────────────────────── */}
       <AnimatePresence>
