@@ -1349,18 +1349,20 @@ export default function Widget() {
                   </div>
                 )}
                 <div className="absolute inset-0 px-2 py-1.5 flex flex-col overflow-hidden">
-                  {/* Top time label */}
-                  <span className="text-[10px] mb-0.5 font-semibold whitespace-nowrap tabular-nums flex-shrink-0 flex items-center gap-1 opacity-90" style={{ color: textMuted }}>
-                    {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
-                    {isLive ? (
-                      <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
-                        <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
-                        {formatTimeLeft(minutesLeft)}
-                      </span>
-                    ) : (
-                      <span>({durationLabel})</span>
-                    )}
-                  </span>
+                  {/* Top time label (only displayed for items >= 1 hour) */}
+                  {durationMin >= 60 && (
+                    <span className="text-[10px] mb-0.5 font-semibold whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
+                      {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                      {isLive ? (
+                        <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
+                          {formatTimeLeft(minutesLeft)}
+                        </span>
+                      ) : (
+                        <span>({durationLabel})</span>
+                      )}
+                    </span>
+                  )}
                   <div className="flex items-start gap-1.5 flex-1 min-h-0">
                     {!ev.noCheckbox && (
                     <button
@@ -1385,7 +1387,7 @@ export default function Widget() {
                     </p>
                   </div>
                   {height >= sh * 1.5 && (
-                    <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums pl-5 flex-shrink-0 flex items-center gap-1" style={{ color: textMuted }}>
+                    <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1" style={{ color: textMuted }}>
                       {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
                       {isLive ? (
                         <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
