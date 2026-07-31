@@ -1,10 +1,40 @@
 import webview
 import ctypes
 import ctypes.wintypes
+import threading
+import time
 
 _resizing = False
 _old_wndproc = None
 _new_wndproc = None
+_always_on_top_enabled = True
+
+
+def force_topmost_loop():
+    """Background daemon thread that forcefully re-elevates the widget window to top-most Z-order
+
+    without stealing keyboard/input focus, ensuring it stays on top of demanding apps.
+    """
+    HWND_TOPMOST = -1
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
+    GWL_EXSTYLE = -20
+    WS_EX_TOPMOST = 0x00000008
+
+    while True:
+        time.sleep(0.5)
+        if _always_on_top_enabled and 'window' in globals() and window and hasattr(window, 'native') and window.native:
+            try:
+                hwnd = int(window.native.Handle.ToInt64())
+                if hwnd:
+                    ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                    if not (ex & WS_EX_TOPMOST):
+                        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOPMOST)
+                    user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            except Exception:
+                pass
 
 # Declare ctypes function signatures to prevent memory Access Violations
 user32 = ctypes.WinDLL('user32')
@@ -120,16 +150,26 @@ class Api:
             webbrowser.open(url)
 
     def set_always_on_top(self, on_top):
-        # SWP and HWND top-most constants
+        global _always_on_top_enabled
+        _always_on_top_enabled = bool(on_top)
         HWND_TOPMOST = -1
         HWND_NOTOPMOST = -2
         SWP_NOMOVE = 0x0002
         SWP_NOSIZE = 0x0001
+        SWP_NOACTIVATE = 0x0010
         SWP_SHOWWINDOW = 0x0040
+        GWL_EXSTYLE = -20
+        WS_EX_TOPMOST = 0x00000008
         try:
             hwnd = int(window.native.Handle.ToInt64())
-            target = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-            user32.SetWindowPos(hwnd, target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if _always_on_top_enabled:
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOPMOST)
+                target = HWND_TOPMOST
+            else:
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TOPMOST)
+                target = HWND_NOTOPMOST
+            user32.SetWindowPos(hwnd, target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception as e:
             print("Failed to toggle top-most:", e)
 
@@ -265,6 +305,10 @@ def on_shown():
         else:
             _old_wndproc = user32.GetWindowLongW(hwnd, GWL_WNDPROC)
             user32.SetWindowLongW(hwnd, GWL_WNDPROC, _new_wndproc)
+
+        # Start daemon thread to continuously enforce top-most Z-order without stealing focus
+        t = threading.Thread(target=force_topmost_loop, daemon=True)
+        t.start()
 
     except Exception as e:
         print("Failed to apply native Win32 style:", e)

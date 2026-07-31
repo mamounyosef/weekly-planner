@@ -152,6 +152,8 @@ export interface AutoBackupCfg {
   keep: number;
 }
 
+export type TaskCheckboxShape = 'circle' | 'square';
+
 export interface AppSettings {
   interval: IntervalMin;
   darkMode: boolean;
@@ -179,6 +181,7 @@ export interface AppSettings {
   tasksPanelWidth: number;   // 260–520
   showTaskRow: boolean;      // the dated-task band under All Day
   taskColor: string;         // '#rrggbb' — the one colour tasks wear on the grid
+  taskCheckboxShape: TaskCheckboxShape; // 'circle' | 'square'
   taskFilters: string[];     // panel filter selection; empty = show everything
   googleTasksSync: boolean;
 }
@@ -206,6 +209,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tasksPanelWidth: 340,
   showTaskRow: true,
   taskColor: '#7dd3fc',
+  taskCheckboxShape: 'circle',
   taskFilters: [],
   googleTasksSync: true,
 };
@@ -285,6 +289,9 @@ export function coerceSettings(raw: unknown): AppSettings {
   }
   if (typeof r.showTaskRow === 'boolean') s.showTaskRow = r.showTaskRow;
   if (typeof r.taskColor === 'string' && /^#[0-9a-f]{6}$/i.test(r.taskColor)) s.taskColor = r.taskColor;
+  if (['circle', 'square'].includes(r.taskCheckboxShape as string)) {
+    s.taskCheckboxShape = r.taskCheckboxShape as TaskCheckboxShape;
+  }
   if (Array.isArray(r.taskFilters)) {
     // Re-derived in canonical order, so an out-of-order array can never round-trip.
     s.taskFilters = TASK_FILTER_ORDER.filter(f => (r.taskFilters as unknown[]).includes(f));

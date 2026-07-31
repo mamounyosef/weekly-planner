@@ -66,12 +66,38 @@ export function weekKeyOf(date: Date, weekStartsOn: WeekStartsOn): string {
   return format(startOfWeek(date, { weekStartsOn }), 'yyyy-MM-dd');
 }
 
-function parseDate(d: string): Date {
+export function parseDate(d: string): Date {
   if (!d) return new Date(0);
   const parts = d.split('-');
   if (parts.length < 3) return new Date(0);
   const [y, m, day] = parts.map(Number);
   return new Date(y, m - 1, day);
+}
+
+// Helper to calculate the visible dayIndex and daysSpan of an all-day event
+// within the viewed week (which starts at weekStart). Returns null if it doesn't overlap.
+export function getEventWeekOverlap(ev: RecurFields, weekStart: Date): { dayIndex: number; daysSpan: number } | null {
+  const evWeekStart = parseDate(ev.weekKey || '0000-01-01');
+  const evStart = addDays(evWeekStart, ev.dayIndex || 0);
+  const evEnd = addDays(evStart, Math.max(1, ev.daysSpan || 1));
+  const weekEnd = addDays(weekStart, 7);
+
+  if (evStart >= weekEnd || evEnd <= weekStart) {
+    return null;
+  }
+
+  const startDiff = differenceInDays(evStart, weekStart);
+  const visibleDayIndex = Math.max(0, startDiff);
+  
+  const endDiff = differenceInDays(evEnd, weekStart);
+  const visibleDaysSpan = Math.min(7, endDiff) - visibleDayIndex;
+
+  if (visibleDaysSpan <= 0) return null;
+
+  return {
+    dayIndex: visibleDayIndex,
+    daysSpan: visibleDaysSpan
+  };
 }
 
 const ymd = (d: Date): string => format(d, 'yyyy-MM-dd');
@@ -293,13 +319,14 @@ export function editSeries<T extends RecurFields>(
   const nextExdates = exdates.includes(occDate) ? exdates : [...exdates, occDate];
   const masterNext = { ...master, exdates: nextExdates, updatedAt: Date.now() } as T;
 
-  const weekStart = parseDate(viewedWeekKey);
+  const targetWeekKey = patch.weekKey ?? viewedWeekKey;
+  const weekStart = parseDate(targetWeekKey);
   const occDay = parseDate(occDate);
   const newId = newLocalId();
   const detached = {
     ...master,
     id: newId,
-    weekKey: viewedWeekKey,
+    weekKey: targetWeekKey,
     dayIndex: differenceInDays(occDay, weekStart),
     recur: undefined,
     exdates: undefined,
@@ -338,7 +365,8 @@ function editWholeSeries<T extends RecurFields>(
   let newOccDate = occDate;
 
   if (master.recur && p.dayIndex != null) {
-    const weekStart = parseDate(viewedWeekKey);
+    const targetWeekKey = p.weekKey ?? viewedWeekKey;
+    const weekStart = parseDate(targetWeekKey);
     const newDate = addDays(weekStart, p.dayIndex);
     const rec = master.recur;
     const oldDate = occDate ? parseDate(occDate) : anchorOf(master);

@@ -63,6 +63,7 @@ import {
   type LightPreset,
   type EventCardStyle,
   type SidebarStyle,
+  type TaskCheckboxShape,
 } from '@/lib/settingsSync';
 
 type TimeFormat = '12h' | '24h';
@@ -179,6 +180,7 @@ export default function SettingsPage() {
   const [taskFilters, setTaskFilters] = useState<string[]>(initialSettings.taskFilters);
   const [showTaskRow, setShowTaskRow] = useState<boolean>(initialSettings.showTaskRow);
   const [taskColor, setTaskColor] = useState<string>(initialSettings.taskColor);
+  const [taskCheckboxShape, setTaskCheckboxShape] = useState<TaskCheckboxShape>(initialSettings.taskCheckboxShape ?? 'circle');
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
 
@@ -242,6 +244,7 @@ export default function SettingsPage() {
       setTaskFilters(s.taskFilters);
       setShowTaskRow(s.showTaskRow);
       setTaskColor(s.taskColor);
+      if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
       setGoogleTasksSync(s.googleTasksSync);
     });
   }, []);
@@ -276,6 +279,7 @@ export default function SettingsPage() {
           setTaskFilters(coerced.taskFilters);
           setShowTaskRow(coerced.showTaskRow);
           setTaskColor(coerced.taskColor);
+          setTaskCheckboxShape(coerced.taskCheckboxShape);
           setGoogleTasksSync(coerced.googleTasksSync);
         }
       })
@@ -325,9 +329,11 @@ export default function SettingsPage() {
       taskFilters,
       showTaskRow,
       taskColor,
+      taskCheckboxShape,
       googleTasksSync,
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor, googleTasksSync]);
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+      taskCheckboxShape, googleTasksSync]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {
@@ -402,6 +408,7 @@ export default function SettingsPage() {
     taskFilters,
     showTaskRow,
     taskColor,
+      taskCheckboxShape,
     googleTasksSync,
   });
 
@@ -435,6 +442,7 @@ export default function SettingsPage() {
     setTaskFilters(restored.taskFilters);
     setShowTaskRow(restored.showTaskRow);
     setTaskColor(restored.taskColor);
+    if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
     setGoogleTasksSync(restored.googleTasksSync);
     broadcastSettingsChange(restored);
   };
@@ -1097,6 +1105,39 @@ export default function SettingsPage() {
                       />
                     </button>
                   </label>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex flex-col">
+                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task Checkbox Shape</span>
+                      <span className="text-[11px]" style={{ color: textSecondary }}>
+                        Choose whether completed task checkboxes are circles or squares in the side panel.
+                      </span>
+                    </span>
+                    <div className="flex items-center gap-1.5 p-1 rounded-xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
+                      <button
+                        type="button"
+                        onClick={() => setTaskCheckboxShape('circle')}
+                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-all"
+                        style={{
+                          background: taskCheckboxShape === 'circle' ? taskColor : 'transparent',
+                          color: taskCheckboxShape === 'circle' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                        }}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full border border-current" /> Circle
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTaskCheckboxShape('square')}
+                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-all"
+                        style={{
+                          background: taskCheckboxShape === 'square' ? taskColor : 'transparent',
+                          color: taskCheckboxShape === 'square' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                        }}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-sm border border-current" /> Square
+                      </button>
+                    </div>
+                  </div>
 
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task colour on the calendar</span>

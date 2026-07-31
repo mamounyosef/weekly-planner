@@ -50,7 +50,7 @@ import {
   recoveredSessionId,
   safeFocusHeartbeat,
 } from '@/lib/focusSessions';
-import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId } from '@/lib/recurrence';
+import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
 import { themePalette, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
 
@@ -1242,9 +1242,9 @@ export default function Widget() {
         {todayColIdx !== -1 && (() => {
           const todayAllDay = Object.values(weekEvents).filter(ev => {
             if (!ev.allDay || ev.deleted) return false;
-            const start = ev.dayIndex;
-            const end = start + (ev.daysSpan || 1);
-            return todayColIdx >= start && todayColIdx < end;
+            const overlap = getEventWeekOverlap(ev, weekStart);
+            if (!overlap) return false;
+            return todayColIdx >= overlap.dayIndex && todayColIdx < overlap.dayIndex + overlap.daysSpan;
           });
           if (todayAllDay.length === 0) return null;
           return (
@@ -1406,63 +1406,183 @@ export default function Widget() {
                   color: text,
                 }}
               >
+                {(() => {
+                  const isMicroCard   = height < 26;
+                  const isShortCard   = height >= 26 && height < 44;
+                  const isCompactCard = height >= 44 && height < 64;
+                  return (
+                    <div
+                      className={`absolute inset-0 flex flex-col overflow-hidden ${
+                        isMicroCard || isShortCard ? 'px-1.5 py-0' : isCompactCard ? 'px-2 py-1' : 'px-2 pt-1.5 pb-1.5'
+                      }`}
+                      style={{
+                        top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4,
+                        bottom: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4,
+                      }}
+                    >
+                      {(() => {
+                        if (isMicroCard) {
+                          return (
+                            <div className="flex items-center gap-1 w-full h-full my-auto overflow-hidden text-xs px-0.5 leading-none">
+                              {!ev.noCheckbox && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleEventCompleted(ev.id);
+                                  }}
+                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  style={{
+                                    borderColor: isCompleted ? text : `${text}50`,
+                                    backgroundColor: isCompleted ? text : 'transparent',
+                                  }}
+                                >
+                                  {isCompleted && (
+                                    <div className="w-1 h-1 rounded-full" style={{ backgroundColor: bg }} />
+                                  )}
+                                </button>
+                              )}
+                              <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                              </span>
+                            </div>
+                          );
+                        }
+
+                        if (isShortCard) {
+                          return (
+                            <div className="flex items-center gap-1.5 w-full h-full my-auto overflow-hidden text-xs px-0.5 leading-none">
+                              {!ev.noCheckbox && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleEventCompleted(ev.id);
+                                  }}
+                                  className="flex-shrink-0 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  style={{
+                                    borderColor: isCompleted ? text : `${text}50`,
+                                    backgroundColor: isCompleted ? text : 'transparent',
+                                  }}
+                                >
+                                  {isCompleted && (
+                                    <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                  )}
+                                </button>
+                              )}
+                              <span className={`font-semibold truncate min-w-0 flex-shrink ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                              </span>
+                              <span className="text-[10px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
+                                · {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                              </span>
+                            </div>
+                          );
+                        }
+
+                        if (isCompactCard) {
+                          return (
+                            <div className="flex flex-col justify-between w-full h-full overflow-hidden leading-tight py-0.5">
+                              <div className="flex items-center gap-1.5 w-full min-w-0 flex-shrink-0">
+                                {!ev.noCheckbox && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleEventCompleted(ev.id);
+                                    }}
+                                    className="flex-shrink-0 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                    style={{
+                                      borderColor: isCompleted ? text : `${text}50`,
+                                      backgroundColor: isCompleted ? text : 'transparent',
+                                    }}
+                                  >
+                                    {isCompleted && (
+                                      <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                    )}
+                                  </button>
+                                )}
+                                <span className={`text-[12px] font-semibold truncate leading-tight min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                  {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                                </span>
+                              </div>
+                              <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-85 leading-none mt-auto flex items-center gap-1 whitespace-nowrap" style={{ color: textMuted }}>
+                                {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                {isLive ? (
+                                  <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                    <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
+                                    {minutesLeft}m left
+                                  </span>
+                                ) : (
+                                  <span>({durationLabel})</span>
+                                )}
+                              </span>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <>
+                            {durationMin >= 60 && (
+                              <span className="text-[10px] mb-0.5 font-semibold whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
+                                {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                {isLive ? (
+                                  <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                    <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
+                                    {formatTimeLeft(minutesLeft)}
+                                  </span>
+                                ) : (
+                                  <span>({durationLabel})</span>
+                                )}
+                              </span>
+                            )}
+                            <div className="flex items-start gap-1.5 flex-1 min-h-0">
+                              {!ev.noCheckbox && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleEventCompleted(ev.id);
+                                  }}
+                                  className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  style={{
+                                    borderColor: isCompleted ? text : `${text}50`,
+                                    backgroundColor: isCompleted ? text : 'transparent',
+                                  }}
+                                >
+                                  {isCompleted && (
+                                    <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                  )}
+                                </button>
+                              )}
+                              <p className={`text-[13px] font-semibold leading-tight break-words line-clamp-4 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                              </p>
+                            </div>
+                            {height >= sh * 1.5 && (
+                              <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1" style={{ color: textMuted }}>
+                                {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                {isLive ? (
+                                  <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                    <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
+                                    {minutesLeft}m left
+                                  </span>
+                                ) : (
+                                  <span>({durationLabel})</span>
+                                )}
+                              </span>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  );
+                })()}
                 {segKind === 'head' && (
                   <div className="absolute top-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 9 }} title={`Continues from ${formatTimeLabel(fullStartMin, timeFormat)} the night before`}>
                     <span style={{ fontSize: 8, lineHeight: 1, opacity: 0.55, color: text }}>⌃ continued</span>
                   </div>
                 )}
-                <div className="absolute inset-0 px-2 py-1.5 flex flex-col overflow-hidden">
-                  {/* Top time label (only displayed for items >= 1 hour) */}
-                  {durationMin >= 60 && (
-                    <span className="text-[10px] mb-0.5 font-semibold whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
-                      {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
-                      {isLive ? (
-                        <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
-                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
-                          {formatTimeLeft(minutesLeft)}
-                        </span>
-                      ) : (
-                        <span>({durationLabel})</span>
-                      )}
-                    </span>
-                  )}
-                  <div className="flex items-start gap-1.5 flex-1 min-h-0">
-                    {!ev.noCheckbox && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleEventCompleted(ev.id);
-                      }}
-                      className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
-                      style={{
-                        borderColor: isCompleted ? text : `${text}50`,
-                        backgroundColor: isCompleted ? text : 'transparent',
-                      }}
-                    >
-                      {isCompleted && (
-                        <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
-                      )}
-                    </button>
-                    )}
-                    <p className={`text-[13px] font-semibold leading-tight break-words line-clamp-4 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                      {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
-                    </p>
-                  </div>
-                  {height >= sh * 1.5 && (
-                    <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1" style={{ color: textMuted }}>
-                      {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
-                      {isLive ? (
-                        <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
-                          <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
-                          {formatTimeLeft(minutesLeft)}
-                        </span>
-                      ) : (
-                        <span>({durationLabel})</span>
-                      )}
-                    </span>
-                  )}
-                </div>
                 {segKind === 'tail' && (
                   <div className="absolute bottom-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 9 }} title={`Continues until ${formatTimeLabel(fullEndMin, timeFormat)}`}>
                     <span style={{ fontSize: 8, lineHeight: 1, opacity: 0.55, color: text }}>continued ⌄</span>

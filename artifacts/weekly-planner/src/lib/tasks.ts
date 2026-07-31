@@ -81,7 +81,7 @@ export function taskKind(t: Task): TaskKind {
 
 /** The concrete due date of a task (or of one expanded occurrence). */
 export function dueDateOf(t: Task): string | null {
-  if (t.occDate) return t.occDate;
+  if (t.occDate && t.recur) return t.occDate;
   if (!t.weekKey) return null;
   return ymd(addDays(parseYmd(t.weekKey), t.dayIndex ?? 0));
 }
@@ -89,13 +89,14 @@ export function dueDateOf(t: Task): string | null {
 /** Set (or clear, with `null`) the due date. Clearing makes the task general. */
 export function withDueDate(t: Task, date: string | null, weekStartsOn: WeekStartsOn): Task {
   if (!date) {
-    return { ...t, weekKey: undefined, dayIndex: undefined, startTime: undefined, endTime: undefined, recur: undefined, updatedAt: Date.now() };
+    return { ...t, weekKey: undefined, dayIndex: undefined, startTime: undefined, endTime: undefined, recur: undefined, occDate: undefined, updatedAt: Date.now() };
   }
   const d = parseYmd(date);
   return {
     ...t,
     weekKey: weekKeyOf(d, weekStartsOn),
     dayIndex: differenceInDays(d, startOfWeek(d, { weekStartsOn })),
+    occDate: undefined,
     updatedAt: Date.now(),
   };
 }

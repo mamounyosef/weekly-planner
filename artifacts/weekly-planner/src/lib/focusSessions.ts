@@ -77,6 +77,13 @@ export function focusRecoveryFor(
 ): FocusRecovery | null {
   if (!timer.isRunning || !timer.sessionStartedAt) return null;
 
+  // A session that was toggled/resumed very recently (within heartbeat stale window)
+  // is actively running. Stale heartbeat files on disk from before a pause must NOT
+  // trigger crash recovery.
+  if (timer.lastStartedAt && now - Date.parse(timer.lastStartedAt) <= FOCUS_HEARTBEAT_STALE_MS) {
+    return null;
+  }
+
   const matched = beat && beat.sessionStartedAt === timer.sessionStartedAt ? beat : null;
   if (matched) {
     if (now - Date.parse(matched.at) <= FOCUS_HEARTBEAT_STALE_MS) return null; // alive
