@@ -120,13 +120,13 @@ export function addMinutesToTime(hhmm: string, minutes: number): string {
  * they have no anchor, and `resolveWeek` would otherwise resolve them against
  * the year-0 sentinel.
  */
-export function resolveWeekTasks(raw: TaskData, viewedWeekKey: string): TaskData {
+export function resolveWeekTasks(raw: TaskData, viewedWeekKey: string, range?: { from: number; to: number }): TaskData {
   const scheduled: TaskData = {};
   for (const t of Object.values(raw)) {
     if (!t.weekKey || t.deleted) continue;
     scheduled[t.id] = t;
   }
-  return resolveWeek<Task>(scheduled, viewedWeekKey);
+  return resolveWeek<Task>(scheduled, viewedWeekKey, range);
 }
 
 /**

@@ -76,21 +76,31 @@ export function parseDate(d: string): Date {
 
 // Helper to calculate the visible dayIndex and daysSpan of an all-day event
 // within the viewed week (which starts at weekStart). Returns null if it doesn't overlap.
-export function getEventWeekOverlap(ev: RecurFields, weekStart: Date): { dayIndex: number; daysSpan: number } | null {
+// `range` (day offsets from `weekStart`, `to` exclusive) defaults to the 7 days of
+// the week; the custom view passes its own window, so the returned `dayIndex` is
+// relative to `weekStart` and may be negative.
+export function getEventWeekOverlap(
+  ev: RecurFields,
+  weekStart: Date,
+  range?: { from: number; to: number },
+): { dayIndex: number; daysSpan: number } | null {
+  const fromOff = range ? range.from : 0;
+  const toOff = range ? range.to : 7;
   const evWeekStart = parseDate(ev.weekKey || '0000-01-01');
   const evStart = addDays(evWeekStart, ev.dayIndex || 0);
   const evEnd = addDays(evStart, Math.max(1, ev.daysSpan || 1));
-  const weekEnd = addDays(weekStart, 7);
+  const winStart = addDays(weekStart, fromOff);
+  const weekEnd = addDays(weekStart, toOff);
 
-  if (evStart >= weekEnd || evEnd <= weekStart) {
+  if (evStart >= weekEnd || evEnd <= winStart) {
     return null;
   }
 
   const startDiff = differenceInDays(evStart, weekStart);
-  const visibleDayIndex = Math.max(0, startDiff);
-  
+  const visibleDayIndex = Math.max(fromOff, startDiff);
+
   const endDiff = differenceInDays(evEnd, weekStart);
-  const visibleDaysSpan = Math.min(7, endDiff) - visibleDayIndex;
+  const visibleDaysSpan = Math.min(toOff, endDiff) - visibleDayIndex;
 
   if (visibleDaysSpan <= 0) return null;
 
@@ -214,9 +224,22 @@ export function parseOccId(id: string): { masterId: string; occDate: string | nu
 // week, keyed by occurrence id ("<masterId>::<date>" for repeats, plain id for
 // non-repeating items). Each occurrence carries `masterId`/`occDate` so edits and
 // deletes can be routed back to the stored master.
-export function resolveWeek<T extends RecurFields>(raw: Record<string, T>, viewedWeekKey: string): Record<string, T> {
-  const weekStart = parseDate(viewedWeekKey);
-  const weekEnd = new Date(weekStart.getTime() + 7 * DAY_MS);
+// `range` widens/narrows the window to an arbitrary run of days expressed as
+// offsets from the week start (default the 7 days of the week itself). The custom
+// view uses e.g. { from: -2, to: 5 }; `dayIndex` is always stamped relative to the
+// week start, so it can legitimately be negative or >= 7 there.
+export function resolveWeek<T extends RecurFields>(
+  raw: Record<string, T>,
+  viewedWeekKey: string,
+  range?: { from: number; to: number },
+): Record<string, T> {
+  const anchorWeekStart = parseDate(viewedWeekKey);
+  const fromOff = range ? range.from : 0;
+  const toOff = range ? range.to : 7;
+  const weekStart = addDays(anchorWeekStart, fromOff);          // first visible day
+  const weekEnd = addDays(anchorWeekStart, toOff);              // one past the last
+  // Offsets are stamped against the anchor week start, not the first visible day.
+  const stampBase = anchorWeekStart;
   const out: Record<string, T> = {};
 
   // Safety net: if two stored records ever end up pointing at the SAME Google event
@@ -243,17 +266,26 @@ export function resolveWeek<T extends RecurFields>(raw: Record<string, T>, viewe
 
     if (!master.recur) {
       // Non-repeating: show if its span overlaps this week (supports multi-day all-day).
+      // A TIMED item on the last day of the previous week can run past the day-start
+      // boundary into this week's first day, so reach one day back for those and stamp
+      // a negative dayIndex — the grid draws them as a spill-in "head" segment.
       const start = anchorOf(master);
       const end = addDays(start, master.daysSpan ?? 1);
-      if (start < weekEnd && end > weekStart) {
-        out[master.id] = { ...master, masterId: master.id, occDate: ymd(start) };
+      const from = master.allDay ? weekStart : addDays(weekStart, -1);
+      if (start < weekEnd && end > from) {
+        out[master.id] = master.allDay
+          ? { ...master, masterId: master.id, occDate: ymd(start) }
+          : { ...master, masterId: master.id, occDate: ymd(start), weekKey: viewedWeekKey, dayIndex: differenceInDays(start, stampBase) };
       }
       continue;
     }
 
-    // Repeating: widen the scan backwards for multi-day all-day spill-in.
-    const span = master.allDay ? Math.max(1, master.daysSpan ?? 1) : 1;
-    const scanStart = addDays(weekStart, -(span - 1));
+    // Repeating: widen the scan backwards for multi-day all-day spill-in, and by one
+    // day for timed items so an overnight occurrence from the previous week's last day
+    // still reaches this week's first day.
+    const scanStart = master.allDay
+      ? addDays(weekStart, -(Math.max(1, master.daysSpan ?? 1) - 1))
+      : addDays(weekStart, -1);
     for (const d of occurrenceStarts(master, scanStart, weekEnd)) {
       const occDate = ymd(d);
       const occId = makeOccId(master.id, occDate);
@@ -263,7 +295,7 @@ export function resolveWeek<T extends RecurFields>(raw: Record<string, T>, viewe
         masterId: master.id,
         occDate,
         weekKey: viewedWeekKey,
-        dayIndex: differenceInDays(d, weekStart), // may be < 0 for spill-in; overlap clips it
+        dayIndex: differenceInDays(d, stampBase), // may be < 0 for spill-in; overlap clips it
       };
     }
   }
@@ -271,10 +303,22 @@ export function resolveWeek<T extends RecurFields>(raw: Record<string, T>, viewe
   return out;
 }
 
+// ─── Anchor normalisation ──────────────────────────────────────────────────
+// The custom view addresses days outside the anchor week (dayIndex < 0 or > 6).
+// That's fine for rendering, but stored records must always hold a real
+// (weekKey, 0–6) pair, so fold any out-of-range offset onto its own week.
+export function normalizeAnchor<T extends RecurFields>(item: T, weekStartsOn: WeekStartsOn): T {
+  const di = item.dayIndex ?? 0;
+  if (di >= 0 && di <= 6) return item;
+  const date = addDays(parseDate(item.weekKey ?? FAR_PAST_WEEK), di);
+  const ws = startOfWeek(date, { weekStartsOn });
+  return { ...item, weekKey: ymd(ws), dayIndex: differenceInDays(date, ws) };
+}
+
 // ─── Create ────────────────────────────────────────────────────────────────
 // Stamp anchor + timestamp onto a freshly created item (recurrence optional).
-export function stampNewItem<T extends RecurFields>(item: T, viewedWeekKey: string): T {
-  return { ...item, weekKey: item.weekKey ?? viewedWeekKey, deleted: false, updatedAt: Date.now() };
+export function stampNewItem<T extends RecurFields>(item: T, viewedWeekKey: string, weekStartsOn: WeekStartsOn = 0): T {
+  return normalizeAnchor({ ...item, weekKey: item.weekKey ?? viewedWeekKey, deleted: false, updatedAt: Date.now() }, weekStartsOn);
 }
 
 // ─── Edit (whole series) ───────────────────────────────────────────────────
@@ -295,7 +339,7 @@ export function editSeries<T extends RecurFields>(
 
   // Non-repeating: plain in-place edit.
   if (!master.recur) {
-    const next = { ...master, ...patch, updatedAt: Date.now() } as T;
+    const next = normalizeAnchor({ ...master, ...patch, updatedAt: Date.now() } as T, weekStartsOn);
     return { events: { ...raw, [masterId]: next }, targetId: masterId };
   }
 
@@ -323,7 +367,7 @@ export function editSeries<T extends RecurFields>(
   const weekStart = parseDate(targetWeekKey);
   const occDay = parseDate(occDate);
   const newId = newLocalId();
-  const detached = {
+  const detached = normalizeAnchor({
     ...master,
     id: newId,
     weekKey: targetWeekKey,
@@ -343,7 +387,7 @@ export function editSeries<T extends RecurFields>(
     deleted: false,
     ...patch, // the actual change (move/time/title/color) lands on the detached item
     updatedAt: Date.now(),
-  } as T;
+  } as T, weekStartsOn);
 
   return { events: { ...raw, [masterId]: masterNext, [newId]: detached }, targetId: newId };
 }
@@ -394,7 +438,7 @@ function editWholeSeries<T extends RecurFields>(
     delete (p as Partial<RecurFields>).weekKey;
   }
 
-  next = { ...next, ...p };
+  next = normalizeAnchor({ ...next, ...p }, weekStartsOn);
   const events = { ...raw, [masterId]: next };
   const targetId = master.recur ? (newOccDate ? makeOccId(masterId, newOccDate) : masterId) : masterId;
   return { events, targetId };

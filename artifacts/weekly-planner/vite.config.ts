@@ -34,6 +34,47 @@ async function pruneBackups(backupDir: string, baseName: string, keep = 30) {
   }
 }
 
+/**
+ * Union the incoming focus-session list with what is already on disk, keyed by
+ * id. Sessions are append-only in normal use, so a row the sender doesn't know
+ * about is one another window just logged — never a deletion. Newest first.
+ */
+async function mergeFocusSessions(filePath: string, body: string): Promise<string> {
+  let incoming: unknown;
+  try {
+    incoming = JSON.parse(body);
+  } catch {
+    return body; // let safeWriteJsonFile reject it
+  }
+  if (!Array.isArray(incoming)) return body;
+
+  let existing: unknown[] = [];
+  try {
+    const parsed = JSON.parse(await fsp.readFile(filePath, 'utf-8'));
+    if (Array.isArray(parsed)) existing = parsed;
+  } catch {
+    existing = [];
+  }
+  if (existing.length === 0) return body;
+
+  const byId = new Map<string, Record<string, unknown>>();
+  // Existing first, then incoming — so the sender's version of a row it does
+  // know about (e.g. an edited duration) wins.
+  for (const list of [existing, incoming as unknown[]]) {
+    for (const row of list) {
+      if (!row || typeof row !== 'object') continue;
+      const id = (row as Record<string, unknown>).id;
+      if (typeof id !== 'string') continue;
+      byId.set(id, row as Record<string, unknown>);
+    }
+  }
+
+  const merged = [...byId.values()].sort((a, b) =>
+    String(b.endedAt ?? '').localeCompare(String(a.endedAt ?? ''))
+  ).slice(0, 1000);
+  return JSON.stringify(merged);
+}
+
 async function safeWriteJsonFile(opts: {
   filePath: string;
   backupDir: string;
@@ -1666,7 +1707,14 @@ export default defineConfig({
             req.on('end', async () => {
               try {
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const result = await safeWriteJsonFile({ filePath: focusPath, backupDir, baseName: 'focus-sessions', body, kind: 'array', force });
+                // The main window and the widget each hold the whole session list
+                // and POST all of it. A plain overwrite therefore loses a session
+                // the *other* window logged since this one last read the file —
+                // that is how a completed hour of focus vanished. Merge by id
+                // instead. `force` (a deliberate manual edit of a day's total,
+                // which legitimately removes rows) still replaces outright.
+                const merged = force ? body : await mergeFocusSessions(focusPath, body);
+                const result = await safeWriteJsonFile({ filePath: focusPath, backupDir, baseName: 'focus-sessions', body: merged, kind: 'array', force });
                 res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
                   res.statusCode = result.status;

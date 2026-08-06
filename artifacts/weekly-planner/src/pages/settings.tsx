@@ -162,6 +162,8 @@ export default function SettingsPage() {
   // Owned by the main window. Carried here purely so saving from this page never
   // resets which view the planner was on.
   const [calendarView, setCalendarView] = useState<string | undefined>(initialSettings.calendarView);
+  const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
+  const [customDaysAfter, setCustomDaysAfter] = useState<number>(initialSettings.customDaysAfter);
   const [eventColorStyle, setEventColorStyle] = useState<EventCardStyle>(initialSettings.eventColorStyle);
   const [sidebarStyle, setSidebarStyle] = useState<SidebarStyle>(initialSettings.sidebarStyle);
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(initialSettings.timeFormat);
@@ -228,6 +230,8 @@ export default function SettingsPage() {
       setWidgetDarkPreset(s.widgetDarkPreset);
       setWidgetLightPreset(s.widgetLightPreset);
       setCalendarView(s.calendarView);
+      setCustomDaysBefore(s.customDaysBefore);
+      setCustomDaysAfter(s.customDaysAfter);
       setEventColorStyle(s.eventColorStyle);
       setSidebarStyle(s.sidebarStyle);
       setTimeFormat(s.timeFormat);
@@ -263,6 +267,8 @@ export default function SettingsPage() {
           setWidgetDarkPreset(coerced.widgetDarkPreset);
           setWidgetLightPreset(coerced.widgetLightPreset);
           setCalendarView(coerced.calendarView);
+          setCustomDaysBefore(coerced.customDaysBefore);
+          setCustomDaysAfter(coerced.customDaysAfter);
           setEventColorStyle(coerced.eventColorStyle);
           setSidebarStyle(coerced.sidebarStyle);
           setTimeFormat(coerced.timeFormat);
@@ -313,6 +319,8 @@ export default function SettingsPage() {
       widgetDarkPreset,
       widgetLightPreset,
       calendarView,
+      customDaysBefore,
+      customDaysAfter,
       eventColorStyle,
       sidebarStyle,
       timeFormat,
@@ -332,7 +340,7 @@ export default function SettingsPage() {
       taskCheckboxShape,
       googleTasksSync,
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
       taskCheckboxShape, googleTasksSync]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -392,6 +400,8 @@ export default function SettingsPage() {
     widgetDarkPreset,
     widgetLightPreset,
     calendarView,
+    customDaysBefore,
+    customDaysAfter,
     eventColorStyle,
     sidebarStyle,
     timeFormat,
@@ -426,6 +436,8 @@ export default function SettingsPage() {
     setWidgetDarkPreset(restored.widgetDarkPreset);
     setWidgetLightPreset(restored.widgetLightPreset);
     setCalendarView(restored.calendarView);
+    setCustomDaysBefore(restored.customDaysBefore);
+    setCustomDaysAfter(restored.customDaysAfter);
     setEventColorStyle(restored.eventColorStyle);
     setSidebarStyle(restored.sidebarStyle);
     setTimeFormat(restored.timeFormat);

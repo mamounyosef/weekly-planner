@@ -650,10 +650,47 @@ export function focusTimerPushKey(timer: FocusTimerState): string {
 }
 
 export function getFocusTimerElapsedSeconds(timer: FocusTimerState, now = Date.now()): number {
-  const runningSeconds = timer.isRunning && timer.lastStartedAt
-    ? Math.max(0, Math.floor((now - new Date(timer.lastStartedAt).getTime()) / 1000))
+  const anchor = timer.lastStartedAt ? Date.parse(timer.lastStartedAt) : NaN;
+  const runningSeconds = timer.isRunning && Number.isFinite(anchor)
+    ? Math.max(0, Math.floor((now - anchor) / 1000))
     : 0;
   return Math.max(0, Math.floor(timer.accumulatedSeconds + runningSeconds));
+}
+
+/**
+ * Bank the time run so far into `accumulatedSeconds` without losing any of it.
+ *
+ * This is called every few seconds while a session runs so that closing the app
+ * mid-session never loses progress. The subtle part is the new anchor: it must
+ * move forward by *exactly* the whole seconds just credited, NOT to "now".
+ * Anchoring to now discards the sub-second remainder on every single fold —
+ * ~0.4s each time, which is ~3 minutes an hour of focus time silently vanishing.
+ * The countdown then ran visibly slow, and pausing (which recomputes the true
+ * total) made it appear to jump backwards by minutes.
+ */
+export function checkpointFocusTimer(timer: FocusTimerState, now = Date.now()): FocusTimerState {
+  if (!timer.isRunning || !timer.lastStartedAt) return timer;
+  const anchor = Date.parse(timer.lastStartedAt);
+  if (!Number.isFinite(anchor)) return timer;
+  // A negative span means the clock went backwards (NTP correction, timezone
+  // fiddling). Banking it would rewind the session, so leave the anchor alone.
+  const ran = Math.floor((now - anchor) / 1000);
+  if (ran <= 0) return timer;
+  return {
+    ...timer,
+    accumulatedSeconds: Math.max(0, timer.accumulatedSeconds) + ran,
+    lastStartedAt: new Date(anchor + ran * 1000).toISOString(),
+  };
+}
+
+/** Stop the clock, keeping every second that was actually run. */
+export function pauseFocusTimer(timer: FocusTimerState, now = Date.now()): FocusTimerState {
+  return {
+    ...checkpointFocusTimer(timer, now),
+    isRunning: false,
+    lastStartedAt: null,
+    lastPausedAt: new Date(now).toISOString(),
+  };
 }
 
 export function formatFocusDuration(seconds: number): string {

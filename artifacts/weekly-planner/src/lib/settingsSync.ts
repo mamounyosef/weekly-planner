@@ -171,6 +171,10 @@ export interface AppSettings {
   dayStartH: number;
   dayEndH: number;
   calendarView?: string;
+  // Custom view window: how many days to show BEFORE the week start, and how many
+  // to show FROM the week start onwards (total columns = before + after).
+  customDaysBefore: number;
+  customDaysAfter: number;
   focusDayStartHour: number;
   focusChime: FocusChimeId;
   focusCues: Record<FocusCueSlot, FocusCueId>;
@@ -200,6 +204,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dayStartH: 8,
   dayEndH: 18,
   calendarView: 'week',
+  customDaysBefore: 1,
+  customDaysAfter: 7,
   focusDayStartHour: 4,
   focusChime: 'bowl',
   focusCues: DEFAULT_FOCUS_CUES,
@@ -262,6 +268,8 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.dayStartH === 'number') s.dayStartH = r.dayStartH;
   if (typeof r.dayEndH === 'number') s.dayEndH = r.dayEndH;
   if (typeof r.calendarView === 'string') s.calendarView = r.calendarView;
+  if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(0, Math.min(7, Math.round(r.customDaysBefore)));
+  if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(1, Math.min(14, Math.round(r.customDaysAfter)));
   if (typeof r.focusDayStartHour === 'number') {
     s.focusDayStartHour = Math.max(0, Math.min(23, Math.round(r.focusDayStartHour)));
   }

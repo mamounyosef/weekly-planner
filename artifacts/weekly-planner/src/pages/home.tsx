@@ -10,6 +10,7 @@ import {
   startOfWeek,
   endOfWeek,
   startOfMonth,
+  differenceInCalendarWeeks,
   endOfMonth,
   eachDayOfInterval,
   isToday,
@@ -18,6 +19,7 @@ import {
   addDays,
   subDays,
   differenceInDays,
+  startOfDay,
 } from 'date-fns';
 import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -32,6 +34,8 @@ import {
   formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
+  checkpointFocusTimer,
+  pauseFocusTimer,
   loadLocalFocusSessions,
   loadLocalFocusTimer,
   coerceFocusTimer,
@@ -227,10 +231,19 @@ type TimeFormat    = '12h' | '24h';
 type WeekStartsOn  = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0=Sun … 6=Sat
 
 // Calendar zoom levels, narrowest â†’ widest. Ctrl+wheel steps along this axis.
-type CalendarView = 'day' | 'week' | 'month' | 'year';
+type CalendarView = 'day' | 'week' | 'month' | 'year' | 'custom';
 const CALENDAR_VIEWS: CalendarView[] = ['day', 'week', 'month', 'year'];
+// 'custom' sits outside the zoom axis (it has its own width) but is still a
+// selectable view in the toolbar.
+const CALENDAR_VIEW_BUTTONS: CalendarView[] = [...CALENDAR_VIEWS, 'custom'];
 const isCalendarView = (v: unknown): v is CalendarView =>
-  typeof v === 'string' && (CALENDAR_VIEWS as string[]).includes(v);
+  typeof v === 'string' && (CALENDAR_VIEW_BUTTONS as string[]).includes(v);
+
+// Custom view window: P days BEFORE the week start + N days FROM the week start.
+// P=1,N=7 with a Sunday week start = Saturday → next Saturday (8 columns).
+const CUSTOM_BEFORE_MAX = 7;
+const CUSTOM_AFTER_MIN  = 1;
+const CUSTOM_AFTER_MAX  = 14;
 
 // App zoom: a fine 5% step, clamped to something still usable at both ends.
 const ZOOM_MIN  = 0.5;
@@ -716,6 +729,9 @@ export default function WeeklyPlanner() {
   const [weekStartsOn, setWeekStartsOn]     = useState<WeekStartsOn>(initialSettings.weekStartsOn);
   // Zoom levels, narrowest â†’ widest. Ctrl+wheel steps through them.
   const [calendarView, setCalendarView] = useState<CalendarView>('week');
+  // Custom view: P days before the week start, N days from the week start.
+  const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
+  const [customDaysAfter, setCustomDaysAfter]   = useState<number>(initialSettings.customDaysAfter);
   // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
   // it's applied as CSS `zoom` on the root so layout reflows instead of blurring.
   const [appZoom, setAppZoom] = useState(1);
@@ -820,7 +836,7 @@ export default function WeeklyPlanner() {
     // `events` — it stays out of the grid/Google until the user presses Save.
     const base = stampNewItem(
       { id: uid(), dayIndex: todayIdx, startTime, endTime, content: '', color: 'sage' } as PlannerEvent,
-      editCtxRef.current.viewedWeekKey,
+      editCtxRef.current.viewedWeekKey, editCtxRef.current.weekStartsOn,
     );
     setDraft(base);
     // Open the popup centred and pinned so it stays put (no event to anchor to yet).
@@ -1281,14 +1297,35 @@ export default function WeeklyPlanner() {
   // their 0–6 week-relative dayIndex, so everything below works off this mapping
   // between a *visible slot* and the real day index it stands for.
   const dayViewColIdx = (currentDate.getDay() - weekStartsOn + 7) % 7;
-  const visibleCols   = calendarView === 'day' ? [dayViewColIdx] : [0, 1, 2, 3, 4, 5, 6];
+  // Custom view widens the grid past the anchor week: column offsets run from
+  // -P (P days before the week start) through N-1. Offsets outside 0–6 address
+  // days in the neighbouring weeks and are perfectly legal here — only STORED
+  // records must stay in range (see normalizeAnchor).
+  const customFrom = -clamp(customDaysBefore, 0, CUSTOM_BEFORE_MAX);
+  const customTo   = clamp(customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX);
+  const visibleCols   = calendarView === 'day'
+    ? [dayViewColIdx]
+    : calendarView === 'custom'
+      ? Array.from({ length: customTo - customFrom }, (_, i) => customFrom + i)
+      : [0, 1, 2, 3, 4, 5, 6];
   const colCount      = visibleCols.length;
+  // Which week of its month the viewed week is — counted by week starts, so the
+  // week containing the 1st is week 1 even when it begins in the previous month.
+  const weekOfMonth = differenceInCalendarWeeks(weekStart, startOfMonth(weekStart), { weekStartsOn }) + 1;
+  /** The date a column offset stands for (offsets may fall outside the week). */
+  const dayAt = useCallback((offset: number) => addDays(weekStart, offset), [weekStart]);
   /** Visible slot for a week dayIndex, or -1 when that day isn't on screen. */
   const colSlot = (dayIndex: number) => visibleCols.indexOf(dayIndex);
   // Grids that render the timeline use these so day view stretches to full width.
   const isDayView = calendarView === 'day';
-  // Both 'day' and 'week' render the timeline grid.
-  const isTimelineView = calendarView === 'day' || calendarView === 'week';
+  const isCustomView = calendarView === 'custom';
+  // The window of day offsets the grid resolves events over.
+  const viewRange = useMemo(
+    () => (isCustomView ? { from: customFrom, to: customTo } : { from: 0, to: 7 }),
+    [isCustomView, customFrom, customTo],
+  );
+  // 'day', 'week' and 'custom' all render the timeline grid.
+  const isTimelineView = calendarView === 'day' || calendarView === 'week' || calendarView === 'custom';
   // Long-lived mouse handlers read the visible columns through a ref.
   const visibleColsRef = useRef<number[]>(visibleCols);
   visibleColsRef.current = visibleCols;
@@ -1317,12 +1354,12 @@ export default function WeeklyPlanner() {
   const currentRealWeekKey = weekKeyOf(new Date(nowTick), weekStartsOn);
   const isPastWeek        = viewedWeekKey < currentRealWeekKey;
   // Items visible in the viewed week, keyed by the storage id actually shown.
-  const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+  const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey, viewRange), [events, viewedWeekKey, viewRange]);
   const weekAllDayEvents = useMemo(() => {
     const rawAllDays = Object.values(weekEvents).filter(ev => ev.allDay && !ev.deleted);
     const mapped: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
     for (const ev of rawAllDays) {
-      const overlap = getEventWeekOverlap(ev, weekStart);
+      const overlap = getEventWeekOverlap(ev, weekStart, viewRange);
       if (overlap) {
         mapped.push({
           ...ev,
@@ -1332,7 +1369,7 @@ export default function WeeklyPlanner() {
       }
     }
     return mapped;
-  }, [weekEvents, weekStart]);
+  }, [weekEvents, weekStart, viewRange]);
   const allDayLayout = useMemo(() => {
     return layoutAllDay(weekAllDayEvents);
   }, [weekAllDayEvents]);
@@ -1349,32 +1386,32 @@ export default function WeeklyPlanner() {
   // Tasks visible in the viewed week, split by kind. Unlike all-day events a task
   // never spans days, so the dated band needs no packing layout — each chip sits
   // in its own day column.
-  const weekTasks = useMemo(() => resolveWeekTasks(tasks, viewedWeekKey), [tasks, viewedWeekKey]);
+  const weekTasks = useMemo(() => resolveWeekTasks(tasks, viewedWeekKey, viewRange), [tasks, viewedWeekKey, viewRange]);
+  // Keyed by column OFFSET rather than a fixed 0-6 array, so the custom view's
+  // out-of-week columns get their tasks too.
+  const bucketTasks = useCallback((timed: boolean) => {
+    const cols = new Map<number, Task[]>();
+    for (const t of Object.values(weekTasks)) {
+      if (t.deleted || (timed ? !t.startTime : !!t.startTime)) continue;
+      const i = t.dayIndex ?? 0;
+      if (i < viewRange.from || i >= viewRange.to) continue;
+      const bucket = cols.get(i);
+      if (bucket) bucket.push(t); else cols.set(i, [t]);
+    }
+    return cols;
+  }, [weekTasks, viewRange]);
   const datedTasksByCol = useMemo(() => {
-    const cols: Task[][] = [[], [], [], [], [], [], []];
-    for (const t of Object.values(weekTasks)) {
-      if (t.deleted || t.startTime) continue;
-      const i = t.dayIndex ?? 0;
-      if (i >= 0 && i < 7) cols[i].push(t);
-    }
-    for (const c of cols) c.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title));
+    const cols = bucketTasks(false);
+    for (const c of cols.values()) c.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title));
     return cols;
-  }, [weekTasks]);
-  const timedTasksByCol = useMemo(() => {
-    const cols: Task[][] = [[], [], [], [], [], [], []];
-    for (const t of Object.values(weekTasks)) {
-      if (t.deleted || !t.startTime) continue;
-      const i = t.dayIndex ?? 0;
-      if (i >= 0 && i < 7) cols[i].push(t);
-    }
-    return cols;
-  }, [weekTasks]);
+  }, [bucketTasks]);
+  const timedTasksByCol = useMemo(() => bucketTasks(true), [bucketTasks]);
   const maxTasksInAnyCol = useMemo(
-    () => datedTasksByCol.reduce((m, c) => Math.max(m, c.length), 0),
+    () => [...datedTasksByCol.values()].reduce((m, c) => Math.max(m, c.length), 0),
     [datedTasksByCol],
   );
   // The band is only drawn in week/day view — month and year lay themselves out.
-  const showTaskBand = showTaskRow && (calendarView === 'week' || calendarView === 'day');
+  const showTaskBand = showTaskRow && isTimelineView;
   const taskRowHeight = showTaskBand
     ? Math.max(TASK_ROW_MIN_H, maxTasksInAnyCol * (TASK_CHIP_H + 2) + 8)
     : 0;
@@ -1538,7 +1575,7 @@ export default function WeeklyPlanner() {
 
   // Create a brand-new item, anchored to the viewed week (recurrence optional).
   const createStamped = useCallback((base: PlannerEvent, opts?: { edit?: boolean; menuAt?: { x: number; y: number } }) => {
-    const stamped = stampNewItem(base, editCtxRef.current.viewedWeekKey);
+    const stamped = stampNewItem(base, editCtxRef.current.viewedWeekKey, editCtxRef.current.weekStartsOn);
     writeEvents({ ...eventsRef.current, [stamped.id]: stamped });
     if (opts?.edit) setEditingId(stamped.id);
     if (opts?.menuAt) { setMenuPinned(false); setMenuId(stamped.id); setMenuPos(opts.menuAt); }
@@ -1609,7 +1646,10 @@ export default function WeeklyPlanner() {
   // midnight and the day-start hour, "now" belongs to the PREVIOUS calendar day's
   // column, not today's — otherwise the red line lands a whole day too far right.
   const nowOwnerDate = nowMin < dayStartMin ? subDays(nowDate, 1) : nowDate;
-  const nowColIdx = days.findIndex(d => isSameDay(d, nowOwnerDate));
+  // As a column OFFSET from the week start, so the custom view's out-of-week
+  // columns can host the now-line too; -1 when "now" isn't on screen at all.
+  const nowOffset = differenceInDays(startOfDay(nowOwnerDate), weekStart);
+  const nowColIdx = visibleCols.includes(nowOffset) ? nowOffset : -1;
   const liveLineOnScreen = nowColIdx >= 0 && nowInView;
 
   // Show a "Go to Live" pill whenever the red now-line has scrolled out of the
@@ -1984,9 +2024,7 @@ export default function WeeklyPlanner() {
     // committed when the session ended). Folds elapsed into accumulatedSeconds and
     // re-anchors lastStartedAt so the persisted number is always current.
     const checkpointId = setInterval(() => {
-      setFocusTimer(prev => (prev.isRunning && prev.lastStartedAt
-        ? { ...prev, accumulatedSeconds: getFocusTimerElapsedSeconds(prev), lastStartedAt: new Date().toISOString() }
-        : prev));
+      setFocusTimer(prev => checkpointFocusTimer(prev));
     }, 5000);
     return () => {
       window.removeEventListener('storage', handleStorage);
@@ -2094,6 +2132,11 @@ export default function WeeklyPlanner() {
   // hours later (which credited a whole hour to the wrong day).
   const focusTimerRef = useRef(focusTimer);
   focusTimerRef.current = focusTimer;
+  // Set whenever the timer stops on its OWN (hit zero, or a session recovered
+  // after a shutdown). The cue effect below reads it to tell that transition
+  // apart from a real pause/stop: completing RESETS the timer, so the remaining
+  // seconds jump back to full and can't distinguish the two.
+  const focusAutoEndedRef = useRef(false);
   const completeFocusSessionRef = useRef(completeFocusSession);
   completeFocusSessionRef.current = completeFocusSession;
   // The sessionStartedAt we've confirmed is genuinely live. The completion
@@ -2125,6 +2168,7 @@ export default function WeeklyPlanner() {
           }).catch(() => {});
           return;
         }
+        focusAutoEndedRef.current = true; // recovery, not a pause the user asked for
         if (recovery.durationSeconds >= MIN_RECOVERED_SESSION_SECONDS) {
           completeFocusSessionRef.current(recovery.durationSeconds, false, {
             endedAt: new Date(recovery.endedAt),
@@ -2198,6 +2242,7 @@ export default function WeeklyPlanner() {
         `complete|${focusTimer.sessionStartedAt ?? ''}|${focusTimer.plannedSeconds}`,
         () => playFocusChime(focusChimeRef.current),
       );
+      focusAutoEndedRef.current = true;
       completeFocusSession(focusTimer.plannedSeconds, true);
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
@@ -2222,8 +2267,10 @@ export default function WeeklyPlanner() {
       // A fresh session id (or none before) means "start"; same one means "resume".
       slot = session && session === prevSession ? 'resume' : 'start';
     } else if (!running && prevRunning) {
-      // Hitting zero is a completion, not a pause — the chime covers that.
-      if (focusRemainingSeconds > 0) slot = 'pause';
+      // Hitting zero is a completion, not a pause: the session-complete chime
+      // covers that one, so this must not also fire the pause cue.
+      if (focusAutoEndedRef.current) focusAutoEndedRef.current = false;
+      else slot = 'pause';
     }
     if (!slot) return;
     const cue = focusCuesRef.current[slot];
@@ -2233,23 +2280,22 @@ export default function WeeklyPlanner() {
 
   const startFocus = () => {
     const startedAt = new Date().toISOString();
-    setFocusTimer(prev => ({
-      ...prev,
-      isRunning: true,
-      lastStartedAt: startedAt,
-      sessionStartedAt: prev.sessionStartedAt ?? startedAt,
-      lastPausedAt: null,
-    }));
+    setFocusTimer(prev => {
+      // Already running (double-click, or the hotkey and this button racing):
+      // re-anchoring would silently drop everything since the last checkpoint.
+      if (prev.isRunning && prev.lastStartedAt) return prev;
+      return {
+        ...prev,
+        isRunning: true,
+        lastStartedAt: startedAt,
+        sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+        lastPausedAt: null,
+      };
+    });
   };
 
   const pauseFocus = () => {
-    setFocusTimer(prev => ({
-      ...prev,
-      accumulatedSeconds: getFocusTimerElapsedSeconds(prev),
-      isRunning: false,
-      lastStartedAt: null,
-      lastPausedAt: new Date().toISOString(),
-    }));
+    setFocusTimer(prev => (prev.isRunning ? pauseFocusTimer(prev) : prev));
   };
 
   const resetFocus = () => {
@@ -2355,6 +2401,8 @@ export default function WeeklyPlanner() {
           if (s.dayStartH != null) setDayStartH(s.dayStartH);
           if (s.dayEndH != null) setDayEndH(s.dayEndH);
           if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
+          if (s.customDaysBefore != null) setCustomDaysBefore(clamp(Number(s.customDaysBefore), 0, CUSTOM_BEFORE_MAX));
+          if (s.customDaysAfter != null) setCustomDaysAfter(clamp(Number(s.customDaysAfter), CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
           if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
           if (s.focusChime != null) setFocusChime(coerceFocusChime(s.focusChime));
           if (s.focusCues && typeof s.focusCues === 'object') {
@@ -2459,11 +2507,11 @@ export default function WeeklyPlanner() {
     broadcastSettingsChange({
       interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
       eventColorStyle, sidebarStyle,
-      timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView,
+      timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter,
       focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
       tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync]);
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -2603,7 +2651,7 @@ export default function WeeklyPlanner() {
   const currentSettingsSnapshot = (): AppSettings => ({
     interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
     eventColorStyle, sidebarStyle,
-    timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView,
+    timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter,
     focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
     tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync
   });
@@ -2628,6 +2676,8 @@ export default function WeeklyPlanner() {
     setDayStartH(restored.dayStartH);
     setDayEndH(restored.dayEndH);
     if (isCalendarView(restored.calendarView)) setCalendarView(restored.calendarView);
+    setCustomDaysBefore(restored.customDaysBefore);
+    setCustomDaysAfter(restored.customDaysAfter);
     setFocusDayStartHour(restored.focusDayStartHour);
     setFocusChime(restored.focusChime);
     setFocusCues(restored.focusCues);
@@ -2965,7 +3015,10 @@ export default function WeeklyPlanner() {
           const duration = timeToMin(ev.endTime) - evStart;
           const dayOffset = ev.dayIndex - anchor.dayIndex;
           const timeOffset = evStart - timeToMin(anchor.startTime);
-          const targetDay = clamp(coords.dayIndex + dayOffset, 0, 6);
+          // Clamp into the VISIBLE window — in the custom view that runs past the
+          // anchor week on either side.
+          const visCols = visibleColsRef.current;
+          const targetDay = clamp(coords.dayIndex + dayOffset, visCols[0], visCols[visCols.length - 1]);
           const targetStart = clamp(coords.snappedMin + timeOffset, dayStartRef.current * 60, dayEndRef.current * 60 - duration);
           // A pasted copy is a fresh, standalone item: strip recurrence + Google
           // identity so it never mutates the source's series or sync record.
@@ -2974,7 +3027,7 @@ export default function WeeklyPlanner() {
             startTime: minToTime(targetStart), endTime: minToTime(targetStart + duration),
             recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined,
             gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined,
-          } as PlannerEvent, wk);
+          } as PlannerEvent, wk, editCtxRef.current.weekStartsOn);
           pastedIds.push(newId);
         }
         writeEvents({ ...eventsRef.current, ...stampedNew });
@@ -3025,7 +3078,7 @@ export default function WeeklyPlanner() {
               startTime: minToTime(pasteStart), endTime: minToTime(pasteStart + duration),
               recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined,
               gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined,
-            } as PlannerEvent, wk);
+            } as PlannerEvent, wk, editCtxRef.current.weekStartsOn);
             pastedIds.push(newId);
           }
           writeEvents({ ...eventsRef.current, ...stampedNew });
@@ -3168,7 +3221,7 @@ export default function WeeklyPlanner() {
         let targetDay = coords.dayIndex;
         let rawStart = coords.snappedMin - dr.offsetMin;
         if (dr.isHeadClick) {
-          targetDay = (coords.dayIndex - 1 + 7) % 7;
+          targetDay = coords.dayIndex - 1;
           rawStart = coords.snappedMin + 1440 - dr.offsetMin;
         }
         const maxStart = dayEndMin - POSITION_SNAP;
@@ -3265,7 +3318,8 @@ export default function WeeklyPlanner() {
       if (sr) {
         const gridRect = daysGridRef.current?.getBoundingClientRect();
         if (gridRect) {
-          const colW = gridRect.width / 7;
+          const cols = visibleColsRef.current;
+          const colW = gridRect.width / cols.length;
           const curX = e.clientX - gridRect.left;
           const curY = e.clientY - gridRect.top - topBandsHeight;
           const left = Math.min(sr.startX, curX);
@@ -3276,8 +3330,11 @@ export default function WeeklyPlanner() {
           const bottomMin = yToMin(Math.max(0, bottomPx), interval, dayStartH);
           const idsToAdd: string[] = [];
           for (const [id, ev] of Object.entries(weekEventsRef.current)) {
-            const colLeft = ev.dayIndex * colW;
-            const colRight = (ev.dayIndex + 1) * colW;
+            // Position by VISIBLE slot — day/custom views don't show every dayIndex.
+            const slot = cols.indexOf(ev.dayIndex);
+            if (slot === -1) continue;
+            const colLeft = slot * colW;
+            const colRight = (slot + 1) * colW;
             if (colRight <= left || colLeft >= right) continue;
             let evStart = normalizeMin(timeToMin(ev.startTime), dayStartH);
             let evEnd = normalizeMin(timeToMin(ev.endTime), dayStartH);
@@ -3491,7 +3548,7 @@ export default function WeeklyPlanner() {
       const newId = uid();
       // Each clone is a fresh, non-repeating copy on that day (recurrence + sync
       // identity stripped so it stands alone).
-      additions[newId] = stampNewItem({ ...ev, id: newId, dayIndex: day, weekKey: wk, recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined, gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined }, wk);
+      additions[newId] = stampNewItem({ ...ev, id: newId, dayIndex: day, weekKey: wk, recur: undefined, exdates: undefined, masterId: undefined, occDate: undefined, gCalId: undefined, gCalCalendarId: undefined, gCalETag: undefined, gCalRecurSig: undefined, lastSyncedAt: undefined, deleted: undefined }, wk, weekStartsOn);
     }
     writeEvents({ ...eventsRef.current, ...additions });
     setMenuId(null); setMenuPos(null);
@@ -3507,6 +3564,9 @@ export default function WeeklyPlanner() {
     setCurrentDate(d => {
       switch (calendarView) {
         case 'day':   return addDays(d, dir);
+        // The custom window is anchored to the week start, so stepping moves a whole
+        // week — the window keeps the same shape (e.g. Sat → next Sat) as it walks.
+        case 'custom': return dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1);
         case 'month': return dir < 0 ? subMonths(d, 1) : addMonths(d, 1);
         case 'year':  return dir < 0 ? subMonths(d, 12) : addMonths(d, 12);
         default:      return dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1);
@@ -3768,8 +3828,11 @@ export default function WeeklyPlanner() {
         <div className="flex-1 min-w-0 flex flex-col relative">
       {/* â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
-        <div className="max-w-[1400px] mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-5">
+        {/* The toolbar spans the full content width (the grid below stays capped at
+            1400 and centred) — capping it too wasted the side margins and forced the
+            controls onto a second line. It still wraps if the window gets narrow. */}
+        <div className="w-full px-6 min-h-14 py-1.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+          <div className="flex items-center gap-3.5 flex-shrink-0">
             {showFocusAnalysis ? (
               <button
                 onClick={() => setShowFocusAnalysis(false)}
@@ -3789,30 +3852,72 @@ export default function WeeklyPlanner() {
                     ? format(currentDate, 'EEEE, MMM d yyyy')
                     : calendarView === 'year'
                       ? format(currentDate, 'yyyy')
-                      : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
+                      : calendarView === 'custom'
+                        ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d')}`
+                        : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                 </span>
+                {/* Which week of the shown month this is (week view only). */}
+                {calendarView === 'week' && (
+                  <span
+                    className="text-[9.5px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md whitespace-nowrap -ml-2.5"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: headerInactive }}
+                    title={`Week ${weekOfMonth} of ${format(weekStart, 'MMMM')}`}
+                  >
+                    Week {weekOfMonth}
+                  </span>
+                )}
                 <div className="flex items-center rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                   <button onClick={navPrev}  title={`Previous ${calendarView} (${formatCombo(shortcuts.prevWeek)})`} className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronLeft size={15}/></button>
                   <button onClick={goToday} title={`Jump to today (${formatCombo(shortcuts.today)})`} className="px-3 py-1 text-xs font-medium text-foreground/75 rounded-md transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}>Today</button>
                   <button onClick={navNext}  title={`Next ${calendarView} (${formatCombo(shortcuts.nextWeek)})`} className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
                 </div>
-                {/* Day / Week / Month / Year switch (also Ctrl+wheel) */}
+                {/* Day / Week / Month / Year / Custom switch (Ctrl+wheel steps the first four) */}
                 <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }} title="Ctrl + scroll to zoom between these">
-                  {CALENDAR_VIEWS.map(v => {
+                  {CALENDAR_VIEW_BUTTONS.map(v => {
                     const active = calendarView === v;
                     return (
-                      <button key={v} onClick={() => { setDirection(0); setCalendarView(v); }} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 capitalize"
+                      <button key={v} onClick={() => { setDirection(0); setCalendarView(v); }} className="px-2.5 py-1 text-xs font-semibold rounded-md transition-all duration-200 capitalize"
                         style={{ background: active ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent', color: active ? (darkMode ? '#f5f5f5' : menuText) : headerInactive, boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                         {v}
                       </button>
                     );
                   })}
                 </div>
+                {/* Custom window size: P days before the week start, N days from it. */}
+                {calendarView === 'custom' && (
+                  <div className="flex flex-col rounded-lg px-1 py-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    {([
+                      { label: 'Before', title: `Days shown BEFORE the week start (${format(weekStart, 'EEEE')})`, value: customDaysBefore, min: 0, max: CUSTOM_BEFORE_MAX, set: setCustomDaysBefore },
+                      { label: 'After',  title: `Days shown FROM the week start (${format(weekStart, 'EEEE')}) onwards`, value: customDaysAfter, min: CUSTOM_AFTER_MIN, max: CUSTOM_AFTER_MAX, set: setCustomDaysAfter },
+                    ] as const).map(s => (
+                      <div key={s.label} className="flex items-center h-[19px]" title={s.title}>
+                        <span className="text-[8.5px] font-bold uppercase tracking-wider w-[34px]" style={{ color: headerInactive }}>{s.label}</span>
+                        <button
+                          onClick={() => s.set(v => Math.max(s.min, v - 1))}
+                          disabled={s.value <= s.min}
+                          className="px-0.5 rounded transition-colors disabled:opacity-30"
+                          style={{ color: headerInactive }}
+                          onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        ><Minus size={10}/></button>
+                        <span className="w-[15px] text-center text-[10.5px] font-semibold tabular-nums" style={{ color: menuText }}>{s.value}</span>
+                        <button
+                          onClick={() => s.set(v => Math.min(s.max, v + 1))}
+                          disabled={s.value >= s.max}
+                          className="px-0.5 rounded transition-colors disabled:opacity-30"
+                          style={{ color: headerInactive }}
+                          onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        ><Plus size={10}/></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </>
             )}
           </div>
-          <div className="flex items-center gap-3">
-            <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+          <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+            <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
             {/* App zoom stepper — mirrors Ctrl +/âˆ’ (Ctrl+0 resets). */}
@@ -3820,7 +3925,7 @@ export default function WeeklyPlanner() {
               <button
                 onClick={() => setAppZoom(z => clampZoom(z - ZOOM_STEP))}
                 disabled={appZoom <= ZOOM_MIN + 1e-9}
-                className="px-1.5 py-1 transition-colors disabled:opacity-30"
+                className="px-1 py-1 transition-colors disabled:opacity-30"
                 style={{ color: headerInactive }}
                 onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -3837,13 +3942,13 @@ export default function WeeklyPlanner() {
                     if (e.key === 'Enter') commitZoomDraft();
                     if (e.key === 'Escape') { setZoomDraft(String(Math.round(appZoom * 100))); setEditingZoom(false); }
                   }}
-                  className="w-[38px] bg-transparent outline-none text-center text-[11px] font-semibold tabular-nums"
+                  className="w-[34px] bg-transparent outline-none text-center text-[11px] font-semibold tabular-nums"
                   style={{ color: menuText }}
                 />
               ) : (
                 <button
                   onClick={() => { setZoomDraft(String(Math.round(appZoom * 100))); setEditingZoom(true); }}
-                  className="w-[46px] text-[11px] font-semibold tabular-nums cursor-text"
+                  className="w-[40px] text-[11px] font-semibold tabular-nums cursor-text"
                   style={{ color: menuText }}
                   title="Click to type an exact zoom %"
                 >
@@ -3853,7 +3958,7 @@ export default function WeeklyPlanner() {
               <button
                 onClick={() => setAppZoom(z => clampZoom(z + ZOOM_STEP))}
                 disabled={appZoom >= ZOOM_MAX - 1e-9}
-                className="px-1.5 py-1 transition-colors disabled:opacity-30"
+                className="px-1 py-1 transition-colors disabled:opacity-30"
                 style={{ color: headerInactive }}
                 onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -3863,11 +3968,10 @@ export default function WeeklyPlanner() {
             </div>
             {!showFocusAnalysis && isTimelineView && (
               <>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: headerLabel }}>Interval</span>
+                <div className="flex items-center gap-2" title="Grid interval">
                   <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                     {([5, 15, 30, 60] as IntervalMin[]).map(v => (
-                      <button key={v} onClick={() => setIntervalOpt(v)} className="px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200"
+                      <button key={v} onClick={() => setIntervalOpt(v)} className="px-2.5 py-1 text-xs font-semibold rounded-md transition-all duration-200"
                         style={{ background: interval===v ? (darkMode?'rgba(255,255,255,0.14)':'#fff') : 'transparent', color: interval===v ? (darkMode ? '#f5f5f5' : menuText) : headerInactive, boxShadow: interval===v ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
                         {v}m
                       </button>
@@ -3921,7 +4025,7 @@ export default function WeeklyPlanner() {
             <button
               onClick={() => setShowFocusAnalysis(v => !v)}
               title={`${showFocusAnalysis ? 'Back to calendar' : 'Focus Analysis'} (${formatCombo(shortcuts.focusAnalysis)})`}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
               style={{
                 background: showFocusAnalysis ? (darkMode?'rgba(96,165,250,0.22)':'rgba(37,99,235,0.12)') : surfaceBg,
                 border: `1px solid ${showFocusAnalysis ? 'rgba(96,165,250,0.50)' : surfaceBdr}`,
@@ -3934,7 +4038,7 @@ export default function WeeklyPlanner() {
             <button
               onClick={() => setTasksPanelOpen(v => !v)}
               title={tasksPanelOpen ? 'Hide tasks' : 'Show tasks'}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
               style={{
                 background: tasksPanelOpen ? `${taskColor}22` : surfaceBg,
                 border: `1px solid ${tasksPanelOpen ? `${taskColor}88` : surfaceBdr}`,
@@ -3947,23 +4051,23 @@ export default function WeeklyPlanner() {
             <button
               onClick={handleHeaderCreateClick}
               title="Create Event"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-blue-500 hover:bg-blue-600 transition-colors shadow-sm cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-blue-500 hover:bg-blue-600 transition-colors shadow-sm cursor-pointer"
             >
               <Plus size={14} />
               Create
             </button>
-            <button onClick={openWidget} title="Open Floating Widget" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+            <button onClick={openWidget} title="Open Floating Widget" className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <AppWindow size={14}/>
             </button>
             <button
               onClick={() => setShowShortcutHelp(true)}
               title={`Keyboard shortcuts (${formatCombo(shortcuts.help)})`}
-              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
+              className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
               style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
             >
               <Keyboard size={14}/>
             </button>
-            <button onClick={() => navigateToSettings()} title="Settings" className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+            <button onClick={() => navigateToSettings()} title="Settings" className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <Settings size={14}/>
             </button>
           </div>
@@ -4202,7 +4306,7 @@ export default function WeeklyPlanner() {
                 <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
               // Day view slides per day; week view per week.
-              key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : `w:${weekStart.toISOString()}`}
+              key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : isCustomView ? `c:${weekStart.toISOString()}:${customFrom}:${customTo}` : `w:${weekStart.toISOString()}`}
               custom={direction}
               variants={{
                 enter:  (d: number) => ({ x: d>0?10:d<0?-10:0, opacity: 0 }),
@@ -4276,7 +4380,7 @@ export default function WeeklyPlanner() {
                 style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}
               >
                 {visibleCols.map((colIdx) => {
-                  const day       = days[colIdx];
+                  const day       = dayAt(colIdx);
                   const today     = isSameDay(day, nowOwnerDate);
                   // The column that actually contains "now" (see nowColIdx: before the
                   // day-start hour that's yesterday's column, not today's).
@@ -4342,7 +4446,7 @@ export default function WeeklyPlanner() {
                           if (targetDayIndex === colIdx) {
                             renderItems.push({ ev: phEv, key: `${ev.id}__tail_ph`, startMin: targetS, endMin: dayStartMin + 1440, segKind: 'tail' });
                           }
-                          if ((targetDayIndex + 1) % 7 === colIdx) {
+                          if (targetDayIndex + 1 === colIdx) {
                             renderItems.push({ ev: phEv, key: `${ev.id}__head_ph`, startMin: dayStartMin, endMin: targetE - 1440, segKind: 'head' });
                           }
                         } else {
@@ -4357,7 +4461,7 @@ export default function WeeklyPlanner() {
                           if (ev.dayIndex === colIdx) {
                             renderItems.push({ ev, key: `${ev.id}__tail_drag`, startMin: origS, endMin: dayStartMin + 1440, segKind: 'tail' });
                           }
-                          if ((ev.dayIndex + 1) % 7 === colIdx) {
+                          if (ev.dayIndex + 1 === colIdx) {
                             renderItems.push({ ev, key: `${ev.id}__head_drag`, startMin: dayStartMin, endMin: origE - 1440, segKind: 'head' });
                           }
                         } else {
@@ -4371,7 +4475,7 @@ export default function WeeklyPlanner() {
                           if (targetDayIndex === colIdx) {
                             renderItems.push({ ev, key: `${ev.id}__tail_resize`, startMin: targetS, endMin: dayStartMin + 1440, segKind: 'tail' });
                           }
-                          if ((targetDayIndex + 1) % 7 === colIdx) {
+                          if (targetDayIndex + 1 === colIdx) {
                             renderItems.push({ ev, key: `${ev.id}__head_resize`, startMin: dayStartMin, endMin: targetE - 1440, segKind: 'head' });
                           }
                         } else {
@@ -4386,7 +4490,7 @@ export default function WeeklyPlanner() {
                           if (ev.dayIndex === colIdx) {
                             renderItems.push({ ev, key: ev.id, startMin: origS, endMin: dayStartMin + 1440, segKind: 'tail' });
                           }
-                          if ((ev.dayIndex + 1) % 7 === colIdx) {
+                          if (ev.dayIndex + 1 === colIdx) {
                             renderItems.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: origE - 1440, segKind: 'head' });
                           }
                         } else {
@@ -4402,7 +4506,7 @@ export default function WeeklyPlanner() {
                   // a task overlapping a meeting sits beside it instead of on top.
                   // `layoutParallel` is structurally typed, so they can just join the
                   // same input list.
-                  const colTimedTasks = showTaskBand ? timedTasksByCol[colIdx] : [];
+                  const colTimedTasks = (showTaskBand ? timedTasksByCol.get(colIdx) : undefined) ?? [];
                   const timedTaskItems = colTimedTasks.map(t => {
                     const s = normalizeMin(timeToMin(t.startTime!), dayStartH);
                     let e = normalizeMin(timeToMin(t.endTime || t.startTime!), dayStartH);
@@ -4501,7 +4605,7 @@ export default function WeeklyPlanner() {
                           style={{ height: taskRowHeight }}
                           className="flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] overflow-hidden"
                         >
-                          {datedTasksByCol[colIdx].map(t => {
+                          {(datedTasksByCol.get(colIdx) ?? []).map(t => {
                             const occ = t.occDate ?? null;
                             const done = isTaskDone(t, occ);
                             const c = taskChipColors(t.color || undefined);
@@ -4546,7 +4650,7 @@ export default function WeeklyPlanner() {
                               e.stopPropagation();
                               const id = createTask({
                                 title: 'New task',
-                                dueDate: format(days[colIdx], 'yyyy-MM-dd'),
+                                dueDate: format(dayAt(colIdx), 'yyyy-MM-dd'),
                               });
                               if (id) openTaskMenu(id, { x: e.clientX + 10, y: e.clientY });
                             }}
@@ -5155,16 +5259,14 @@ export default function WeeklyPlanner() {
                     const span = ev.visibleDaysSpan;
                     // Day view shows one column: clip the banner to that day, and
                     // skip it entirely when the span doesn't reach the shown day.
-                    let leftPct: number;
-                    let widthPct: number;
-                    if (isDayView) {
-                      if (dayViewColIdx < startIdx || dayViewColIdx >= startIdx + span) return null;
-                      leftPct = 0;
-                      widthPct = 100;
-                    } else {
-                      leftPct = (startIdx / 7) * 100;
-                      widthPct = (span / 7) * 100;
-                    }
+                    // Clip the banner to the visible column window (one column in day
+                    // view, the custom range otherwise) and drop it if it misses.
+                    const firstOff = visibleCols[0];
+                    const clipStart = Math.max(startIdx, firstOff);
+                    const clipEnd = Math.min(startIdx + span, firstOff + colCount);
+                    if (clipEnd <= clipStart) return null;
+                    const leftPct = ((clipStart - firstOff) / colCount) * 100;
+                    const widthPct = ((clipEnd - clipStart) / colCount) * 100;
 
                     const isEdit = editingId === ev.id;
                     const isSelected = selectedIds.has(ev.id);
@@ -5172,7 +5274,7 @@ export default function WeeklyPlanner() {
                     const { bg, border, text, textMuted } = chipColors(ev);
 
                     // Find actual day date string of start day
-                    const startDayDate = days[ev.visibleDayIndex ?? ev.dayIndex];
+                    const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
                     const dateStr = format(startDayDate, 'yyyy-MM-dd');
                     const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
 

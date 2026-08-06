@@ -21,6 +21,8 @@ import {
   formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
+  checkpointFocusTimer,
+  pauseFocusTimer,
   isCompletedFocusSession,
   loadLocalFocusSessions,
   loadLocalFocusTimer,
@@ -389,9 +391,7 @@ export default function Widget() {
     // Checkpoint a running session's elapsed time into durable state every few seconds
     // so closing the app mid-session never loses progress.
     const checkpointId = setInterval(() => {
-      setFocusTimer(prev => (prev.isRunning && prev.lastStartedAt
-        ? { ...prev, accumulatedSeconds: getFocusTimerElapsedSeconds(prev), lastStartedAt: new Date().toISOString() }
-        : prev));
+      setFocusTimer(prev => checkpointFocusTimer(prev));
     }, 5000);
 
     return () => {
@@ -470,7 +470,7 @@ export default function Widget() {
         if (ev.dayIndex === todayColIdx) {
           items.push({ ev, key: ev.id, startMin: s, endMin: dayStartMin + 1440, segKind: 'tail' });
         }
-        if ((ev.dayIndex + 1) % 7 === todayColIdx) {
+        if (ev.dayIndex + 1 === todayColIdx) {
           items.push({ ev, key: `${ev.id}__head`, startMin: dayStartMin, endMin: e - 1440, segKind: 'head' });
         }
         continue;
@@ -714,6 +714,10 @@ export default function Widget() {
   // refresh the same shared heartbeat, so "stale" means no window was alive.
   const focusTimerRef = useRef(focusTimer);
   focusTimerRef.current = focusTimer;
+  // Set when the timer ends on its own (hit zero, or a shutdown-recovered
+  // session). Completing resets the timer, so the remaining seconds are no use
+  // for telling a completion apart from a pause - see home.tsx.
+  const focusAutoEndedRef = useRef(false);
   const completeFocusSessionRef = useRef(completeFocusSession);
   completeFocusSessionRef.current = completeFocusSession;
   const [focusLiveSession, setFocusLiveSession] = useState<string | null>(null);
@@ -741,6 +745,7 @@ export default function Widget() {
           }).catch(() => {});
           return;
         }
+        focusAutoEndedRef.current = true; // recovery, not a pause the user asked for
         if (recovery.durationSeconds >= MIN_RECOVERED_SESSION_SECONDS) {
           completeFocusSessionRef.current(recovery.durationSeconds, false, {
             endedAt: new Date(recovery.endedAt),
@@ -805,6 +810,7 @@ export default function Widget() {
         `complete|${focusTimer.sessionStartedAt ?? ''}|${focusTimer.plannedSeconds}`,
         () => playFocusChime(focusChimeRef.current),
       );
+      focusAutoEndedRef.current = true;
       completeFocusSession(focusTimer.plannedSeconds, true);
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
@@ -828,8 +834,11 @@ export default function Widget() {
     if (running && !prevRunning) {
       slot = session && session === prevSession ? 'resume' : 'start';
     } else if (!running && prevRunning) {
-      // Hitting zero is a completion, not a pause — the chime covers that.
-      if (focusRemainingSeconds > 0) slot = 'pause';
+      // Hitting zero is a completion, not a pause: the session-complete chime
+      // covers that one, so this must not also fire the pause cue. The panel
+      // still opens back up, as it does on a pause.
+      if (focusAutoEndedRef.current) { focusAutoEndedRef.current = false; setFocusCollapsed(false); }
+      else slot = 'pause';
     }
     if (!slot) return;
 
@@ -846,23 +855,22 @@ export default function Widget() {
   const startFocus = () => {
     const startedAt = new Date().toISOString();
     setFocusCollapsed(true);
-    setFocusTimer(prev => ({
-      ...prev,
-      isRunning: true,
-      lastStartedAt: startedAt,
-      sessionStartedAt: prev.sessionStartedAt ?? startedAt,
-      lastPausedAt: null,
-    }));
+    setFocusTimer(prev => {
+      // Already running (double-click, or the hotkey and this button racing):
+      // re-anchoring would silently drop everything since the last checkpoint.
+      if (prev.isRunning && prev.lastStartedAt) return prev;
+      return {
+        ...prev,
+        isRunning: true,
+        lastStartedAt: startedAt,
+        sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+        lastPausedAt: null,
+      };
+    });
   };
 
   const pauseFocus = () => {
-    setFocusTimer(prev => ({
-      ...prev,
-      accumulatedSeconds: getFocusTimerElapsedSeconds(prev),
-      isRunning: false,
-      lastStartedAt: null,
-      lastPausedAt: new Date().toISOString(),
-    }));
+    setFocusTimer(prev => (prev.isRunning ? pauseFocusTimer(prev) : prev));
   };
 
   const resetFocus = () => {
@@ -924,35 +932,51 @@ export default function Widget() {
     });
   };
 
-  const handleHeaderMouseDown = (e: React.MouseEvent) => {
-    if (e.button === 0) {
-      let isDragging = true;
-      let startX = e.screenX;
-      let startY = e.screenY;
-      
-      const handleMouseMove = (ev: MouseEvent) => {
-        if (!isDragging) return;
-        const dx = ev.screenX - startX;
-        const dy = ev.screenY - startY;
-        if (dx !== 0 || dy !== 0) {
-          startX = ev.screenX;
-          startY = ev.screenY;
-          if ((window as any).pywebview?.api?.move_window_relative) {
-            (window as any).pywebview.api.move_window_relative(dx, dy);
-          }
-        }
-      };
+  const handleWindowMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
 
-      const handleMouseUp = () => {
-        isDragging = false;
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-      };
-
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
+    // Do not initiate window drag if user clicked an interactive element
+    const target = e.target as HTMLElement | null;
+    if (target) {
+      const interactive = target.closest(
+        'button, input, textarea, select, a, [role="button"], [data-no-drag="true"], .no-drag'
+      );
+      if (interactive || target.isContentEditable) {
+        return;
+      }
     }
+
+    if ((window as any).pywebview?.api?.start_drag) {
+      (window as any).pywebview.api.start_drag();
+    }
+
+    let isDragging = true;
+    let startX = e.screenX;
+    let startY = e.screenY;
+
+    const handleMouseMove = (ev: MouseEvent) => {
+      if (!isDragging) return;
+      const dx = ev.screenX - startX;
+      const dy = ev.screenY - startY;
+      if (dx !== 0 || dy !== 0) {
+        startX = ev.screenX;
+        startY = ev.screenY;
+        if ((window as any).pywebview?.api?.move_window_relative) {
+          (window as any).pywebview.api.move_window_relative(dx, dy);
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      isDragging = false;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
   };
+
 
   // ── Style overrides ────────────────────────────────────────────────────────
   const surfaceBg  = darkMode ? widgetTheme.surfaceBg : 'rgba(255,255,255,0.60)';
@@ -961,7 +985,11 @@ export default function Widget() {
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
 
   return (
-    <div className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`} style={{ background: widgetTheme.rootBg }}>
+    <div
+      onMouseDown={handleWindowMouseDown}
+      className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`}
+      style={{ background: widgetTheme.rootBg }}
+    >
       <style>{`
         /* Hide scrollbars globally in the widget window */
         html, body, #root {
@@ -1022,7 +1050,7 @@ export default function Widget() {
       `}</style>
       {/* Drag handle header for pywebview */}
       <header
-        onMouseDown={handleHeaderMouseDown}
+        onMouseDown={handleWindowMouseDown}
         className="pywebview-drag sticky top-0 z-30 backdrop-blur-xl flex items-center justify-between pl-3 pr-2 h-[46px] cursor-move"
         style={{
           // A soft top-down wash with a hairline rule, instead of a flat panel
