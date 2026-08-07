@@ -343,9 +343,11 @@ export function editSeries<T extends RecurFields>(
     return { events: { ...raw, [masterId]: next }, targetId: masterId };
   }
 
-  // Series-level fields (the repeat rule itself, or the lock flag) always apply to
-  // the whole master and never detach — they define the series, not one occurrence.
-  const seriesLevel = 'recur' in patch || 'locked' in patch;
+  // Series-level fields (the repeat rule itself, the lock flag, or which link
+  // group the item belongs to) always apply to the whole master and never detach
+  // — they define the series, not one occurrence. Linking in particular must not
+  // detach: pressing "link" is describing the item, not editing one day of it.
+  const seriesLevel = 'recur' in patch || 'locked' in patch || 'linkGroup' in patch;
 
   // Repeating + LOCKED (or a series-level change) → edit the whole series in place.
   if (master.locked || seriesLevel) {

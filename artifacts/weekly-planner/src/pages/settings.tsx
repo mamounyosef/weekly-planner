@@ -50,6 +50,20 @@ import {
 } from '@/lib/shortcuts';
 
 import {
+  PRAYER_KEYS,
+  PRAYER_LABELS,
+  PRAYER_METHODS,
+  PRAYER_HORIZON_MIN,
+  PRAYER_HORIZON_MAX,
+  buildPrayerDay,
+  prayerDateKey,
+  prayerMonthUrl,
+  type PrayerDayTimes,
+  type PrayerKey,
+  type PrayerSettings,
+  type PrayerStyle,
+} from '@/lib/prayerTimes';
+import {
   broadcastSettingsChange,
   subscribeSettingsChange,
   loadSettingsLocal,
@@ -77,6 +91,140 @@ interface AutoBackupCfg {
 }
 
 const AUTO_BACKUP_DEFAULT: AutoBackupCfg = { enabled: true, intervalHours: 24, keep: 50 };
+
+/**
+ * The exact strings Google demands in "Authorized redirect URIs".
+ *
+ * Google matches redirect_uri EXACTLY — scheme, host, port, path, trailing
+ * slash — and `http://localhost:5173` and `http://127.0.0.1:5173` are two
+ * different entries. This planner is opened under BOTH (the main window on
+ * localhost, the side widget on 127.0.0.1), so registering only one produces
+ * "Error 400: redirect_uri_mismatch" the moment you connect from the other.
+ * Rather than explaining that, show both and let them be copied.
+ */
+function RedirectUriHelp({ textPrimary, textSecondary, cardBdr, darkMode, onCopied }: {
+  textPrimary: string;
+  textSecondary: string;
+  cardBdr: string;
+  darkMode: boolean;
+  onCopied: () => void;
+}) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  let uris: string[] = [origin];
+  try {
+    const u = new URL(origin);
+    if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') {
+      const port = u.port ? `:${u.port}` : '';
+      uris = [`${u.protocol}//localhost${port}`, `${u.protocol}//127.0.0.1${port}`];
+    }
+  } catch (_) {}
+
+  return (
+    <div className="p-3 rounded-xl border flex flex-col gap-2" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+      <span className="text-[11px] font-bold" style={{ color: textPrimary }}>
+        First: authorise these redirect URIs
+      </span>
+      <p className="text-[10.5px] leading-snug" style={{ color: textSecondary }}>
+        In Google Cloud Console → APIs &amp; Services → Credentials → your OAuth client →
+        <b> Authorized redirect URIs</b>, add both of these exactly. Google compares them
+        character for character, and this app runs under both host names (the main window
+        uses localhost, the side widget uses 127.0.0.1). Missing one is what causes
+        “Error 400: redirect_uri_mismatch”.
+      </p>
+      <div className="flex flex-col gap-1.5">
+        {uris.map(u => (
+          <button
+            key={u}
+            type="button"
+            onClick={() => { navigator.clipboard?.writeText(u).then(onCopied, () => {}); }}
+            className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-left transition-colors"
+            style={{ borderColor: cardBdr, background: darkMode ? 'rgba(0,0,0,0.25)' : '#fff' }}
+            title="Copy"
+          >
+            <code className="text-[11px] font-mono truncate" style={{ color: textPrimary }}>{u}</code>
+            <span className="text-[10px] font-semibold flex-shrink-0" style={{ color: textSecondary }}>Copy</span>
+          </button>
+        ))}
+      </div>
+      <p className="text-[10px] leading-snug" style={{ color: textSecondary }}>
+        Also check <b>OAuth consent screen → Publishing status</b>. While an app is in
+        <b> Testing</b>, Google expires its refresh tokens after 7 days — sync then dies
+        every week until you press Publish.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Today's calculated times, live from the same cache the calendar uses. This is
+ * the only honest way to check a method/offset change — you compare these six
+ * numbers against your mosque, not a description of an algorithm.
+ */
+function PrayerTodayPreview({ prayer, textPrimary, textSecondary, cardBdr, darkMode }: {
+  prayer: PrayerSettings;
+  textPrimary: string;
+  textSecondary: string;
+  cardBdr: string;
+  darkMode: boolean;
+}) {
+  const [state, setState] = useState<{ status: 'loading' | 'ok' | 'error'; times?: PrayerDayTimes; stale?: boolean; message?: string }>({ status: 'loading' });
+  const now = new Date();
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: 'loading' });
+    const d = new Date();
+    fetch(prayerMonthUrl(prayer, d.getFullYear(), d.getMonth() + 1))
+      .then(async r => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body?.error || `Server responded ${r.status}`);
+        return body;
+      })
+      .then(body => {
+        if (cancelled) return;
+        const today = body?.days?.[prayerDateKey(new Date())];
+        if (!today) throw new Error('No times returned for today');
+        setState({ status: 'ok', times: today, stale: !!body.stale });
+      })
+      .catch(err => {
+        if (!cancelled) setState({ status: 'error', message: String(err?.message || err) });
+      });
+    return () => { cancelled = true; };
+  }, [prayer.city, prayer.country, prayer.method, prayer.school]);
+
+  const occurrences = state.times ? buildPrayerDay(prayerDateKey(now), state.times, prayer) : [];
+
+  return (
+    <div className="p-4 rounded-2xl border flex flex-col gap-2" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>
+          Today in {prayer.city}
+        </span>
+        {state.stale && (
+          <span className="text-[10px] font-semibold" style={{ color: '#f59e0b' }}>cached — API unreachable</span>
+        )}
+      </div>
+      {state.status === 'loading' && (
+        <span className="text-xs" style={{ color: textSecondary }}>Loading…</span>
+      )}
+      {state.status === 'error' && (
+        <span className="text-xs" style={{ color: '#ef4444' }}>
+          Couldn't load times for “{prayer.city}, {prayer.country}” — check the spelling. ({state.message})
+        </span>
+      )}
+      {state.status === 'ok' && (
+        <div className="flex items-center gap-3 flex-wrap">
+          {occurrences.map(o => (
+            <span key={o.key} className="flex flex-col">
+              <span className="text-[10px]" style={{ color: textSecondary }}>{o.label}</span>
+              <span className="text-sm font-bold tabular-nums" style={{ color: textPrimary }}>{o.time}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * The background-theme picker. Each tile paints itself in the theme it selects,
@@ -145,7 +293,17 @@ export default function SettingsPage() {
   const [, setLocation] = useLocation();
 
   // Active Sidebar Tab
-  const [activeTab, setActiveTab] = useState<TabCategory>('appearance');
+  // `?tab=integrations` deep-links a section — the header's "Google disconnected"
+  // pill sends you straight to the connection controls rather than dumping you on
+  // the appearance tab to go hunting.
+  const [activeTab, setActiveTab] = useState<TabCategory>(() => {
+    try {
+      const requested = new URLSearchParams(window.location.search).get('tab');
+      const known: string[] = ['appearance', 'calendar', 'audio', 'shortcuts', 'backup', 'integrations'];
+      if (requested && known.includes(requested)) return requested as TabCategory;
+    } catch (_) {}
+    return 'appearance';
+  });
 
   // Initialize state from local settings cache for instant display
   const initialSettings = useRef(loadSettingsLocal()).current;
@@ -184,7 +342,11 @@ export default function SettingsPage() {
   const [taskColor, setTaskColor] = useState<string>(initialSettings.taskColor);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<TaskCheckboxShape>(initialSettings.taskCheckboxShape ?? 'circle');
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
+  const [prayer, setPrayer] = useState<PrayerSettings>(initialSettings.prayer);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
+  const patchPrayer = useCallback((patch: Partial<PrayerSettings>) => {
+    setPrayer(prev => ({ ...prev, ...patch }));
+  }, []);
 
   // Backup status state
   const [backupStatus, setBackupStatus] = useState<{ count: number; lastBackupAt: string | null } | null>(null);
@@ -250,6 +412,7 @@ export default function SettingsPage() {
       setTaskColor(s.taskColor);
       if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
       setGoogleTasksSync(s.googleTasksSync);
+      setPrayer(s.prayer);
     });
   }, []);
 
@@ -287,6 +450,7 @@ export default function SettingsPage() {
           setTaskColor(coerced.taskColor);
           setTaskCheckboxShape(coerced.taskCheckboxShape);
           setGoogleTasksSync(coerced.googleTasksSync);
+          setPrayer(coerced.prayer);
         }
       })
       .catch(err => console.error('Failed to load settings:', err));
@@ -339,8 +503,9 @@ export default function SettingsPage() {
       taskColor,
       taskCheckboxShape,
       googleTasksSync,
+      prayer,
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+  }, [prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
       taskCheckboxShape, googleTasksSync]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -420,6 +585,7 @@ export default function SettingsPage() {
     taskColor,
       taskCheckboxShape,
     googleTasksSync,
+    prayer,
   });
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
@@ -456,6 +622,7 @@ export default function SettingsPage() {
     setTaskColor(restored.taskColor);
     if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
     setGoogleTasksSync(restored.googleTasksSync);
+    setPrayer(restored.prayer);
     broadcastSettingsChange(restored);
   };
 
@@ -1184,6 +1351,271 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Prayer times */}
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Prayer Times</h2>
+                      <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                        Fetched from the Aladhan API for your city and kept up to date daily. A prayer has a start
+                        time and no duration, so it never takes up space on the grid — tick it off like a task.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => patchPrayer({ enabled: !prayer.enabled })}
+                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                      style={{ background: prayer.enabled ? prayer.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={prayer.enabled}
+                      title={prayer.enabled ? 'Prayer times are shown' : 'Prayer times are hidden'}
+                    >
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: prayer.enabled ? 22 : 2 }} />
+                    </button>
+                  </div>
+
+                  {prayer.enabled && (
+                    <>
+                      <PrayerTodayPreview prayer={prayer} textPrimary={textPrimary} textSecondary={textSecondary} cardBdr={cardBdr} darkMode={darkMode} />
+
+                      {/* Location */}
+                      <div className="flex flex-col gap-3">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Location</span>
+                        <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                          City and country are geocoded by the API. Spelling matters — "Amman" / "Jordan".
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <input
+                            defaultValue={prayer.city}
+                            key={`city-${prayer.city}`}
+                            onBlur={e => { const v = e.target.value.trim(); if (v && v !== prayer.city) patchPrayer({ city: v }); }}
+                            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                            placeholder="City"
+                            className="flex-1 px-3 py-2 rounded-xl border text-xs outline-none"
+                            style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          />
+                          <input
+                            defaultValue={prayer.country}
+                            key={`country-${prayer.country}`}
+                            onBlur={e => { const v = e.target.value.trim(); if (v && v !== prayer.country) patchPrayer({ country: v }); }}
+                            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                            placeholder="Country"
+                            className="flex-1 px-3 py-2 rounded-xl border text-xs outline-none"
+                            style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Calculation method */}
+                      <div className="flex flex-col gap-2">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Calculation method</span>
+                        <p className="text-[11px] -mt-1" style={{ color: textSecondary }}>
+                          The authority whose angles are used. This is the biggest single factor in matching your
+                          local mosque — the same city can differ by ~20 minutes between methods.
+                        </p>
+                        <select
+                          value={prayer.method}
+                          onChange={e => patchPrayer({ method: Number(e.target.value) })}
+                          className="px-3 py-2 rounded-xl border text-xs outline-none"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                        >
+                          {PRAYER_METHODS.map(m => (
+                            <option key={m.id} value={m.id}>{m.label}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Asr madhab */}
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex flex-col">
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Asr madhab</span>
+                          <span className="text-[11px]" style={{ color: textSecondary }}>
+                            Hanafi puts Asr roughly 30–60 minutes later than the standard shadow ratio.
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-1.5 p-1 rounded-xl border flex-shrink-0" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
+                          {([[0, 'Standard'], [1, 'Hanafi']] as const).map(([val, label]) => (
+                            <button
+                              key={label}
+                              type="button"
+                              onClick={() => patchPrayer({ school: val })}
+                              className="px-3 py-1 rounded-lg text-xs font-semibold transition-all"
+                              style={{
+                                background: prayer.school === val ? prayer.color : 'transparent',
+                                color: prayer.school === val ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Which ones show */}
+                      <div className="flex flex-col gap-3">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Which ones to show</span>
+                        <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                          Sunrise isn't a prayer — it's off unless you switch it on here.
+                        </p>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {PRAYER_KEYS.map(k => {
+                            const on = k === 'sunrise' ? prayer.showSunrise : !prayer.hidden.includes(k);
+                            return (
+                              <button
+                                key={k}
+                                type="button"
+                                onClick={() => {
+                                  if (k === 'sunrise') { patchPrayer({ showSunrise: !prayer.showSunrise }); return; }
+                                  patchPrayer({
+                                    hidden: prayer.hidden.includes(k)
+                                      ? prayer.hidden.filter(h => h !== k)
+                                      : [...prayer.hidden, k],
+                                  });
+                                }}
+                                className="px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all"
+                                style={{
+                                  background: on ? prayer.color : 'transparent',
+                                  borderColor: on ? prayer.color : cardBdr,
+                                  color: on ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                                }}
+                              >
+                                {PRAYER_LABELS[k]}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Display style */}
+                      <div className="flex flex-col gap-3">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>How they're drawn</span>
+                        <div className="grid grid-cols-3 gap-2">
+                          {([
+                            ['marker', 'Marker line', 'A hairline at the exact time. Never collides with events.'],
+                            ['pill', 'Small pill', 'A compact chip on the timeline. More visible, can overlap.'],
+                            ['row', 'Its own row', 'A strip above the grid, out of the timeline entirely.'],
+                          ] as Array<[PrayerStyle, string, string]>).map(([id, label, desc]) => (
+                            <button
+                              key={id}
+                              type="button"
+                              onClick={() => patchPrayer({ style: id })}
+                              className="p-3 rounded-2xl border text-left flex flex-col gap-1 transition-all"
+                              style={{
+                                background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                                borderColor: prayer.style === id ? prayer.color : cardBdr,
+                                boxShadow: prayer.style === id ? `0 0 0 2px ${prayer.color}55` : 'none',
+                              }}
+                            >
+                              <span className="text-xs font-bold" style={{ color: textPrimary }}>{label}</span>
+                              <span className="text-[10px] leading-snug" style={{ color: textSecondary }}>{desc}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Colour */}
+                      <div className="flex flex-col gap-3">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Colour</span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {['#34d399', '#4ade80', '#22d3ee', '#a78bfa', '#f59e0b', '#f472b6', '#e2e8f0', '#94a3b8'].map(hex => (
+                            <button
+                              key={hex}
+                              onClick={() => patchPrayer({ color: hex })}
+                              className="w-8 h-8 rounded-lg transition-transform hover:scale-110"
+                              style={{ background: hex, border: `2px solid ${prayer.color.toLowerCase() === hex ? textPrimary : 'transparent'}` }}
+                              title={hex}
+                            />
+                          ))}
+                          <label className="flex items-center gap-2 px-3 py-1.5 rounded-xl border cursor-pointer" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }}>
+                            <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>Custom</span>
+                            <input
+                              type="color"
+                              value={prayer.color}
+                              onChange={e => patchPrayer({ color: e.target.value })}
+                              className="w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Horizon */}
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="flex flex-col">
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Show up to</span>
+                          <span className="text-[11px]" style={{ color: textSecondary }}>
+                            How far ahead prayers are drawn. Past days always keep theirs.
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <input
+                            type="number"
+                            min={PRAYER_HORIZON_MIN}
+                            max={PRAYER_HORIZON_MAX}
+                            value={prayer.horizonDays}
+                            onChange={e => {
+                              const n = Number(e.target.value);
+                              if (Number.isFinite(n)) {
+                                patchPrayer({ horizonDays: Math.max(PRAYER_HORIZON_MIN, Math.min(PRAYER_HORIZON_MAX, Math.round(n))) });
+                              }
+                            }}
+                            className="w-20 px-3 py-2 rounded-xl border text-xs outline-none tabular-nums"
+                            style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          />
+                          <span className="text-xs" style={{ color: textSecondary }}>days ahead</span>
+                        </div>
+                      </div>
+
+                      {/* Side window */}
+                      <label className="flex items-center justify-between gap-4 cursor-pointer">
+                        <span className="flex flex-col">
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Show in the side window</span>
+                          <span className="text-[11px]" style={{ color: textSecondary }}>
+                            Prayers appear on the widget's timeline and in its day list.
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => patchPrayer({ showInWidget: !prayer.showInWidget })}
+                          className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                          style={{ background: prayer.showInWidget ? prayer.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                          aria-pressed={prayer.showInWidget}
+                        >
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: prayer.showInWidget ? 22 : 2 }} />
+                        </button>
+                      </label>
+
+                      {/* Manual corrections */}
+                      <div className="flex flex-col gap-3">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Manual correction (minutes)</span>
+                        <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                          Only if your mosque differs from the calculated time. Applied on top of the API result, ±60 max.
+                        </p>
+                        <div className="grid grid-cols-3 gap-2">
+                          {PRAYER_KEYS.map(k => (
+                            <label key={k} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl border" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+                              <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>{PRAYER_LABELS[k]}</span>
+                              <input
+                                type="number"
+                                min={-60}
+                                max={60}
+                                value={prayer.offsets[k] ?? 0}
+                                onChange={e => {
+                                  const n = Number(e.target.value);
+                                  const next: Partial<Record<PrayerKey, number>> = { ...prayer.offsets };
+                                  if (!Number.isFinite(n) || n === 0) delete next[k];
+                                  else next[k] = Math.max(-60, Math.min(60, Math.round(n)));
+                                  patchPrayer({ offsets: next });
+                                }}
+                                className="w-14 bg-transparent text-xs text-right outline-none tabular-nums"
+                                style={{ color: textPrimary }}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               </motion.div>
             )}
 
@@ -1574,21 +2006,33 @@ export default function SettingsPage() {
                     ) : (
                       <div className="flex flex-col gap-3 pt-3 border-t" style={{ borderColor: cardBdr }}>
                         {!gCalStatus.authenticated ? (
-                          <button
-                            onClick={() => {
-                              const redirectUri = window.location.origin;
-                              fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
-                                .then(r => r.json())
-                                .then(res => {
-                                  if (res.url) {
-                                    window.location.href = res.url;
-                                  }
-                                });
-                            }}
-                            className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-all text-white bg-blue-600 hover:bg-blue-700"
-                          >
-                            Link Google Account
-                          </button>
+                          <>
+                            <RedirectUriHelp
+                              textPrimary={textPrimary}
+                              textSecondary={textSecondary}
+                              cardBdr={cardBdr}
+                              darkMode={darkMode}
+                              onCopied={() => showToast('Redirect URI copied.', 'success')}
+                            />
+                            <button
+                              onClick={() => {
+                                const redirectUri = window.location.origin;
+                                fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
+                                  .then(r => r.json())
+                                  .then(res => {
+                                    if (res.url) {
+                                      window.location.href = res.url;
+                                    } else {
+                                      showToast(res.error || 'Could not build the Google sign-in link.', 'error');
+                                    }
+                                  })
+                                  .catch(() => showToast("Couldn't reach the server to start sign-in.", 'error'));
+                              }}
+                              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-all text-white bg-blue-600 hover:bg-blue-700"
+                            >
+                              Link Google Account
+                            </button>
+                          </>
                         ) : (
                           <div className="flex items-center justify-between gap-3">
                             <button

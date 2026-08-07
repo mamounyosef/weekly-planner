@@ -10,6 +10,100 @@ _new_wndproc = None
 _always_on_top_enabled = True
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ('cbSize', ctypes.wintypes.DWORD),
+        ('rcMonitor', ctypes.wintypes.RECT),
+        ('rcWork', ctypes.wintypes.RECT),
+        ('dwFlags', ctypes.wintypes.DWORD),
+    ]
+
+
+MONITOR_DEFAULTTONULL = 0
+MONITOR_DEFAULTTONEAREST = 2
+
+
+def rescue_hwnd(hwnd):
+    """Pull one window back onto a real monitor. Returns the new (x, y, w, h), or
+    None when the window was already fine (or could not be moved).
+
+    Unplugging the second screen does NOT reliably move a top-most, caption-less
+    window with it: Windows leaves it sitting at coordinates that no longer
+    belong to any display, so it is running and reachable only from the taskbar
+    while being invisible on every remaining screen.
+
+    "Off-screen" is judged by the window's CENTRE, not by any overlap — a window
+    hanging a few pixels into the primary display is just as unusable as one
+    parked entirely outside it.
+    """
+    try:
+        if not hwnd:
+            return None
+        # A minimized window reports a placeholder rect (-32000, -32000); moving
+        # it would corrupt the position it restores to.
+        if user32.IsIconic(hwnd):
+            return None
+
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        if w <= 0 or h <= 0:
+            return None
+
+        centre = ctypes.wintypes.POINT(rect.left + w // 2, rect.top + h // 2)
+        if user32.MonitorFromPoint(centre, MONITOR_DEFAULTTONULL):
+            return None  # its middle is on a live display — nothing to do
+
+        monitor = user32.MonitorFromRect(ctypes.byref(rect), MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return None
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return None
+
+        work = info.rcWork
+        # Shrink before clamping: a widget sized for a big second screen may not
+        # fit the laptop panel, and a too-tall window can't be clamped into view.
+        new_w = min(w, work.right - work.left)
+        new_h = min(h, work.bottom - work.top)
+        new_x = min(max(rect.left, work.left), work.right - new_w)
+        new_y = min(max(rect.top, work.top), work.bottom - new_h)
+
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_SHOWWINDOW = 0x0040
+        user32.SetWindowPos(hwnd, 0, new_x, new_y, new_w, new_h,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        return (new_x, new_y, new_w, new_h)
+    except Exception as e:
+        print("Failed to rescue off-screen widget:", e)
+        return None
+
+
+def rescue_offscreen_window():
+    """Rescue the widget window itself, if it is up."""
+    try:
+        if 'window' not in globals() or not window or not getattr(window, 'native', None):
+            return
+        rescue_hwnd(int(window.native.Handle.ToInt64()))
+    except Exception as e:
+        print("Failed to rescue off-screen widget:", e)
+
+
+def schedule_rescue():
+    """Re-check a few times after a display change.
+
+    Windows re-arranges monitors over several hundred milliseconds and moves some
+    windows itself, so one immediate check can either run too early (the old
+    layout is still reported) or undo what Windows was about to do anyway.
+    """
+    for delay in (0.4, 1.5, 3.5):
+        threading.Timer(delay, rescue_offscreen_window).start()
+
+
 def force_topmost_loop():
     """Background daemon thread that forcefully re-elevates the widget window to top-most Z-order
 
@@ -23,8 +117,17 @@ def force_topmost_loop():
     GWL_EXSTYLE = -20
     WS_EX_TOPMOST = 0x00000008
 
+    ticks = 0
     while True:
         time.sleep(0.5)
+        # Safety net for the off-screen case: WM_DISPLAYCHANGE is the fast path,
+        # but it isn't delivered for every way a display can vanish (docking,
+        # RDP, waking with the second screen already gone), so re-check
+        # periodically. It costs two Win32 calls when nothing is wrong.
+        ticks += 1
+        if ticks % 8 == 0:
+            rescue_offscreen_window()
+
         if _always_on_top_enabled and 'window' in globals() and window and hasattr(window, 'native') and window.native:
             try:
                 hwnd = int(window.native.Handle.ToInt64())
@@ -67,6 +170,19 @@ user32.LoadImageW.restype = ctypes.c_void_p
 
 user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint64, ctypes.c_void_p]
 user32.SendMessageW.restype = ctypes.c_int64
+
+# Monitor queries — used to rescue the widget when a screen is unplugged.
+user32.MonitorFromPoint.argtypes = [ctypes.wintypes.POINT, ctypes.wintypes.DWORD]
+user32.MonitorFromPoint.restype = ctypes.c_void_p
+
+user32.MonitorFromRect.argtypes = [ctypes.POINTER(ctypes.wintypes.RECT), ctypes.wintypes.DWORD]
+user32.MonitorFromRect.restype = ctypes.c_void_p
+
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = ctypes.wintypes.BOOL
+
+user32.IsIconic.argtypes = [ctypes.c_void_p]
+user32.IsIconic.restype = ctypes.wintypes.BOOL
 
 # Give the widget its own taskbar identity instead of inheriting pythonw.exe's,
 # which is what makes Windows show our icon rather than a generic Python one.
@@ -176,6 +292,7 @@ class Api:
 
 # Win32 Constants
 WM_NCHITTEST = 0x0084
+WM_DISPLAYCHANGE = 0x007E
 HTCLIENT = 1
 HTLEFT = 10
 HTRIGHT = 11
@@ -187,6 +304,11 @@ HTBOTTOMLEFT = 16
 HTBOTTOMRIGHT = 17
 
 def wndproc(hwnd, msg, wparam, lparam):
+    if msg == WM_DISPLAYCHANGE:
+        # A screen was plugged in, unplugged or re-arranged. Check off the message
+        # loop (via timers) so the window procedure returns immediately.
+        schedule_rescue()
+
     if msg == WM_NCHITTEST:
         # Decode signed 16-bit coordinates from lparam
         x_raw = lparam & 0xFFFF

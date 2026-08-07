@@ -6,9 +6,10 @@ import {
   eachDayOfInterval,
   isToday,
   subDays,
+  addDays,
   isSameDay,
 } from 'date-fns';
-import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown } from 'lucide-react';
+import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon } from 'lucide-react';
 import { motion } from 'framer-motion';
 import {
   DEFAULT_FOCUS_TIMER,
@@ -28,6 +29,8 @@ import {
   loadLocalFocusTimer,
   coerceFocusTimer,
   focusTimerPushKey,
+  focusTimerIdentity,
+  focusTimerTransitionKey,
   safeFocusSessions,
   sumFocusSecondsForDay,
   uid,
@@ -55,6 +58,14 @@ import {
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
 import { themePalette, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
+import {
+  coercePrayerSettings,
+  DEFAULT_PRAYER_SETTINGS,
+  prayerDateKey,
+  type PrayerOccurrence,
+  type PrayerSettings,
+} from '@/lib/prayerTimes';
+import { usePrayerTimes } from '@/lib/usePrayerTimes';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -250,9 +261,15 @@ export default function Widget() {
   const timerHydratedRef = useRef(false);
   // Ignore stale server pulls briefly after a local change so they can't undo it.
   const lastLocalTimerChangeRef = useRef(0);
+  /** When this window last WROTE the timer — anything older is a stale echo. */
+  const lastLocalPushAtRef = useRef(0);
+  /** Pending coalesced write for duration-only nudges (the +/- buttons and A/D). */
+  const pushTimeoutRef = useRef<number | null>(null);
+  const lastTransitionKeyRef = useRef<string | null>(null);
   const lastTimerPushKeyRef = useRef<string | null>(null);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft] = useState('60');
+  const [prayer, setPrayer] = useState<PrayerSettings>(DEFAULT_PRAYER_SETTINGS);
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const focusCompleteRef = useRef(false);
   const [focusCelebrate, setFocusCelebrate] = useState(false);
@@ -280,6 +297,7 @@ export default function Widget() {
         if (s.dayStartH != null) setDayStartH(s.dayStartH);
         if (s.dayEndH != null) setDayEndH(s.dayEndH);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
+        setPrayer(coercePrayerSettings(s.prayer));
         if (s.focusChime != null) focusChimeRef.current = coerceFocusChime(s.focusChime);
         if (s.focusCues && typeof s.focusCues === 'object') {
           const c = s.focusCues as Record<string, unknown>;
@@ -332,13 +350,21 @@ export default function Widget() {
     // the grace window (see home.tsx for the full rationale).
     const applyTimerFromServer = (data: unknown, live = false) => {
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
-      const json = JSON.stringify(coerceFocusTimer(data));
+      const incoming = coerceFocusTimer(data);
+      const json = focusTimerIdentity(incoming);
       timerHydratedRef.current = true;
       if (json === lastTimerJsonRef.current) return;
+      // Older than our own last write ⇒ it IS our own write, broadcast back late.
+      // Applying it would drag the value back to a version the user has already
+      // moved past — the stutter when holding down +/- or tapping A/D quickly.
+      // This applies to streamed events too; being "live" only means it arrived
+      // promptly, not that it describes a newer state.
+      if (incoming.updatedAt && incoming.updatedAt < lastLocalPushAtRef.current) return;
       if (!live && Date.now() - lastLocalTimerChangeRef.current < 4000) return;
       lastTimerJsonRef.current = json;
-      lastTimerPushKeyRef.current = focusTimerPushKey(JSON.parse(json));
-      setFocusTimer(JSON.parse(json));
+      lastTimerPushKeyRef.current = focusTimerPushKey(incoming);
+      lastTransitionKeyRef.current = focusTimerTransitionKey(incoming);
+      setFocusTimer(incoming);
     };
     const pullTimer = () => {
       fetch('/api/focus-timer')
@@ -437,6 +463,43 @@ export default function Widget() {
 
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
+
+  // ── Prayer times ───────────────────────────────────────────────────────────
+  // Same cache the main window uses (the server owns it), so showing them here
+  // costs no extra API calls.
+  const widgetPrayer = useMemo(
+    () => (prayer.showInWidget ? prayer : { ...prayer, enabled: false }),
+    [prayer],
+  );
+  // Keyed off the date STRING: `nowOwnerDate` is rebuilt every tick, and a fresh
+  // Date object every second would re-run the loader forever.
+  const prayerDayStr = prayerDateKey(nowOwnerDate);
+  const prayerDates = useMemo(() => {
+    const d = new Date(`${prayerDayStr}T00:00:00`);
+    return [d, addDays(d, 1)];
+  }, [prayerDayStr]);
+  const { prayersFor, isDone: isPrayerDone, toggleDone: togglePrayerDone } = usePrayerTimes(widgetPrayer, prayerDates);
+  /** The day's prayers, for the list. */
+  const dayPrayers = useMemo(
+    () => (widgetPrayer.enabled ? prayersFor(prayerDates[0]) : []),
+    [widgetPrayer.enabled, prayersFor, prayerDates],
+  );
+  /** The ones that land inside the visible hour window, with their grid minute. */
+  const timelinePrayers = useMemo(() => {
+    if (!widgetPrayer.enabled) return [] as Array<PrayerOccurrence & { norm: number }>;
+    const out: Array<PrayerOccurrence & { norm: number }> = [];
+    for (const p of prayersFor(prayerDates[0])) {
+      if (p.minutes >= dayStartMin) out.push({ ...p, norm: p.minutes });
+    }
+    // The column runs dayStart → next dayStart, so tomorrow's pre-dawn prayers
+    // belong to the bottom of this one.
+    for (const p of prayersFor(prayerDates[1])) {
+      if (p.minutes < dayStartMin) out.push({ ...p, norm: p.minutes + 1440 });
+    }
+    return out
+      .filter(p => p.norm >= dayStartMin && p.norm <= dayEndMin)
+      .sort((a, b) => a.norm - b.norm);
+  }, [widgetPrayer.enabled, prayersFor, prayerDates, dayStartMin, dayEndMin]);
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   // "Today" for focus stats respects the configurable day-start hour (e.g. before
@@ -772,7 +835,7 @@ export default function Widget() {
     // Don't push to the backend until we've hydrated from it (avoid clobbering a live
     // session owned by another window before our first pull).
     if (!timerHydratedRef.current) return;
-    const json = JSON.stringify(coerceFocusTimer(focusTimer));
+    const json = focusTimerIdentity(focusTimer);
     if (json === lastTimerJsonRef.current) return;
     // Running-session checkpoints carry no new information; pushing them would
     // stomp a start/pause made elsewhere (main window, system-wide hotkey).
@@ -781,11 +844,35 @@ export default function Widget() {
     lastTimerPushKeyRef.current = pushKey;
     lastTimerJsonRef.current = json;
     lastLocalTimerChangeRef.current = Date.now();
-    fetch('/api/focus-timer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: json,
-    }).catch(() => {});
+
+    // Holding A/D (or clicking +/- repeatedly) used to fire one POST per press,
+    // each writing the file, taking a backup and broadcasting to both windows.
+    // Duration nudges are coalesced into a single write; a start/pause still
+    // goes out immediately, because the other window's cue depends on it.
+    const transitionKey = focusTimerTransitionKey(focusTimer);
+    const durationOnly = lastTransitionKeyRef.current === transitionKey;
+    lastTransitionKeyRef.current = transitionKey;
+
+    const send = () => {
+      const stamp = Date.now();
+      lastLocalPushAtRef.current = stamp;
+      lastLocalTimerChangeRef.current = stamp;
+      fetch('/api/focus-timer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...JSON.parse(json), updatedAt: stamp }),
+      }).catch(() => {});
+    };
+
+    if (pushTimeoutRef.current !== null) {
+      window.clearTimeout(pushTimeoutRef.current);
+      pushTimeoutRef.current = null;
+    }
+    if (durationOnly) {
+      pushTimeoutRef.current = window.setTimeout(() => { pushTimeoutRef.current = null; send(); }, 220);
+    } else {
+      send();
+    }
   }, [focusTimer]);
 
   useEffect(() => {
@@ -809,6 +896,7 @@ export default function Widget() {
       claimFocusCue(
         `complete|${focusTimer.sessionStartedAt ?? ''}|${focusTimer.plannedSeconds}`,
         () => playFocusChime(focusChimeRef.current),
+        { playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000 },
       );
       focusAutoEndedRef.current = true;
       completeFocusSession(focusTimer.plannedSeconds, true);
@@ -849,7 +937,12 @@ export default function Widget() {
 
     const cue = focusCuesRef.current[slot];
     if (cue === 'none') return;
-    claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue));
+    // If the claim can't be reached (dev-server restart), only the window that
+    // actually performed the toggle sounds it — otherwise both do, and you hear
+    // the cue twice.
+    claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue), {
+      playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000,
+    });
   }, [focusTimer, focusRemainingSeconds]);
 
   const startFocus = () => {
@@ -889,14 +982,33 @@ export default function Widget() {
     }));
   };
 
-  const adjustFocusMinutes = (deltaMinutes: number) => {
-    const currentMinutes = Math.max(1, Math.round(focusTimer.plannedSeconds / 60));
-    if (deltaMinutes > 0) {
-      setFocusMinutes(Math.max(5, Math.ceil((currentMinutes + 1) / 5) * 5));
-    } else {
-      setFocusMinutes(Math.max(5, Math.floor((currentMinutes - 1) / 5) * 5));
-    }
-  };
+  // Reads the current planned time from `prev` rather than the render closure so
+  // the key handler below can be bound once and never go stale.
+  const adjustFocusMinutes = useCallback((deltaMinutes: number) => {
+    setFocusTimer(prev => {
+      const currentMinutes = Math.max(1, Math.round(prev.plannedSeconds / 60));
+      const nextMinutes = deltaMinutes > 0
+        ? Math.max(5, Math.ceil((currentMinutes + 1) / 5) * 5)
+        : Math.max(5, Math.floor((currentMinutes - 1) / 5) * 5);
+      return { ...prev, plannedSeconds: nextMinutes * 60 };
+    });
+  }, []);
+
+  // A / D nudge the focus duration down / up, mirroring the − and + buttons.
+  // Skipped while a text field has focus so typing a duration isn't hijacked.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      const key = e.key.toLowerCase();
+      if (key !== 'a' && key !== 'd') return;
+      e.preventDefault();
+      adjustFocusMinutes(key === 'a' ? -5 : 5);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [adjustFocusMinutes]);
 
   const commitFocusMinutesDraft = () => {
     const parsed = Number(focusMinutesDraft);
@@ -1161,7 +1273,7 @@ export default function Widget() {
             <button
               onClick={() => adjustFocusMinutes(-5)}
               className="w-8 h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
-              title="Decrease focus duration by 5 minutes"
+              title="Decrease focus duration by 5 minutes (A)"
               style={{
                 background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
                 border: `1px solid ${surfaceBdr}`,
@@ -1207,7 +1319,7 @@ export default function Widget() {
             <button
               onClick={() => adjustFocusMinutes(5)}
               className="w-8 h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
-              title="Increase focus duration by 5 minutes"
+              title="Increase focus duration by 5 minutes (D)"
               style={{
                 background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
                 border: `1px solid ${surfaceBdr}`,
@@ -1322,6 +1434,43 @@ export default function Widget() {
           );
         })()}
 
+        {/* Prayer band. Always rendered when prayers are on: the timeline only
+            covers the configured hour window, and Fajr/Isha usually fall outside
+            it — this row is the one place the whole day is guaranteed visible. */}
+        {dayPrayers.length > 0 && (
+          <div className="flex border-b border-border/50 flex-shrink-0" style={{ background: darkMode ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.2)' }}>
+            <div className="flex-shrink-0 border-r border-border/50 flex items-center justify-center gap-1 p-1" style={{ width: 62 }}>
+              <Moon size={9} style={{ color: widgetPrayer.color, opacity: 0.85 }} />
+              <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">Prayer</span>
+            </div>
+            <div className="flex-1 p-1.5 flex flex-wrap gap-1">
+              {dayPrayers.map(p => {
+                const done = isPrayerDone(p.dateStr, p.key);
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => togglePrayerDone(p.dateStr, p.key)}
+                    className="px-1.5 py-0.5 rounded-md border text-[10px] font-semibold flex items-center gap-1"
+                    style={{
+                      background: `${widgetPrayer.color}22`,
+                      borderColor: `${widgetPrayer.color}66`,
+                      color: widgetPrayer.color,
+                      opacity: done ? 0.5 : 1,
+                    }}
+                    title={`${p.label} · ${formatTimeLabel(p.minutes, timeFormat)}${done ? ' · done' : ''}`}
+                  >
+                    <span className="flex items-center">
+                      {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
+                    </span>
+                    <span style={{ textDecoration: done ? 'line-through' : 'none' }}>{p.label}</span>
+                    <span className="tabular-nums opacity-80">{formatTimeLabel(p.minutes, timeFormat)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Timeline Grid (Axis + Grid Area) */}
         <div className="flex flex-row relative flex-shrink-0" style={{ height: totalH }}>
           {/* Time axis */}
@@ -1381,6 +1530,77 @@ export default function Widget() {
               </div>
             );
           })()}
+
+          {/* Prayer times — zero-height overlays at the exact minute, so they
+              never take space from an event or block a click on the grid. */}
+          {widgetPrayer.style !== 'row' && timelinePrayers.map(p => {
+            const top = minToY(p.norm, interval, dayStartH);
+            const done = isPrayerDone(p.dateStr, p.key);
+            const label = `${p.label} · ${formatTimeLabel(p.minutes, timeFormat)}`;
+
+            if (widgetPrayer.style === 'pill') {
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => togglePrayerDone(p.dateStr, p.key)}
+                  className="absolute flex items-center gap-1 rounded-md px-1.5 z-20"
+                  style={{
+                    top, left: 2, right: 2, height: 16,
+                    background: `${widgetPrayer.color}26`,
+                    border: `1px solid ${widgetPrayer.color}80`,
+                    opacity: done ? 0.5 : 1,
+                  }}
+                  title={label}
+                >
+                  <span className="flex-shrink-0 flex items-center" style={{ color: widgetPrayer.color }}>
+                    {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
+                  </span>
+                  <span
+                    className="text-[9.5px] font-semibold truncate leading-none"
+                    style={{ color: widgetPrayer.color, textDecoration: done ? 'line-through' : 'none' }}
+                  >
+                    {p.label}
+                  </span>
+                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: widgetPrayer.color }}>
+                    {formatTimeLabel(p.minutes, timeFormat)}
+                  </span>
+                </button>
+              );
+            }
+
+            return (
+              <div
+                key={p.id}
+                className="absolute left-0 right-0 z-20 pointer-events-none"
+                style={{ top, height: 0, opacity: done ? 0.45 : 1 }}
+              >
+                <div className="absolute left-0 right-0" style={{ height: 0, borderTop: `1px dashed ${widgetPrayer.color}`, opacity: 0.85 }} />
+                <button
+                  onClick={() => togglePrayerDone(p.dateStr, p.key)}
+                  className="absolute flex items-center gap-1 rounded-full pl-1 pr-1.5 pointer-events-auto"
+                  style={{
+                    left: 2, top: -7, height: 14,
+                    background: `${widgetPrayer.color}26`,
+                    border: `1px solid ${widgetPrayer.color}80`,
+                  }}
+                  title={`${label}${done ? ' · done' : ''}`}
+                >
+                  <span className="flex items-center" style={{ color: widgetPrayer.color }}>
+                    {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
+                  </span>
+                  <span
+                    className="text-[9px] font-bold leading-none whitespace-nowrap"
+                    style={{ color: widgetPrayer.color, textDecoration: done ? 'line-through' : 'none' }}
+                  >
+                    {p.label}
+                  </span>
+                  <span className="text-[8.5px] tabular-nums leading-none opacity-80 whitespace-nowrap" style={{ color: widgetPrayer.color }}>
+                    {formatTimeLabel(p.minutes, timeFormat)}
+                  </span>
+                </button>
+              </div>
+            );
+          })}
 
           {/* Events list */}
           {colEvents.map(item => {

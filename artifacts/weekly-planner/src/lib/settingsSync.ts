@@ -1,5 +1,6 @@
 import { coerceFocusChime, coerceFocusCue, DEFAULT_FOCUS_CUES, type FocusChimeId, type FocusCueId, type FocusCueSlot } from './focusSessions';
 import { coerceShortcuts, DEFAULT_SHORTCUTS, type ShortcutMap } from './shortcuts';
+import { coercePrayerSettings, DEFAULT_PRAYER_SETTINGS, type PrayerSettings } from './prayerTimes';
 
 export type TimeFormat = '12h' | '24h';
 export type IntervalMin = 5 | 15 | 30 | 60;
@@ -188,6 +189,8 @@ export interface AppSettings {
   taskCheckboxShape: TaskCheckboxShape; // 'circle' | 'square'
   taskFilters: string[];     // panel filter selection; empty = show everything
   googleTasksSync: boolean;
+  // ── Prayer times ───────────────────────────────────────────────────────────
+  prayer: PrayerSettings;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -218,6 +221,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   taskCheckboxShape: 'circle',
   taskFilters: [],
   googleTasksSync: true,
+  prayer: DEFAULT_PRAYER_SETTINGS,
 };
 
 export const TASK_PANEL_MIN_W = 260;
@@ -305,6 +309,7 @@ export function coerceSettings(raw: unknown): AppSettings {
     s.taskFilters = TASK_FILTER_ORDER.filter(f => (r.taskFilters as unknown[]).includes(f));
   }
   if (typeof r.googleTasksSync === 'boolean') s.googleTasksSync = r.googleTasksSync;
+  s.prayer = coercePrayerSettings(r.prayer);
   return s;
 }
 

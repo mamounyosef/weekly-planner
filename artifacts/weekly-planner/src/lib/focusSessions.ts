@@ -19,6 +19,14 @@ export interface FocusTimerState {
    * duplicate. See `focusCueKey`.
    */
   lastPausedAt?: string | null;
+  /**
+   * When this state was written, in ms. Stamped by whichever window pushed it,
+   * and used purely to reject STALE echoes: a burst of duration edits produces a
+   * burst of pushes, and the broadcast of an earlier one can land after a later
+   * one and drag the number backwards. Deliberately excluded from the identity,
+   * push and cue keys — it is metadata about the write, not part of the state.
+   */
+  updatedAt?: number;
 }
 
 export const FOCUS_SESSIONS_KEY = 'planner-focus-sessions';
@@ -454,12 +462,25 @@ export function coerceFocusCue(value: unknown, slot: FocusCueSlot): FocusCueId {
  * and the widget is a WebView2, so they have entirely separate storage and a
  * local claim would always succeed in both.
  */
-export function claimFocusCue(key: string, play: () => void): void {
+/**
+ * Play a cue exactly once across every open window.
+ *
+ * `playIfUnreachable` decides what happens when the claim itself fails — which
+ * happens for real whenever the dev server restarts. Answering "yes" in every
+ * window is what makes the sound play TWICE, so only the window that performed
+ * the toggle should say yes; the other one stays quiet and nothing is doubled.
+ */
+export function claimFocusCue(
+  key: string,
+  play: () => void,
+  opts: { playIfUnreachable?: boolean } = {},
+): void {
+  const { playIfUnreachable = true } = opts;
   const ask = () => {
     fetch(`/api/focus-cue/claim?key=${encodeURIComponent(key)}`, { method: 'POST' })
       .then(r => r.json())
       .then(r => { if (r && r.granted) play(); })
-      .catch(() => play()); // server unreachable → don't swallow the cue
+      .catch(() => { if (playIfUnreachable) play(); });
   };
 
   // Winning the claim is useless if this window can't actually make a sound —
@@ -606,7 +627,29 @@ export function coerceFocusTimer(parsed: unknown): FocusTimerState {
     lastStartedAt: typeof p.lastStartedAt === 'string' ? p.lastStartedAt : null,
     sessionStartedAt: typeof p.sessionStartedAt === 'string' ? p.sessionStartedAt : null,
     lastPausedAt: typeof p.lastPausedAt === 'string' ? p.lastPausedAt : null,
+    updatedAt: Number.isFinite(Number(p.updatedAt)) ? Number(p.updatedAt) : undefined,
   };
+}
+
+/**
+ * The timer state as the two windows compare it — the write timestamp stripped
+ * out. Without this every push would look like a different state to the other
+ * window (and to the sender's own echo check), which is precisely the loop that
+ * made rapid +/- edits stutter.
+ */
+export function focusTimerIdentity(timer: FocusTimerState): string {
+  const { updatedAt: _ignored, ...rest } = coerceFocusTimer(timer);
+  return JSON.stringify(rest);
+}
+
+/**
+ * Everything about a timer EXCEPT its planned duration. Equal keys mean the user
+ * only nudged the length — safe to coalesce into one write a moment later, where
+ * a start/pause/resume has to reach the other window immediately.
+ */
+export function focusTimerTransitionKey(timer: FocusTimerState): string {
+  const t = coerceFocusTimer(timer);
+  return `${t.isRunning}|${t.sessionStartedAt ?? ''}|${t.lastStartedAt ?? ''}|${t.lastPausedAt ?? ''}|${t.accumulatedSeconds}`;
 }
 
 /**

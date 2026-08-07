@@ -283,62 +283,200 @@ export default defineConfig({
           const tokensPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'google-tokens.json');
           const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
-          // Helper to get access token (refreshing if needed)
-          async function getGoogleToken() {
-            try {
-              const configData = await fs.readFile(configPath, 'utf-8');
-              const config = JSON.parse(configData);
-              const tokensData = await fs.readFile(tokensPath, 'utf-8');
-              const tokens = JSON.parse(tokensData);
+          /**
+           * Live health of the Google connection, reported to the UI.
+           *
+           * Sync used to fail completely silently: the refresh token died, every
+           * run bailed at `getGoogleToken() → null`, and the app went on showing
+           * "Syncing" and "authenticated" for days while nothing moved in either
+           * direction. Every failure now lands here and is surfaced.
+           */
+          const syncHealth = {
+            auth: {
+              ok: true,
+              /** True only for errors a reconnect fixes (invalid_grant & friends). */
+              needsReconnect: false,
+              error: null,
+              at: 0,
+            },
+            calendar: { lastRunAt: 0, lastOkAt: 0, pushed: 0, pulled: 0, deleted: 0, incomplete: false, error: null },
+            tasks:    { lastRunAt: 0, lastOkAt: 0, pushed: 0, pulled: 0, deleted: 0, incomplete: false, error: null, skipped: null },
+          };
 
-              if (!tokens.refresh_token) throw new Error('No refresh token');
+          /** Live OAuth `state` nonces, keyed by value (CSRF protection). */
+          const pendingOAuthStates = new Map();
+
+          /** Errors where retrying with the same refresh token can never work. */
+          const FATAL_OAUTH_ERRORS = new Set([
+            'invalid_grant',        // expired, revoked, or password changed
+            'invalid_client',       // client id/secret wrong
+            'unauthorized_client',
+            'invalid_request',
+          ]);
+
+          async function markAuthBroken(reason, needsReconnect) {
+            syncHealth.auth = { ok: false, needsReconnect, error: reason, at: Date.now() };
+            if (!needsReconnect) return;
+            // Persist it so a dev-server restart doesn't go back to claiming the
+            // connection is fine, and so the UI can ask for a reconnect on boot.
+            try {
+              const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+              if (toks.invalid === reason) return;
+              toks.invalid = reason;
+              toks.invalidAt = Date.now();
+              await safeWriteJsonFile({
+                filePath: tokensPath, backupDir, baseName: 'google-tokens',
+                body: JSON.stringify(toks), kind: 'object', force: true,
+              });
+            } catch (_) {}
+          }
+
+          async function markAuthOk() {
+            syncHealth.auth = { ok: true, needsReconnect: false, error: null, at: Date.now() };
+          }
+
+          // Single-flight refresh: several syncs (calendar + tasks + a manual run)
+          // can want a token at the same moment, and three parallel refreshes of
+          // the same grant is how you get Google to start rejecting them.
+          let refreshInFlight = null;
+
+          async function refreshAccessToken(config, tokens) {
+            const params = new URLSearchParams();
+            params.append('client_id', config.clientId);
+            params.append('client_secret', config.clientSecret);
+            params.append('refresh_token', tokens.refresh_token);
+            params.append('grant_type', 'refresh_token');
+
+            const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: params.toString(),
+            });
+
+            const raw = await tokenRes.text();
+            if (!tokenRes.ok) {
+              let code = '';
+              let description = '';
+              try {
+                const parsed = JSON.parse(raw);
+                code = parsed.error || '';
+                description = parsed.error_description || '';
+              } catch (_) {}
+              const fatal = FATAL_OAUTH_ERRORS.has(code);
+              const reason = description || code || `HTTP ${tokenRes.status}`;
+              await markAuthBroken(
+                fatal ? `Google rejected the saved authorisation (${reason}). Reconnect to fix.` : `Token refresh failed: ${reason}`,
+                fatal,
+              );
+              console.error('[google] token refresh failed:', tokenRes.status, raw.slice(0, 300));
+              return null;
+            }
+
+            const tokenData = JSON.parse(raw);
+            tokens.access_token = tokenData.access_token;
+            if (tokenData.refresh_token) tokens.refresh_token = tokenData.refresh_token;
+            tokens.expires_at = Date.now() + (tokenData.expires_in || 3600) * 1000;
+            // Record which scopes this token actually carries. Tokens minted before
+            // Tasks support have calendar-only scope, and every Tasks call made with
+            // one 403s — persisting this is how the UI knows to ask for a reconnect.
+            if (tokenData.scope) tokens.scope = tokenData.scope;
+            // A successful refresh clears any previous "reconnect me" flag.
+            delete tokens.invalid;
+            delete tokens.invalidAt;
+
+            await safeWriteJsonFile({
+              filePath: tokensPath,
+              backupDir,
+              baseName: 'google-tokens',
+              body: JSON.stringify(tokens),
+              kind: 'object',
+              force: true,
+            });
+            await markAuthOk();
+            return tokens.access_token;
+          }
+
+          /**
+           * Access token, refreshed when stale. `force` throws away a cached token
+           * that Google has started 401ing on mid-run.
+           */
+          async function getGoogleToken(force = false) {
+            try {
+              const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+              const tokens = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+
+              if (!tokens.refresh_token) {
+                await markAuthBroken('No refresh token stored. Connect Google again.', true);
+                return null;
+              }
 
               const now = Date.now();
-              if (tokens.expires_at && now < tokens.expires_at - 60000) {
+              if (!force && tokens.expires_at && now < tokens.expires_at - 60000) {
+                // A token file flagged invalid may still hold a technically unexpired
+                // access token; using it is fine, and a working call clears the flag.
+                if (!tokens.invalid) await markAuthOk();
                 return tokens.access_token;
               }
 
-              const params = new URLSearchParams();
-              params.append('client_id', config.clientId);
-              params.append('client_secret', config.clientSecret);
-              params.append('refresh_token', tokens.refresh_token);
-              params.append('grant_type', 'refresh_token');
-
-              const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: params.toString()
-              });
-
-              if (!tokenRes.ok) {
-                throw new Error(`Failed to refresh token: ${tokenRes.statusText}`);
+              if (!refreshInFlight) {
+                refreshInFlight = refreshAccessToken(config, tokens)
+                  .finally(() => { refreshInFlight = null; });
               }
-
-              const tokenData = await tokenRes.json();
-              tokens.access_token = tokenData.access_token;
-              if (tokenData.refresh_token) {
-                tokens.refresh_token = tokenData.refresh_token;
-              }
-              tokens.expires_at = Date.now() + tokenData.expires_in * 1000;
-              // Record which scopes this token actually carries. Tokens minted before
-              // Tasks support have calendar-only scope, and every Tasks call made with
-              // one 403s — persisting this is how the UI knows to ask for a reconnect.
-              if (tokenData.scope) tokens.scope = tokenData.scope;
-
-              await safeWriteJsonFile({
-                filePath: tokensPath,
-                backupDir,
-                baseName: 'google-tokens',
-                body: JSON.stringify(tokens),
-                kind: 'object',
-                force: true
-              });
-
-              return tokens.access_token;
+              return await refreshInFlight;
             } catch (err) {
+              // Reading/parsing the local files failed — not something a reconnect fixes.
+              await markAuthBroken(`Could not read Google credentials: ${err.message}`, false);
               console.error('Error in getGoogleToken:', err);
               return null;
             }
+          }
+
+          /**
+           * One Google API call with the retries the previous code had none of.
+           *
+           * • 401 → the access token died mid-run; refresh once and retry.
+           * • 429 / 5xx → Google is rate-limiting or wobbling; back off and retry.
+           * • Network throw → same treatment; a dropped Wi-Fi packet must not look
+           *   like "this event no longer exists on Google".
+           *
+           * Returns the Response (which may still be !ok) or null when the call
+           * never completed, so callers can tell "Google said no" from "we never
+           * got an answer" — the distinction that keeps deletion mirroring safe.
+           */
+          async function gfetch(url, init = {}, opts = {}) {
+            const { tries = 3, label = 'google' } = opts;
+            let token = await getGoogleToken();
+            if (!token) return null;
+
+            for (let attempt = 0; attempt < tries; attempt++) {
+              let res = null;
+              try {
+                res = await fetch(url, {
+                  ...init,
+                  headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` },
+                });
+              } catch (err) {
+                if (attempt === tries - 1) {
+                  console.error(`[google] ${label} network failure:`, err.message);
+                  return null;
+                }
+                await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+                continue;
+              }
+
+              if (res.status === 401 && attempt < tries - 1) {
+                const fresh = await getGoogleToken(true);
+                if (!fresh) return res; // reconnect needed — reported by getGoogleToken
+                token = fresh;
+                continue;
+              }
+              if ((res.status === 429 || res.status >= 500) && attempt < tries - 1) {
+                await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
+                continue;
+              }
+              return res;
+            }
+            return null;
           }
 
           // Maps Google event to PlannerEvent. `parseRecur` (from recurrence.ts)
@@ -422,6 +560,9 @@ export default defineConfig({
           // Fallback swatch, used only when Google gave us no colour at all. Spread
           // across the palette by calendar id so different calendars stay tellable
           // apart rather than all landing on one swatch.
+          /** What an app-owned event falls back to when its colour can't be recovered. */
+          const OWNED_DEFAULT_COLOR = 'sage';
+
           function mapGoogleColor(calendarId) {
             const colors = ['sage', 'peach', 'blue', 'sand', 'lilac'];
             let hash = 0;
@@ -500,18 +641,37 @@ export default defineConfig({
           let isTasksSyncing = false;
 
           async function runGoogleTasksSync(clientTasks, todayYmdOpt, weekStartsOnOpt = 0) {
-            if (isTasksSyncing) return clientTasks;
+            if (isTasksSyncing) {
+              syncHealth.tasks.skipped = 'A tasks sync was already running';
+              return clientTasks;
+            }
             isTasksSyncing = true;
+            syncHealth.tasks.lastRunAt = Date.now();
+            syncHealth.tasks.error = null;
+            syncHealth.tasks.skipped = null;
+            let pushed = 0;
+            let pushFailures = 0;
             try {
               const accessToken = await getGoogleToken();
-              if (!accessToken) return clientTasks;
+              if (!accessToken) {
+                syncHealth.tasks.error = syncHealth.auth.error || 'Not connected to Google';
+                return clientTasks;
+              }
 
               // Bail before making a single call if Tasks wasn't authorised — the
-              // alternative is a 403 on every request, every four minutes.
+              // alternative is a 403 on every request, every four minutes. This
+              // used to be a silent `return`, which is how "Tasks never synced"
+              // stayed invisible for weeks.
               try {
                 const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
-                if (!String(toks.scope || '').includes('/auth/tasks')) return clientTasks;
-              } catch (_) { return clientTasks; }
+                if (!String(toks.scope || '').includes('/auth/tasks')) {
+                  syncHealth.tasks.skipped = 'The Google connection has no Tasks permission — reconnect to grant it';
+                  return clientTasks;
+                }
+              } catch (err) {
+                syncHealth.tasks.error = `Could not read Google credentials: ${err.message}`;
+                return clientTasks;
+              }
 
               const { addDays, differenceInDays, format, startOfWeek } = await import('date-fns');
               const {
@@ -532,8 +692,9 @@ export default defineConfig({
                 };
               };
 
-              const auth = { Authorization: `Bearer ${accessToken}` };
-              const jsonAuth = { ...auth, 'Content-Type': 'application/json' };
+              // gfetch attaches the Authorization header (and refreshes it on a
+              // mid-run 401), so callers only carry the content type.
+              const jsonCT = { 'Content-Type': 'application/json' };
               const today = todayYmdOpt || format(new Date(), 'yyyy-MM-dd');
               const now = Date.now();
               const localMap = { ...clientTasks };
@@ -543,18 +704,18 @@ export default defineConfig({
               let listId = null;
               let pageToken = '';
               do {
-                const res = await fetch(`${TASKS_API}/users/@me/lists?maxResults=100${pageToken ? `&pageToken=${pageToken}` : ''}`, { headers: auth });
-                if (!res.ok) throw new Error(`Failed to list task lists: ${res.status}`);
+                const res = await gfetch(`${TASKS_API}/users/@me/lists?maxResults=100${pageToken ? `&pageToken=${pageToken}` : ''}`, {}, { label: 'taskLists' });
+                if (!res || !res.ok) throw new Error(`Failed to list task lists: ${res ? res.status : 'no response'}`);
                 const data = await res.json();
                 for (const l of data.items || []) if (l.title === TASK_LIST_TITLE) listId = l.id;
                 pageToken = data.nextPageToken || '';
               } while (pageToken && !listId);
 
               if (!listId) {
-                const res = await fetch(`${TASKS_API}/users/@me/lists`, {
-                  method: 'POST', headers: jsonAuth, body: JSON.stringify({ title: TASK_LIST_TITLE }),
-                });
-                if (!res.ok) throw new Error(`Failed to create task list: ${res.status}`);
+                const res = await gfetch(`${TASKS_API}/users/@me/lists`, {
+                  method: 'POST', headers: jsonCT, body: JSON.stringify({ title: TASK_LIST_TITLE }),
+                }, { label: 'createTaskList' });
+                if (!res || !res.ok) throw new Error(`Failed to create task list: ${res ? res.status : 'no response'}`);
                 listId = (await res.json()).id;
               }
 
@@ -566,8 +727,8 @@ export default defineConfig({
               pageToken = '';
               do {
                 const url = `${TASKS_API}/lists/${listId}/tasks?maxResults=100&showCompleted=true&showHidden=true${pageToken ? `&pageToken=${pageToken}` : ''}`;
-                const res = await fetch(url, { headers: auth });
-                if (!res.ok) { fetchIncomplete = true; break; }
+                const res = await gfetch(url, {}, { label: 'listTasks' });
+                if (!res || !res.ok) { fetchIncomplete = true; break; }
                 const data = await res.json();
                 for (const t of data.items || []) {
                   if (t.deleted) continue;
@@ -594,19 +755,25 @@ export default defineConfig({
               const locallyDirty = t => !!t.updatedAt && (!t.lastSyncedAt || t.updatedAt > t.lastSyncedAt);
 
               const deleteRemote = async (id) => {
-                const res = await fetch(`${TASKS_API}/lists/${listId}/tasks/${id}`, { method: 'DELETE', headers: auth });
-                return res.ok || res.status === 404 || res.status === 410;
+                const res = await gfetch(`${TASKS_API}/lists/${listId}/tasks/${id}`, { method: 'DELETE' }, { label: 'deleteTask' });
+                return !!res && (res.ok || res.status === 404 || res.status === 410);
               };
               const patchRemote = async (id, body) => {
-                const res = await fetch(`${TASKS_API}/lists/${listId}/tasks/${id}`, {
-                  method: 'PATCH', headers: jsonAuth, body: JSON.stringify(body),
-                });
-                return res.ok ? await res.json() : null;
+                const res = await gfetch(`${TASKS_API}/lists/${listId}/tasks/${id}`, {
+                  method: 'PATCH', headers: jsonCT, body: JSON.stringify(body),
+                }, { label: 'patchTask' });
+                if (res && res.ok) { pushed++; return await res.json(); }
+                pushFailures++;
+                console.error(`[google] task PATCH failed: ${res ? res.status + ' ' + (await res.text()) : 'no response'}`);
+                return null;
               };
               const insertRemote = async (body, parentId) => {
                 const url = `${TASKS_API}/lists/${listId}/tasks${parentId ? `?parent=${encodeURIComponent(parentId)}` : ''}`;
-                const res = await fetch(url, { method: 'POST', headers: jsonAuth, body: JSON.stringify(body) });
-                return res.ok ? await res.json() : null;
+                const res = await gfetch(url, { method: 'POST', headers: jsonCT, body: JSON.stringify(body) }, { label: 'insertTask' });
+                if (res && res.ok) { pushed++; return await res.json(); }
+                pushFailures++;
+                console.error(`[google] task insert failed: ${res ? res.status + ' ' + (await res.text()) : 'no response'}`);
+                return null;
               };
               // Google normalises `due` and throws the time away; only ever read the
               // date half back out.
@@ -864,11 +1031,21 @@ export default defineConfig({
                 }
               }
 
+              syncHealth.tasks.pushed = pushed;
+              syncHealth.tasks.incomplete = fetchIncomplete;
+              syncHealth.tasks.error = pushFailures
+                ? `${pushFailures} task change${pushFailures === 1 ? '' : 's'} could not be sent to Google`
+                : fetchIncomplete
+                  ? 'Google returned an incomplete task list; deletions were not mirrored this run'
+                  : null;
+              if (!pushFailures && !fetchIncomplete) syncHealth.tasks.lastOkAt = Date.now();
+
               // Returning the identical reference is the signal to the endpoint
               // that nothing needs persisting.
               if (!changed) return clientTasks;
               return localMap;
             } catch (err) {
+              syncHealth.tasks.error = err && err.message ? err.message : String(err);
               console.error('Google Tasks sync failed:', err);
               return clientTasks;
             } finally {
@@ -884,9 +1061,18 @@ export default defineConfig({
               return clientEvents;
             }
             isSyncing = true;
+            syncHealth.calendar.lastRunAt = Date.now();
+            syncHealth.calendar.error = null;
+            let pushed = 0;
+            let pushFailures = 0;
             try {
               const accessToken = await getGoogleToken();
-              if (!accessToken) return clientEvents;
+              if (!accessToken) {
+                // getGoogleToken has already recorded WHY on syncHealth.auth; the
+                // endpoint reports it so the UI stops claiming everything is fine.
+                syncHealth.calendar.error = syncHealth.auth.error || 'Not connected to Google';
+                return clientEvents;
+              }
 
               const { format, startOfWeek, addDays, differenceInDays } = await import('date-fns');
               // Load the app's own recurrence formatting so app↔Google mapping stays
@@ -894,10 +1080,10 @@ export default defineConfig({
               const { buildGoogleRecurrence, parseGoogleRecurrence } = await server.ssrLoadModule('/src/lib/recurrence.ts');
 
               // 1. Fetch calendar list
-              const listRes = await fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
-                headers: { Authorization: `Bearer ${accessToken}` }
-              });
-              if (!listRes.ok) throw new Error(`Failed to list calendars: ${listRes.statusText}`);
+              const listRes = await gfetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {}, { label: 'calendarList' });
+              if (!listRes || !listRes.ok) {
+                throw new Error(`Failed to list calendars: ${listRes ? listRes.status + ' ' + listRes.statusText : 'no response'}`);
+              }
               const listData = await listRes.json();
               const calendars = listData.items || [];
 
@@ -908,10 +1094,8 @@ export default defineConfig({
               // simply fall back to the app's own swatches.
               let palettes = null;
               try {
-                const colorsRes = await fetch('https://www.googleapis.com/calendar/v3/colors', {
-                  headers: { Authorization: `Bearer ${accessToken}` }
-                });
-                if (colorsRes.ok) palettes = await colorsRes.json();
+                const colorsRes = await gfetch('https://www.googleapis.com/calendar/v3/colors', {}, { label: 'colors' });
+                if (colorsRes && colorsRes.ok) palettes = await colorsRes.json();
               } catch (err) {
                 console.error('Failed to fetch Google colour palette:', err);
               }
@@ -930,15 +1114,12 @@ export default defineConfig({
               if (targetCal) {
                 targetCalendarId = targetCal.id;
               } else {
-                const createRes = await fetch('https://www.googleapis.com/calendar/v3/calendars', {
+                const createRes = await gfetch('https://www.googleapis.com/calendar/v3/calendars', {
                   method: 'POST',
-                  headers: {
-                    Authorization: `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json'
-                  },
+                  headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ summary: 'Daily calendar' })
-                });
-                if (!createRes.ok) throw new Error('Failed to create Daily calendar');
+                }, { label: 'createCalendar' });
+                if (!createRes || !createRes.ok) throw new Error('Failed to create Daily calendar');
                 const created = await createRes.json();
                 targetCalendarId = created.id;
               }
@@ -968,8 +1149,8 @@ export default defineConfig({
                     + `?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}`
                     + `&singleEvents=${singleEvents ? 'true' : 'false'}&showDeleted=false&maxResults=2500`
                     + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
-                  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-                  if (!res.ok) { fetchIncomplete = true; break; }
+                  const res = await gfetch(url, {}, { label: `events:${calId}` });
+                  if (!res || !res.ok) { fetchIncomplete = true; break; }
                   const data = await res.json();
                   for (const item of (data.items || [])) {
                     if (item.status === 'cancelled') continue;
@@ -1032,11 +1213,10 @@ export default defineConfig({
               }
               async function deleteFromGoogle(gCalId) {
                 try {
-                  const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(gCalId)}`, {
+                  const delRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(gCalId)}`, {
                     method: 'DELETE',
-                    headers: { Authorization: `Bearer ${accessToken}` }
-                  });
-                  if (delRes.ok || delRes.status === 404 || delRes.status === 410) {
+                  }, { label: 'deleteEvent' });
+                  if (delRes && (delRes.ok || delRes.status === 404 || delRes.status === 410)) {
                     seenGCalIds.delete(gCalId);
                     return true;
                   }
@@ -1103,18 +1283,21 @@ export default defineConfig({
                 if (!ev.gCalId) {
                   try {
                     const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
-                    const insRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
+                    const insRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
                       method: 'POST',
-                      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                      headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify(body)
-                    });
-                    if (insRes.ok) {
+                    }, { label: 'insertEvent' });
+                    if (insRes && insRes.ok) {
                       const created = await insRes.json();
                       localMap[id] = { ...ev, gCalId: created.id, gCalCalendarId: targetCalendarId, gCalETag: created.etag, lastSyncedAt: nowMs };
                       seenGCalIds.add(created.id);
                       justPushed.add(id);
+                      pushed++;
                     } else {
-                      console.error(`Google API insert failed for event ${id}: Status ${insRes.status} - ${await insRes.text()}`);
+                      pushFailures++;
+                      const detail = insRes ? `${insRes.status} - ${await insRes.text()}` : 'no response';
+                      console.error(`Google API insert failed for event ${id}: ${detail}`);
                     }
                   } catch (err) {
                     console.error(`Failed to create local event ${id} on Google:`, err);
@@ -1123,21 +1306,27 @@ export default defineConfig({
                 else if (ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt)) {
                   try {
                     const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
-                    const updRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
+                    const updRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
                       method: 'PUT',
-                      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                      headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify(body)
-                    });
-                    if (updRes.ok) {
+                    }, { label: 'updateEvent' });
+                    if (updRes && updRes.ok) {
                       const updated = await updRes.json();
                       localMap[id] = { ...ev, gCalETag: updated.etag, lastSyncedAt: nowMs };
                       seenGCalIds.add(ev.gCalId);
                       justPushed.add(id);
-                    } else if (updRes.status === 404 || updRes.status === 410) {
+                      pushed++;
+                    } else if (updRes && (updRes.status === 404 || updRes.status === 410)) {
+                      // Gone on Google — but only trust that when the snapshot was
+                      // complete; a half-fetched run must not delete local records.
                       seenGCalIds.delete(ev.gCalId);
-                      delete localMap[id];
+                      if (!fetchIncomplete) delete localMap[id];
+                      else localMap[id] = { ...ev, gCalId: undefined, gCalETag: undefined, lastSyncedAt: undefined };
                     } else {
-                      console.error(`Google API update failed for event ${ev.gCalId}: Status ${updRes.status} - ${await updRes.text()}`);
+                      pushFailures++;
+                      const detail = updRes ? `${updRes.status} - ${await updRes.text()}` : 'no response';
+                      console.error(`Google API update failed for event ${ev.gCalId}: ${detail}`);
                     }
                   } catch (err) {
                     console.error(`Failed to update event ${ev.gCalId} on Google:`, err);
@@ -1161,11 +1350,35 @@ export default defineConfig({
                   const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
                   if (plannerEv) {
                     // Keep the original local id when this event came from the app, so it
-                    // returns as itself rather than as a new "gcal-…" import with a
-                    // hash-derived colour.
-                    // The app authored this one, so the app owns its colour: drop
-                    // Google's hex and let the local swatch stand.
-                    if (gEv.plannerId) { plannerEv.id = gEv.plannerId; delete plannerEv.gCalHex; }
+                    // returns as itself rather than as a new "gcal-…" import.
+                    if (gEv.plannerId) plannerEv.id = gEv.plannerId;
+
+                    // ── The Daily calendar is APP-OWNED: the app owns the colour ──
+                    // Google stores one colour for the whole calendar and knows
+                    // nothing about our palette, so anything re-imported from here
+                    // used to come back wearing that single calendar colour (or
+                    // mapGoogleColor's arbitrary per-calendar hash). That is the
+                    // "every sync turns my items purple" bug: it repaints on any
+                    // re-import — an event whose local record lost its gCalId, a
+                    // restored backup, or an item created before plannerId existed.
+                    //
+                    // Precedence: the colour this item already has locally → an
+                    // explicit per-event colour set in Google (a deliberate choice,
+                    // unlike the calendar default) → the app's default swatch.
+                    const existing = localMap[plannerEv.id];
+                    delete plannerEv.gCalHex;
+                    const perEventHex = gEv.colorId && palettes && palettes.event && palettes.event[gEv.colorId]
+                      ? palettes.event[gEv.colorId].background
+                      : null;
+                    if (existing && existing.color) {
+                      plannerEv.color = existing.color;
+                      if (existing.gCalHex) plannerEv.gCalHex = existing.gCalHex;
+                    } else if (perEventHex) {
+                      plannerEv.gCalHex = perEventHex;
+                    } else {
+                      plannerEv.color = OWNED_DEFAULT_COLOR;
+                    }
+
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
                     localByGCalId.set(gEv.gCalId, plannerEv.id);
@@ -1234,7 +1447,18 @@ export default defineConfig({
                 delete localMap[id];
               }
 
+              syncHealth.calendar.pushed = pushed;
+              syncHealth.calendar.incomplete = fetchIncomplete;
+              syncHealth.calendar.error = pushFailures
+                ? `${pushFailures} change${pushFailures === 1 ? '' : 's'} could not be sent to Google`
+                : fetchIncomplete
+                  ? 'Google returned an incomplete snapshot; deletions were not mirrored this run'
+                  : null;
+              if (!pushFailures && !fetchIncomplete) syncHealth.calendar.lastOkAt = Date.now();
               return localMap;
+            } catch (err) {
+              syncHealth.calendar.error = err && err.message ? err.message : String(err);
+              throw err;
             } finally {
               isSyncing = false;
             }
@@ -1264,14 +1488,48 @@ export default defineConfig({
               let authenticated = false;
               let email = '';
               let hasTasksScope = false;
+              // A stored refresh token Google has since rejected is NOT a working
+              // connection. Reporting it as one is what let the app show "Syncing"
+              // for days while every single call was failing.
+              let storedInvalid = null;
               try {
                 const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
                 authenticated = !!toks.refresh_token;
                 email = toks.email || '';
                 hasTasksScope = String(toks.scope || '').includes('/auth/tasks');
+                storedInvalid = toks.invalid || null;
               } catch (_) {}
 
-              res.end(JSON.stringify({ configured, authenticated, email, autoSync, clientId, clientSecret, hasTasksScope }));
+              // Probe the credential when we don't already know it's broken. This
+              // is what makes the UI notice a dead authorisation on its own: a
+              // still-valid access token returns from cache with no network call,
+              // and an expired one costs exactly one refresh (whose failure is
+              // then remembered, so this never becomes a poll against Google).
+              if (authenticated && !storedInvalid && !syncHealth.auth.needsReconnect) {
+                await getGoogleToken();
+                try {
+                  const fresh = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+                  storedInvalid = fresh.invalid || null;
+                  hasTasksScope = String(fresh.scope || '').includes('/auth/tasks');
+                } catch (_) {}
+              }
+
+              const needsReconnect = !!storedInvalid || syncHealth.auth.needsReconnect;
+              const authError = syncHealth.auth.error || storedInvalid || null;
+
+              res.end(JSON.stringify({
+                configured,
+                authenticated: authenticated && !needsReconnect,
+                hasStoredToken: authenticated,
+                needsReconnect,
+                authError,
+                email,
+                autoSync,
+                clientId,
+                clientSecret,
+                hasTasksScope,
+                health: syncHealth,
+              }));
             } catch (err) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: 'Failed to read auth status' }));
@@ -1327,6 +1585,41 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Missing redirectUri parameter' }));
                 return;
               }
+
+              // Google matches this string EXACTLY against the client's Authorized
+              // redirect URIs — scheme, host, port, path and trailing slash all
+              // count, and http://localhost:5173 and http://127.0.0.1:5173 are two
+              // different entries. This app is opened under both (the main window
+              // via localhost, the widget via 127.0.0.1), which is exactly how you
+              // end up staring at Error 400: redirect_uri_mismatch. Reject anything
+              // malformed here rather than letting Google reject it after a
+              // full-page navigation, and hand the caller both spellings so the UI
+              // can tell the user precisely what to register.
+              let parsed;
+              try {
+                parsed = new URL(redirectUri);
+              } catch (_) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: `Not a valid redirect URI: ${redirectUri}` }));
+                return;
+              }
+              const isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '[::1]';
+              if (parsed.protocol !== 'https:' && !isLoopback) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: `Google only accepts https:// or loopback redirect URIs; got ${redirectUri}` }));
+                return;
+              }
+              const bothHosts = isLoopback
+                ? ['localhost', '127.0.0.1'].map(h => `${parsed.protocol}//${h}${parsed.port ? ':' + parsed.port : ''}${parsed.pathname === '/' ? '' : parsed.pathname}`)
+                : [redirectUri];
+
+              // CSRF: Google hands this back untouched on the callback, and the
+              // exchange refuses a code that doesn't carry the nonce we issued.
+              const state = crypto.randomUUID();
+              pendingOAuthStates.set(state, { at: Date.now(), redirectUri });
+              for (const [k, v] of pendingOAuthStates) {
+                if (Date.now() - v.at > 15 * 60 * 1000) pendingOAuthStates.delete(k);
+              }
               // Calendar + Tasks. An existing refresh token was minted calendar-only,
               // so adding Tasks requires a reconnect — `prompt=consent` already forces
               // the consent screen and reissues a refresh token, so a plain reconnect
@@ -1335,8 +1628,19 @@ export default defineConfig({
                 'https://www.googleapis.com/auth/calendar',
                 'https://www.googleapis.com/auth/tasks',
               ].join(' ');
-              const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(config.clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent&include_granted_scopes=true`;
-              res.end(JSON.stringify({ url: authUrl }));
+              // access_type=offline + prompt=consent is what guarantees a REFRESH
+              // token comes back (without consent, a repeat authorisation returns
+              // an access token only, and sync dies again in an hour).
+              const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
+                + `?client_id=${encodeURIComponent(config.clientId)}`
+                + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+                + '&response_type=code'
+                + `&scope=${encodeURIComponent(scope)}`
+                + '&access_type=offline'
+                + '&prompt=consent'
+                + '&include_granted_scopes=true'
+                + `&state=${encodeURIComponent(state)}`;
+              res.end(JSON.stringify({ url: authUrl, redirectUri, authorizedRedirectUris: bothHosts }));
             } catch (err) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: 'OAuth configuration not found. Please setup credentials first.' }));
@@ -1354,8 +1658,22 @@ export default defineConfig({
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
               try {
-                const { code, redirectUri } = JSON.parse(body);
+                const { code, redirectUri, state } = JSON.parse(body);
                 const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+
+                // Refuse a code that didn't come from an authorisation we started.
+                // Tolerated when absent so a link opened from an older build (or a
+                // manually pasted code) still works — the nonce is the check, its
+                // absence just means we can't perform it.
+                if (state) {
+                  const pending = pendingOAuthStates.get(state);
+                  if (!pending) {
+                    res.statusCode = 400;
+                    res.end(JSON.stringify({ error: 'This sign-in link has expired or did not come from this app. Start the connection again.' }));
+                    return;
+                  }
+                  pendingOAuthStates.delete(state);
+                }
 
                 const params = new URLSearchParams();
                 params.append('code', code);
@@ -1372,8 +1690,15 @@ export default defineConfig({
 
                 if (!tokenRes.ok) {
                   const errText = await tokenRes.text();
+                  let hint = '';
+                  if (errText.includes('redirect_uri_mismatch')) {
+                    hint = ` — add exactly "${redirectUri}" to the OAuth client's Authorized redirect URIs in Google Cloud Console.`;
+                  } else if (errText.includes('invalid_client')) {
+                    hint = ' — the Client ID or Client Secret does not match the OAuth client.';
+                  }
+                  console.error('[google] token exchange failed:', errText.slice(0, 400));
                   res.statusCode = 400;
-                  res.end(JSON.stringify({ error: `Token exchange failed: ${errText}` }));
+                  res.end(JSON.stringify({ error: `Token exchange failed${hint}`, detail: errText.slice(0, 400) }));
                   return;
                 }
 
@@ -1406,6 +1731,12 @@ export default defineConfig({
                   force: true
                 });
 
+                // A fresh grant clears the "reconnect me" state held in memory —
+                // without this the UI kept demanding a reconnect it had just done.
+                await markAuthOk();
+                syncHealth.calendar.error = null;
+                syncHealth.tasks.error = null;
+                syncHealth.tasks.skipped = null;
                 res.end(JSON.stringify({ success: true, email: tokens.email }));
               } catch (err) {
                 res.statusCode = 500;
@@ -1423,6 +1754,9 @@ export default defineConfig({
             }
             try {
               await fs.unlink(tokensPath).catch(() => {});
+              // Deliberately disconnected is not "broken" — clear the alarm, or the
+              // header would nag for a reconnect the user just chose to undo.
+              await markAuthOk();
               res.end(JSON.stringify({ success: true }));
             } catch (_) {
               res.statusCode = 500;
@@ -1459,7 +1793,13 @@ export default defineConfig({
                   });
                 }
 
-                res.end(JSON.stringify({ success: true, events: synced }));
+                res.end(JSON.stringify({
+                  success: !syncHealth.calendar.error && !syncHealth.auth.needsReconnect,
+                  events: synced,
+                  needsReconnect: syncHealth.auth.needsReconnect,
+                  error: syncHealth.calendar.error || (syncHealth.auth.ok ? null : syncHealth.auth.error),
+                  health: syncHealth.calendar,
+                }));
               } catch (err) {
                 console.error('Error in google-sync endpoint:', err);
                 res.statusCode = 500;
@@ -1499,7 +1839,13 @@ export default defineConfig({
                   });
                 }
 
-                res.end(JSON.stringify({ success: true, tasks: synced }));
+                res.end(JSON.stringify({
+                  success: !syncHealth.tasks.error && !syncHealth.auth.needsReconnect,
+                  tasks: synced,
+                  needsReconnect: syncHealth.auth.needsReconnect,
+                  error: syncHealth.tasks.error || syncHealth.tasks.skipped || (syncHealth.auth.ok ? null : syncHealth.auth.error),
+                  health: syncHealth.tasks,
+                }));
               } catch (err) {
                 console.error('Error in google-tasks-sync endpoint:', err);
                 res.statusCode = 500;
@@ -1589,6 +1935,143 @@ export default defineConfig({
                 res.statusCode = 500;
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ error: 'Failed to write tasks' }));
+              }
+            });
+          } else {
+            next();
+          }
+        });
+
+        // ── Prayer times ──────────────────────────────────────────────────────
+        // The Aladhan API is hit from the server, not the browser: one shared
+        // cache for both windows, no CORS, and — most importantly — the cache
+        // file means a month already fetched keeps working with no internet.
+        // A month is re-fetched when it is older than a week (and always for a
+        // month still in progress, since a calendar fetched on the 1st is only
+        // as accurate as the API was that day).
+        server.middlewares.use('/api/prayer-times', async (req, res, next) => {
+          if (req.method !== 'GET') { next(); return; }
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const cachePath = path.resolve(import.meta.dirname, '..', '..', 'database', 'prayer-times.json');
+
+          const url = new URL(req.url || '', 'http://localhost');
+          const city = (url.searchParams.get('city') || '').trim();
+          const country = (url.searchParams.get('country') || '').trim();
+          const method = Number(url.searchParams.get('method'));
+          const school = Number(url.searchParams.get('school'));
+          const year = Number(url.searchParams.get('year'));
+          const month = Number(url.searchParams.get('month'));
+
+          res.setHeader('Content-Type', 'application/json');
+          if (!city || !country || !Number.isFinite(method) || !Number.isFinite(year) || !Number.isFinite(month)
+              || month < 1 || month > 12 || year < 1900 || year > 2200) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'Bad prayer-times query' }));
+            return;
+          }
+
+          const key = `${city}|${country}|${method}|${school === 1 ? 1 : 0}|${year}-${month}`;
+          let cache: Record<string, { fetchedAt: number; days: Record<string, Record<string, string>> }> = {};
+          try {
+            cache = JSON.parse(await fs.readFile(cachePath, 'utf-8')) || {};
+          } catch { cache = {}; }
+
+          const hit = cache[key];
+          const now = Date.now();
+          const nowD = new Date();
+          const isCurrentMonth = year === nowD.getFullYear() && month === nowD.getMonth() + 1;
+          const maxAge = isCurrentMonth ? 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
+          if (hit && now - hit.fetchedAt < maxAge) {
+            res.end(JSON.stringify({ days: hit.days, fetchedAt: hit.fetchedAt }));
+            return;
+          }
+
+          const api = `https://api.aladhan.com/v1/calendarByCity/${year}/${month}`
+            + `?city=${encodeURIComponent(city)}&country=${encodeURIComponent(country)}`
+            + `&method=${method}&school=${school === 1 ? 1 : 0}`;
+          try {
+            const resp = await fetch(api, { headers: { 'User-Agent': 'weekly-planner' } });
+            if (!resp.ok) throw new Error(`Aladhan responded ${resp.status}`);
+            const json: any = await resp.json();
+            const rows: any[] = Array.isArray(json?.data) ? json.data : [];
+            if (!rows.length) throw new Error('Aladhan returned no days');
+
+            const days: Record<string, Record<string, string>> = {};
+            for (const row of rows) {
+              // "01-08-2026" (DD-MM-YYYY) → "2026-08-01".
+              const g = String(row?.date?.gregorian?.date || '');
+              const m = g.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+              if (!m) continue;
+              const dateStr = `${m[3]}-${m[2]}-${m[1]}`;
+              const t = row?.timings || {};
+              const picked: Record<string, string> = {};
+              for (const [ours, theirs] of Object.entries({
+                fajr: 'Fajr', sunrise: 'Sunrise', dhuhr: 'Dhuhr',
+                asr: 'Asr', maghrib: 'Maghrib', isha: 'Isha',
+              })) {
+                // Values arrive as "04:19 (+03)" — the offset is already baked in.
+                const hhmm = String(t[theirs] || '').match(/^(\d{1,2}):(\d{2})/);
+                if (hhmm) picked[ours] = `${hhmm[1].padStart(2, '0')}:${hhmm[2]}`;
+              }
+              if (Object.keys(picked).length) days[dateStr] = picked;
+            }
+            if (!Object.keys(days).length) throw new Error('Aladhan returned nothing usable');
+
+            cache[key] = { fetchedAt: now, days };
+            try {
+              await fs.mkdir(path.dirname(cachePath), { recursive: true });
+              await fs.writeFile(cachePath, JSON.stringify(cache, null, 2), 'utf-8');
+            } catch (err) {
+              console.error('[prayer] failed to write cache:', err);
+            }
+            res.end(JSON.stringify({ days, fetchedAt: now }));
+          } catch (err) {
+            // Offline or the API is down: an old cache still beats a blank grid.
+            if (hit) {
+              res.end(JSON.stringify({ days: hit.days, fetchedAt: hit.fetchedAt, stale: true }));
+              return;
+            }
+            console.error('[prayer] fetch failed:', err);
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: String((err as Error)?.message || err) }));
+          }
+        });
+
+        // Which prayers have been ticked off: { 'yyyy-MM-dd': ['fajr', ...] }.
+        server.middlewares.use('/api/prayer-done', async (req, res, next) => {
+          const fs = await import('fs/promises');
+          const path = await import('path');
+          const donePath = path.resolve(import.meta.dirname, '..', '..', 'database', 'prayer-done.json');
+          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
+
+          if (req.method === 'GET') {
+            try {
+              const data = await fs.readFile(donePath, 'utf-8');
+              res.setHeader('Content-Type', 'application/json');
+              res.end(data);
+            } catch {
+              res.setHeader('Content-Type', 'application/json');
+              res.end('{}');
+            }
+          } else if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', async () => {
+              try {
+                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                const result = await safeWriteJsonFile({ filePath: donePath, backupDir, baseName: 'prayer-done', body, kind: 'object', force });
+                res.setHeader('Content-Type', 'application/json');
+                if (!result.ok) {
+                  res.statusCode = result.status;
+                  res.end(JSON.stringify({ error: result.error }));
+                  return;
+                }
+                res.end(JSON.stringify({ success: true }));
+              } catch {
+                res.statusCode = 500;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'Failed to write prayer completion' }));
               }
             });
           } else {

@@ -21,7 +21,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -40,6 +40,8 @@ import {
   loadLocalFocusTimer,
   coerceFocusTimer,
   focusTimerPushKey,
+  focusTimerIdentity,
+  focusTimerTransitionKey,
   isCompletedFocusSession,
   safeFocusSessions,
   sumFocusSecondsForDay,
@@ -191,10 +193,42 @@ import {
   withDueDate,
   withTime,
 } from '@/lib/tasks';
+import {
+  buildPrayerDay,
+  coercePrayerSettings,
+  prayerDateKey,
+  type PrayerOccurrence,
+  type PrayerSettings,
+} from '@/lib/prayerTimes';
+import { usePrayerTimes } from '@/lib/usePrayerTimes';
+
+/** Per-service sync health as reported by /api/google-auth/status. */
+interface SyncLeg {
+  lastRunAt: number;
+  lastOkAt: number;
+  pushed: number;
+  incomplete: boolean;
+  error: string | null;
+  skipped?: string | null;
+}
+
+/** "Calendar: synced 3 min ago" / "Tasks: <what went wrong>". */
+function syncHealthLabel(name: string, leg?: SyncLeg): string {
+  if (!leg) return `${name}: no sync yet`;
+  if (leg.error) return `${name}: ${leg.error}`;
+  if (leg.skipped) return `${name}: ${leg.skipped}`;
+  if (!leg.lastOkAt) return `${name}: no successful sync yet`;
+  const mins = Math.floor((Date.now() - leg.lastOkAt) / 60000);
+  const ago = mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)}h ago`;
+  return `${name}: synced ${ago}`;
+}
 
 // Dated-task band under All Day.
 const TASK_CHIP_H = 22;
 const TASK_ROW_MIN_H = 30;
+// Prayer band, when prayers are set to render in their own row.
+const PRAYER_CHIP_H = 17;
+const PRAYER_ROW_MIN_H = 28;
 
 const clampPanelWidth = (w: number) =>
   Math.max(TASK_PANEL_MIN_W, Math.min(TASK_PANEL_MAX_W, Math.round(Number.isFinite(w) ? w : 340)));
@@ -276,6 +310,12 @@ interface PlannerEvent {
   recur?: Recurrence;          // absent = does not repeat
   exdates?: string[];          // 'yyyy-MM-dd' occurrence dates removed individually
   locked?: boolean;            // repeating master: edits/moves apply to whole series (default off)
+  // ── Linking ("coupled like train carriages") ────────────────────────────────
+  // Items sharing a `linkGroup` move as one: dragging any of them drags the rest
+  // by the same delta, and dragging one's START edge shifts the rest too, so a
+  // "Get Up" chip stays welded to the front of the "Sleeping" block it precedes.
+  // Durations are never changed — only positions. Series-level (see editSeries).
+  linkGroup?: string;
   deleted?: boolean;           // tombstone awaiting a Google-side delete, then removal
   // View-only, stamped onto expanded occurrences (never persisted):
   masterId?: string;
@@ -743,6 +783,9 @@ export default function WeeklyPlanner() {
   const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
   const [showTaskRow, setShowTaskRow]         = useState<boolean>(initialSettings.showTaskRow);
   const [taskColor, setTaskColor]             = useState<string>(initialSettings.taskColor);
+  const [prayer, setPrayer]                   = useState<PrayerSettings>(initialSettings.prayer);
+  const [prayerPanelOpen, setPrayerPanelOpen] = useState(false);
+  const prayerPanelRef                        = useRef<HTMLDivElement>(null);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<any>(initialSettings.taskCheckboxShape ?? 'circle');
   const [taskFilters, setTaskFilters]         = useState<TaskFilter[]>(canonicalFilters(initialSettings.taskFilters));
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
@@ -814,8 +857,19 @@ export default function WeeklyPlanner() {
     // False for tokens minted before Tasks support — every Tasks call with one
     // returns 403, so a reconnect is required before tasks sync can run.
     hasTasksScope?: boolean;
+    // Google has rejected the stored authorisation (expired/revoked refresh
+    // token). Only a reconnect fixes it, so we surface it instead of retrying
+    // forever behind a spinner that says "Syncing".
+    needsReconnect?: boolean;
+    authError?: string | null;
+    health?: {
+      auth: { ok: boolean; needsReconnect: boolean; error: string | null; at: number };
+      calendar: SyncLeg;
+      tasks: SyncLeg & { skipped?: string | null };
+    };
   }>({ configured: false, authenticated: false });
   const [gCalSyncing, setGCalSyncing] = useState(false);
+  const gCalHealth = gCalStatus.health;
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
@@ -859,6 +913,10 @@ export default function WeeklyPlanner() {
   const resizeRef = useRef<{
     eventId: string; edge: 'top' | 'bottom'; startMin: number; endMin: number;
     isHeadClick?: boolean; isTailClick?: boolean;
+    /** Where the start edge began, so a linked train can be shifted by the delta. */
+    baseStartMin: number;
+    /** Linked partners captured at gesture start (top-edge resizes only). */
+    linkBase: Record<string, { dayIndex: number; startMin: number; durationMin: number }>;
   } | null>(null);
 
   const [dragDisp, setDragDisp]     = useState<{ id: string; day: number; startMin: number } | null>(null);
@@ -947,7 +1005,8 @@ export default function WeeklyPlanner() {
     };
   }, []);
 
-  const navigateToSettings = useCallback(() => {
+  /** `tab` deep-links straight to a section of the settings page. */
+  const navigateToSettings = useCallback((tab?: string) => {
     if (mainRef.current) {
       try {
         sessionStorage.setItem(HOME_SCROLL_KEY, JSON.stringify({
@@ -957,7 +1016,7 @@ export default function WeeklyPlanner() {
         }));
       } catch (_) {}
     }
-    setLocation('/settings');
+    setLocation(tab ? `/settings?tab=${encodeURIComponent(tab)}` : '/settings');
   }, [setLocation]);
 
   const handleMainScroll = useCallback(() => {
@@ -1093,6 +1152,21 @@ export default function WeeklyPlanner() {
     setTasks(next);
   }, []);
 
+  // One place to turn a sync response into something the user actually sees.
+  // The same message is not repeated on every four-minute cycle — only when it
+  // changes — or a broken connection would toast forever.
+  const lastSyncProblemRef = useRef<string | null>(null);
+  const reportSyncProblem = useCallback((label: string, res: { needsReconnect?: boolean; error?: string | null }) => {
+    const problem = res?.needsReconnect
+      ? `${label}: Google needs you to reconnect.`
+      : res?.error
+        ? `${label}: ${res.error}`
+        : null;
+    if (problem === lastSyncProblemRef.current) return;
+    lastSyncProblemRef.current = problem;
+    if (problem) showToast(problem, 'error');
+  }, [showToast]);
+
   const syncQueuedRef = useRef(false);
   const triggerGCalSync = useCallback((customEvents?: PlannerData) => {
     // Never sync before events have loaded — see eventsLoadedRef.
@@ -1111,7 +1185,9 @@ export default function WeeklyPlanner() {
     })
     .then(r => r.json())
     .then(res => {
-      if (res.success && res.events) {
+      // Merge whenever the server returned a map. `success` false can mean "three
+      // pushes failed" — the pulled half is still good and must not be thrown away.
+      if (res.events) {
         const serverMap: PlannerData = res.events;
         const live = eventsRef.current;
         // Merge, don't replace: for records the user touched mid-flight (live differs
@@ -1138,6 +1214,7 @@ export default function WeeklyPlanner() {
         eventsRef.current = merged;       // keep the ref hot (see writeEvents)
         setEvents(merged);
       }
+      reportSyncProblem('Google Calendar', res);
     })
     .catch(err => {
       console.error('Google Calendar sync failed:', err);
@@ -1155,7 +1232,7 @@ export default function WeeklyPlanner() {
           if (status.clientId) setClientIdInput(status.clientId);
         });
     });
-  }, [weekStartsOn, showToast]);
+  }, [weekStartsOn, showToast, reportSyncProblem]);
 
   // -- Google Tasks sync driver ------------------------------------------------
   // Same in-flight serialisation + mid-flight merge as the calendar sync above.
@@ -1177,7 +1254,7 @@ export default function WeeklyPlanner() {
     })
       .then(r => r.json())
       .then(res => {
-        if (!res.success || !res.tasks) return;
+        if (!res.tasks) return;
         const serverMap: TaskData = res.tasks;
         const live = tasksRef.current;
         const merged: TaskData = { ...serverMap };
@@ -1194,33 +1271,25 @@ export default function WeeklyPlanner() {
             : liveTask; // created during the flight; the server hasn't seen it
         }
         if (JSON.stringify(merged) !== JSON.stringify(live)) writeTasks(merged);
+        reportSyncProblem('Google Tasks', res);
       })
       .catch(err => console.error('Google Tasks sync failed:', err))
       .finally(() => {
         tasksSyncInFlightRef.current = false;
         if (tasksSyncQueuedRef.current) { tasksSyncQueuedRef.current = false; triggerTasksSyncRef.current(); }
       });
-  }, [weekStartsOn, writeTasks]);
+  }, [weekStartsOn, writeTasks, reportSyncProblem]);
   const triggerTasksSyncRef = useRef(triggerTasksSync);
   useEffect(() => { triggerTasksSyncRef.current = triggerTasksSync; }, [triggerTasksSync]);
 
   useEffect(() => {
     return subscribeSettingsChange(s => {
-      setIntervalOpt(s.interval);
-      setDarkMode(s.darkMode);
-      setDarkPreset(s.darkPreset);
-      setEventColorStyle(s.eventColorStyle);
-      setSidebarStyle(s.sidebarStyle);
-      setTimeFormat(s.timeFormat);
-      setWeekStartsOn(s.weekStartsOn);
-      setDayStartH(s.dayStartH);
-      setDayEndH(s.dayEndH);
-      setTasksPanelOpen(s.tasksPanelOpen);
-      setTasksPanelWidth(s.tasksPanelWidth);
-      setShowTaskRow(s.showTaskRow);
-      setTaskColor(s.taskColor);
-      setTaskFilters(canonicalFilters(s.taskFilters));
-      setGoogleTasksSync(s.googleTasksSync);
+      // Adopt the WHOLE snapshot. Adopting a subset was silently destructive:
+      // this page re-broadcasts everything it holds, so any field it failed to
+      // adopt was immediately pushed back over the change that had just been
+      // made (calendarView, the custom-view day counts and the task checkbox
+      // shape all reverted this way).
+      applySettingsSnapshotRef.current(s);
     });
   }, []);
 
@@ -1230,26 +1299,46 @@ export default function WeeklyPlanner() {
 
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
+    // Google can also come back with ?error=access_denied (or similar) instead of
+    // a code. That used to be dropped on the floor, leaving the user staring at a
+    // planner that silently hadn't connected.
+    const authError = urlParams.get('error');
+    if (authError) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      showToast(
+        authError === 'access_denied'
+          ? 'Google sign-in was cancelled — not connected.'
+          : `Google sign-in failed: ${authError}`,
+        'error',
+      );
+    }
+
     const code = urlParams.get('code');
     if (code) {
+      const state = urlParams.get('state');
       window.history.replaceState({}, document.title, window.location.pathname);
+      // Must be byte-identical to the redirect_uri used in the auth request, or
+      // Google rejects the exchange too.
       const redirectUri = window.location.origin;
       fetch('/api/google-auth/exchange', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, redirectUri })
+        body: JSON.stringify({ code, redirectUri, state })
       })
       .then(r => r.json())
       .then(res => {
         if (res.success) {
+          showToast('Google connected.', 'success');
+          fetch('/api/google-auth/status').then(r => r.json()).then(setGCalStatus).catch(() => {});
           triggerGCalSync();
         } else {
-          console.error('Failed to exchange auth code:', res.error);
+          console.error('Failed to exchange auth code:', res.error, res.detail || '');
+          showToast(res.error || 'Could not complete the Google connection.', 'error');
         }
       })
       .catch(err => console.error('Error during token exchange:', err));
     }
-  }, [triggerGCalSync]);
+  }, [triggerGCalSync, showToast]);
 
   useEffect(() => {
     if (!gCalStatus.authenticated || !gCalStatus.autoSync) return;
@@ -1258,6 +1347,21 @@ export default function WeeklyPlanner() {
     }, 4 * 60 * 1000);
     return () => clearInterval(intervalId);
   }, [gCalStatus.authenticated, gCalStatus.autoSync, triggerGCalSync]);
+
+  // Poll the connection's health even when nothing is syncing. Without this the
+  // status only ever refreshed as a side effect of a sync — so once the token
+  // died and the sync loops stopped, the UI kept showing the last good state
+  // until the page was reloaded.
+  useEffect(() => {
+    const pull = () => {
+      fetch('/api/google-auth/status')
+        .then(r => r.json())
+        .then(status => { if (status && typeof status === 'object') setGCalStatus(status); })
+        .catch(() => {});
+    };
+    const id = setInterval(pull, 60000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (isInitialMount.current || !gCalStatus.authenticated) return;
@@ -1400,12 +1504,19 @@ export default function WeeklyPlanner() {
     }
     return cols;
   }, [weekTasks, viewRange]);
+  const dayAtRef = useRef(dayAt);
+  useEffect(() => { dayAtRef.current = dayAt; }, [dayAt]);
+
   const datedTasksByCol = useMemo(() => {
     const cols = bucketTasks(false);
     for (const c of cols.values()) c.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title));
     return cols;
   }, [bucketTasks]);
   const timedTasksByCol = useMemo(() => bucketTasks(true), [bucketTasks]);
+  const datedTasksByColRef = useRef(datedTasksByCol);
+  useEffect(() => { datedTasksByColRef.current = datedTasksByCol; }, [datedTasksByCol]);
+  const weekTasksRef = useRef(weekTasks);
+  useEffect(() => { weekTasksRef.current = weekTasks; }, [weekTasks]);
   const maxTasksInAnyCol = useMemo(
     () => [...datedTasksByCol.values()].reduce((m, c) => Math.max(m, c.length), 0),
     [datedTasksByCol],
@@ -1416,9 +1527,83 @@ export default function WeeklyPlanner() {
     ? Math.max(TASK_ROW_MIN_H, maxTasksInAnyCol * (TASK_CHIP_H + 2) + 8)
     : 0;
 
+  // â”€â”€ Prayer times â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Drawn from the API-backed cache, never from the events store: a prayer has a
+  // start time and no duration, so it is a marker on the grid, not a block.
+  const visibleColsSig = visibleCols.join(',');
+  const prayerDates = useMemo(() => {
+    const days = visibleCols.map(c => dayAt(c));
+    // A column for day D runs D dayStart â†’ D+1 dayStart, so the day AFTER the last
+    // column can still contribute its pre-dawn prayers and has to be loaded too.
+    if (days.length) days.push(addDays(days[days.length - 1], 1));
+    return days;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleColsSig, dayAt]);
+  const { prayersFor, rawTimesFor, isDone: isPrayerDone, toggleDone: togglePrayerDone } = usePrayerTimes(prayer, prayerDates);
+  // Today's complete list for the header panel: Sunrise and any individually
+  // hidden prayers included, because that panel exists to show the whole day.
+  const todayPrayerList = useMemo(() => {
+    if (!prayer.enabled) return [] as PrayerOccurrence[];
+    const today = new Date(nowTick);
+    return buildPrayerDay(prayerDateKey(today), rawTimesFor(today), { ...prayer, showSunrise: true, hidden: [] });
+    // nowTick only matters here for the date rolling over, so round it to the day.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prayer, rawTimesFor, prayerDateKey(new Date(nowTick))]);
+  // Close the prayer panel on an outside click or Escape, like every other popup.
+  useEffect(() => {
+    if (!prayerPanelOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!prayerPanelRef.current?.contains(e.target as Node)) setPrayerPanelOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPrayerPanelOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [prayerPanelOpen]);
+
+  /** The next prayer still to come today — what the header button advertises. */
+  const nextPrayer = useMemo(() => {
+    const now = new Date(nowTick);
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    return todayPrayerList.find(p => p.minutes >= nowMinutes) ?? null;
+  }, [todayPrayerList, nowTick]);
+  /**
+   * The prayers that land inside one visible day column, with the grid minute to
+   * draw them at. Mirrors the now-line's day-boundary rule: before the day-start
+   * hour belongs to the PREVIOUS calendar day's column.
+   */
+  const columnPrayers = useCallback((day: Date): Array<PrayerOccurrence & { norm: number }> => {
+    if (!prayer.enabled) return [];
+    const out: Array<PrayerOccurrence & { norm: number }> = [];
+    for (const p of prayersFor(day)) {
+      if (p.minutes < dayStartMin) continue;       // the previous column owns it
+      out.push({ ...p, norm: p.minutes });
+    }
+    for (const p of prayersFor(addDays(day, 1))) {
+      if (p.minutes >= dayStartMin) continue;      // that day owns it itself
+      out.push({ ...p, norm: p.minutes + 1440 });
+    }
+    return out.sort((a, b) => a.norm - b.norm);
+  }, [prayer.enabled, prayersFor, dayStartMin]);
+
+  // The prayer band ("Its own row" style) — every prayer of the calendar day,
+  // including the ones outside the visible hour window.
+  const showPrayerBand = prayer.enabled && prayer.style === 'row' && isTimelineView;
+  const maxPrayersInAnyCol = useMemo(() => {
+    if (!showPrayerBand) return 0;
+    return visibleCols.reduce((m, c) => Math.max(m, prayersFor(dayAt(c)).length), 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPrayerBand, visibleColsSig, dayAt, prayersFor]);
+  const prayerRowHeight = showPrayerBand
+    ? Math.max(PRAYER_ROW_MIN_H, maxPrayersInAnyCol * (PRAYER_CHIP_H + 2) + 8)
+    : 0;
+
   /**
    * Total height of every fixed band above the scrollable time grid: the day
-   * header, the All Day row and the task row.
+   * header, the All Day row, the task row and the prayer row.
    *
    * EVERY mouse-Y â†’ minute conversion and every absolutely-positioned overlay
    * inside `daysGridRef` MUST use this instead of adding the pieces up itself —
@@ -1426,7 +1611,7 @@ export default function WeeklyPlanner() {
    * select and click-to-create. There must be no `HEADER_PX + allDayHeight`
    * anywhere else in this file.
    */
-  const topBandsHeight = HEADER_PX + allDayHeight + taskRowHeight;
+  const topBandsHeight = HEADER_PX + allDayHeight + taskRowHeight + prayerRowHeight;
 
   // Month overview: full weeks covering the current month, each day resolved to the
   // events actually visible that week (recurring versions + single-week overrides).
@@ -1511,6 +1696,67 @@ export default function WeeklyPlanner() {
     setEvents(next);
   }, []);
 
+  /**
+   * Apply a full settings snapshot to this page's state.
+   *
+   * ONE place, used by every loader (localStorage on boot, the file DB, and the
+   * re-sync when returning from the settings page). The loaders used to each
+   * carry their own hand-written list of fields, and a field missing from a list
+   * was not merely "not loaded": this page still BROADCASTS every field it holds,
+   * so an unread field was overwritten on the server with whatever stale value
+   * this page happened to be holding. `widgetDarkPreset` was missing from the
+   * file-DB loader, which is exactly why the side window's colour reset itself
+   * every time the app reloaded.
+   *
+   * The exhaustiveness map below makes that class of bug a compile error rather
+   * than a mystery: adding a field to AppSettings fails the typecheck until it is
+   * listed here, and listing it without wiring it up is immediately visible.
+   */
+  const applySettingsSnapshot = useCallback((s: AppSettings) => {
+    const handled: Record<keyof AppSettings, true> = {
+      interval: true, darkMode: true, darkPreset: true, lightPreset: true,
+      widgetDarkPreset: true, widgetLightPreset: true, eventColorStyle: true,
+      sidebarStyle: true, timeFormat: true, weekStartsOn: true, dayStartH: true,
+      dayEndH: true, calendarView: true, customDaysBefore: true, customDaysAfter: true,
+      focusDayStartHour: true, focusChime: true, focusCues: true, shortcuts: true,
+      autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
+      taskColor: true, taskCheckboxShape: true, taskFilters: true, googleTasksSync: true,
+      prayer: true,
+    };
+    void handled;
+
+    setIntervalOpt(s.interval);
+    setDarkMode(s.darkMode);
+    setDarkPreset(s.darkPreset);
+    setLightPreset(s.lightPreset);
+    setWidgetDarkPreset(s.widgetDarkPreset);
+    setWidgetLightPreset(s.widgetLightPreset);
+    setEventColorStyle(s.eventColorStyle);
+    setSidebarStyle(s.sidebarStyle);
+    setTimeFormat(s.timeFormat);
+    setWeekStartsOn(s.weekStartsOn);
+    setDayStartH(s.dayStartH);
+    setDayEndH(s.dayEndH);
+    if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
+    setCustomDaysBefore(clamp(s.customDaysBefore, 0, CUSTOM_BEFORE_MAX));
+    setCustomDaysAfter(clamp(s.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
+    setFocusDayStartHour(s.focusDayStartHour);
+    setFocusChime(s.focusChime);
+    setFocusCues(s.focusCues);
+    setShortcuts(s.shortcuts);
+    setAutoBackup(s.autoBackup);
+    setTasksPanelOpen(s.tasksPanelOpen);
+    setTasksPanelWidth(clampPanelWidth(s.tasksPanelWidth));
+    setShowTaskRow(s.showTaskRow);
+    setTaskColor(s.taskColor);
+    setTaskCheckboxShape(s.taskCheckboxShape);
+    setTaskFilters(canonicalFilters(s.taskFilters));
+    setGoogleTasksSync(s.googleTasksSync);
+    setPrayer(s.prayer);
+  }, []);
+  const applySettingsSnapshotRef = useRef(applySettingsSnapshot);
+  useEffect(() => { applySettingsSnapshotRef.current = applySettingsSnapshot; }, [applySettingsSnapshot]);
+
   // Patch the occurrence shown as `id`, routed to its stored master (an edit is to
   // the whole item). Remaps UI references if the occurrence id shifted (e.g. a
   // day-move). Returns the new occurrence id.
@@ -1555,6 +1801,77 @@ export default function WeeklyPlanner() {
       });
     }
   }, [writeEvents]);
+
+  // ── Linked items ────────────────────────────────────────────────────────────
+  // A link group is a plain shared id. Membership is resolved against what is
+  // VISIBLE in the current view, because that is what can actually be dragged:
+  // a partner outside the viewed range has nothing on screen to move.
+
+  /** Occurrence ids currently on screen that share `ev`'s link group (incl. itself). */
+  const linkedIdsOf = useCallback((ev: PlannerEvent | undefined, id: string): string[] => {
+    if (!ev?.linkGroup) return [id];
+    const out: string[] = [];
+    for (const [otherId, other] of Object.entries(weekEventsRef.current)) {
+      if (other.deleted || other.allDay) continue;
+      if (other.linkGroup === ev.linkGroup) out.push(otherId);
+    }
+    return out.length ? out : [id];
+  }, []);
+
+  /**
+   * The item immediately above/below this one in the same day column — the
+   * carriage to couple to. "Nearest" is by start time; ties and overlaps are
+   * fine, we just take the closest one that isn't already in the group.
+   */
+  const linkNeighbour = useCallback((id: string, dir: 'prev' | 'next'): { id: string; ev: PlannerEvent } | null => {
+    const ev = weekEventsRef.current[id] ?? eventsRef.current[id];
+    if (!ev) return null;
+    const start = normalizeMin(timeToMin(ev.startTime), dayStartH);
+    let best: { id: string; ev: PlannerEvent; delta: number } | null = null;
+    for (const [otherId, other] of Object.entries(weekEventsRef.current)) {
+      if (otherId === id || other.deleted || other.allDay) continue;
+      if (other.dayIndex !== ev.dayIndex) continue;
+      if (ev.linkGroup && other.linkGroup === ev.linkGroup) continue; // already coupled
+      const otherStart = normalizeMin(timeToMin(other.startTime), dayStartH);
+      const delta = dir === 'prev' ? start - otherStart : otherStart - start;
+      if (delta <= 0) continue; // wrong side (or exactly level — ambiguous, skip)
+      if (!best || delta < best.delta) best = { id: otherId, ev: other, delta };
+    }
+    return best ? { id: best.id, ev: best.ev } : null;
+  }, [dayStartH]);
+
+  /** Couple `id` to its neighbour, merging whatever groups either already had. */
+  const linkToNeighbour = useCallback((id: string, dir: 'prev' | 'next') => {
+    const ev = weekEventsRef.current[id] ?? eventsRef.current[id];
+    const neighbour = linkNeighbour(id, dir);
+    if (!ev || !neighbour) {
+      showToast(`No item ${dir === 'prev' ? 'above' : 'below'} this one to link to.`, 'error');
+      return;
+    }
+    // Keep an existing group id where there is one, so coupling a third carriage
+    // to a train doesn't renumber the whole train.
+    const groupId = ev.linkGroup || neighbour.ev.linkGroup || uid();
+    const affected = new Set<string>([id, neighbour.id]);
+    for (const gid of linkedIdsOf(ev, id)) affected.add(gid);
+    for (const gid of linkedIdsOf(neighbour.ev, neighbour.id)) affected.add(gid);
+
+    const patches: Record<string, Partial<PlannerEvent>> = {};
+    for (const aid of affected) {
+      const target = weekEventsRef.current[aid] ?? eventsRef.current[aid];
+      if (target && target.linkGroup !== groupId) patches[aid] = { linkGroup: groupId };
+    }
+    if (Object.keys(patches).length) applyEditMany(patches);
+    showToast(`Linked to “${neighbour.ev.content || 'Untitled'}”.`, 'success');
+  }, [linkNeighbour, linkedIdsOf, applyEditMany, showToast]);
+
+  /** Uncouple one item; the rest of the train stays coupled. */
+  const unlinkItem = useCallback((id: string) => {
+    applyEdit(id, { linkGroup: undefined });
+    showToast('Unlinked.', 'info');
+  }, [applyEdit, showToast]);
+
+  const applyEditManyRef = useRef(applyEditMany);
+  useEffect(() => { applyEditManyRef.current = applyEditMany; }, [applyEditMany]);
 
   // Delete the occurrence shown as `id`. `mode` scopes a repeating item's delete
   // ('one' = just this occurrence; 'following'; 'all'). Non-repeating ignores it.
@@ -1606,6 +1923,48 @@ export default function WeeklyPlanner() {
     const { events: map, targetId } = editTaskSeries(tasksRef.current, occId, patch, viewedWeekKey, weekStartsOn);
     writeTasks(map);
     return targetId;
+  }, [writeTasks]);
+
+  // ── Dragging task chips in the band ────────────────────────────────────────
+  // Native HTML5 drag rather than the mouse-tracking rig the events use: chips
+  // live in a normal flow row, so the browser's own drag gives us the ordering
+  // and cross-column drop for free, and it can't interfere with event dragging.
+  const [taskDragId, setTaskDragId] = useState<string | null>(null);
+  const [taskDropCol, setTaskDropCol] = useState<number | null>(null);
+
+  /**
+   * Drop a task into a day column at a given position.
+   *
+   * `beforeId` is the chip it was dropped above (null = dropped at the end).
+   * The column is then renumbered 0..n so "first in the list" survives a reload
+   * — order is a stored field, not a rendering accident.
+   */
+  const moveTaskToColumn = useCallback((occId: string, colIdx: number, beforeId: string | null) => {
+    const wso = editCtxRef.current.weekStartsOn;
+    const target = weekTasksRef.current[occId] ?? tasksRef.current[occId];
+    if (!target) return;
+    const ymd = format(dayAtRef.current(colIdx), 'yyyy-MM-dd');
+
+    // Everything already sitting in that column, in display order, with the
+    // dragged chip removed and re-inserted at the drop point.
+    const column = (datedTasksByColRef.current.get(colIdx) ?? []).filter(t => t.id !== occId);
+    const insertAt = beforeId ? column.findIndex(t => t.id === beforeId) : -1;
+    const ordered = [...column];
+    ordered.splice(insertAt === -1 ? ordered.length : insertAt, 0, { ...target, id: occId } as Task);
+
+    let map = tasksRef.current;
+    ordered.forEach((t, i) => {
+      const isDragged = t.id === occId;
+      const current = map[t.id] ?? weekTasksRef.current[t.id];
+      if (!current) return;
+      // Only the dragged chip changes day; the rest just get their new index.
+      const patch: Partial<Task> = isDragged
+        ? { ...withDueDate(current, ymd, wso), order: i }
+        : { order: i };
+      const res = editTaskSeries(map, t.id, patch, editCtxRef.current.viewedWeekKey, wso);
+      map = res.events;
+    });
+    writeTasks(map);
   }, [writeTasks]);
 
   const deleteTask = useCallback((occId: string, mode: DeleteMode = 'one') => {
@@ -1966,6 +2325,11 @@ export default function WeeklyPlanner() {
   // short grace window after a local change we ignore differing pulls.
   const lastLocalTimerChangeRef = useRef(0);
   const lastTimerPushKeyRef = useRef<string | null>(null);
+  /** When this window last WROTE the timer — anything older is a stale echo. */
+  const lastLocalPushAtRef = useRef(0);
+  /** Pending coalesced write for duration-only nudges (the +/- buttons). */
+  const timerPushTimeoutRef = useRef<number | null>(null);
+  const lastTransitionKeyRef = useRef<string | null>(null);
   // When this window last saved events, and whether the user is mid-interaction —
   // both gate whether a pushed database change may be adopted here.
   const lastLocalEventsWriteRef = useRef(0);
@@ -1987,15 +2351,22 @@ export default function WeeklyPlanner() {
     // wasn't armed — reacted instantly, so the cue sounded twice.
     const applyTimerFromServer = (data: unknown, live = false) => {
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
-      const json = JSON.stringify(coerceFocusTimer(data));
+      const incoming = coerceFocusTimer(data);
+      const json = focusTimerIdentity(incoming);
       timerHydratedRef.current = true;
       if (json === lastTimerJsonRef.current) return; // our own echo / no change
+      // Stamped before our own last write ⇒ it IS an earlier write of ours coming
+      // back late. Applying it would undo a newer local change — the stutter when
+      // nudging the duration quickly. True of streamed events too: "live" means it
+      // arrived promptly, not that it describes a newer state.
+      if (incoming.updatedAt && incoming.updatedAt < lastLocalPushAtRef.current) return;
       // Don't let a stale server read clobber a change we just made locally
       // (the server may not have stored our push yet).
       if (!live && Date.now() - lastLocalTimerChangeRef.current < 4000) return;
       lastTimerJsonRef.current = json;
-      lastTimerPushKeyRef.current = focusTimerPushKey(JSON.parse(json));
-      setFocusTimer(JSON.parse(json));
+      lastTimerPushKeyRef.current = focusTimerPushKey(incoming);
+      lastTransitionKeyRef.current = focusTimerTransitionKey(incoming);
+      setFocusTimer(incoming);
     };
 
     const pullTimer = () => {
@@ -2201,7 +2572,7 @@ export default function WeeklyPlanner() {
     // (empty/stale) state could overwrite a live session owned by another window.
     if (!timerHydratedRef.current) return;
     // Push to the shared backend (skip if this value just arrived from a pull).
-    const json = JSON.stringify(coerceFocusTimer(focusTimer));
+    const json = focusTimerIdentity(focusTimer);
     if (json === lastTimerJsonRef.current) return;
     // A running-session checkpoint isn't a real change — pushing it would stomp a
     // start/pause made from the widget or the system-wide hotkey.
@@ -2210,11 +2581,34 @@ export default function WeeklyPlanner() {
     lastTimerPushKeyRef.current = pushKey;
     lastTimerJsonRef.current = json;
     lastLocalTimerChangeRef.current = Date.now();
-    fetch('/api/focus-timer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: json,
-    }).catch(() => {});
+
+    // Duration nudges are coalesced into one write (each used to cost a file
+    // write, a backup and a broadcast to both windows); a start/pause still goes
+    // out immediately, because the other window's cue depends on it.
+    const transitionKey = focusTimerTransitionKey(focusTimer);
+    const durationOnly = lastTransitionKeyRef.current === transitionKey;
+    lastTransitionKeyRef.current = transitionKey;
+
+    const send = () => {
+      const stamp = Date.now();
+      lastLocalPushAtRef.current = stamp;
+      lastLocalTimerChangeRef.current = stamp;
+      fetch('/api/focus-timer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...JSON.parse(json), updatedAt: stamp }),
+      }).catch(() => {});
+    };
+
+    if (timerPushTimeoutRef.current !== null) {
+      window.clearTimeout(timerPushTimeoutRef.current);
+      timerPushTimeoutRef.current = null;
+    }
+    if (durationOnly) {
+      timerPushTimeoutRef.current = window.setTimeout(() => { timerPushTimeoutRef.current = null; send(); }, 220);
+    } else {
+      send();
+    }
   }, [focusTimer]);
 
   useEffect(() => {
@@ -2241,6 +2635,7 @@ export default function WeeklyPlanner() {
       claimFocusCue(
         `complete|${focusTimer.sessionStartedAt ?? ''}|${focusTimer.plannedSeconds}`,
         () => playFocusChime(focusChimeRef.current),
+        { playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000 },
       );
       focusAutoEndedRef.current = true;
       completeFocusSession(focusTimer.plannedSeconds, true);
@@ -2275,7 +2670,12 @@ export default function WeeklyPlanner() {
     if (!slot) return;
     const cue = focusCuesRef.current[slot];
     if (cue === 'none') return;
-    claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue));
+    // If the claim can't be reached (dev-server restart), only the window that
+    // actually performed the toggle sounds it — otherwise both do, and you hear
+    // the cue twice.
+    claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue), {
+      playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000,
+    });
   }, [focusTimer, focusRemainingSeconds]);
 
   const startFocus = () => {
@@ -2362,26 +2762,7 @@ export default function WeeklyPlanner() {
       .catch(err => console.error('Failed to load tasks from backend database:', err))
       .finally(() => { tasksLoadedRef.current = true; });
 
-    const localS = loadSettingsLocal();
-    setIntervalOpt(localS.interval);
-    setDarkMode(localS.darkMode);
-    setDarkPreset(localS.darkPreset);
-    setLightPreset(localS.lightPreset);
-    setWidgetDarkPreset(localS.widgetDarkPreset);
-    setWidgetLightPreset(localS.widgetLightPreset);
-    setEventColorStyle(localS.eventColorStyle);
-    setSidebarStyle(localS.sidebarStyle);
-    setTimeFormat(localS.timeFormat);
-    setWeekStartsOn(localS.weekStartsOn);
-    setDayStartH(localS.dayStartH);
-    setDayEndH(localS.dayEndH);
-    setShortcuts(localS.shortcuts);
-    setTasksPanelOpen(localS.tasksPanelOpen);
-    setTasksPanelWidth(localS.tasksPanelWidth);
-    setShowTaskRow(localS.showTaskRow);
-    setTaskColor(localS.taskColor);
-    setTaskFilters(canonicalFilters(localS.taskFilters));
-    setGoogleTasksSync(localS.googleTasksSync);
+    applySettingsSnapshotRef.current(loadSettingsLocal());
     const savedZoom = parseFloat(localStorage.getItem(ZOOM_KEY) || '');
     if (Number.isFinite(savedZoom)) setAppZoom(clampZoom(savedZoom));
 
@@ -2390,40 +2771,12 @@ export default function WeeklyPlanner() {
       .then(r => r.json())
       .then((s) => {
         if (s && typeof s === 'object') {
-          if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
-          if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-          if (s.darkPreset) setDarkPreset(s.darkPreset as DarkPreset);
-          if (s.lightPreset) setLightPreset(s.lightPreset as LightPreset);
-          if (s.eventColorStyle) setEventColorStyle(s.eventColorStyle as EventCardStyle);
-          if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle as SidebarStyle);
-          if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
-          if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
-          if (s.dayStartH != null) setDayStartH(s.dayStartH);
-          if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
-          if (s.customDaysBefore != null) setCustomDaysBefore(clamp(Number(s.customDaysBefore), 0, CUSTOM_BEFORE_MAX));
-          if (s.customDaysAfter != null) setCustomDaysAfter(clamp(Number(s.customDaysAfter), CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
-          if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
-          if (s.focusChime != null) setFocusChime(coerceFocusChime(s.focusChime));
-          if (s.focusCues && typeof s.focusCues === 'object') {
-            const c = s.focusCues as Record<string, unknown>;
-            setFocusCues({
-              start: coerceFocusCue(c.start, 'start'),
-              pause: coerceFocusCue(c.pause, 'pause'),
-              resume: coerceFocusCue(c.resume, 'resume'),
-            });
-          }
-          if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
-          if (s.autoBackup && typeof s.autoBackup === 'object') {
-            setAutoBackup(coerceAutoBackup(s.autoBackup));
-          }
-          if (typeof s.tasksPanelOpen === 'boolean') setTasksPanelOpen(s.tasksPanelOpen);
-          if (s.tasksPanelWidth != null) setTasksPanelWidth(clampPanelWidth(Number(s.tasksPanelWidth)));
-          if (typeof s.showTaskRow === 'boolean') setShowTaskRow(s.showTaskRow);
-          if (typeof s.taskColor === 'string' && /^#[0-9a-f]{6}$/i.test(s.taskColor)) setTaskColor(s.taskColor);
-          if (['circle', 'square'].includes(s.taskCheckboxShape)) setTaskCheckboxShape(s.taskCheckboxShape);
-          if (Array.isArray(s.taskFilters)) setTaskFilters(canonicalFilters(s.taskFilters));
-          if (typeof s.googleTasksSync === 'boolean') setGoogleTasksSync(s.googleTasksSync);
+          // Coerce once and apply EVERYTHING. The old hand-written field list
+          // silently omitted the two side-window presets, so this page loaded
+          // them from its own localStorage, ignored the newer values on the
+          // server, and then pushed its stale copy straight back over them —
+          // which is why that one setting kept reverting on every reload.
+          applySettingsSnapshotRef.current(coerceSettings(s));
         }
       })
       .catch(err => console.error('Failed to load settings from backend:', err))
@@ -2447,21 +2800,12 @@ export default function WeeklyPlanner() {
   // Sync settings when returning to main planner route
   useEffect(() => {
     if (location === '/' && settingsLoaded.current) {
+      // Returning from the settings page: adopt the whole saved snapshot, not a
+      // subset — see applySettingsSnapshot for why a partial list corrupts data.
       fetch('/api/settings')
         .then(r => r.json())
         .then((s) => {
-          if (s && typeof s === 'object') {
-            if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
-            if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-            if (s.darkPreset) setDarkPreset(s.darkPreset as DarkPreset);
-            if (s.lightPreset) setLightPreset(s.lightPreset as LightPreset);
-            if (s.eventColorStyle) setEventColorStyle(s.eventColorStyle as EventCardStyle);
-            if (s.sidebarStyle) setSidebarStyle(s.sidebarStyle as SidebarStyle);
-            if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
-            if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
-            if (s.dayStartH != null) setDayStartH(s.dayStartH);
-            if (s.dayEndH != null) setDayEndH(s.dayEndH);
-          }
+          if (s && typeof s === 'object') applySettingsSnapshotRef.current(coerceSettings(s));
         })
         .catch(() => {});
     }
@@ -2470,29 +2814,12 @@ export default function WeeklyPlanner() {
   // Subscribe to live settings updates broadcast from anywhere (Settings page, shortcuts, etc.)
   useEffect(() => {
     return subscribeSettingsChange(s => {
-      setIntervalOpt(s.interval);
-      setDarkMode(s.darkMode);
-      setDarkPreset(s.darkPreset);
-      setLightPreset(s.lightPreset);
-      setWidgetDarkPreset(s.widgetDarkPreset);
-      setWidgetLightPreset(s.widgetLightPreset);
-      setEventColorStyle(s.eventColorStyle);
-      setSidebarStyle(s.sidebarStyle);
-      setTimeFormat(s.timeFormat);
-      setWeekStartsOn(s.weekStartsOn);
-      setDayStartH(s.dayStartH);
-      setDayEndH(s.dayEndH);
-      setFocusDayStartHour(s.focusDayStartHour);
-      setFocusChime(s.focusChime);
-      setFocusCues(s.focusCues);
-      setShortcuts(s.shortcuts);
-      setAutoBackup(s.autoBackup);
-      setTasksPanelOpen(s.tasksPanelOpen);
-      setTasksPanelWidth(s.tasksPanelWidth);
-      setShowTaskRow(s.showTaskRow);
-      setTaskColor(s.taskColor);
-      setTaskFilters(canonicalFilters(s.taskFilters));
-      setGoogleTasksSync(s.googleTasksSync);
+      // Adopt the WHOLE snapshot. Adopting a subset was silently destructive:
+      // this page re-broadcasts everything it holds, so any field it failed to
+      // adopt was immediately pushed back over the change that had just been
+      // made (calendarView, the custom-view day counts and the task checkbox
+      // shape all reverted this way).
+      applySettingsSnapshotRef.current(s);
     });
   }, []);
 
@@ -2509,9 +2836,10 @@ export default function WeeklyPlanner() {
       eventColorStyle, sidebarStyle,
       timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter,
       focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
-      tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync
+      tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync,
+      prayer
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync]);
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -2653,7 +2981,8 @@ export default function WeeklyPlanner() {
     eventColorStyle, sidebarStyle,
     timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter,
     focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
-    tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync
+    tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync,
+    prayer
   });
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
@@ -2690,6 +3019,7 @@ export default function WeeklyPlanner() {
     if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
     setTaskFilters(canonicalFilters(restored.taskFilters));
     setGoogleTasksSync(restored.googleTasksSync);
+    setPrayer(restored.prayer);
     broadcastSettingsChange(restored);
   };
 
@@ -3156,12 +3486,39 @@ export default function WeeklyPlanner() {
         if (!coords) return;
         br.curDay = coords.dayIndex;
         const dayDelta = coords.dayIndex - br.origDay;
-        const deltaMin = clamp(snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP), -dayStartMin * 4, dayEndMin);
+        const rawDelta = clamp(snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP), -dayStartMin * 4, dayEndMin);
+
+        // ONE delta for the whole set, clamped so that every member stays in
+        // range — clamping each item separately let the one that hit the edge
+        // stop while the others kept going, which silently pulled a linked pair
+        // (or a multi-selection) apart. Relative spacing is the whole point of
+        // both features, so the group moves as far as its most constrained
+        // member allows, and no further.
+        //
+        // The upper bound deliberately does NOT subtract the item's duration:
+        // an item may legitimately run past the end of the visible window (the
+        // head/tail rendering handles that), and subtracting it teleported any
+        // long overnight block to the bottom of the grid.
+        let minDelta = -Infinity;
+        let maxDelta = Infinity;
+        let minDayDelta = -Infinity;
+        let maxDayDelta = Infinity;
+        for (const id of br.eventIds) {
+          const base = br.baseStartMins[id];
+          minDelta = Math.max(minDelta, dayStartMin - base);
+          maxDelta = Math.min(maxDelta, (dayEndMin - POSITION_SNAP) - base);
+          minDayDelta = Math.max(minDayDelta, 0 - br.baseDays[id]);
+          maxDayDelta = Math.min(maxDayDelta, 6 - br.baseDays[id]);
+        }
+        const deltaMin = clamp(rawDelta, minDelta, maxDelta);
+        const dayShift = clamp(dayDelta, minDayDelta, maxDayDelta);
+
         const newBatchDisp: { [id: string]: { dayIndex: number; startMin: number } } = {};
         for (const id of br.eventIds) {
-          const newStart = clamp(br.baseStartMins[id] + deltaMin, dayStartMin, dayEndMin - br.durations[id]);
-          const newDay = clamp(br.baseDays[id] + dayDelta, 0, 6);
-          newBatchDisp[id] = { dayIndex: newDay, startMin: newStart };
+          newBatchDisp[id] = {
+            dayIndex: br.baseDays[id] + dayShift,
+            startMin: br.baseStartMins[id] + deltaMin,
+          };
         }
         setBatchDisp(newBatchDisp);
         batchDispRef.current = newBatchDisp;
@@ -3253,6 +3610,23 @@ export default function WeeklyPlanner() {
           const newStart = clamp(snapMin(targetStart, POSITION_SNAP), minStart, maxStart);
           rr.startMin = newStart;
           setResizeDisp({ id: rr.eventId, startMin: newStart, endMin: rr.endMin });
+
+          // Preview the train following the start edge. Reusing batchDisp means
+          // the existing renderer draws the partners at their new spots for free.
+          const partnerIds = Object.keys(rr.linkBase || {});
+          if (partnerIds.length) {
+            const delta = newStart - rr.baseStartMin;
+            const disp: { [id: string]: { dayIndex: number; startMin: number } } = {};
+            for (const pid of partnerIds) {
+              const base = rr.linkBase[pid];
+              disp[pid] = {
+                dayIndex: base.dayIndex,
+                startMin: clamp(base.startMin + delta, dayStartMin, dayEndMin - POSITION_SNAP),
+              };
+            }
+            setBatchDisp(disp);
+            batchDispRef.current = disp;
+          }
         }
       }
     };
@@ -3371,10 +3745,30 @@ export default function WeeklyPlanner() {
       }
       if (rr) {
         const ev = weekEventsRef.current[rr.eventId] ?? eventsRef.current[rr.eventId];
+        const partnerIds = Object.keys(rr.linkBase || {});
+        const delta = rr.startMin - rr.baseStartMin;
         if (ev) {
-          applyEditRef.current(rr.eventId, { startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) });
+          // One batched write for the item and its train, so the whole move is a
+          // single undo step rather than one per carriage.
+          if (partnerIds.length && delta !== 0) {
+            const patches: Record<string, Partial<PlannerEvent>> = {
+              [rr.eventId]: { startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) },
+            };
+            for (const pid of partnerIds) {
+              const base = rr.linkBase[pid];
+              const start = clamp(base.startMin + delta, dayStartMin, dayEndMin - POSITION_SNAP);
+              patches[pid] = {
+                startTime: minToTime(start >= 1440 ? start - 1440 : start),
+                endTime: minToTime((start + base.durationMin) % 1440),
+              };
+            }
+            applyEditManyRef.current(patches);
+          } else {
+            applyEditRef.current(rr.eventId, { startTime: minToTime(rr.startMin), endTime: minToTime(rr.endMin) });
+          }
         }
         resizeRef.current = null; setResizeDisp(null);
+        if (partnerIds.length) { setBatchDisp(null); batchDispRef.current = null; }
         setTimeout(() => { didDragRef.current = false; }, 80);
       }
     };
@@ -3435,14 +3829,20 @@ export default function WeeklyPlanner() {
     e.preventDefault(); e.stopPropagation();
     if (e.ctrlKey || e.metaKey) return; // toggle selection in onClick, don't drag
 
-    // Batch drag: mousedown on a selected event while others are selected
-    if (selectedIds.size > 1 && selectedIds.has(ev.id)) {
+    // Batch drag: mousedown on a selected event while others are selected — or on
+    // a LINKED item, whose whole train moves as one whether it's selected or not.
+    const linkedIds = linkedIdsOf(ev, ev.id);
+    const dragIds: string[] =
+      selectedIds.size > 1 && selectedIds.has(ev.id) ? [...selectedIds]
+      : linkedIds.length > 1 ? linkedIds
+      : [];
+    if (dragIds.length > 1) {
       const coords = getGridCoords(e.clientX, e.clientY);
       if (!coords) return;
       const baseStartMins: Record<string, number> = {};
       const baseDays: Record<string, number> = {};
       const durations: Record<string, number> = {};
-      for (const id of selectedIds) {
+      for (const id of dragIds) {
         const eRef = weekEventsRef.current[id] ?? eventsRef.current[id];
         if (eRef) {
           const s = normalizeMin(timeToMin(eRef.startTime), dayStartH);
@@ -3454,7 +3854,7 @@ export default function WeeklyPlanner() {
         }
       }
       batchDragRef.current = {
-        eventIds: [...selectedIds], baseStartMins, baseDays, durations,
+        eventIds: dragIds, baseStartMins, baseDays, durations,
         origDay: ev.dayIndex, curDay: ev.dayIndex,
         baseMouseMin: coords.snappedMin,
         active: false, initX: e.clientX, initY: e.clientY,
@@ -3491,10 +3891,28 @@ export default function WeeklyPlanner() {
     const startMin = normalizeMin(timeToMin(ev.startTime), dayStartH);
     let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
     if (endMin <= startMin) endMin += 1440;
+    // Dragging the START edge carries the linked train with it (the whole point
+    // of linking "Get Up" to "Sleeping"): remember where every partner sat so the
+    // move can be replayed as a delta. The END edge moves nothing — growing an
+    // item downward doesn't reposition what precedes it.
+    const linkBase: Record<string, { dayIndex: number; startMin: number; durationMin: number }> = {};
+    if (edge === 'top') {
+      for (const partnerId of linkedIdsOf(ev, ev.id)) {
+        if (partnerId === ev.id) continue;
+        const partner = weekEventsRef.current[partnerId] ?? eventsRef.current[partnerId];
+        if (!partner) continue;
+        const ps = normalizeMin(timeToMin(partner.startTime), dayStartH);
+        let pe = normalizeMin(timeToMin(partner.endTime), dayStartH);
+        if (pe <= ps) pe += 1440;
+        linkBase[partnerId] = { dayIndex: partner.dayIndex, startMin: ps, durationMin: pe - ps };
+      }
+    }
     resizeRef.current = {
       eventId: ev.id, edge, startMin, endMin,
       isHeadClick: segKind === 'head',
-      isTailClick: segKind === 'tail'
+      isTailClick: segKind === 'tail',
+      baseStartMin: startMin,
+      linkBase,
     };
     // Mark this as a drag gesture: releasing over empty grid must not be read as a
     // click that creates a new item there (cleared shortly after mouseup).
@@ -4000,9 +4418,23 @@ export default function WeeklyPlanner() {
                 </div>
               </>
             )}
+            {/* A dead Google authorisation is a dead end until the user acts, so
+                it replaces the sync spinner with something clickable rather than
+                hiding behind it. */}
+            {gCalStatus.needsReconnect && (
+              <button
+                onClick={() => navigateToSettings('integrations')}
+                title={gCalStatus.authError || 'Google rejected the saved authorisation. Reconnect to resume syncing.'}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors shadow-sm"
+                style={{ background: 'rgba(239,68,68,0.14)', border: '1px solid rgba(239,68,68,0.5)', color: '#f87171' }}
+              >
+                <AlertTriangle size={12} />
+                Google disconnected — reconnect
+              </button>
+            )}
             {/* Live sync indicator — quiet when idle, spins while syncing. */}
             <AnimatePresence>
-              {gCalSyncing && (
+              {gCalSyncing && !gCalStatus.needsReconnect && (
                 <motion.span
                   key="sync-spinner"
                   initial={{ opacity: 0, width: 0 }}
@@ -4022,6 +4454,93 @@ export default function WeeklyPlanner() {
                 </motion.span>
               )}
             </AnimatePresence>
+            {/* Prayer times for today — collapsed to the next one, expanding to
+                the whole day (Sunrise included) on click. */}
+            {prayer.enabled && todayPrayerList.length > 0 && (
+              <div className="relative" ref={prayerPanelRef}>
+                <button
+                  onClick={() => setPrayerPanelOpen(v => !v)}
+                  title={nextPrayer
+                    ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)} — click for the whole day`
+                    : "Today's prayer times"}
+                  className="flex items-center gap-1 px-1.5 py-1.5 rounded-lg text-[11px] font-semibold transition-colors shadow-sm"
+                  style={{
+                    background: prayerPanelOpen ? `${prayer.color}26` : surfaceBg,
+                    border: `1px solid ${prayerPanelOpen ? prayer.color : surfaceBdr}`,
+                    color: prayerPanelOpen ? prayer.color : headerInactive,
+                  }}
+                >
+                  <Moon size={12} style={{ color: prayer.color }} />
+                  {nextPrayer && (
+                    <span className="tabular-nums whitespace-nowrap">
+                      {formatTimeLabel(nextPrayer.minutes, timeFormat)}
+                    </span>
+                  )}
+                  <ChevronDown
+                    size={11}
+                    style={{ transform: prayerPanelOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }}
+                  />
+                </button>
+
+                <AnimatePresence>
+                  {prayerPanelOpen && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      transition={{ duration: 0.14, ease: 'easeOut' }}
+                      className="absolute right-0 top-full mt-1.5 z-50 rounded-xl border shadow-xl overflow-hidden"
+                      style={{ background: menuBg, borderColor: surfaceBdr, minWidth: 216 }}
+                    >
+                      <div className="px-3 pt-2.5 pb-1.5 flex items-baseline justify-between gap-3">
+                        <span className="text-[11px] font-bold" style={{ color: menuText }}>
+                          {format(new Date(nowTick), 'EEEE, MMM d')}
+                        </span>
+                        <span className="text-[10px]" style={{ color: menuSub }}>{prayer.city}</span>
+                      </div>
+                      <div className="pb-1.5">
+                        {todayPrayerList.map(p => {
+                          const done = isPrayerDone(p.dateStr, p.key);
+                          const isNext = nextPrayer?.key === p.key;
+                          const passed = !done && !isNext && nextPrayer !== null && p.minutes < nextPrayer.minutes;
+                          return (
+                            <button
+                              key={p.id}
+                              onClick={() => togglePrayerDone(p.dateStr, p.key)}
+                              className="w-full px-3 py-1.5 flex items-center gap-2 transition-colors text-left"
+                              style={{ background: isNext ? `${prayer.color}1f` : 'transparent' }}
+                              onMouseEnter={e => { if (!isNext) e.currentTarget.style.background = hoverBg; }}
+                              onMouseLeave={e => { if (!isNext) e.currentTarget.style.background = 'transparent'; }}
+                              title={done ? `${p.label} — done` : `Mark ${p.label} as done`}
+                            >
+                              <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color, opacity: done ? 1 : 0.75 }}>
+                                {done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
+                              </span>
+                              <span
+                                className="text-[12px] font-semibold flex-1"
+                                style={{
+                                  color: isNext ? prayer.color : menuText,
+                                  opacity: passed ? 0.5 : 1,
+                                  textDecoration: done ? 'line-through' : 'none',
+                                }}
+                              >
+                                {p.label}
+                              </span>
+                              <span
+                                className="text-[12px] font-bold tabular-nums"
+                                style={{ color: isNext ? prayer.color : menuText, opacity: passed ? 0.5 : 0.9 }}
+                              >
+                                {formatTimeLabel(p.minutes, timeFormat)}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
             <button
               onClick={() => setShowFocusAnalysis(v => !v)}
               title={`${showFocusAnalysis ? 'Back to calendar' : 'Focus Analysis'} (${formatCombo(shortcuts.focusAnalysis)})`}
@@ -4359,6 +4878,12 @@ export default function WeeklyPlanner() {
                     <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider">Tasks</span>
                   </div>
                 )}
+                {showPrayerBand && (
+                  <div style={{ height: prayerRowHeight }} className="border-b border-border/50 flex items-center justify-center gap-1">
+                    <Moon size={10} style={{ color: prayer.color, opacity: 0.85 }} />
+                    <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider">Prayer</span>
+                  </div>
+                )}
                 <div className="relative" style={{ height: totalH }}>
                   {slots.map((time, i) => {
                     const isHour = time.endsWith(':00');
@@ -4602,8 +5127,45 @@ export default function WeeklyPlanner() {
                           no absolute overlay to keep in sync. */}
                       {showTaskBand && (
                         <div
-                          style={{ height: taskRowHeight }}
+                          style={{
+                            height: taskRowHeight,
+                            background: taskDropCol === colIdx ? `${taskColor}22` : undefined,
+                            outline: taskDropCol === colIdx ? `1px dashed ${taskColor}` : undefined,
+                            outlineOffset: -2,
+                          }}
                           className="flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] overflow-hidden"
+                          onDragOver={(e) => {
+                            if (!taskDragId) return;
+                            e.preventDefault();                       // required, or the drop never fires
+                            e.dataTransfer.dropEffect = 'move';
+                            if (taskDropCol !== colIdx) setTaskDropCol(colIdx);
+                          }}
+                          onDragLeave={(e) => {
+                            // Ignore the leave events fired while crossing this cell's
+                            // own children, or the highlight strobes.
+                            if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                            setTaskDropCol(c => (c === colIdx ? null : c));
+                          }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const id = taskDragId || e.dataTransfer.getData('text/planner-task');
+                            setTaskDropCol(null);
+                            setTaskDragId(null);
+                            if (!id) return;
+                            // Which chip was it dropped above? Compare against the
+                            // vertical midpoint of each chip already in the column.
+                            const chips = [...e.currentTarget.querySelectorAll('[data-task-chip]')] as HTMLElement[];
+                            let beforeId: string | null = null;
+                            for (const chip of chips) {
+                              const r = chip.getBoundingClientRect();
+                              if (e.clientY < r.top + r.height / 2) {
+                                beforeId = chip.getAttribute('data-task-chip');
+                                break;
+                              }
+                            }
+                            if (beforeId === id) beforeId = null;
+                            moveTaskToColumn(id, colIdx, beforeId);
+                          }}
                         >
                           {(datedTasksByCol.get(colIdx) ?? []).map(t => {
                             const occ = t.occDate ?? null;
@@ -4613,17 +5175,25 @@ export default function WeeklyPlanner() {
                               <button
                                 key={t.id}
                                 data-task="1"
+                                data-task-chip={t.id}
+                                draggable
+                                onDragStart={(e) => {
+                                  setTaskDragId(t.id);
+                                  e.dataTransfer.effectAllowed = 'move';
+                                  e.dataTransfer.setData('text/planner-task', t.id);
+                                }}
+                                onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
                                 onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
                                 onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
-                                className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity"
+                                className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity cursor-grab active:cursor-grabbing"
                                 style={{
                                   height: TASK_CHIP_H,
                                   background: c.bg,
                                   border: `1px dashed ${c.border}`,
-                                  opacity: done ? 0.5 : 1,
+                                  opacity: taskDragId === t.id ? 0.4 : done ? 0.5 : 1,
                                   filter: done ? 'saturate(0.4)' : 'none',
                                 }}
-                                title={t.title}
+                                title={`${t.title} — drag to another day, or up and down to reorder`}
                               >
                                 <span
                                   role="button"
@@ -4660,6 +5230,46 @@ export default function WeeklyPlanner() {
                           >
                             <Plus size={11} />
                           </button>
+                        </div>
+                      )}
+
+                      {/* Prayer band — the whole calendar day's prayers, including
+                          the ones that fall outside the visible hour window. */}
+                      {showPrayerBand && (
+                        <div
+                          style={{ height: prayerRowHeight }}
+                          className="flex-shrink-0 border-b border-border/50 px-1 py-1 flex flex-col gap-[2px] overflow-hidden"
+                        >
+                          {prayersFor(day).map(p => {
+                            const done = isPrayerDone(p.dateStr, p.key);
+                            return (
+                              <button
+                                key={p.id}
+                                onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
+                                className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity"
+                                style={{
+                                  height: PRAYER_CHIP_H,
+                                  background: `${prayer.color}22`,
+                                  border: `1px solid ${prayer.color}66`,
+                                  opacity: done ? 0.5 : 1,
+                                }}
+                                title={`${p.label} · ${formatTimeLabel(p.minutes, timeFormat)}${done ? ' · done' : ''}`}
+                              >
+                                <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                  {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                </span>
+                                <span
+                                  className="text-[10px] font-semibold truncate leading-none"
+                                  style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}
+                                >
+                                  {p.label}
+                                </span>
+                                <span className="text-[9.5px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                  {formatTimeLabel(p.minutes, timeFormat)}
+                                </span>
+                              </button>
+                            );
+                          })}
                         </div>
                       )}
 
@@ -4726,6 +5336,84 @@ export default function WeeklyPlanner() {
                           );
                         })()}
 
+                        {/* Prayer times. Zero-height overlays anchored to the exact
+                            minute — they must never eat a click meant for the grid,
+                            so only the chip itself takes pointer events. */}
+                        {prayer.style !== 'row' && columnPrayers(day).map(p => {
+                          const norm = p.norm;
+                          if (norm < dayStartMin || norm > dayEndMin) return null;
+                          const top = minToY(norm, interval, dayStartH);
+                          const done = isPrayerDone(p.dateStr, p.key);
+                          const label = `${p.label} · ${formatTimeLabel(p.minutes, timeFormat)}`;
+
+                          if (prayer.style === 'pill') {
+                            return (
+                              <button
+                                key={p.id}
+                                onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
+                                className="absolute flex items-center gap-1 rounded-md px-1.5 z-20 transition-opacity"
+                                style={{
+                                  top, left: 2, right: 2, height: 16,
+                                  background: `${prayer.color}26`,
+                                  border: `1px solid ${prayer.color}80`,
+                                  opacity: done ? 0.5 : 1,
+                                }}
+                                title={label}
+                              >
+                                <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                  {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
+                                </span>
+                                <span
+                                  className="text-[9.5px] font-semibold truncate leading-none"
+                                  style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}
+                                >
+                                  {p.label}
+                                </span>
+                                <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                  {formatTimeLabel(p.minutes, timeFormat)}
+                                </span>
+                              </button>
+                            );
+                          }
+
+                          return (
+                            <div
+                              key={p.id}
+                              className="absolute left-0 right-0 z-20 pointer-events-none"
+                              style={{ top, height: 0, opacity: done ? 0.45 : 1 }}
+                            >
+                              <div
+                                className="absolute left-0 right-0"
+                                style={{ height: 0, borderTop: `1px dashed ${prayer.color}`, opacity: 0.85 }}
+                              />
+                              <button
+                                onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
+                                className="absolute flex items-center gap-1 rounded-full pl-1 pr-1.5 pointer-events-auto"
+                                style={{
+                                  left: 2, top: -7, height: 14,
+                                  background: `${prayer.color}26`,
+                                  border: `1px solid ${prayer.color}80`,
+                                  backdropFilter: 'blur(2px)',
+                                }}
+                                title={`${label}${done ? ' · done' : ''}`}
+                              >
+                                <span className="flex items-center" style={{ color: prayer.color }}>
+                                  {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
+                                </span>
+                                <span
+                                  className="text-[9px] font-bold leading-none whitespace-nowrap"
+                                  style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}
+                                >
+                                  {p.label}
+                                </span>
+                                <span className="text-[8.5px] tabular-nums leading-none opacity-80 whitespace-nowrap" style={{ color: prayer.color }}>
+                                  {formatTimeLabel(p.minutes, timeFormat)}
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })}
+
                         {/* Events */}
                         {colEvents.map(item => {
                           const { ev, key: itemKey, segKind } = item;
@@ -4748,7 +5436,12 @@ export default function WeeklyPlanner() {
                             ? 'none'
                             : 'box-shadow 140ms ease, outline-color 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), filter 140ms ease';
                           const { bg, border, text, textMuted, boxShadow, accentBar } = chipColors(ev);
-                          const tooShort = height < sh * 2;
+                          // Whether a card has room for its footer (the start–end line,
+                          // and the colour swatches while editing). This is a PIXEL
+                          // threshold on purpose: keying it to the slot height meant a
+                          // 30-minute card lost its times at the 30m grid interval but
+                          // kept them at 5m — same card, same pixels, different result.
+                          const tooShort = height < 60;
                           // Duration always reflects the event's true full start–end, not just this segment.
                           const fullStartMin = timeToMin(ev.startTime);
                           const fullEndMin   = timeToMin(ev.endTime);
@@ -4935,14 +5628,19 @@ export default function WeeklyPlanner() {
                                 const isMicroCard   = height < 26;
                                 const isShortCard   = height >= 26 && height < 44;
                                 const isCompactCard = height >= 44 && height < 64;
+                                // A full card that is only just past the compact cut-off
+                                // (a 30-minute block at the 30m interval, say) keeps the
+                                // full-card layout but not its generous padding — that
+                                // padding ate two of the three lines the title needed.
+                                const isMediumCard  = height >= 64 && height < 104;
                                 return (
                                   <div
                                     className={`absolute inset-0 flex flex-col overflow-hidden ${
-                                      isMicroCard || isShortCard ? 'px-1.5 py-0' : isCompactCard ? 'px-2 py-1' : 'px-2 pt-2.5 pb-2'
+                                      isMicroCard || isShortCard ? 'px-1.5 py-0' : isCompactCard || isMediumCard ? 'px-2 py-1' : 'px-2 pt-2.5 pb-2'
                                     }`}
                                     style={{
-                                      top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 6,
-                                      bottom: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 4 : 8,
+                                      top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : isMediumCard ? 3 : 6,
+                                      bottom: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 4 : isMediumCard ? 3 : 8,
                                     }}
                                   >
                                     {isEdit ? (
@@ -5119,7 +5817,7 @@ export default function WeeklyPlanner() {
                                                 )}
                                               </button>
                                             )}
-                                            <p className={`text-xs font-medium leading-snug break-words line-clamp-5 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                            <p className={`font-medium break-words line-clamp-5 ${isMediumCard ? 'text-[10.5px] leading-tight' : 'text-xs leading-snug'} ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                                               {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
                                             </p>
                                           </div>
@@ -6885,6 +7583,23 @@ export default function WeeklyPlanner() {
                       </span>
                     </div>
 
+                    {/* What the connection is actually doing. Without this the only
+                        signal was a spinner, which spun just as happily when every
+                        call was failing. */}
+                    <div className="flex flex-col gap-0.5 pb-1">
+                      {gCalStatus.needsReconnect && gCalStatus.authError && (
+                        <span className="text-[10px] leading-snug" style={{ color: '#f87171' }}>
+                          {gCalStatus.authError}
+                        </span>
+                      )}
+                      <span className="text-[10px]" style={{ color: menuSub }}>
+                        {syncHealthLabel('Calendar', gCalHealth?.calendar)}
+                      </span>
+                      <span className="text-[10px]" style={{ color: menuSub }}>
+                        {syncHealthLabel('Tasks', gCalHealth?.tasks)}
+                      </span>
+                    </div>
+
                     {!gCalStatus.authenticated ? (
                       <button
                         onClick={() => {
@@ -6899,7 +7614,7 @@ export default function WeeklyPlanner() {
                         }}
                         className="w-full py-1.5 px-3 text-xs font-semibold rounded-md text-center transition-all text-white bg-blue-500 hover:bg-blue-600 cursor-pointer"
                       >
-                        Link Google Account
+                        {gCalStatus.needsReconnect ? 'Reconnect Google Account' : 'Link Google Account'}
                       </button>
                     ) : (
                       <div className="flex flex-col gap-2">
@@ -7450,6 +8165,80 @@ export default function WeeklyPlanner() {
               </span>
             </button>
           )}
+
+          {/* Linked items — couple this item to the one above or below it, like
+              train carriages. Coupled items move as one: dragging any of them, or
+              dragging this one's START edge, carries the rest along. */}
+          {!isDraft && !menuEvent.allDay && (() => {
+            const linkedNow = linkedIdsOf(menuEvent, menuEvent.id).filter(lid => lid !== menuEvent.id);
+            const above = linkNeighbour(menuEvent.id, 'prev');
+            const below = linkNeighbour(menuEvent.id, 'next');
+            return (
+              <div className="px-3 py-2.5 flex flex-col gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Linked movement</span>
+                  {linkedNow.length > 0 && (
+                    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'rgba(96,165,250,0.18)', color: '#93c5fd' }}>
+                      {linkedNow.length + 1} coupled
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={!above}
+                    onClick={() => linkToNeighbour(menuEvent.id, 'prev')}
+                    className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
+                    style={{
+                      background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText,
+                      opacity: above ? 1 : 0.4, cursor: above ? 'pointer' : 'default',
+                    }}
+                    title={above ? `Couple to “${above.ev.content || 'Untitled'}” above` : 'Nothing above this item today'}
+                  >
+                    <ChevronUp size={12} /> Link above
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!below}
+                    onClick={() => linkToNeighbour(menuEvent.id, 'next')}
+                    className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
+                    style={{
+                      background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText,
+                      opacity: below ? 1 : 0.4, cursor: below ? 'pointer' : 'default',
+                    }}
+                    title={below ? `Couple to “${below.ev.content || 'Untitled'}” below` : 'Nothing below this item today'}
+                  >
+                    <ChevronDown size={12} /> Link below
+                  </button>
+                </div>
+                {linkedNow.length > 0 && (
+                  <>
+                    <div className="flex flex-col gap-0.5">
+                      {linkedNow.map(lid => {
+                        const partner = weekEvents[lid] ?? events[lid];
+                        if (!partner) return null;
+                        return (
+                          <span key={lid} className="text-[10px] truncate flex items-center gap-1" style={{ color: menuSub }}>
+                            <Link2 size={9} style={{ opacity: 0.7, flexShrink: 0 }} />
+                            {partner.content || 'Untitled'} · {formatTimeLabel(timeToMin(partner.startTime), timeFormat)}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => unlinkItem(menuEvent.id)}
+                      className="w-full flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
+                      style={{ background: 'transparent', border: `1px solid ${menuBdr}`, color: '#f87171' }}
+                      title="Uncouple this item; the rest stay linked to each other"
+                    >
+                      <Link2Off size={12} /> Unlink this item
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Draft footer: commit or discard (dedicated create) */}
           {isDraft && (
