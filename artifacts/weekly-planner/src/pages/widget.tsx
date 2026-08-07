@@ -57,7 +57,8 @@ import {
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
-import { themePalette, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
+import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
+import { matchesCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
 import {
   coercePrayerSettings,
   DEFAULT_PRAYER_SETTINGS,
@@ -269,6 +270,7 @@ export default function Widget() {
   const lastTimerPushKeyRef = useRef<string | null>(null);
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft] = useState('60');
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(DEFAULT_SHORTCUTS);
   const [prayer, setPrayer] = useState<PrayerSettings>(DEFAULT_PRAYER_SETTINGS);
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const focusCompleteRef = useRef(false);
@@ -283,8 +285,6 @@ export default function Widget() {
     setFocusTimer(loadLocalFocusTimer());
 
     // Settings come from the shared backend so the widget always matches the main window.
-    // Each loader is split into "apply this payload" + "go fetch it", so the live
-    // stream and the fallback poll share exactly the same handling.
     const applySettings = (s: any) => {
       if (s && typeof s === 'object') {
         if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
@@ -297,6 +297,7 @@ export default function Widget() {
         if (s.dayStartH != null) setDayStartH(s.dayStartH);
         if (s.dayEndH != null) setDayEndH(s.dayEndH);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
+        if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
         if (s.focusChime != null) focusChimeRef.current = coerceFocusChime(s.focusChime);
         if (s.focusCues && typeof s.focusCues === 'object') {
@@ -309,6 +310,8 @@ export default function Widget() {
         }
       }
     };
+
+    const unsubSettings = subscribeSettingsChange(applySettings);
     const loadSettings = () => {
       fetch('/api/settings')
         .then(r => r.json())
@@ -994,21 +997,42 @@ export default function Widget() {
     });
   }, []);
 
-  // A / D nudge the focus duration down / up, mirroring the − and + buttons.
-  // Skipped while a text field has focus so typing a duration isn't hijacked.
+  // Configurable widget shortcuts (widgetMinus, widgetPlus, widgetStart).
+  // Skipped while a text field has focus so typing is not hijacked.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
-      const key = e.key.toLowerCase();
-      if (key !== 'a' && key !== 'd') return;
-      e.preventDefault();
-      adjustFocusMinutes(key === 'a' ? -5 : 5);
+
+      if (matchesCombo(shortcuts.widgetMinus, e)) {
+        e.preventDefault();
+        adjustFocusMinutes(-5);
+      } else if (matchesCombo(shortcuts.widgetPlus, e)) {
+        e.preventDefault();
+        adjustFocusMinutes(5);
+      } else if (matchesCombo(shortcuts.widgetStart, e)) {
+        e.preventDefault();
+        setFocusTimer(prev => {
+          if (prev.isRunning) {
+            return pauseFocusTimer(prev);
+          } else {
+            const startedAt = new Date().toISOString();
+            setFocusCollapsed(true);
+            if (prev.lastStartedAt) return prev;
+            return {
+              ...prev,
+              isRunning: true,
+              lastStartedAt: startedAt,
+              sessionStartedAt: prev.sessionStartedAt ?? startedAt,
+              lastPausedAt: null,
+            };
+          }
+        });
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [adjustFocusMinutes]);
+  }, [adjustFocusMinutes, shortcuts]);
 
   const commitFocusMinutesDraft = () => {
     const parsed = Number(focusMinutesDraft);

@@ -20,7 +20,10 @@ export type ShortcutAction =
   | 'copy'
   | 'paste'
   | 'delete'
-  | 'help';
+  | 'help'
+  | 'widgetMinus'
+  | 'widgetPlus'
+  | 'widgetStart';
 
 export interface ShortcutDef {
   action: ShortcutAction;
@@ -47,7 +50,10 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
   { action: 'copy',          label: 'Copy item',         hint: 'Copy the selected or hovered item',      group: 'Editing',    blockedInTextFields: true },
   { action: 'paste',         label: 'Paste item',        hint: 'Paste at the cursor position',           group: 'Editing',    blockedInTextFields: true },
   { action: 'delete',        label: 'Delete item',       hint: 'Delete the selected or hovered item',    group: 'Editing',    blockedInTextFields: true },
-  { action: 'toggleTimer',   label: 'Start / pause timer', hint: 'Toggle the focus timer',               group: 'Focus',      blockedInTextFields: true },
+  { action: 'toggleTimer',   label: 'Start / pause timer', hint: 'Toggle main focus timer',              group: 'Focus',      blockedInTextFields: true },
+  { action: 'widgetMinus',   label: 'Widget timer −',    hint: 'Decrease focus timer in widget',         group: 'Focus',      blockedInTextFields: true },
+  { action: 'widgetPlus',    label: 'Widget timer +',    hint: 'Increase focus timer in widget',         group: 'Focus',      blockedInTextFields: true },
+  { action: 'widgetStart',   label: 'Widget start / pause', hint: 'Start or pause focus session in widget', group: 'Focus',   blockedInTextFields: true },
 ];
 
 export type ShortcutMap = Record<ShortcutAction, string>;
@@ -70,10 +76,10 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   copy:          'Ctrl+C',
   paste:         'Ctrl+V',
   delete:        'Delete',
-  // NOT Alt+Space: Space activates whatever button has focus, and Alt+Space
-  // opens the Windows system menu before the page ever sees it. This same combo
-  // is registered OS-wide by focus-hotkey.py, so it works off-window too.
   toggleTimer:   'Alt+Shift+F1',
+  widgetMinus:   'A',
+  widgetPlus:    'D',
+  widgetStart:   'S',
 };
 
 /**
