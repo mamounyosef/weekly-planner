@@ -1155,6 +1155,7 @@ function TaskRow({
         if (e.dataTransfer) {
           e.dataTransfer.effectAllowed = 'move';
           e.dataTransfer.setData('text/plain', row.occId);
+          e.dataTransfer.setData('text/planner-task', row.occId);
         }
         onDragStart?.();
       }}

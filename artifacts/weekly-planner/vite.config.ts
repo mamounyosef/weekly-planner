@@ -482,10 +482,13 @@ export default defineConfig({
           // Maps Google event to PlannerEvent. `parseRecur` (from recurrence.ts)
           // turns a Google recurrence array into { recur, exdates } so a repeating
           // event round-trips as a single master.
-          function mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseRecur, palettes, calHex) {
+          function mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseRecur, palettes, calHex, targetCalendarId) {
             const isAllDay = !!gEv.start.date;
             const { recur, exdates } = gEv.recurrence ? parseRecur(gEv.recurrence) : {};
             const gCalHex = resolveGoogleHex(gEv, palettes, calHex || {});
+            const colorFromId = gEv.colorId ? GOOGLE_COLOR_ID_TO_SWATCH[gEv.colorId] : null;
+            const isDailyCal = targetCalendarId && gEv.gCalCalendarId === targetCalendarId;
+            const resolvedColor = colorFromId || (isDailyCal ? 'sage' : mapGoogleColor(gEv.gCalCalendarId));
 
             if (isAllDay) {
               const startD = new Date(gEv.start.date + 'T00:00:00');
@@ -502,7 +505,7 @@ export default defineConfig({
                 startTime: '00:00',
                 endTime: '00:30',
                 content: gEv.summary,
-                color: mapGoogleColor(gEv.gCalCalendarId),
+                color: resolvedColor,
                 ...(gCalHex ? { gCalHex } : {}),
                 allDay: true,
                 daysSpan,
@@ -530,7 +533,7 @@ export default defineConfig({
                 startTime,
                 endTime,
                 content: gEv.summary,
-                color: mapGoogleColor(gEv.gCalCalendarId),
+                color: resolvedColor,
                 ...(gCalHex ? { gCalHex } : {}),
                 weekKey,
                 ...(recur ? { recur } : {}),
@@ -547,9 +550,33 @@ export default defineConfig({
           // Precedence matches what Google Calendar itself renders:
           //   1. the event's own `colorId` (the 11-entry *event* palette), else
           //   2. the colour of the calendar it lives on.
-          // `palettes` is the /colors resource; `calHex` maps calendarId → hex from
-          // the calendar list. Returns null when neither is known, and the caller
-          // falls back to the app's five-swatch palette.
+          const SWATCH_TO_GOOGLE_COLOR_ID: Record<string, string> = {
+            lavender: '1',
+            sage: '2',
+            lilac: '3',
+            rose: '4',
+            sand: '5',
+            peach: '6',
+            teal: '7',
+            blue: '9',
+            emerald: '10',
+            coral: '11',
+          };
+
+          const GOOGLE_COLOR_ID_TO_SWATCH: Record<string, string> = {
+            '1': 'lavender',
+            '2': 'sage',
+            '3': 'lilac',
+            '4': 'rose',
+            '5': 'sand',
+            '6': 'peach',
+            '7': 'teal',
+            '8': 'sand',
+            '9': 'blue',
+            '10': 'emerald',
+            '11': 'coral',
+          };
+
           function resolveGoogleHex(gEv, palettes, calHex) {
             if (gEv.colorId && palettes && palettes.event && palettes.event[gEv.colorId]) {
               return palettes.event[gEv.colorId].background;
@@ -557,9 +584,6 @@ export default defineConfig({
             return calHex[gEv.gCalCalendarId] || null;
           }
 
-          // Fallback swatch, used only when Google gave us no colour at all. Spread
-          // across the palette by calendar id so different calendars stay tellable
-          // apart rather than all landing on one swatch.
           /** What an app-owned event falls back to when its colour can't be recovered. */
           const OWNED_DEFAULT_COLOR = 'sage';
 
@@ -581,6 +605,7 @@ export default defineConfig({
             const dateStr = format(eventDate, 'yyyy-MM-dd');
             const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
             const recurrence = ev.recur ? buildRecur(ev, tz) : undefined;
+            const googleColorId = ev.color ? SWATCH_TO_GOOGLE_COLOR_ID[ev.color] : undefined;
 
             if (ev.allDay) {
               const endDate = addDays(eventDate, ev.daysSpan || 1);
@@ -589,6 +614,7 @@ export default defineConfig({
                 start: { date: dateStr },
                 end: { date: format(endDate, 'yyyy-MM-dd') }
               };
+              if (googleColorId) body.colorId = googleColorId;
               if (recurrence) body.recurrence = recurrence;
               stampPlannerId(body, plannerId || ev.id);
               return body;
@@ -602,6 +628,7 @@ export default defineConfig({
                 start: { dateTime: startDate.toISOString(), timeZone: tz },
                 end: { dateTime: endDate.toISOString(), timeZone: tz }
               };
+              if (googleColorId) body.colorId = googleColorId;
               if (recurrence) body.recurrence = recurrence;
               stampPlannerId(body, plannerId || ev.id);
               return body;
@@ -1347,7 +1374,7 @@ export default defineConfig({
                 if (!seenGCalIds.has(gEv.gCalId)) continue;
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
+                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
                   if (plannerEv) {
                     // Keep the original local id when this event came from the app, so it
                     // returns as itself rather than as a new "gcal-…" import.
@@ -1391,7 +1418,7 @@ export default defineConfig({
                 // A local edit we just pushed wins this round; only pull when Google is ahead.
                 const locallyDirty = ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt);
                 if (!locallyDirty && ev.gCalETag !== gEv.gCalETag) {
-                  const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
+                  const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
                   if (g) {
                     // Daily events are app-owned: the app is the source of truth for
                     // colour (Google doesn't store our palette, so mapGoogleColor would
@@ -1405,7 +1432,7 @@ export default defineConfig({
               for (const gEv of otherGoogleEvents) {
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
+                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
                   if (plannerEv) {
                     plannerEv.lastSyncedAt = nowMs;
                     localMap[plannerEv.id] = plannerEv;
@@ -1414,7 +1441,7 @@ export default defineConfig({
                 } else {
                   const ev = localMap[localId];
                   if (ev && !ev.deleted && ev.gCalETag !== gEv.gCalETag) {
-                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex);
+                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
                     if (g) {
                       localMap[localId] = { ...ev, ...g, id: localId, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
                     }

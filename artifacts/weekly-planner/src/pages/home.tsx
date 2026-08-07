@@ -1958,8 +1958,9 @@ export default function WeeklyPlanner() {
       const current = map[t.id] ?? weekTasksRef.current[t.id];
       if (!current) return;
       // Only the dragged chip changes day; the rest just get their new index.
+      // Clear startTime & endTime so dropping onto the top task band turns timed tasks into top-of-day tasks.
       const patch: Partial<Task> = isDragged
-        ? { ...withDueDate(current, ymd, wso), order: i }
+        ? { ...withDueDate(current, ymd, wso), startTime: undefined, endTime: undefined, order: i }
         : { order: i };
       const res = editTaskSeries(map, t.id, patch, editCtxRef.current.viewedWeekKey, wso);
       map = res.events;
@@ -5898,9 +5899,17 @@ export default function WeeklyPlanner() {
                             <div
                               key={key}
                               data-task="1"
+                              data-task-chip={t.id}
+                              draggable
+                              onDragStart={(e) => {
+                                setTaskDragId(t.id);
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/planner-task', t.id);
+                              }}
+                              onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
                               onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
                               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
-                              className="absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
+                              className="absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow cursor-grab active:cursor-grabbing"
                               style={{
                                 top, height: h,
                                 left:  `calc(${col * colW}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
@@ -5910,10 +5919,10 @@ export default function WeeklyPlanner() {
                                 // survive every card style, including `minimal`.
                                 border: `1.5px dashed ${c.border}`,
                                 borderLeft: `3px solid ${c.border}`,
-                                opacity: done ? 0.45 : 1,
+                                opacity: taskDragId === t.id ? 0.4 : done ? 0.45 : 1,
                                 filter: done ? 'saturate(0.4)' : 'none',
                               }}
-                              title={t.title}
+                              title={`${t.title} — drag to top of day or another day`}
                             >
                               <div className="flex items-start gap-1 px-1.5 py-1">
                                 <span
