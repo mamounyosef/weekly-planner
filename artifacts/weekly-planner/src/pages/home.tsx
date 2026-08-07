@@ -1157,6 +1157,9 @@ export default function WeeklyPlanner() {
   // changes — or a broken connection would toast forever.
   const lastSyncProblemRef = useRef<string | null>(null);
   const reportSyncProblem = useCallback((label: string, res: { needsReconnect?: boolean; error?: string | null }) => {
+    const currentSettings = loadSettingsLocal();
+    if (currentSettings.googleSyncEnabled === false) return;
+    if (!gCalStatus.authenticated || !gCalStatus.configured) return;
     const problem = res?.needsReconnect
       ? `${label}: Google needs you to reconnect.`
       : res?.error
@@ -1165,12 +1168,15 @@ export default function WeeklyPlanner() {
     if (problem === lastSyncProblemRef.current) return;
     lastSyncProblemRef.current = problem;
     if (problem) showToast(problem, 'error');
-  }, [showToast]);
+  }, [showToast, gCalStatus.authenticated, gCalStatus.configured]);
 
   const syncQueuedRef = useRef(false);
   const triggerGCalSync = useCallback((customEvents?: PlannerData) => {
     // Never sync before events have loaded — see eventsLoadedRef.
     if (!customEvents && !eventsLoadedRef.current) return;
+    const currentSettings = loadSettingsLocal();
+    if (currentSettings.googleSyncEnabled === false) return;
+    if (!gCalStatus.authenticated || !gCalStatus.configured) return;
     if (syncInFlightRef.current) { syncQueuedRef.current = true; return; }
     syncInFlightRef.current = true;
     setGCalSyncing(true);
@@ -1197,7 +1203,7 @@ export default function WeeklyPlanner() {
         // Records we deleted while this (older) sync was in flight are gone from live
         // but still present in the stale serverMap. Without this, the server's copy
         // would resurrect them ~seconds later. Anything we *sent* (was in launched)
-        // that no longer exists locally was deleted mid-flight â†’ drop it. Records the
+        // that no longer exists locally was deleted mid-flight — drop it. Records the
         // server newly pulled (not in launched, e.g. foreign calendars) are kept.
         for (const id of Object.keys(serverMap)) {
           if (launched[id] !== undefined && live[id] === undefined) delete merged[id];
@@ -1218,7 +1224,9 @@ export default function WeeklyPlanner() {
     })
     .catch(err => {
       console.error('Google Calendar sync failed:', err);
-      showToast('Google Calendar sync failed.', 'error');
+      if (gCalStatus.authenticated && gCalStatus.configured && loadSettingsLocal().googleSyncEnabled !== false) {
+        showToast('Google Calendar sync failed.', 'error');
+      }
     })
     .finally(() => {
       setGCalSyncing(false);
@@ -1232,7 +1240,7 @@ export default function WeeklyPlanner() {
           if (status.clientId) setClientIdInput(status.clientId);
         });
     });
-  }, [weekStartsOn, showToast, reportSyncProblem]);
+  }, [weekStartsOn, showToast, reportSyncProblem, gCalStatus.authenticated, gCalStatus.configured]);
 
   // -- Google Tasks sync driver ------------------------------------------------
   // Same in-flight serialisation + mid-flight merge as the calendar sync above.
@@ -1244,6 +1252,9 @@ export default function WeeklyPlanner() {
   const tasksSyncQueuedRef = useRef(false);
   const triggerTasksSync = useCallback(() => {
     if (!tasksLoadedRef.current) return;
+    const currentSettings = loadSettingsLocal();
+    if (currentSettings.googleSyncEnabled === false) return;
+    if (!gCalStatus.authenticated || !gCalStatus.configured) return;
     if (tasksSyncInFlightRef.current) { tasksSyncQueuedRef.current = true; return; }
     tasksSyncInFlightRef.current = true;
     const launched = tasksRef.current;
@@ -1278,7 +1289,7 @@ export default function WeeklyPlanner() {
         tasksSyncInFlightRef.current = false;
         if (tasksSyncQueuedRef.current) { tasksSyncQueuedRef.current = false; triggerTasksSyncRef.current(); }
       });
-  }, [weekStartsOn, writeTasks, reportSyncProblem]);
+  }, [weekStartsOn, writeTasks, reportSyncProblem, gCalStatus.authenticated, gCalStatus.configured]);
   const triggerTasksSyncRef = useRef(triggerTasksSync);
   useEffect(() => { triggerTasksSyncRef.current = triggerTasksSync; }, [triggerTasksSync]);
 
@@ -1341,18 +1352,16 @@ export default function WeeklyPlanner() {
   }, [triggerGCalSync, showToast]);
 
   useEffect(() => {
-    if (!gCalStatus.authenticated || !gCalStatus.autoSync) return;
+    if (!gCalStatus.authenticated || !gCalStatus.configured || !gCalStatus.autoSync) return;
     const intervalId = setInterval(() => {
       triggerGCalSync();
     }, 4 * 60 * 1000);
     return () => clearInterval(intervalId);
-  }, [gCalStatus.authenticated, gCalStatus.autoSync, triggerGCalSync]);
+  }, [gCalStatus.authenticated, gCalStatus.configured, gCalStatus.autoSync, triggerGCalSync]);
 
-  // Poll the connection's health even when nothing is syncing. Without this the
-  // status only ever refreshed as a side effect of a sync — so once the token
-  // died and the sync loops stopped, the UI kept showing the last good state
-  // until the page was reloaded.
+  // Poll connection status ONLY when authenticated & configured
   useEffect(() => {
+    if (!gCalStatus.authenticated || !gCalStatus.configured) return;
     const pull = () => {
       fetch('/api/google-auth/status')
         .then(r => r.json())
@@ -1361,24 +1370,19 @@ export default function WeeklyPlanner() {
     };
     const id = setInterval(pull, 60000);
     return () => clearInterval(id);
-  }, []);
+  }, [gCalStatus.authenticated, gCalStatus.configured]);
 
   useEffect(() => {
-    if (isInitialMount.current || !gCalStatus.authenticated) return;
-    // Never push mid-edit: while an item is focused for editing (e.g. typing a
-    // title) we hold off. The push fires once editing finishes (editingId â†’ null,
-    // i.e. focus leaves the item) or after a structural change settles.
+    if (isInitialMount.current || !gCalStatus.authenticated || !gCalStatus.configured) return;
     if (editingId !== null) return;
     // If this render is the result of applying a sync response, don't sync again.
     if (gcalEchoRef.current === events) { gcalEchoRef.current = null; return; }
     const timer = setTimeout(() => { triggerGCalSync(); }, 800);
     return () => clearTimeout(timer);
-  }, [events, editingId, gCalStatus.authenticated, triggerGCalSync]);
+  }, [events, editingId, gCalStatus.authenticated, gCalStatus.configured, triggerGCalSync]);
 
   // Tasks: the same pair of triggers. Gated additionally on the Tasks scope
-  // actually having been granted — an old calendar-only token would 403 on
-  // every call. The server bails silently too; this just avoids the round-trip.
-  const tasksSyncReady = gCalStatus.authenticated && !!gCalStatus.hasTasksScope && googleTasksSync;
+  const tasksSyncReady = gCalStatus.authenticated && gCalStatus.configured && !!gCalStatus.hasTasksScope && googleTasksSync;
   useEffect(() => {
     if (!tasksSyncReady || !gCalStatus.autoSync) return;
     triggerTasksSync();
@@ -1720,7 +1724,10 @@ export default function WeeklyPlanner() {
       dayEndH: true, calendarView: true, customDaysBefore: true, customDaysAfter: true,
       focusDayStartHour: true, focusChime: true, focusCues: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
-      taskColor: true, taskCheckboxShape: true, taskFilters: true, googleTasksSync: true,
+      taskColor: true, taskCheckboxShape: true, taskFilters: true, googleSyncEnabled: true, googleTasksSync: true,
+      gcalPushEnabled: true, gcalPushTarget: true, gcalPushOtherCalendars: true,
+      gcalPullDailyEdits: true, gcalPullDailyNew: true, gcalPullOtherCalendars: true,
+      gcalMirrorLocalDeletions: true, gcalMirrorGoogleDeletions: true,
       prayer: true,
     };
     void handled;
@@ -2832,14 +2839,7 @@ export default function WeeklyPlanner() {
   // Persist settings to the shared backend whenever any of them change (after initial load).
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    broadcastSettingsChange({
-      interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
-      eventColorStyle, sidebarStyle,
-      timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter,
-      focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
-      tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync,
-      prayer
-    });
+    broadcastSettingsChange(currentSettingsSnapshot());
   }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
@@ -2977,14 +2977,7 @@ export default function WeeklyPlanner() {
   // single exported file is a complete snapshot of the whole app's data.
   const BACKUP_FORMAT_VERSION = 2;
 
-  const currentSettingsSnapshot = (): AppSettings => ({
-    interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset,
-    eventColorStyle, sidebarStyle,
-    timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter,
-    focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup,
-    tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync,
-    prayer
-  });
+  const currentSettingsSnapshot = (): AppSettings => loadSettingsLocal();
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
     const restored = coerceSettings({

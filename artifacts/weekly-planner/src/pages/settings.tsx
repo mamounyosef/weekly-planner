@@ -341,6 +341,7 @@ export default function SettingsPage() {
   const [showTaskRow, setShowTaskRow] = useState<boolean>(initialSettings.showTaskRow);
   const [taskColor, setTaskColor] = useState<string>(initialSettings.taskColor);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<TaskCheckboxShape>(initialSettings.taskCheckboxShape ?? 'circle');
+  const [googleSyncEnabled, setGoogleSyncEnabled] = useState<boolean>(initialSettings.googleSyncEnabled ?? true);
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [gcalPushEnabled, setGcalPushEnabled] = useState<boolean>(initialSettings.gcalPushEnabled ?? true);
   const [gcalPushTarget, setGcalPushTarget] = useState<'daily' | 'primary'>(initialSettings.gcalPushTarget ?? 'daily');
@@ -419,6 +420,7 @@ export default function SettingsPage() {
       setShowTaskRow(s.showTaskRow);
       setTaskColor(s.taskColor);
       if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
+      if (typeof s.googleSyncEnabled === 'boolean') setGoogleSyncEnabled(s.googleSyncEnabled);
       setGoogleTasksSync(s.googleTasksSync);
       if (typeof s.gcalPushEnabled === 'boolean') setGcalPushEnabled(s.gcalPushEnabled);
       if (s.gcalPushTarget) setGcalPushTarget(s.gcalPushTarget);
@@ -518,6 +520,7 @@ export default function SettingsPage() {
       showTaskRow,
       taskColor,
       taskCheckboxShape,
+      googleSyncEnabled,
       googleTasksSync,
       gcalPushEnabled,
       gcalPushTarget,
@@ -530,7 +533,7 @@ export default function SettingsPage() {
       prayer,
     });
   }, [prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
-      taskCheckboxShape, googleTasksSync, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
+      taskCheckboxShape, googleSyncEnabled, googleTasksSync, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {
@@ -607,8 +610,17 @@ export default function SettingsPage() {
     taskFilters,
     showTaskRow,
     taskColor,
-      taskCheckboxShape,
+    taskCheckboxShape,
+    googleSyncEnabled,
     googleTasksSync,
+    gcalPushEnabled,
+    gcalPushTarget,
+    gcalPushOtherCalendars,
+    gcalPullDailyEdits,
+    gcalPullDailyNew,
+    gcalPullOtherCalendars,
+    gcalMirrorLocalDeletions,
+    gcalMirrorGoogleDeletions,
     prayer,
   });
 
@@ -1964,6 +1976,27 @@ export default function SettingsPage() {
                     <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
                       Sync your events bidirectionally with Google Calendar.
                     </p>
+                  </div>
+
+                  {/* Master Enable/Disable Toggle */}
+                  <div className="p-4 rounded-2xl border flex items-center justify-between gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
+                    <div>
+                      <span className="text-xs font-bold block" style={{ color: textPrimary }}>
+                        Master Google Synchronization
+                      </span>
+                      <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                        {googleSyncEnabled
+                          ? 'Google sync is enabled. The app will sync with Google Calendar & Tasks when connected.'
+                          : 'Google sync is completely DISABLED. The app runs offline without contacting Google or showing warnings.'}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setGoogleSyncEnabled(v => !v)}
+                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                      style={{ background: googleSyncEnabled ? accentColor : cardBdr }}
+                    >
+                      <span className="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: googleSyncEnabled ? 22 : 4 }} />
+                    </button>
                   </div>
 
                   <div className="p-4 rounded-2xl border flex flex-col gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>

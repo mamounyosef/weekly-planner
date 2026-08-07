@@ -188,6 +188,7 @@ export interface AppSettings {
   taskColor: string;         // '#rrggbb' — the one colour tasks wear on the grid
   taskCheckboxShape: TaskCheckboxShape; // 'circle' | 'square'
   taskFilters: string[];     // panel filter selection; empty = show everything
+  googleSyncEnabled: boolean;         // Master toggle for Google integration & synchronization
   googleTasksSync: boolean;
   // ── Google Calendar Sync Policies ──────────────────────────────────────────
   gcalPushEnabled: boolean;           // Master push toggle (app → Google)
@@ -229,6 +230,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   taskColor: '#7dd3fc',
   taskCheckboxShape: 'circle',
   taskFilters: [],
+  googleSyncEnabled: true,
   googleTasksSync: true,
   gcalPushEnabled: true,
   gcalPushTarget: 'daily',
@@ -325,6 +327,7 @@ export function coerceSettings(raw: unknown): AppSettings {
     // Re-derived in canonical order, so an out-of-order array can never round-trip.
     s.taskFilters = TASK_FILTER_ORDER.filter(f => (r.taskFilters as unknown[]).includes(f));
   }
+  if (typeof r.googleSyncEnabled === 'boolean') s.googleSyncEnabled = r.googleSyncEnabled;
   if (typeof r.googleTasksSync === 'boolean') s.googleTasksSync = r.googleTasksSync;
   if (typeof r.gcalPushEnabled === 'boolean') s.gcalPushEnabled = r.gcalPushEnabled;
   if (r.gcalPushTarget === 'daily' || r.gcalPushTarget === 'primary') s.gcalPushTarget = r.gcalPushTarget;

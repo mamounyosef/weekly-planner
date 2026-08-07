@@ -402,18 +402,22 @@ export default defineConfig({
            */
           async function getGoogleToken(force = false) {
             try {
-              const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
-              const tokens = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+              let config: any = null;
+              let tokens: any = null;
+              try {
+                config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+              } catch (_) {}
+              try {
+                tokens = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+              } catch (_) {}
 
-              if (!tokens.refresh_token) {
-                await markAuthBroken('No refresh token stored. Connect Google again.', true);
+              if (!config || !config.clientId || !tokens || !tokens.refresh_token) {
+                // Not connected or not configured — normal unlinked state, not a broken auth error
                 return null;
               }
 
               const now = Date.now();
               if (!force && tokens.expires_at && now < tokens.expires_at - 60000) {
-                // A token file flagged invalid may still hold a technically unexpired
-                // access token; using it is fine, and a working call clears the flag.
                 if (!tokens.invalid) await markAuthOk();
                 return tokens.access_token;
               }
@@ -424,8 +428,6 @@ export default defineConfig({
               }
               return await refreshInFlight;
             } catch (err) {
-              // Reading/parsing the local files failed — not something a reconnect fixes.
-              await markAuthBroken(`Could not read Google credentials: ${err.message}`, false);
               console.error('Error in getGoogleToken:', err);
               return null;
             }
@@ -681,22 +683,21 @@ export default defineConfig({
             try {
               const accessToken = await getGoogleToken();
               if (!accessToken) {
-                syncHealth.tasks.error = syncHealth.auth.error || 'Not connected to Google';
+                if (syncHealth.auth.needsReconnect) {
+                  syncHealth.tasks.error = syncHealth.auth.error || 'Google connection needs reconnect';
+                } else {
+                  syncHealth.tasks.error = null;
+                }
                 return clientTasks;
               }
 
-              // Bail before making a single call if Tasks wasn't authorised — the
-              // alternative is a 403 on every request, every four minutes. This
-              // used to be a silent `return`, which is how "Tasks never synced"
-              // stayed invisible for weeks.
               try {
                 const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
                 if (!String(toks.scope || '').includes('/auth/tasks')) {
-                  syncHealth.tasks.skipped = 'The Google connection has no Tasks permission — reconnect to grant it';
+                  syncHealth.tasks.skipped = 'The Google connection has no Tasks permission';
                   return clientTasks;
                 }
-              } catch (err) {
-                syncHealth.tasks.error = `Could not read Google credentials: ${err.message}`;
+              } catch (_) {
                 return clientTasks;
               }
 
@@ -1100,9 +1101,11 @@ export default defineConfig({
             try {
               const accessToken = await getGoogleToken();
               if (!accessToken) {
-                // getGoogleToken has already recorded WHY on syncHealth.auth; the
-                // endpoint reports it so the UI stops claiming everything is fine.
-                syncHealth.calendar.error = syncHealth.auth.error || 'Not connected to Google';
+                if (syncHealth.auth.needsReconnect) {
+                  syncHealth.calendar.error = syncHealth.auth.error || 'Google connection needs reconnect';
+                } else {
+                  syncHealth.calendar.error = null;
+                }
                 return clientEvents;
               }
 
