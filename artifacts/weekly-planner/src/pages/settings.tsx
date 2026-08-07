@@ -342,6 +342,14 @@ export default function SettingsPage() {
   const [taskColor, setTaskColor] = useState<string>(initialSettings.taskColor);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<TaskCheckboxShape>(initialSettings.taskCheckboxShape ?? 'circle');
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
+  const [gcalPushEnabled, setGcalPushEnabled] = useState<boolean>(initialSettings.gcalPushEnabled ?? true);
+  const [gcalPushTarget, setGcalPushTarget] = useState<'daily' | 'primary'>(initialSettings.gcalPushTarget ?? 'daily');
+  const [gcalPushOtherCalendars, setGcalPushOtherCalendars] = useState<boolean>(initialSettings.gcalPushOtherCalendars ?? true);
+  const [gcalPullDailyEdits, setGcalPullDailyEdits] = useState<boolean>(initialSettings.gcalPullDailyEdits ?? false);
+  const [gcalPullDailyNew, setGcalPullDailyNew] = useState<boolean>(initialSettings.gcalPullDailyNew ?? false);
+  const [gcalPullOtherCalendars, setGcalPullOtherCalendars] = useState<boolean>(initialSettings.gcalPullOtherCalendars ?? true);
+  const [gcalMirrorLocalDeletions, setGcalMirrorLocalDeletions] = useState<boolean>(initialSettings.gcalMirrorLocalDeletions ?? true);
+  const [gcalMirrorGoogleDeletions, setGcalMirrorGoogleDeletions] = useState<boolean>(initialSettings.gcalMirrorGoogleDeletions ?? false);
   const [prayer, setPrayer] = useState<PrayerSettings>(initialSettings.prayer);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
   const patchPrayer = useCallback((patch: Partial<PrayerSettings>) => {
@@ -412,6 +420,14 @@ export default function SettingsPage() {
       setTaskColor(s.taskColor);
       if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
       setGoogleTasksSync(s.googleTasksSync);
+      if (typeof s.gcalPushEnabled === 'boolean') setGcalPushEnabled(s.gcalPushEnabled);
+      if (s.gcalPushTarget) setGcalPushTarget(s.gcalPushTarget);
+      if (typeof s.gcalPushOtherCalendars === 'boolean') setGcalPushOtherCalendars(s.gcalPushOtherCalendars);
+      if (typeof s.gcalPullDailyEdits === 'boolean') setGcalPullDailyEdits(s.gcalPullDailyEdits);
+      if (typeof s.gcalPullDailyNew === 'boolean') setGcalPullDailyNew(s.gcalPullDailyNew);
+      if (typeof s.gcalPullOtherCalendars === 'boolean') setGcalPullOtherCalendars(s.gcalPullOtherCalendars);
+      if (typeof s.gcalMirrorLocalDeletions === 'boolean') setGcalMirrorLocalDeletions(s.gcalMirrorLocalDeletions);
+      if (typeof s.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(s.gcalMirrorGoogleDeletions);
       setPrayer(s.prayer);
     });
   }, []);
@@ -503,10 +519,18 @@ export default function SettingsPage() {
       taskColor,
       taskCheckboxShape,
       googleTasksSync,
+      gcalPushEnabled,
+      gcalPushTarget,
+      gcalPushOtherCalendars,
+      gcalPullDailyEdits,
+      gcalPullDailyNew,
+      gcalPullOtherCalendars,
+      gcalMirrorLocalDeletions,
+      gcalMirrorGoogleDeletions,
       prayer,
     });
   }, [prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
-      taskCheckboxShape, googleTasksSync]);
+      taskCheckboxShape, googleTasksSync, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {
@@ -2063,6 +2087,154 @@ export default function SettingsPage() {
                         )}
                       </div>
                     )}
+                  </div>
+                </div>
+
+                {/* Google Sync Policy & Modification Rules */}
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
+                      <ShieldCheck size={16} className="text-blue-500" />
+                      Google Sync Policy & Modification Rules
+                    </h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      Configure direction, target calendars, and authority permissions between Google Calendar and this planner.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-4">
+                    {/* Section A: App -> Google (Push) */}
+                    <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-blue-500">App → Google (Push Controls)</span>
+                      
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Push local events to Google Calendar</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Create and update events on Google when authored in the planner</span>
+                        </div>
+                        <button
+                          onClick={() => setGcalPushEnabled(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalPushEnabled ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPushEnabled ? 22 : 2 }} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Google Calendar Destination</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Where newly created app events land on Google Calendar</span>
+                        </div>
+                        <select
+                          value={gcalPushTarget}
+                          onChange={e => setGcalPushTarget(e.target.value as 'daily' | 'primary')}
+                          className="py-1.5 px-3 text-xs font-semibold rounded-xl border outline-none cursor-pointer"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                        >
+                          <option value="daily">Daily Calendar (Isolated & Recommended)</option>
+                          <option value="primary">Primary Google Calendar</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow updating external Google Calendar events</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Local edits to external Google Calendar cards will push back to their original calendar</span>
+                        </div>
+                        <button
+                          onClick={() => setGcalPushOtherCalendars(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalPushOtherCalendars ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Section B: Google -> App (Pull & Protection Rules) */}
+                    <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-500">Google → App (Pull & Protection Rules)</span>
+                      
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow Google edits to modify Daily Calendar app items</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                            {gcalPullDailyEdits ? 'Google Calendar changes will overwrite local app items' : 'OFF (Recommended): App is sole source of truth; Google edits cannot touch local items'}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => setGcalPullDailyEdits(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalPullDailyEdits ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import raw new events from Google Daily Calendar</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Import new items created directly on Google Calendar into the planner</span>
+                        </div>
+                        <button
+                          onClick={() => setGcalPullDailyNew(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalPullDailyNew ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import events from other Google Calendars</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Display items from Primary, Work, and Personal Google Calendars as read-only cards</span>
+                        </div>
+                        <button
+                          onClick={() => setGcalPullOtherCalendars(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalPullOtherCalendars ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Section C: Deletion Rules */}
+                    <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-purple-500">Deletion Mirroring Rules</span>
+                      
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting in app deletes on Google Calendar</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Removing an event in the planner issues a DELETE call to Google Calendar</span>
+                        </div>
+                        <button
+                          onClick={() => setGcalMirrorLocalDeletions(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalMirrorLocalDeletions ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div>
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting on Google Calendar deletes in app</span>
+                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                            {gcalMirrorGoogleDeletions ? 'Deleting an item on Google Calendar wipes it locally' : 'OFF (Protected): Items deleted on Google Calendar will stay safe in your local planner'}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => setGcalMirrorGoogleDeletions(v => !v)}
+                          className="relative w-10 h-5 rounded-full transition-colors"
+                          style={{ background: gcalMirrorGoogleDeletions ? accentColor : cardBdr }}
+                        >
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
 

@@ -1082,7 +1082,7 @@ export default defineConfig({
 
           // Main sync logic
           let isSyncing = false;
-          async function runGoogleSync(clientEvents, weekStartsOnOpt = 0) {
+          async function runGoogleSync(clientEvents, weekStartsOnOpt = 0, policyOpts: any = null) {
             if (isSyncing) {
               console.log('Sync already in progress. Skipping concurrent run.');
               return clientEvents;
@@ -1099,6 +1099,25 @@ export default defineConfig({
                 // endpoint reports it so the UI stops claiming everything is fine.
                 syncHealth.calendar.error = syncHealth.auth.error || 'Not connected to Google';
                 return clientEvents;
+              }
+
+              // Load settings from disk and merge explicit policyOpts passed in
+              let policy = {
+                gcalPushEnabled: true,
+                gcalPushTarget: 'daily',
+                gcalPushOtherCalendars: true,
+                gcalPullDailyEdits: false,
+                gcalPullDailyNew: false,
+                gcalPullOtherCalendars: true,
+                gcalMirrorLocalDeletions: true,
+                gcalMirrorGoogleDeletions: false,
+              };
+              try {
+                const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'settings.json');
+                const storedSettings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+                policy = { ...policy, ...storedSettings, ...(policyOpts || {}) };
+              } catch (_) {
+                policy = { ...policy, ...(policyOpts || {}) };
               }
 
               const { format, startOfWeek, addDays, differenceInDays } = await import('date-fns');
@@ -1135,20 +1154,26 @@ export default defineConfig({
                 if (hex) calHex[c.id] = hex;
               }
 
-              // 2. Find or create "Daily calendar"
-              let targetCal = calendars.find(c => c.summary === 'Daily calendar');
+              // 2. Find or create target calendar ("Daily calendar" vs Primary)
               let targetCalendarId = '';
-              if (targetCal) {
-                targetCalendarId = targetCal.id;
-              } else {
-                const createRes = await gfetch('https://www.googleapis.com/calendar/v3/calendars', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ summary: 'Daily calendar' })
-                }, { label: 'createCalendar' });
-                if (!createRes || !createRes.ok) throw new Error('Failed to create Daily calendar');
-                const created = await createRes.json();
-                targetCalendarId = created.id;
+              if (policy.gcalPushTarget === 'primary') {
+                const primaryCal = calendars.find(c => c.primary);
+                if (primaryCal) targetCalendarId = primaryCal.id;
+              }
+              if (!targetCalendarId) {
+                let targetCal = calendars.find(c => c.summary === 'Daily calendar');
+                if (targetCal) {
+                  targetCalendarId = targetCal.id;
+                } else {
+                  const createRes = await gfetch('https://www.googleapis.com/calendar/v3/calendars', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ summary: 'Daily calendar' })
+                  }, { label: 'createCalendar' });
+                  if (!createRes || !createRes.ok) throw new Error('Failed to create Daily calendar');
+                  const created = await createRes.json();
+                  targetCalendarId = created.id;
+                }
               }
 
               // 3. Define sync window (from 60 days ago to 180 days in the future).
@@ -1255,13 +1280,13 @@ export default defineConfig({
 
               const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
-              // A. Mirror local deletions to Google. A tombstone (deleted:true) that
-              //    carries a Daily gCalId is DELETEd on Google (this covers a whole
-              //    repeating series too); then the record is dropped locally. A
-              //    tombstone without a gCalId (never synced, or a foreign read-only
-              //    event the user hid) is just dropped.
+              // A. Mirror local deletions to Google (governed by gcalMirrorLocalDeletions)
               for (const [id, ev] of Object.entries(localMap)) {
                 if (!ev.deleted) continue;
+                if (!policy.gcalMirrorLocalDeletions) {
+                  delete localMap[id];
+                  continue;
+                }
                 if (ev.gCalId && ev.gCalCalendarId === targetCalendarId) {
                   if (await deleteFromGoogle(ev.gCalId)) delete localMap[id];
                 } else {
@@ -1278,10 +1303,7 @@ export default defineConfig({
                 }
               }
 
-              // B. Push app-owned creates/updates to the Daily calendar ONLY. Each app
-              //    event (repeating or not) is one Google event; recurrence comes from
-              //    ev.recur via constructGoogleEventBody → buildGoogleRecurrence. Events
-              //    carrying a foreign gCalId are read-only mirrors, never written back.
+              // B. Push app-owned creates/updates to Google
               // Records we create/update on Google in this pass. The Daily calendar was
               // fetched at the very start (before these writes), so its snapshot is stale
               // for exactly these ids — we must NOT reconcile them against it in step C,
@@ -1291,7 +1313,30 @@ export default defineConfig({
               for (const [id, ev] of Object.entries(localMap)) {
                 if (ev.deleted) continue;
                 const isForeign = ev.gCalId && ev.gCalCalendarId && ev.gCalCalendarId !== targetCalendarId;
-                if (isForeign) continue;
+                if (isForeign) {
+                  if (!policy.gcalPushOtherCalendars) continue;
+                  if (ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt)) {
+                    try {
+                      const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
+                      const updRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(ev.gCalCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                      }, { label: 'updateForeignEvent' });
+                      if (updRes && updRes.ok) {
+                        const updated = await updRes.json();
+                        localMap[id] = { ...ev, gCalETag: updated.etag, lastSyncedAt: nowMs };
+                        justPushed.add(id);
+                        pushed++;
+                      }
+                    } catch (err) {
+                      console.error(`Failed to update foreign event ${ev.gCalId} on Google:`, err);
+                    }
+                  }
+                  continue;
+                }
+
+                if (!policy.gcalPushEnabled) continue;
 
                 if (!ev.gCalId && dailyByPlannerId.has(id)) {
                   // We already created this record on Google in an earlier run; the local
@@ -1367,13 +1412,14 @@ export default defineConfig({
                 if (ev.gCalId) localByGCalId.set(ev.gCalId, id);
               }
 
-              // C. Pull the Daily calendar back in — Google may also edit/create there.
+              // C. Pull the Daily calendar back in — governed by gcalPullDailyEdits & gcalPullDailyNew
               for (const gEv of dailyGoogleEvents) {
                 // Deleted during this run (step A orphan cleanup) — it no longer exists
                 // on Google, so importing it back would resurrect what the user removed.
                 if (!seenGCalIds.has(gEv.gCalId)) continue;
                 const localId = localByGCalId.get(gEv.gCalId);
                 if (!localId) {
+                  if (!policy.gcalPullDailyNew) continue;
                   const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
                   if (plannerEv) {
                     // Keep the original local id when this event came from the app, so it
@@ -1415,6 +1461,9 @@ export default defineConfig({
                 const ev = localMap[localId];
                 if (!ev || ev.deleted) continue; // never resurrect a locally-deleted record
                 if (justPushed.has(localId)) continue; // we authored this in step B; snapshot is stale
+                
+                if (!policy.gcalPullDailyEdits) continue;
+
                 // A local edit we just pushed wins this round; only pull when Google is ahead.
                 const locallyDirty = ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt);
                 if (!locallyDirty && ev.gCalETag !== gEv.gCalETag) {
@@ -1428,50 +1477,50 @@ export default defineConfig({
                 }
               }
 
-              // D. Pull read-only events from every other calendar.
-              for (const gEv of otherGoogleEvents) {
-                const localId = localByGCalId.get(gEv.gCalId);
-                if (!localId) {
-                  const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
-                  if (plannerEv) {
-                    plannerEv.lastSyncedAt = nowMs;
-                    localMap[plannerEv.id] = plannerEv;
-                    localByGCalId.set(gEv.gCalId, plannerEv.id);
-                  }
-                } else {
-                  const ev = localMap[localId];
-                  if (ev && !ev.deleted && ev.gCalETag !== gEv.gCalETag) {
-                    const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
-                    if (g) {
-                      localMap[localId] = { ...ev, ...g, id: localId, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
+              // D. Pull read-only events from every other calendar (governed by gcalPullOtherCalendars)
+              if (policy.gcalPullOtherCalendars) {
+                for (const gEv of otherGoogleEvents) {
+                  const localId = localByGCalId.get(gEv.gCalId);
+                  if (!localId) {
+                    const plannerEv = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
+                    if (plannerEv) {
+                      plannerEv.lastSyncedAt = nowMs;
+                      localMap[plannerEv.id] = plannerEv;
+                      localByGCalId.set(gEv.gCalId, plannerEv.id);
                     }
-                  } else if (ev && !ev.deleted) {
-                    // Unchanged on Google, so nothing above re-maps it — but records
-                    // synced before colours were supported carry no hex at all. Fill it
-                    // in (and follow a recolour) without touching anything else.
-                    const hex = resolveGoogleHex(gEv, palettes, calHex);
-                    if (hex && ev.gCalHex !== hex) localMap[localId] = { ...ev, gCalHex: hex };
+                  } else {
+                    const ev = localMap[localId];
+                    if (ev && !ev.deleted && ev.gCalETag !== gEv.gCalETag) {
+                      const g = mapGoogleToPlannerEvent(gEv, format, startOfWeek, differenceInDays, weekStartsOnOpt, parseGoogleRecurrence, palettes, calHex, targetCalendarId);
+                      if (g) {
+                        localMap[localId] = { ...ev, ...g, id: localId, recur: g.recur, exdates: g.exdates, completedDates: ev.completedDates, noCheckbox: ev.noCheckbox, lastSyncedAt: nowMs };
+                      }
+                    } else if (ev && !ev.deleted) {
+                      // Unchanged on Google, so nothing above re-maps it — but records
+                      // synced before colours were supported carry no hex at all. Fill it
+                      // in (and follow a recolour) without touching anything else.
+                      const hex = resolveGoogleHex(gEv, palettes, calHex);
+                      if (hex && ev.gCalHex !== hex) localMap[localId] = { ...ev, gCalHex: hex };
+                    }
                   }
                 }
               }
 
-              // E. Mirror Google-side deletions: any previously-synced local event whose
-              //    gCalId is no longer present on Google is removed locally. Repeating
-              //    masters are always reconciled; non-repeating ones only when their date
-              //    is inside the fetch window (so events outside it aren't wrongly dropped).
-              for (const [id, ev] of Object.entries(localMap)) {
-                if (fetchIncomplete) break; // snapshot unreliable → never mirror deletions this run
-                if (!ev.gCalId || ev.deleted) continue;
-                if (justPushed.has(id)) continue; // just created/updated; not in the stale fetch
-                if (seenGCalIds.has(ev.gCalId)) continue;
-                if (!ev.recur) {
-                  const d = eventOccurrenceDate(ev, addDays);
-                  if (d) {
-                    const t = d.getTime();
-                    if (t < timeMinMs || t > timeMaxMs) continue;
+              // E. Mirror Google-side deletions (governed by gcalMirrorGoogleDeletions)
+              if (policy.gcalMirrorGoogleDeletions && !fetchIncomplete) {
+                for (const [id, ev] of Object.entries(localMap)) {
+                  if (!ev.gCalId || ev.deleted) continue;
+                  if (justPushed.has(id)) continue; // just created/updated; not in the stale fetch
+                  if (seenGCalIds.has(ev.gCalId)) continue;
+                  if (!ev.recur) {
+                    const d = eventOccurrenceDate(ev, addDays);
+                    if (d) {
+                      const t = d.getTime();
+                      if (t < timeMinMs || t > timeMaxMs) continue;
+                    }
                   }
+                  delete localMap[id];
                 }
-                delete localMap[id];
               }
 
               syncHealth.calendar.pushed = pushed;
@@ -1802,8 +1851,8 @@ export default defineConfig({
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
               try {
-                const { events: clientEvents, weekStartsOn: weekStartsOnOpt } = JSON.parse(body);
-                const synced = await runGoogleSync(clientEvents, weekStartsOnOpt || 0);
+                const { events: clientEvents, weekStartsOn: weekStartsOnOpt, settings: clientSettings } = JSON.parse(body);
+                const synced = await runGoogleSync(clientEvents, weekStartsOnOpt || 0, clientSettings);
 
                 // runGoogleSync returns the exact same object it was given when a sync was
                 // skipped (another run already in progress, or Google not connected). In that

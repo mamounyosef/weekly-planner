@@ -189,6 +189,15 @@ export interface AppSettings {
   taskCheckboxShape: TaskCheckboxShape; // 'circle' | 'square'
   taskFilters: string[];     // panel filter selection; empty = show everything
   googleTasksSync: boolean;
+  // ── Google Calendar Sync Policies ──────────────────────────────────────────
+  gcalPushEnabled: boolean;           // Master push toggle (app → Google)
+  gcalPushTarget: 'daily' | 'primary'; // Destination calendar on Google ('daily' | 'primary')
+  gcalPushOtherCalendars: boolean;    // Allow local edits to external Google Calendar events to push back to Google
+  gcalPullDailyEdits: boolean;        // Allow Google edits to Daily Calendar to modify local app events (DEFAULT: false = Protected)
+  gcalPullDailyNew: boolean;          // Import new events created directly on Google's Daily Calendar into app (DEFAULT: false)
+  gcalPullOtherCalendars: boolean;    // Import events from other Google Calendars (Primary, Work, etc.) as read-only cards
+  gcalMirrorLocalDeletions: boolean;  // Deleting an event in app deletes it on Google Calendar
+  gcalMirrorGoogleDeletions: boolean; // Deleting an event on Google's Daily Calendar deletes it in app
   // ── Prayer times ───────────────────────────────────────────────────────────
   prayer: PrayerSettings;
 }
@@ -221,6 +230,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   taskCheckboxShape: 'circle',
   taskFilters: [],
   googleTasksSync: true,
+  gcalPushEnabled: true,
+  gcalPushTarget: 'daily',
+  gcalPushOtherCalendars: true,
+  gcalPullDailyEdits: false,
+  gcalPullDailyNew: false,
+  gcalPullOtherCalendars: true,
+  gcalMirrorLocalDeletions: true,
+  gcalMirrorGoogleDeletions: false,
   prayer: DEFAULT_PRAYER_SETTINGS,
 };
 
@@ -309,6 +326,14 @@ export function coerceSettings(raw: unknown): AppSettings {
     s.taskFilters = TASK_FILTER_ORDER.filter(f => (r.taskFilters as unknown[]).includes(f));
   }
   if (typeof r.googleTasksSync === 'boolean') s.googleTasksSync = r.googleTasksSync;
+  if (typeof r.gcalPushEnabled === 'boolean') s.gcalPushEnabled = r.gcalPushEnabled;
+  if (r.gcalPushTarget === 'daily' || r.gcalPushTarget === 'primary') s.gcalPushTarget = r.gcalPushTarget;
+  if (typeof r.gcalPushOtherCalendars === 'boolean') s.gcalPushOtherCalendars = r.gcalPushOtherCalendars;
+  if (typeof r.gcalPullDailyEdits === 'boolean') s.gcalPullDailyEdits = r.gcalPullDailyEdits;
+  if (typeof r.gcalPullDailyNew === 'boolean') s.gcalPullDailyNew = r.gcalPullDailyNew;
+  if (typeof r.gcalPullOtherCalendars === 'boolean') s.gcalPullOtherCalendars = r.gcalPullOtherCalendars;
+  if (typeof r.gcalMirrorLocalDeletions === 'boolean') s.gcalMirrorLocalDeletions = r.gcalMirrorLocalDeletions;
+  if (typeof r.gcalMirrorGoogleDeletions === 'boolean') s.gcalMirrorGoogleDeletions = r.gcalMirrorGoogleDeletions;
   s.prayer = coercePrayerSettings(r.prayer);
   return s;
 }
