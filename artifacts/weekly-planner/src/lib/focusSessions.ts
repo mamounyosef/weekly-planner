@@ -182,13 +182,27 @@ export function coerceFocusChime(value: unknown): FocusChimeId {
 // One context for the page's lifetime. Building a fresh AudioContext per chime
 // cost tens of milliseconds and could come up suspended — that was the lag.
 let sharedCtx: AudioContext | null = null;
+let userGestureUnlocked = false;
+
+if (typeof window !== 'undefined') {
+  const unlock = () => {
+    userGestureUnlocked = true;
+    if (sharedCtx && sharedCtx.state === 'suspended') {
+      sharedCtx.resume().catch(() => {});
+    }
+  };
+  window.addEventListener('pointerdown', unlock, { capture: true });
+  window.addEventListener('keydown', unlock, { capture: true });
+}
 
 function getCtx(): AudioContext | null {
   try {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) return null;
     if (!sharedCtx) sharedCtx = new AC();
-    if (sharedCtx.state === 'suspended') sharedCtx.resume().catch(() => {});
+    if (userGestureUnlocked && sharedCtx.state === 'suspended') {
+      sharedCtx.resume().catch(() => {});
+    }
     return sharedCtx;
   } catch (_) {
     return null;
@@ -196,17 +210,13 @@ function getCtx(): AudioContext | null {
 }
 
 /**
- * Open (and unlock) the audio context on a user gesture. Browsers won't let a
- * page make sound until one happens, and doing it up front means the chime is
- * instant when the session actually ends.
+ * Open (and unlock) the audio context on a user gesture.
  */
 export function primeFocusAudio(): void {
+  userGestureUnlocked = true;
   const ctx = getCtx();
   if (!ctx) return;
-  // Cheap to call on every gesture — a context that is already awake needs
-  // nothing, and one that has gone back to sleep gets re-warmed for free.
   if (ctx.state === 'running') return;
-  // A silent blip is enough to move the context out of "suspended".
   try {
     const g = ctx.createGain();
     g.gain.value = 0.0001;
@@ -219,13 +229,13 @@ export function primeFocusAudio(): void {
 }
 
 /**
- * Run `fn` only once the context is actually running. Scheduling notes against a
- * suspended context puts them at a clock that isn't advancing, so by the time it
- * resumes their start times have passed and nothing is heard.
+ * Run `fn` only once the context is actually running.
  */
 function whenRunning(ctx: AudioContext, fn: () => void): void {
   if (ctx.state === 'running') { fn(); return; }
-  ctx.resume().then(fn).catch(() => { try { fn(); } catch (_) { /* ignore */ } });
+  if (userGestureUnlocked) {
+    ctx.resume().then(fn).catch(() => { try { fn(); } catch (_) { /* ignore */ } });
+  }
 }
 
 interface ToneOpts {
@@ -334,7 +344,13 @@ function buildChain(ctx: AudioContext, cutoff = 3200): { master: GainNode; send:
   return { master, send };
 }
 
+let lastChimePlayTime = 0;
+
 export function playFocusChime(id: FocusChimeId = DEFAULT_FOCUS_CHIME): void {
+  const now = Date.now();
+  if (now - lastChimePlayTime < 600) return;
+  lastChimePlayTime = now;
+
   const ctx = getCtx();
   if (!ctx) return;
   whenRunning(ctx, () => renderChime(ctx, id));
@@ -470,11 +486,18 @@ export function coerceFocusCue(value: unknown, slot: FocusCueSlot): FocusCueId {
  * window is what makes the sound play TWICE, so only the window that performed
  * the toggle should say yes; the other one stays quiet and nothing is doubled.
  */
+const clientClaimedCueKeys = new Set<string>();
+
 export function claimFocusCue(
   key: string,
   play: () => void,
   opts: { playIfUnreachable?: boolean } = {},
 ): void {
+  if (!key) return;
+  if (clientClaimedCueKeys.has(key)) return;
+  clientClaimedCueKeys.add(key);
+  setTimeout(() => clientClaimedCueKeys.delete(key), 8000);
+
   const { playIfUnreachable = true } = opts;
   const ask = () => {
     fetch(`/api/focus-cue/claim?key=${encodeURIComponent(key)}`, { method: 'POST' })
@@ -490,14 +513,22 @@ export function claimFocusCue(
   const ctx = getCtx();
   if (ctx && ctx.state !== 'running') {
     ctx.resume().catch(() => {});
-    setTimeout(ask, 200);
+    setTimeout(ask, 150);
     return;
   }
   ask();
 }
 
+let lastCuePlayTime = 0;
+let lastCuePlayId = '';
+
 export function playFocusCue(id: FocusCueId): void {
   if (id === 'none') return;
+  const now = Date.now();
+  if (id === lastCuePlayId && now - lastCuePlayTime < 50) return;
+  lastCuePlayTime = now;
+  lastCuePlayId = id;
+
   const ctx = getCtx();
   if (!ctx) return;
   whenRunning(ctx, () => renderCue(ctx, id));
@@ -662,7 +693,10 @@ export function focusTimerTransitionKey(timer: FocusTimerState): string {
  * the toggle, which gives exactly that — no time windows, no guessing.
  */
 export function focusCueKey(slot: FocusCueSlot, timer: FocusTimerState): string {
-  return `${slot}|${timer.sessionStartedAt ?? ''}|${timer.lastStartedAt ?? ''}|${timer.lastPausedAt ?? ''}`;
+  const rawStamp = timer.lastStartedAt || timer.lastPausedAt || timer.sessionStartedAt || '';
+  const parsedMs = rawStamp ? Date.parse(rawStamp) : 0;
+  const timeBucket = Number.isFinite(parsedMs) && parsedMs > 0 ? Math.floor(parsedMs / 4000) : 0;
+  return `${slot}|${timer.sessionStartedAt ?? ''}|${timeBucket}`;
 }
 
 export function loadLocalFocusTimer(): FocusTimerState {

@@ -732,7 +732,12 @@ export default defineConfig({
               let pageToken = '';
               do {
                 const res = await gfetch(`${TASKS_API}/users/@me/lists?maxResults=100${pageToken ? `&pageToken=${pageToken}` : ''}`, {}, { label: 'taskLists' });
-                if (!res || !res.ok) throw new Error(`Failed to list task lists: ${res ? res.status : 'no response'}`);
+                if (!res || !res.ok) {
+                  if (res && res.status === 403) {
+                    throw new Error('Google Tasks Permission Denied (403): Re-link Google Account in Settings to grant Tasks scope');
+                  }
+                  throw new Error(`Failed to list task lists: ${res ? res.status : 'no response'}`);
+                }
                 const data = await res.json();
                 for (const l of data.items || []) if (l.title === TASK_LIST_TITLE) listId = l.id;
                 pageToken = data.nextPageToken || '';
@@ -2435,6 +2440,14 @@ export default defineConfig({
         const cueClaims = new Map<string, number>();
 
         server.middlewares.use('/api/focus-cue/claim', (req, res, next) => {
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          if (req.method === 'OPTIONS') {
+            res.statusCode = 204;
+            res.end();
+            return;
+          }
           if (req.method !== 'POST') return next();
           const key = new URL(req.url ?? '', 'http://x').searchParams.get('key') ?? '';
           const now = Date.now();
