@@ -149,6 +149,28 @@ function formatTimeLabel(min: number, fmt: TimeFormat = '12h'): string {
   return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, '0')}${ampm}`;
 }
 
+function formatCompactRange(startMin: number, endMin: number, fmt: TimeFormat = '12h'): string {
+  const normS = ((startMin % 1440) + 1440) % 1440;
+  const normE = ((endMin % 1440) + 1440) % 1440;
+  if (fmt === '24h') {
+    const sh = Math.floor(normS / 60), sm = normS % 60;
+    const eh = Math.floor(normE / 60), em = normE % 60;
+    const sStr = sm === 0 ? String(sh).padStart(2, '0') : `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}`;
+    const eStr = em === 0 ? String(eh).padStart(2, '0') : `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')}`;
+    return `${sStr}–${eStr}`;
+  }
+  const sh = Math.floor(normS / 60), sm = normS % 60;
+  const eh = Math.floor(normE / 60), em = normE % 60;
+  const sAmpm = sh >= 12 ? 'pm' : 'am';
+  const eAmpm = eh >= 12 ? 'pm' : 'am';
+  const sh12 = sh % 12 || 12;
+  const eh12 = eh % 12 || 12;
+  const sStr = sm === 0 ? `${sh12}` : `${sh12}:${String(sm).padStart(2, '0')}`;
+  const eStr = em === 0 ? `${eh12}` : `${eh12}:${String(em).padStart(2, '0')}`;
+  if (sAmpm === eAmpm) return `${sStr}–${eStr}${eAmpm}`;
+  return `${sStr}${sAmpm}–${eStr}${eAmpm}`;
+}
+
 function formatSlotLabel(slot: string, fmt: TimeFormat): string {
   if (fmt === '24h') return slot;
   const [hStr, mStr] = slot.split(':');
@@ -1630,7 +1652,7 @@ export default function Widget() {
           {colEvents.map(item => {
             const { ev, key: itemKey, segKind } = item;
             const top = minToY(item.startMin, interval, dayStartH);
-            const height = Math.max(sh, minToY(item.endMin, interval, dayStartH) - top);
+            const height = Math.max(18, minToY(item.endMin, interval, dayStartH) - top);
             const { bg, border, text, textMuted } = chipColors(ev);
             // Live/duration status always reflects the event's true full start–end, not just this segment.
             const fullStartMin = timeToMin(ev.startTime);
@@ -1723,7 +1745,7 @@ export default function Widget() {
 
                         if (isShortCard) {
                           return (
-                            <div className="flex items-center gap-1.5 w-full h-full my-auto overflow-hidden text-xs px-0.5 leading-none">
+                            <div className="flex items-center gap-1 w-full h-full my-auto overflow-hidden px-0.5 leading-none">
                               {!ev.noCheckbox && (
                                 <button
                                   type="button"
@@ -1731,22 +1753,22 @@ export default function Widget() {
                                     e.stopPropagation();
                                     toggleEventCompleted(ev.id);
                                   }}
-                                  className="flex-shrink-0 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
                                   style={{
                                     borderColor: isCompleted ? text : `${text}50`,
                                     backgroundColor: isCompleted ? text : 'transparent',
                                   }}
                                 >
                                   {isCompleted && (
-                                    <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                                    <div className="w-1 h-1 rounded-full" style={{ backgroundColor: bg }} />
                                   )}
                                 </button>
                               )}
-                              <span className={`font-semibold truncate min-w-0 flex-shrink ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                              <span className={`text-[10px] font-semibold truncate min-w-0 flex-shrink ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                                 {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
                               </span>
-                              <span className="text-[10px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
-                                · {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                              <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
+                                · {formatCompactRange(fullStartMin, fullEndMin, timeFormat)} ({durationMin < 60 ? `${durationMin}m` : durationLabel})
                               </span>
                             </div>
                           );

@@ -190,6 +190,11 @@ export interface AppSettings {
   taskFilters: string[];     // panel filter selection; empty = show everything
   googleSyncEnabled: boolean;         // Master toggle for Google integration & synchronization
   googleTasksSync: boolean;
+  // ── Sticky Header Bands ───────────────────────────────────────────────────
+  stickyAllDayMain: boolean;   // Sticky All-Day Events row in Main Window
+  stickyTasksMain: boolean;    // Sticky Tasks row in Main Window
+  stickyAllDayWidget: boolean; // Sticky All-Day Events row in Sidebar Widget
+  stickyTasksWidget: boolean;  // Sticky Tasks row in Sidebar Widget
   // ── Google Calendar Sync Policies ──────────────────────────────────────────
   gcalPushEnabled: boolean;           // Master push toggle (app → Google)
   gcalPushTarget: 'daily' | 'primary'; // Destination calendar on Google ('daily' | 'primary')
@@ -217,8 +222,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dayStartH: 8,
   dayEndH: 18,
   calendarView: 'week',
-  customDaysBefore: 1,
-  customDaysAfter: 7,
+  customDaysBefore: 0,
+  customDaysAfter: 0,
   focusDayStartHour: 4,
   focusChime: 'bowl',
   focusCues: DEFAULT_FOCUS_CUES,
@@ -232,6 +237,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   taskFilters: [],
   googleSyncEnabled: true,
   googleTasksSync: true,
+  stickyAllDayMain: true,
+  stickyTasksMain: true,
+  stickyAllDayWidget: true,
+  stickyTasksWidget: true,
   gcalPushEnabled: true,
   gcalPushTarget: 'daily',
   gcalPushOtherCalendars: true,
@@ -291,8 +300,8 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.dayStartH === 'number') s.dayStartH = r.dayStartH;
   if (typeof r.dayEndH === 'number') s.dayEndH = r.dayEndH;
   if (typeof r.calendarView === 'string') s.calendarView = r.calendarView;
-  if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(0, Math.min(7, Math.round(r.customDaysBefore)));
-  if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(1, Math.min(14, Math.round(r.customDaysAfter)));
+  if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(-14, Math.min(14, Math.round(r.customDaysBefore)));
+  if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(-14, Math.min(14, Math.round(r.customDaysAfter)));
   if (typeof r.focusDayStartHour === 'number') {
     s.focusDayStartHour = Math.max(0, Math.min(23, Math.round(r.focusDayStartHour)));
   }
@@ -329,6 +338,10 @@ export function coerceSettings(raw: unknown): AppSettings {
   }
   if (typeof r.googleSyncEnabled === 'boolean') s.googleSyncEnabled = r.googleSyncEnabled;
   if (typeof r.googleTasksSync === 'boolean') s.googleTasksSync = r.googleTasksSync;
+  if (typeof r.stickyAllDayMain === 'boolean') s.stickyAllDayMain = r.stickyAllDayMain;
+  if (typeof r.stickyTasksMain === 'boolean') s.stickyTasksMain = r.stickyTasksMain;
+  if (typeof r.stickyAllDayWidget === 'boolean') s.stickyAllDayWidget = r.stickyAllDayWidget;
+  if (typeof r.stickyTasksWidget === 'boolean') s.stickyTasksWidget = r.stickyTasksWidget;
   if (typeof r.gcalPushEnabled === 'boolean') s.gcalPushEnabled = r.gcalPushEnabled;
   if (r.gcalPushTarget === 'daily' || r.gcalPushTarget === 'primary') s.gcalPushTarget = r.gcalPushTarget;
   if (typeof r.gcalPushOtherCalendars === 'boolean') s.gcalPushOtherCalendars = r.gcalPushOtherCalendars;

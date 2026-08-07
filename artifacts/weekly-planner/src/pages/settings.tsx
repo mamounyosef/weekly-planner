@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   RotateCcw,
   Zap,
+  Compass,
 } from 'lucide-react';
 import {
   FOCUS_CHIMES,
@@ -281,7 +282,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'audio' | 'shortcuts' | 'backup' | 'integrations';
+type TabCategory = 'appearance' | 'calendar' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations';
 
 interface Toast {
   id: number;
@@ -299,7 +300,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'audio', 'shortcuts', 'backup', 'integrations'];
+      const known: string[] = ['appearance', 'calendar', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
@@ -343,6 +344,10 @@ export default function SettingsPage() {
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<TaskCheckboxShape>(initialSettings.taskCheckboxShape ?? 'circle');
   const [googleSyncEnabled, setGoogleSyncEnabled] = useState<boolean>(initialSettings.googleSyncEnabled ?? true);
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
+  const [stickyAllDayMain, setStickyAllDayMain] = useState<boolean>(initialSettings.stickyAllDayMain ?? true);
+  const [stickyTasksMain, setStickyTasksMain] = useState<boolean>(initialSettings.stickyTasksMain ?? true);
+  const [stickyAllDayWidget, setStickyAllDayWidget] = useState<boolean>(initialSettings.stickyAllDayWidget ?? true);
+  const [stickyTasksWidget, setStickyTasksWidget] = useState<boolean>(initialSettings.stickyTasksWidget ?? true);
   const [gcalPushEnabled, setGcalPushEnabled] = useState<boolean>(initialSettings.gcalPushEnabled ?? true);
   const [gcalPushTarget, setGcalPushTarget] = useState<'daily' | 'primary'>(initialSettings.gcalPushTarget ?? 'daily');
   const [gcalPushOtherCalendars, setGcalPushOtherCalendars] = useState<boolean>(initialSettings.gcalPushOtherCalendars ?? true);
@@ -422,6 +427,10 @@ export default function SettingsPage() {
       if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
       if (typeof s.googleSyncEnabled === 'boolean') setGoogleSyncEnabled(s.googleSyncEnabled);
       setGoogleTasksSync(s.googleTasksSync);
+      if (typeof s.stickyAllDayMain === 'boolean') setStickyAllDayMain(s.stickyAllDayMain);
+      if (typeof s.stickyTasksMain === 'boolean') setStickyTasksMain(s.stickyTasksMain);
+      if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
+      if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
       if (typeof s.gcalPushEnabled === 'boolean') setGcalPushEnabled(s.gcalPushEnabled);
       if (s.gcalPushTarget) setGcalPushTarget(s.gcalPushTarget);
       if (typeof s.gcalPushOtherCalendars === 'boolean') setGcalPushOtherCalendars(s.gcalPushOtherCalendars);
@@ -468,6 +477,10 @@ export default function SettingsPage() {
           setTaskColor(coerced.taskColor);
           setTaskCheckboxShape(coerced.taskCheckboxShape);
           setGoogleTasksSync(coerced.googleTasksSync);
+          setStickyAllDayMain(coerced.stickyAllDayMain);
+          setStickyTasksMain(coerced.stickyTasksMain);
+          setStickyAllDayWidget(coerced.stickyAllDayWidget);
+          setStickyTasksWidget(coerced.stickyTasksWidget);
           setPrayer(coerced.prayer);
         }
       })
@@ -522,6 +535,10 @@ export default function SettingsPage() {
       taskCheckboxShape,
       googleSyncEnabled,
       googleTasksSync,
+      stickyAllDayMain,
+      stickyTasksMain,
+      stickyAllDayWidget,
+      stickyTasksWidget,
       gcalPushEnabled,
       gcalPushTarget,
       gcalPushOtherCalendars,
@@ -533,7 +550,7 @@ export default function SettingsPage() {
       prayer,
     });
   }, [prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
-      taskCheckboxShape, googleSyncEnabled, googleTasksSync, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
+      taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {
@@ -809,6 +826,7 @@ export default function SettingsPage() {
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
     { id: 'calendar', label: 'Calendar Grid', icon: <Calendar size={17} /> },
+    { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
     { id: 'backup', label: 'Backups & Data', icon: <Database size={17} /> },
@@ -1291,6 +1309,110 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
+                {/* Sticky Header Bands (Scroll View) */}
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                      Sticky Bands on Scroll
+                    </h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      Keep All-Day events and Tasks fixed at the top when scrolling down the timeline grid. Configurable independently for each view.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-4">
+                    <span className="text-xs font-bold uppercase tracking-wider text-primary/80">Main Window</span>
+                    
+                    <label className="flex items-center justify-between gap-4 cursor-pointer">
+                      <span className="flex flex-col">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sticky All-Day Events</span>
+                        <span className="text-[11px]" style={{ color: textSecondary }}>
+                          Keep the All-Day section pinned at the top when scrolling down the main calendar grid.
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStickyAllDayMain(v => !v)}
+                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        style={{ background: stickyAllDayMain ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                        aria-pressed={stickyAllDayMain}
+                      >
+                        <span
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          style={{ left: stickyAllDayMain ? 22 : 2 }}
+                        />
+                      </button>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-4 cursor-pointer">
+                      <span className="flex flex-col">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sticky Tasks</span>
+                        <span className="text-[11px]" style={{ color: textSecondary }}>
+                          Keep the Tasks row pinned at the top when scrolling down the main calendar grid.
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStickyTasksMain(v => !v)}
+                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        style={{ background: stickyTasksMain ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                        aria-pressed={stickyTasksMain}
+                      >
+                        <span
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          style={{ left: stickyTasksMain ? 22 : 2 }}
+                        />
+                      </button>
+                    </label>
+                  </div>
+
+                  <div className="border-t pt-4 flex flex-col gap-4" style={{ borderColor: cardBdr }}>
+                    <span className="text-xs font-bold uppercase tracking-wider text-primary/80">Sidebar Widget Window</span>
+
+                    <label className="flex items-center justify-between gap-4 cursor-pointer">
+                      <span className="flex flex-col">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sticky All-Day Events</span>
+                        <span className="text-[11px]" style={{ color: textSecondary }}>
+                          Keep All-Day events pinned at the top of the sidebar widget timeline when scrolling.
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStickyAllDayWidget(v => !v)}
+                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        style={{ background: stickyAllDayWidget ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                        aria-pressed={stickyAllDayWidget}
+                      >
+                        <span
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          style={{ left: stickyAllDayWidget ? 22 : 2 }}
+                        />
+                      </button>
+                    </label>
+
+                    <label className="flex items-center justify-between gap-4 cursor-pointer">
+                      <span className="flex flex-col">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sticky Tasks</span>
+                        <span className="text-[11px]" style={{ color: textSecondary }}>
+                          Keep Tasks pinned at the top of the sidebar widget timeline when scrolling.
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStickyTasksWidget(v => !v)}
+                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        style={{ background: stickyTasksWidget ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                        aria-pressed={stickyTasksWidget}
+                      >
+                        <span
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          style={{ left: stickyTasksWidget ? 22 : 2 }}
+                        />
+                      </button>
+                    </label>
+                  </div>
+                </div>
+
                 {/* Tasks */}
                 <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
@@ -1387,8 +1509,19 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </div>
+              </motion.div>
+            )}
 
-                {/* Prayer times */}
+            {/* 🕌 PRAYER TIMES TAB */}
+            {activeTab === 'prayer' && (
+              <motion.div
+                key="prayer"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+                className="flex flex-col gap-6"
+              >
                 <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex items-start justify-between gap-4">
                     <div>

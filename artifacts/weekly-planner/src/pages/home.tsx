@@ -273,10 +273,9 @@ const CALENDAR_VIEW_BUTTONS: CalendarView[] = [...CALENDAR_VIEWS, 'custom'];
 const isCalendarView = (v: unknown): v is CalendarView =>
   typeof v === 'string' && (CALENDAR_VIEW_BUTTONS as string[]).includes(v);
 
-// Custom view window: P days BEFORE the week start + N days FROM the week start.
-// P=1,N=7 with a Sunday week start = Saturday → next Saturday (8 columns).
-const CUSTOM_BEFORE_MAX = 7;
-const CUSTOM_AFTER_MIN  = 1;
+const CUSTOM_BEFORE_MIN = -14;
+const CUSTOM_BEFORE_MAX = 14;
+const CUSTOM_AFTER_MIN  = -14;
 const CUSTOM_AFTER_MAX  = 14;
 
 // App zoom: a fine 5% step, clamped to something still usable at both ends.
@@ -1409,8 +1408,9 @@ export default function WeeklyPlanner() {
   // -P (P days before the week start) through N-1. Offsets outside 0–6 address
   // days in the neighbouring weeks and are perfectly legal here — only STORED
   // records must stay in range (see normalizeAnchor).
-  const customFrom = -clamp(customDaysBefore, 0, CUSTOM_BEFORE_MAX);
-  const customTo   = clamp(customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX);
+  const customFrom = clamp(customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX);
+  const rawCustomTo = 6 + clamp(customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX) + 1;
+  const customTo   = Math.max(customFrom + 1, rawCustomTo);
   const visibleCols   = calendarView === 'day'
     ? [dayViewColIdx]
     : calendarView === 'custom'
@@ -1745,7 +1745,7 @@ export default function WeeklyPlanner() {
     setDayStartH(s.dayStartH);
     setDayEndH(s.dayEndH);
     if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
-    setCustomDaysBefore(clamp(s.customDaysBefore, 0, CUSTOM_BEFORE_MAX));
+    setCustomDaysBefore(clamp(s.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
     setCustomDaysAfter(clamp(s.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
     setFocusDayStartHour(s.focusDayStartHour);
     setFocusChime(s.focusChime);
@@ -4299,8 +4299,24 @@ export default function WeeklyPlanner() {
                 {calendarView === 'custom' && (
                   <div className="flex flex-col rounded-lg px-1 py-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                     {([
-                      { label: 'Before', title: `Days shown BEFORE the week start (${format(weekStart, 'EEEE')})`, value: customDaysBefore, min: 0, max: CUSTOM_BEFORE_MAX, set: setCustomDaysBefore },
-                      { label: 'After',  title: `Days shown FROM the week start (${format(weekStart, 'EEEE')}) onwards`, value: customDaysAfter, min: CUSTOM_AFTER_MIN, max: CUSTOM_AFTER_MAX, set: setCustomDaysAfter },
+                      {
+                        label: 'Before',
+                        title: `Start day offset from week start (${format(weekStart, 'EEEE')}): ${customDaysBefore > 0 ? `+${customDaysBefore}` : customDaysBefore} (${format(addDays(weekStart, customDaysBefore), 'EEEE')})`,
+                        value: customDaysBefore,
+                        min: CUSTOM_BEFORE_MIN,
+                        max: CUSTOM_BEFORE_MAX,
+                        set: setCustomDaysBefore,
+                        dayName: format(addDays(weekStart, customDaysBefore), 'EEE'),
+                      },
+                      {
+                        label: 'After',
+                        title: `End day offset from week end (${format(addDays(weekStart, 6), 'EEEE')}): ${customDaysAfter > 0 ? `+${customDaysAfter}` : customDaysAfter} (${format(addDays(weekStart, 6 + customDaysAfter), 'EEEE')})`,
+                        value: customDaysAfter,
+                        min: CUSTOM_AFTER_MIN,
+                        max: CUSTOM_AFTER_MAX,
+                        set: setCustomDaysAfter,
+                        dayName: format(addDays(weekStart, 6 + customDaysAfter), 'EEE'),
+                      },
                     ] as const).map(s => (
                       <div key={s.label} className="flex items-center h-[19px]" title={s.title}>
                         <span className="text-[8.5px] font-bold uppercase tracking-wider w-[34px]" style={{ color: headerInactive }}>{s.label}</span>
@@ -4312,7 +4328,9 @@ export default function WeeklyPlanner() {
                           onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                         ><Minus size={10}/></button>
-                        <span className="w-[15px] text-center text-[10.5px] font-semibold tabular-nums" style={{ color: menuText }}>{s.value}</span>
+                        <span className="w-[22px] text-center text-[10.5px] font-semibold tabular-nums" style={{ color: menuText }}>
+                          {s.value > 0 ? `+${s.value}` : s.value}
+                        </span>
                         <button
                           onClick={() => s.set(v => Math.min(s.max, v + 1))}
                           disabled={s.value >= s.max}
@@ -4321,6 +4339,9 @@ export default function WeeklyPlanner() {
                           onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                         ><Plus size={10}/></button>
+                        <span className="text-[9px] font-medium text-muted-foreground ml-1 opacity-80" style={{ color: headerInactive }}>
+                          ({s.dayName})
+                        </span>
                       </div>
                     ))}
                   </div>
