@@ -79,7 +79,7 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   toggleTimer:   'Alt+Shift+F1',
   widgetMinus:   'A',
   widgetPlus:    'D',
-  widgetStart:   'S',
+  widgetStart:   'W',
 };
 
 /**
@@ -157,8 +157,14 @@ export function formatCombo(binding: string): string {
 export function coerceShortcuts(raw: unknown): ShortcutMap {
   const out: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   if (!raw || typeof raw !== 'object') return out;
+  const rawObj = raw as Record<string, unknown>;
   for (const def of SHORTCUT_DEFS) {
-    const value = (raw as Record<string, unknown>)[def.action];
+    let value = rawObj[def.action];
+    // Migration: Old default for widgetStart was 'S', which conflicts with goToLive ('S').
+    // Upgrade old 'S' binding for widgetStart to the new default 'W'.
+    if (def.action === 'widgetStart' && value === 'S') {
+      value = 'W';
+    }
     // Drop anything empty or OS-reserved (a previously-saved Alt+F4 would make
     // the shortcut close the app), falling back to that action's default.
     if (typeof value === 'string' && value && !isReservedCombo(value)) {

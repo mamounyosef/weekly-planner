@@ -21,7 +21,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -332,6 +332,7 @@ const WEEK_START_KEY  = 'planner-weekstart';
 const DAY_START_KEY  = 'planner-daystart';
 const DAY_END_KEY    = 'planner-dayend';
 const HEADER_PX      = 56;
+const HEADER_COMPACT_PX = 28;
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP  = 5;
 const DEFAULT_EVENT_MIN = 30; // default duration for a newly created event
@@ -767,7 +768,10 @@ export default function WeeklyPlanner() {
   const [timeFormat, setTimeFormat]         = useState<TimeFormat>(initialSettings.timeFormat);
   const [weekStartsOn, setWeekStartsOn]     = useState<WeekStartsOn>(initialSettings.weekStartsOn);
   // Zoom levels, narrowest â†’ widest. Ctrl+wheel steps through them.
-  const [calendarView, setCalendarView] = useState<CalendarView>('week');
+  const [calendarView, setCalendarView] = useState<CalendarView>(() => {
+    if (isCalendarView(initialSettings.calendarView)) return initialSettings.calendarView;
+    return 'week';
+  });
   // Custom view: P days before the week start, N days from the week start.
   const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
   const [customDaysAfter, setCustomDaysAfter]   = useState<number>(initialSettings.customDaysAfter);
@@ -781,6 +785,8 @@ export default function WeeklyPlanner() {
   const [tasksPanelOpen, setTasksPanelOpen]   = useState<boolean>(initialSettings.tasksPanelOpen);
   const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
   const [showTaskRow, setShowTaskRow]         = useState<boolean>(initialSettings.showTaskRow);
+  const [stickyAllDayMain, setStickyAllDayMain] = useState<boolean>(initialSettings.stickyAllDayMain ?? true);
+  const [stickyTasksMain, setStickyTasksMain]   = useState<boolean>(initialSettings.stickyTasksMain ?? true);
   const [taskColor, setTaskColor]             = useState<string>(initialSettings.taskColor);
   const [prayer, setPrayer]                   = useState<PrayerSettings>(initialSettings.prayer);
   const [prayerPanelOpen, setPrayerPanelOpen] = useState(false);
@@ -790,9 +796,11 @@ export default function WeeklyPlanner() {
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [taskMenuId, setTaskMenuId]   = useState<string | null>(null);
   const [taskMenuPos, setTaskMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [taskOverflowModal, setTaskOverflowModal] = useState<{ dayLabel: string; tasks: Task[] } | null>(null);
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
+  const [isScrolled, setIsScrolled]     = useState(false);
   const [nowTick, setNowTick]           = useState(Date.now());
   const [dayStartH, setDayStartH]       = useState(initialSettings.dayStartH);
   const [dayEndH, setDayEndH]           = useState(initialSettings.dayEndH);
@@ -924,6 +932,7 @@ export default function WeeklyPlanner() {
   const [clipboard, setClipboard]   = useState<PlannerEvent[]>([]);
 
   const daysGridRef  = useRef<HTMLDivElement>(null);
+  const gridCardRef  = useRef<HTMLDivElement>(null);
   const mainRef      = useRef<HTMLDivElement>(null);
   const nowLineRef   = useRef<HTMLDivElement>(null);
   const [showLiveBtn, setShowLiveBtn] = useState(false);
@@ -1018,8 +1027,17 @@ export default function WeeklyPlanner() {
     setLocation(tab ? `/settings?tab=${encodeURIComponent(tab)}` : '/settings');
   }, [setLocation]);
 
+  const updateScrollState = useCallback(() => {
+    if (!mainRef.current) return;
+    const scrollTop = mainRef.current.scrollTop;
+    const gridTop = gridCardRef.current ? gridCardRef.current.offsetTop : 0;
+    const threshold = Math.max(10, gridTop - 5);
+    setIsScrolled(scrollTop >= threshold);
+  }, []);
+
   const handleMainScroll = useCallback(() => {
     repositionMenu();
+    updateScrollState();
     if (isUnmountingRef.current || isRestoringScrollRef.current) return;
     if (mainRef.current) {
       const top = mainRef.current.scrollTop;
@@ -1035,7 +1053,7 @@ export default function WeeklyPlanner() {
         sessionStorage.setItem(HOME_SCROLL_KEY, JSON.stringify({ top, left, windowY }));
       } catch (_) {}
     }
-  }, [repositionMenu]);
+  }, [repositionMenu, updateScrollState]);
 
   useLayoutEffect(() => {
     let t1: number, t2: number, t3: number;
@@ -1048,6 +1066,7 @@ export default function WeeklyPlanner() {
           isRestoringScrollRef.current = true;
           if (mainRef.current) {
             mainRef.current.scrollTop = pos.top;
+            updateScrollState();
             if (typeof pos.left === 'number') mainRef.current.scrollLeft = pos.left;
           }
           if (typeof pos.windowY === 'number' && pos.windowY > 0) {
@@ -1072,7 +1091,15 @@ export default function WeeklyPlanner() {
       clearTimeout(t2);
       clearTimeout(t3);
     };
-  }, []);
+  }, [updateScrollState]);
+
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    updateScrollState();
+    el.addEventListener('scroll', updateScrollState, { passive: true });
+    return () => el.removeEventListener('scroll', updateScrollState);
+  }, [updateScrollState]);
 
   useLayoutEffect(() => {
     if (menuId === null) return;
@@ -1617,6 +1644,14 @@ export default function WeeklyPlanner() {
    */
   const topBandsHeight = HEADER_PX + allDayHeight + taskRowHeight + prayerRowHeight;
 
+  // ── Scroll-aware sticky heights ──────────────────────────────────────────
+  // When scrolled, compact the day header and hide empty all-day/tasks rows.
+  const hasAnyAllDayEvents = maxAllDayRowIndex > 0;
+  const hasAnyDatedTasks   = maxTasksInAnyCol > 0;
+  const stickyHeaderH  = isScrolled ? HEADER_COMPACT_PX : HEADER_PX;
+  const stickyAllDayH  = isScrolled && !hasAnyAllDayEvents ? 0 : allDayHeight;
+  const stickyTasksH   = isScrolled && !hasAnyDatedTasks ? 0 : taskRowHeight;
+
   // Month overview: full weeks covering the current month, each day resolved to the
   // events actually visible that week (recurring versions + single-week overrides).
   const monthMatrix = useMemo(() => {
@@ -1725,6 +1760,7 @@ export default function WeeklyPlanner() {
       focusDayStartHour: true, focusChime: true, focusCues: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
       taskColor: true, taskCheckboxShape: true, taskFilters: true, googleSyncEnabled: true, googleTasksSync: true,
+      stickyAllDayMain: true, stickyTasksMain: true, stickyAllDayWidget: true, stickyTasksWidget: true,
       gcalPushEnabled: true, gcalPushTarget: true, gcalPushOtherCalendars: true,
       gcalPullDailyEdits: true, gcalPullDailyNew: true, gcalPullOtherCalendars: true,
       gcalMirrorLocalDeletions: true, gcalMirrorGoogleDeletions: true,
@@ -1755,6 +1791,8 @@ export default function WeeklyPlanner() {
     setTasksPanelOpen(s.tasksPanelOpen);
     setTasksPanelWidth(clampPanelWidth(s.tasksPanelWidth));
     setShowTaskRow(s.showTaskRow);
+    if (typeof s.stickyAllDayMain === 'boolean') setStickyAllDayMain(s.stickyAllDayMain);
+    if (typeof s.stickyTasksMain === 'boolean') setStickyTasksMain(s.stickyTasksMain);
     setTaskColor(s.taskColor);
     setTaskCheckboxShape(s.taskCheckboxShape);
     setTaskFilters(canonicalFilters(s.taskFilters));
@@ -1763,6 +1801,52 @@ export default function WeeklyPlanner() {
   }, []);
   const applySettingsSnapshotRef = useRef(applySettingsSnapshot);
   useEffect(() => { applySettingsSnapshotRef.current = applySettingsSnapshot; }, [applySettingsSnapshot]);
+
+  const currentSettingsSnapshot = useCallback((): AppSettings => {
+    return coerceSettings({
+      interval,
+      darkMode,
+      darkPreset,
+      lightPreset,
+      widgetDarkPreset,
+      widgetLightPreset,
+      eventColorStyle,
+      sidebarStyle,
+      timeFormat,
+      weekStartsOn,
+      dayStartH,
+      dayEndH,
+      calendarView,
+      customDaysBefore,
+      customDaysAfter,
+      focusDayStartHour,
+      focusChime,
+      focusCues,
+      shortcuts,
+      autoBackup,
+      tasksPanelOpen,
+      tasksPanelWidth,
+      showTaskRow,
+      stickyAllDayMain,
+      stickyTasksMain,
+      stickyAllDayWidget: initialSettings.stickyAllDayWidget,
+      stickyTasksWidget: initialSettings.stickyTasksWidget,
+      taskColor,
+      taskCheckboxShape,
+      taskFilters,
+      googleSyncEnabled: initialSettings.googleSyncEnabled,
+      googleTasksSync,
+      gcalPushEnabled: initialSettings.gcalPushEnabled,
+      gcalPushTarget: initialSettings.gcalPushTarget,
+      gcalPushOtherCalendars: initialSettings.gcalPushOtherCalendars,
+      gcalPullDailyEdits: initialSettings.gcalPullDailyEdits,
+      gcalPullDailyNew: initialSettings.gcalPullDailyNew,
+      gcalPullOtherCalendars: initialSettings.gcalPullOtherCalendars,
+      gcalMirrorLocalDeletions: initialSettings.gcalMirrorLocalDeletions,
+      gcalMirrorGoogleDeletions: initialSettings.gcalMirrorGoogleDeletions,
+      prayer,
+    });
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer, initialSettings]);
 
   // Patch the occurrence shown as `id`, routed to its stored master (an edit is to
   // the whole item). Remaps UI references if the occurrence id shifted (e.g. a
@@ -2067,7 +2151,6 @@ export default function WeeklyPlanner() {
     pendingLiveScrollRef.current = true;
     setDirection(0);
     setCurrentDate(new Date());
-    setCalendarView('week');
     setShowFocusAnalysis(false);
   }, []);
 
@@ -2831,16 +2914,21 @@ export default function WeeklyPlanner() {
     });
   }, []);
 
-  // Sync document root class with darkMode state
+  // Sync document root class & body background with active theme state
   useEffect(() => {
     applyDarkModeClass(darkMode);
-  }, [darkMode]);
+    if (typeof document !== 'undefined') {
+      const bg = themePalette(darkMode, darkPreset, lightPreset).rootBg;
+      document.body.style.background = bg;
+      document.documentElement.style.background = bg;
+    }
+  }, [darkMode, darkPreset, lightPreset]);
 
   // Persist settings to the shared backend whenever any of them change (after initial load).
   useEffect(() => {
     if (!settingsLoaded.current) return;
     broadcastSettingsChange(currentSettingsSnapshot());
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer]);
+  }, [currentSettingsSnapshot]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -2976,8 +3064,6 @@ export default function WeeklyPlanner() {
   // Covers all three database files (events, settings, focus-sessions) so a
   // single exported file is a complete snapshot of the whole app's data.
   const BACKUP_FORMAT_VERSION = 2;
-
-  const currentSettingsSnapshot = (): AppSettings => loadSettingsLocal();
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
     const restored = coerceSettings({
@@ -4029,7 +4115,7 @@ export default function WeeklyPlanner() {
       }
       goToday();
     },
-    goToLive: () => { setShowFocusAnalysis(false); setCalendarView('week'); scrollToLive(); },
+    goToLive: () => { setShowFocusAnalysis(false); scrollToLive(); },
     toggleView: () => {
       setDirection(0);
       if (showFocusAnalysis) {
@@ -4191,10 +4277,16 @@ export default function WeeklyPlanner() {
   // â”€â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <div
-      className={`h-screen min-h-screen flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
+      className={`flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
         darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
       }`}
-      style={{ cursor: globalCursor, zoom: appZoom, background: darkMode ? currentDarkTheme.rootBg : currentLightTheme.rootBg }}
+      style={{
+        cursor: globalCursor,
+        zoom: appZoom,
+        height: `${100 / appZoom}vh`,
+        minHeight: `${100 / appZoom}vh`,
+        background: darkMode ? currentDarkTheme.rootBg : currentLightTheme.rootBg,
+      }}
     >
       {/* â”€â”€ Outer Side Ambient Glow Layer (Zero Banding & Non-interfering) â”€â”€ */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
@@ -4850,7 +4942,8 @@ export default function WeeklyPlanner() {
               initial="enter" animate="center" exit="exit"
               // Snappy: holding the week keys should feel instant, not springy.
               transition={{ x: { type: 'spring', stiffness: 2200, damping: 65, mass: 0.2 }, opacity: { duration: 0.04 } }}
-              className="flex border border-border/60 rounded-xl overflow-hidden shadow-md relative z-10"
+              ref={gridCardRef}
+              className="flex border border-border/60 rounded-xl overflow-clip shadow-md relative z-10"
               style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
             >
               {/* Loading skeleton — a few shimmering placeholder blocks so the first
@@ -4883,14 +4976,41 @@ export default function WeeklyPlanner() {
 
               {/* Time axis */}
               <div className="flex-shrink-0 border-r border-border/50" style={{ width: 64, background: darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)' }}>
-                <div style={{ height: HEADER_PX }} className="border-b border-border/50" />
-                <div style={{ height: allDayHeight }} className="border-b border-border/50 flex items-center justify-center">
-                  <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider text-center">All Day</span>
+                <div
+                  style={{ height: stickyHeaderH, background: darkMode ? currentDarkTheme.cardBg : '#ffffff', transition: 'height 0.15s ease' }}
+                  className="border-b border-border/50 sticky top-0 z-40"
+                />
+                <div
+                  style={{
+                    height: stickyAllDayH,
+                    top: stickyAllDayMain ? stickyHeaderH : undefined,
+                    background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+                    overflow: 'hidden',
+                    transition: 'height 0.15s ease',
+                  }}
+                  className={`border-b border-border/50 flex items-center justify-center ${stickyAllDayMain ? 'sticky z-35' : ''}`}
+                >
+                  {stickyAllDayH > 0 && (
+                    <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider text-center">All Day</span>
+                  )}
                 </div>
                 {showTaskBand && (
-                  <div style={{ height: taskRowHeight }} className="border-b border-border/50 flex items-center justify-center gap-1">
-                    <ListTodo size={10} style={{ color: taskColor, opacity: 0.8 }} />
-                    <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider">Tasks</span>
+                  <div
+                    style={{
+                      height: stickyTasksH,
+                      top: stickyTasksMain ? stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
+                      background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+                      overflow: 'hidden',
+                      transition: 'height 0.15s ease',
+                    }}
+                    className={`border-b border-border/50 flex items-center justify-center gap-1 ${stickyTasksMain ? 'sticky z-34' : ''}`}
+                  >
+                    {stickyTasksH > 0 && (
+                      <>
+                        <ListTodo size={10} style={{ color: taskColor, opacity: 0.8 }} />
+                        <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider">Tasks</span>
+                      </>
+                    )}
                   </div>
                 )}
                 {showPrayerBand && (
@@ -5077,64 +5197,96 @@ export default function WeeklyPlanner() {
                       }}>
                       {/* Day header */}
                       <div
-                        className={`flex-shrink-0 flex flex-col items-center justify-center border-b relative ${today ? 'border-primary/40' : 'border-border/50'}`}
+                        className={`flex-shrink-0 flex items-center justify-center border-b relative sticky top-0 z-40 ${isScrolled ? 'gap-1.5' : 'flex-col'} ${today ? 'border-primary/40' : 'border-border/50'}`}
                         style={{
-                          height: HEADER_PX,
+                          height: stickyHeaderH,
+                          transition: 'height 0.15s ease',
                           background: today
-                            ? (darkMode ? 'rgba(110,180,120,0.16)' : 'rgba(90,160,100,0.14)')
-                            : 'transparent',
+                            ? (darkMode ? 'rgba(110,180,120,0.95)' : 'rgba(90,160,100,0.92)')
+                            : (darkMode ? currentDarkTheme.cardBg : '#ffffff'),
                         }}
                       >
                         {/* Accent rail across the top of today's column */}
                         {today && (
                           <div
                             className="absolute top-0 left-0 right-0"
-                            style={{ height: 3, background: darkMode ? 'rgb(134,206,145)' : 'rgb(63,138,80)' }}
+                            style={{ height: isScrolled ? 2 : 3, background: darkMode ? 'rgb(134,206,145)' : 'rgb(63,138,80)' }}
                           />
                         )}
-                        <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-primary' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
-                        {today ? (
-                          <span
-                            className="text-lg font-bold leading-none flex items-center justify-center rounded-full"
-                            style={{
-                              width: 30,
-                              height: 30,
-                              color: '#fff',
-                              background: darkMode ? 'rgb(88,168,104)' : 'rgb(63,138,80)',
-                              boxShadow: darkMode
-                                ? '0 0 0 3px rgba(134,206,145,0.22)'
-                                : '0 0 0 3px rgba(63,138,80,0.16)',
-                            }}
-                          >
-                            {format(day, 'd')}
-                          </span>
+                        {isScrolled ? (
+                          /* Compact single-line header */
+                          <>
+                            <span className={`text-[9px] font-bold uppercase tracking-widest ${today ? 'text-white' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
+                            {today ? (
+                              <span
+                                className="text-[13px] font-bold leading-none flex items-center justify-center rounded-full"
+                                style={{
+                                  width: 20, height: 20,
+                                  color: '#fff',
+                                  background: darkMode ? 'rgb(88,168,104)' : 'rgb(63,138,80)',
+                                }}
+                              >
+                                {format(day, 'd')}
+                              </span>
+                            ) : (
+                              <span className="text-[13px] font-semibold leading-none text-foreground/70">{format(day, 'd')}</span>
+                            )}
+                          </>
                         ) : (
-                          <span className="text-lg font-semibold leading-none text-foreground/70">{format(day, 'd')}</span>
+                          /* Full expanded header */
+                          <>
+                            <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-primary' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
+                            {today ? (
+                              <span
+                                className="text-lg font-bold leading-none flex items-center justify-center rounded-full"
+                                style={{
+                                  width: 30, height: 30,
+                                  color: '#fff',
+                                  background: darkMode ? 'rgb(88,168,104)' : 'rgb(63,138,80)',
+                                  boxShadow: darkMode
+                                    ? '0 0 0 3px rgba(134,206,145,0.22)'
+                                    : '0 0 0 3px rgba(63,138,80,0.16)',
+                                }}
+                              >
+                                {format(day, 'd')}
+                              </span>
+                            ) : (
+                              <span className="text-lg font-semibold leading-none text-foreground/70">{format(day, 'd')}</span>
+                            )}
+                          </>
                         )}
                       </div>
 
                       {/* All-day cell placeholder */}
                       <div
-                        style={{ height: allDayHeight }}
-                        className="flex-shrink-0 border-b border-border/50 relative group"
+                        style={{
+                          height: stickyAllDayH,
+                          top: stickyAllDayMain ? stickyHeaderH : undefined,
+                          background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+                          overflow: 'hidden',
+                          transition: 'height 0.15s ease',
+                        }}
+                        className={`flex-shrink-0 border-b border-border/50 relative group ${stickyAllDayMain ? 'sticky z-35' : ''}`}
                       >
                         {/* "+" add button on hover */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedIds(new Set());
-                            const id = uid();
-                            createStamped(
-                              { id, dayIndex: colIdx, startTime: "00:00", endTime: "00:30", allDay: true, content: '', color: 'sage' },
-                              { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } }
-                            );
-                          }}
-                          className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-all bg-background/70 hover:bg-background border border-border/40 opacity-0 group-hover:opacity-100 shadow-sm active:scale-95 z-20"
-                          style={{ color: menuSub }}
-                        >
-                          <Plus size={11} />
-                        </button>
+                        {stickyAllDayH > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedIds(new Set());
+                              const id = uid();
+                              createStamped(
+                                { id, dayIndex: colIdx, startTime: "00:00", endTime: "00:30", allDay: true, content: '', color: 'sage' },
+                                { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } }
+                              );
+                            }}
+                            className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-all bg-background/70 hover:bg-background border border-border/40 opacity-0 group-hover:opacity-100 shadow-sm active:scale-95 z-20"
+                            style={{ color: menuSub }}
+                          >
+                            <Plus size={11} />
+                          </button>
+                        )}
                       </div>
 
                       {/* Task band — dated tasks with no time. A task never spans
@@ -5143,12 +5295,15 @@ export default function WeeklyPlanner() {
                       {showTaskBand && (
                         <div
                           style={{
-                            height: taskRowHeight,
-                            background: taskDropCol === colIdx ? `${taskColor}22` : undefined,
+                            height: stickyTasksH,
+                            top: stickyTasksMain ? stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
+                            background: taskDropCol === colIdx ? `${taskColor}22` : (darkMode ? currentDarkTheme.cardBg : '#ffffff'),
                             outline: taskDropCol === colIdx ? `1px dashed ${taskColor}` : undefined,
                             outlineOffset: -2,
+                            overflow: 'hidden',
+                            transition: 'height 0.15s ease',
                           }}
-                          className="flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] overflow-hidden"
+                          className={`flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] ${stickyTasksMain ? 'sticky z-34' : ''}`}
                           onDragOver={(e) => {
                             if (!taskDragId) return;
                             e.preventDefault();                       // required, or the drop never fires
@@ -5182,53 +5337,77 @@ export default function WeeklyPlanner() {
                             moveTaskToColumn(id, colIdx, beforeId);
                           }}
                         >
-                          {(datedTasksByCol.get(colIdx) ?? []).map(t => {
-                            const occ = t.occDate ?? null;
-                            const done = isTaskDone(t, occ);
-                            const c = taskChipColors(t.color || undefined);
+                          {(() => {
+                            const colTasks = datedTasksByCol.get(colIdx) ?? [];
+                            const MAX_TASK_CHIPS = 3;
+                            const visTasks = colTasks.slice(0, MAX_TASK_CHIPS);
+                            const hasMoreColTasks = colTasks.length > MAX_TASK_CHIPS;
                             return (
-                              <button
-                                key={t.id}
-                                data-task="1"
-                                data-task-chip={t.id}
-                                draggable
-                                onDragStart={(e) => {
-                                  setTaskDragId(t.id);
-                                  e.dataTransfer.effectAllowed = 'move';
-                                  e.dataTransfer.setData('text/planner-task', t.id);
-                                }}
-                                onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
-                                onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
-                                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
-                                className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity cursor-grab active:cursor-grabbing"
-                                style={{
-                                  height: TASK_CHIP_H,
-                                  background: c.bg,
-                                  border: `1px dashed ${c.border}`,
-                                  opacity: taskDragId === t.id ? 0.4 : done ? 0.5 : 1,
-                                  filter: done ? 'saturate(0.4)' : 'none',
-                                }}
-                                title={`${t.title} — drag to another day, or up and down to reorder`}
-                              >
-                                <span
-                                  role="button"
-                                  tabIndex={-1}
-                                  onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }}
-                                  className="flex-shrink-0 flex items-center justify-center"
-                                  style={{ color: c.text }}
-                                >
-                                  {done ? <CheckSquare size={10} /> : <Square size={10} />}
-                                </span>
-                                <span
-                                  className="text-[10.5px] font-medium truncate leading-none"
-                                  style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}
-                                >
-                                  {t.title || 'Untitled task'}
-                                </span>
-                                {t.recur && <Repeat size={8} style={{ color: c.textMuted, flexShrink: 0 }} />}
-                              </button>
+                              <>
+                                {visTasks.map(t => {
+                                  const occ = t.occDate ?? null;
+                                  const done = isTaskDone(t, occ);
+                                  const c = taskChipColors(t.color || undefined);
+                                  return (
+                                    <button
+                                      key={t.id}
+                                      data-task="1"
+                                      data-task-chip={t.id}
+                                      draggable
+                                      onDragStart={(e) => {
+                                        setTaskDragId(t.id);
+                                        e.dataTransfer.effectAllowed = 'move';
+                                        e.dataTransfer.setData('text/planner-task', t.id);
+                                      }}
+                                      onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
+                                      onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
+                                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                      className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity cursor-grab active:cursor-grabbing"
+                                      style={{
+                                        height: TASK_CHIP_H,
+                                        background: c.bg,
+                                        border: `1px dashed ${c.border}`,
+                                        opacity: taskDragId === t.id ? 0.4 : done ? 0.5 : 1,
+                                        filter: done ? 'saturate(0.4)' : 'none',
+                                      }}
+                                      title={`${t.title} — drag to another day, or up and down to reorder`}
+                                    >
+                                      <span
+                                        role="button"
+                                        tabIndex={-1}
+                                        onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }}
+                                        className="flex-shrink-0 flex items-center justify-center"
+                                        style={{ color: c.text }}
+                                      >
+                                        {done ? <CheckSquare size={10} /> : <Square size={10} />}
+                                      </span>
+                                      <span
+                                        className="text-[10.5px] font-medium truncate leading-none"
+                                        style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}
+                                      >
+                                        {t.title || 'Untitled task'}
+                                      </span>
+                                      {t.recur && <Repeat size={8} style={{ color: c.textMuted, flexShrink: 0 }} />}
+                                    </button>
+                                  );
+                                })}
+                                {hasMoreColTasks && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setTaskOverflowModal({ dayLabel: format(day, 'EEEE, MMM d'), tasks: colTasks });
+                                    }}
+                                    className="flex items-center justify-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-semibold transition-colors bg-background/70 hover:bg-background border border-border/40 text-muted-foreground z-20 shadow-2xs cursor-pointer"
+                                    title="Click to view all tasks for this day"
+                                  >
+                                    <MoreHorizontal size={10} />
+                                    <span>+{colTasks.length - MAX_TASK_CHIPS} more</span>
+                                  </button>
+                                )}
+                              </>
                             );
-                          })}
+                          })()}
                           <button
                             type="button"
                             onClick={(e) => {
@@ -5322,7 +5501,7 @@ export default function WeeklyPlanner() {
                         {isNowCol && nowInView && (() => {
                           const lineTop = minToY(nowMin, interval, dayStartH);
                           return (
-                            <div ref={nowLineRef} className="absolute left-0 right-0 z-30 pointer-events-none" style={{ top: lineTop, height: 0 }}>
+                            <div ref={nowLineRef} className="absolute left-0 right-0 z-15 pointer-events-none" style={{ top: lineTop, height: 0 }}>
                               {/* Soft glow behind the line so it reads without shouting */}
                               <div
                                 className="absolute left-0 right-0"
@@ -5972,7 +6151,19 @@ export default function WeeklyPlanner() {
                 {/* All-Day Events Overlays (Continuous horizontal banners) */}
                 {weekAllDayEvents.length > 0 && (() => {
                   const layoutMap = layoutAllDay(weekAllDayEvents);
-                  return weekAllDayEvents.map(ev => {
+                  return (
+                    <div
+                      className={`left-0 right-0 pointer-events-none ${stickyAllDayMain ? 'sticky z-36' : 'absolute z-36'}`}
+                      style={{
+                        gridColumn: '1 / -1',
+                        gridRow: '1',
+                        top: stickyHeaderH,
+                        marginTop: stickyAllDayMain ? stickyHeaderH : 0,
+                        height: stickyAllDayH,
+                        overflow: 'visible',
+                      }}
+                    >
+                      {weekAllDayEvents.map(ev => {
                     const layoutInfo = layoutMap.get(ev.id);
                     if (!layoutInfo) return null;
                     const { row } = layoutInfo;
@@ -6004,13 +6195,13 @@ export default function WeeklyPlanner() {
                         key={ev.id}
                         data-event="1"
                         data-event-id={ev.id}
-                        className={`absolute rounded-md border text-[11px] font-semibold flex items-center gap-1.5 px-2.5 hover:-translate-y-[1.5px] ${isEdit || isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                        className={`absolute rounded-md border text-[11px] font-semibold flex items-center gap-1.5 px-2.5 hover:-translate-y-[1.5px] pointer-events-auto ${isEdit || isMenu ? 'z-40 shadow-md' : 'z-30 shadow-sm hover:shadow-md'}`}
                         style={{
-                          top: HEADER_PX + row * 28 + 4,
+                          top: row * 28 + 4,
                           height: 24,
                           left: `calc(${leftPct}% + 4px)`,
                           width: `calc(${widthPct}% - 8px)`,
-                          transition: 'top 260ms cubic-bezier(0.22,1,0.36,1), left 260ms cubic-bezier(0.22,1,0.36,1), width 260ms cubic-bezier(0.22,1,0.36,1), box-shadow 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), outline-color 140ms ease',
+                          transition: 'top 150ms ease, left 260ms cubic-bezier(0.22,1,0.36,1), width 260ms cubic-bezier(0.22,1,0.36,1), box-shadow 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), outline-color 140ms ease',
                           backgroundColor: bg,
                           borderColor: border,
                           color: text,
@@ -6071,8 +6262,10 @@ export default function WeeklyPlanner() {
                         )}
                       </div>
                     );
-                  });
-                })()}
+                  })}
+                </div>
+              );
+            })()}
 
                 {/* Selection rectangle overlay (spans multiple days) */}
                 {selRect && (
@@ -8016,49 +8209,120 @@ export default function WeeklyPlanner() {
             </span>
           </button>
 
-          {/* All-day span selector */}
-          {menuEvent.allDay && (
-            <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-              <span className="text-[11px] font-medium" style={{ color: menuText }}>Duration (days)</span>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const currentSpan = menuEvent.daysSpan || 1;
-                    if (currentSpan > 1) {
-                      applyEdit(menuEvent.id, { daysSpan: currentSpan - 1 });
-                    }
-                  }}
-                  disabled={(menuEvent.daysSpan || 1) <= 1}
-                  className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                  style={{ color: menuText, borderColor: menuBdr }}
-                  onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
-                >
-                  -
-                </button>
-                <span className="text-xs font-semibold w-5 text-center tabular-nums" style={{ color: menuText }}>
-                  {menuEvent.daysSpan || 1}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const currentSpan = menuEvent.daysSpan || 1;
-                    if (currentSpan < 90) {
-                      applyEdit(menuEvent.id, { daysSpan: currentSpan + 1 });
-                    }
-                  }}
-                  disabled={(menuEvent.daysSpan || 1) >= 90}
-                  className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                  style={{ color: menuText, borderColor: menuBdr }}
-                  onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
-                >
-                  +
-                </button>
-              </div>
-            </div>
-          )}
+          {/* All-day date & span selectors */}
+          {menuEvent.allDay && (() => {
+            const currentSpan = Math.max(1, menuEvent.daysSpan || 1);
+            const startDt = menuEvent.occDate
+              ? parseDate(menuEvent.occDate)
+              : addDays(parseDate(menuEvent.weekKey || viewedWeekKey), menuEvent.dayIndex || 0);
+            const startDateStr = format(startDt, 'yyyy-MM-dd');
+            const endDt = addDays(startDt, currentSpan - 1);
+            const endDateStr = format(endDt, 'yyyy-MM-dd');
+
+            return (
+              <>
+                {/* Start Date & End Date pickers */}
+                <div className="px-3 py-2 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                  <div className="flex flex-col gap-1 flex-1 min-w-0">
+                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                      Start Date
+                    </span>
+                    <input
+                      type="date"
+                      value={startDateStr}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) return;
+                        const newStartDt = parseDate(val);
+                        const newWs = startOfWeek(newStartDt, { weekStartsOn });
+                        const newWeekKey = format(newWs, 'yyyy-MM-dd');
+                        const newDayIndex = differenceInDays(newStartDt, newWs);
+                        applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, occDate: val });
+                      }}
+                      className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
+                      style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1 flex-1 min-w-0">
+                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                      End Date
+                    </span>
+                    <input
+                      type="date"
+                      value={endDateStr}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) return;
+                        const newEndDt = parseDate(val);
+                        const diff = differenceInDays(newEndDt, startDt);
+                        if (diff >= 0) {
+                          applyEdit(menuEvent.id, { daysSpan: diff + 1 });
+                        } else {
+                          const newWs = startOfWeek(newEndDt, { weekStartsOn });
+                          const newWeekKey = format(newWs, 'yyyy-MM-dd');
+                          const newDayIndex = differenceInDays(newEndDt, newWs);
+                          applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, daysSpan: 1, occDate: val });
+                        }
+                      }}
+                      className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
+                      style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                    />
+                  </div>
+                </div>
+
+                {/* Duration (days) selector */}
+                <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                  <span className="text-[11px] font-medium" style={{ color: menuText }}>Duration (days)</span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (currentSpan > 1) {
+                          applyEdit(menuEvent.id, { daysSpan: currentSpan - 1 });
+                        }
+                      }}
+                      disabled={currentSpan <= 1}
+                      className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      style={{ color: menuText, borderColor: menuBdr }}
+                      onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={1}
+                      max={90}
+                      value={currentSpan}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val) && val >= 1 && val <= 90) {
+                          applyEdit(menuEvent.id, { daysSpan: val });
+                        }
+                      }}
+                      className="w-8 text-xs font-semibold text-center tabular-nums rounded outline-none border-none py-0.5"
+                      style={{ color: menuText, background: 'transparent' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (currentSpan < 90) {
+                          applyEdit(menuEvent.id, { daysSpan: currentSpan + 1 });
+                        }
+                      }}
+                      disabled={currentSpan >= 90}
+                      className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      style={{ color: menuText, borderColor: menuBdr }}
+                      onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              </>
+            );
+          })()}
 
           {/* Completion-checkbox toggle */}
           <button
@@ -8336,6 +8600,70 @@ export default function WeeklyPlanner() {
 
 
 
+      {/* Task Overflow Modal Pop-up */}
+      <AnimatePresence>
+        {taskOverflowModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+            onClick={() => setTaskOverflowModal(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.94, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.94, opacity: 0 }}
+              className="w-full max-w-[340px] rounded-2xl border shadow-2xl p-4 flex flex-col gap-3 max-h-[80vh] overflow-hidden"
+              style={{ background: darkMode ? (currentDarkTheme.cardBg || '#121316') : '#ffffff', borderColor: surfaceBdr }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: surfaceBdr }}>
+                <span className="text-xs font-bold tracking-tight flex items-center gap-1.5" style={{ color: menuText }}>
+                  <ListTodo size={14} style={{ color: taskColor }} />
+                  Tasks for {taskOverflowModal.dayLabel} ({taskOverflowModal.tasks.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setTaskOverflowModal(null)}
+                  className="w-5 h-5 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                  style={{ color: menuSub }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 pr-0.5 custom-scrollbar max-h-[60vh]">
+                {taskOverflowModal.tasks.map(t => {
+                  const occ = t.occDate ?? null;
+                  const done = isTaskDone(t, occ);
+                  const c = taskChipColors(t.color || undefined);
+                  return (
+                    <div
+                      key={t.id}
+                      onClick={() => handleToggleTaskDone(t.id)}
+                      className="px-3 py-2 rounded-lg border text-xs font-medium flex items-center gap-2 shadow-2xs cursor-pointer transition-opacity"
+                      style={{
+                        background: c.bg,
+                        borderColor: c.border,
+                        color: c.text,
+                        opacity: done ? 0.5 : 1,
+                      }}
+                    >
+                      <span className="flex-shrink-0 flex items-center" style={{ color: c.text }}>
+                        {done ? <CheckSquare size={13} /> : <Square size={13} />}
+                      </span>
+                      <span className={`break-words flex-1 leading-snug ${done ? 'line-through opacity-60' : ''}`}>
+                        {t.title || 'Untitled task'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

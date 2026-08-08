@@ -273,9 +273,13 @@ export function resolveWeek<T extends RecurFields>(
       const end = addDays(start, master.daysSpan ?? 1);
       const from = master.allDay ? weekStart : addDays(weekStart, -1);
       if (start < weekEnd && end > from) {
-        out[master.id] = master.allDay
-          ? { ...master, masterId: master.id, occDate: ymd(start) }
-          : { ...master, masterId: master.id, occDate: ymd(start), weekKey: viewedWeekKey, dayIndex: differenceInDays(start, stampBase) };
+        out[master.id] = {
+          ...master,
+          masterId: master.id,
+          occDate: ymd(start),
+          weekKey: viewedWeekKey,
+          dayIndex: differenceInDays(start, stampBase),
+        };
       }
       continue;
     }

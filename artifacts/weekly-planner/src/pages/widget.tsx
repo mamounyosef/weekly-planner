@@ -8,9 +8,18 @@ import {
   subDays,
   addDays,
   isSameDay,
+  differenceInDays,
+  startOfDay,
 } from 'date-fns';
-import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  resolveWeekTasks,
+  toggleTaskDone as toggleTaskDoneHelper,
+  isTaskDone,
+  TASKS_STORAGE_KEY,
+  type TaskData,
+} from '@/lib/tasks';
 import {
   DEFAULT_FOCUS_TIMER,
   FOCUS_SESSIONS_KEY,
@@ -55,10 +64,10 @@ import {
   recoveredSessionId,
   safeFocusHeartbeat,
 } from '@/lib/focusSessions';
-import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, getEventWeekOverlap } from '@/lib/recurrence';
+import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, parseDate, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
 import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
-import { matchesCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
+import { matchesCombo, formatCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
 import {
   coercePrayerSettings,
   DEFAULT_PRAYER_SETTINGS,
@@ -297,6 +306,16 @@ export default function Widget() {
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const focusCompleteRef = useRef(false);
   const [focusCelebrate, setFocusCelebrate] = useState(false);
+  const [stickyAllDayWidget, setStickyAllDayWidget] = useState(true);
+  const [stickyTasksWidget, setStickyTasksWidget]   = useState(true);
+  const [showTaskRow, setShowTaskRow]               = useState(true);
+  const [taskColor, setTaskColor]                   = useState('#7dd3fc');
+  const [tasks, setTasks]                           = useState<TaskData>({});
+  const [overflowModal, setOverflowModal]           = useState<{
+    type: 'all-day' | 'tasks';
+    title: string;
+    items: any[];
+  } | null>(null);
 
   // ── Load Settings and initial events ───────────────────────────────────────
   useEffect(() => {
@@ -305,6 +324,19 @@ export default function Widget() {
     if (saved) { try { setEvents(migrateEvents(JSON.parse(saved) as PlannerData).events); } catch (_) {} }
     setFocusSessions(loadLocalFocusSessions());
     setFocusTimer(loadLocalFocusTimer());
+
+    const loadTasks = () => {
+      fetch('/api/tasks')
+        .then(r => r.json())
+        .then(data => { if (data && typeof data === 'object') setTasks(data); })
+        .catch(() => {
+          try {
+            const str = localStorage.getItem(TASKS_STORAGE_KEY);
+            if (str) setTasks(JSON.parse(str));
+          } catch (_) {}
+        });
+    };
+    loadTasks();
 
     // Settings come from the shared backend so the widget always matches the main window.
     const applySettings = (s: any) => {
@@ -318,6 +350,10 @@ export default function Widget() {
         if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
         if (s.dayStartH != null) setDayStartH(s.dayStartH);
         if (s.dayEndH != null) setDayEndH(s.dayEndH);
+        if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
+        if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
+        if (typeof s.showTaskRow === 'boolean') setShowTaskRow(s.showTaskRow);
+        if (s.taskColor) setTaskColor(s.taskColor);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
@@ -367,8 +403,21 @@ export default function Widget() {
 
     const handleStorage = (event: StorageEvent) => {
       if (!event.key || event.key === FOCUS_TIMER_KEY) setFocusTimer(loadLocalFocusTimer());
+      if (event.key === STORAGE_KEY && event.newValue) {
+        try { setEvents(migrateEvents(JSON.parse(event.newValue) as PlannerData).events); } catch (_) {}
+      }
+      if (event.key === TASKS_STORAGE_KEY && event.newValue) {
+        try { setTasks(JSON.parse(event.newValue)); } catch (_) {}
+      }
     };
     window.addEventListener('storage', handleStorage);
+
+    const syncWidgetData = () => {
+      loadEvents();
+      loadTasks();
+    };
+    const pollInterval = setInterval(syncWidgetData, 2500);
+    window.addEventListener('focus', syncWidgetData);
 
     // Shared running-timer state (see home.tsx for the echo-guard rationale).
     // `live` = arrived over the stream, so it can't be stale; only a poll needs
@@ -447,6 +496,8 @@ export default function Widget() {
 
     return () => {
       window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('focus', syncWidgetData);
+      clearInterval(pollInterval);
       clearInterval(settingsPollId);
       clearInterval(pollId);
       clearInterval(focusPollId);
@@ -585,24 +636,48 @@ export default function Widget() {
 
   // ── Scroll & Live indicator visibility logic ──────────────────────────────
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const timelineGridRef = useRef<HTMLDivElement>(null);
   const [showLiveBtn, setShowLiveBtn] = useState(false);
   const isProgrammaticScroll = useRef(false);
   const isTrackingLive = useRef(true);
 
+  // Helper to calculate top sticky header obstruction height inside scrollContainer
+  const getStickyHeaderHeight = (container: HTMLElement): number => {
+    const containerTop = container.getBoundingClientRect().top;
+    let maxBottom = containerTop;
+    const stickyEls = container.querySelectorAll('.sticky');
+    stickyEls.forEach(el => {
+      const rect = el.getBoundingClientRect();
+      if (rect.top <= containerTop + 10 && rect.bottom > containerTop) {
+        if (rect.bottom > maxBottom) {
+          maxBottom = rect.bottom;
+        }
+      }
+    });
+    return Math.max(0, maxBottom - containerTop);
+  };
+
   const checkLiveVisibility = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const lineTop = minToY(normNowMin, interval, dayStartH);
-    const isVisible = lineTop >= container.scrollTop && lineTop <= container.scrollTop + container.clientHeight;
+    const stickyHeaderH = getStickyHeaderHeight(container);
+    const gridOffset = timelineGridRef.current?.offsetTop ?? 0;
+    const lineTop = gridOffset + minToY(normNowMin, interval, dayStartH);
+    const isVisible = lineTop >= container.scrollTop + stickyHeaderH && lineTop <= container.scrollTop + container.clientHeight;
     setShowLiveBtn(!isVisible);
   }, [normNowMin, interval, dayStartH]);
 
   const scrollAnimFrame = useRef(0);
-  const centerScrollOnLive = (smooth = true) => {
+  const centerScrollOnLive = useCallback((smooth = true) => {
     const container = scrollContainerRef.current;
     if (!container || container.clientHeight === 0) return;
-    const lineTop = minToY(normNowMin, interval, dayStartH);
-    const targetTop = lineTop - container.clientHeight / 2;
+    const stickyHeaderH = getStickyHeaderHeight(container);
+    const visibleHeight = Math.max(100, container.clientHeight - stickyHeaderH);
+    const visibleCenterOffset = stickyHeaderH + visibleHeight / 2;
+
+    const gridOffset = timelineGridRef.current?.offsetTop ?? 0;
+    const lineTop = gridOffset + minToY(normNowMin, interval, dayStartH);
+    const targetTop = Math.max(0, lineTop - visibleCenterOffset);
 
     if (!smooth) {
       isProgrammaticScroll.current = true;
@@ -637,7 +712,7 @@ export default function Widget() {
     };
 
     scrollAnimFrame.current = requestAnimationFrame(step);
-  };
+  }, [normNowMin, interval, dayStartH]);
 
   const handleScroll = () => {
     if (isProgrammaticScroll.current) {
@@ -648,8 +723,10 @@ export default function Widget() {
     // Check if the live line is visible in the container
     const container = scrollContainerRef.current;
     if (container) {
-      const lineTop = minToY(normNowMin, interval, dayStartH);
-      const isVisible = lineTop >= container.scrollTop && lineTop <= container.scrollTop + container.clientHeight;
+      const stickyHeaderH = getStickyHeaderHeight(container);
+      const gridOffset = timelineGridRef.current?.offsetTop ?? 0;
+      const lineTop = gridOffset + minToY(normNowMin, interval, dayStartH);
+      const isVisible = lineTop >= container.scrollTop + stickyHeaderH && lineTop <= container.scrollTop + container.clientHeight;
       setShowLiveBtn(!isVisible);
     }
     
@@ -666,6 +743,26 @@ export default function Widget() {
     checkLiveVisibility();
     return () => container.removeEventListener('scroll', handleScroll);
   }, [checkLiveVisibility]);
+
+  // Keep centering dynamically if the user resizes the widget window
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    let frameId = 0;
+    const observer = new ResizeObserver(() => {
+      if (isTrackingLive.current) {
+        cancelAnimationFrame(frameId);
+        frameId = requestAnimationFrame(() => {
+          centerScrollOnLive(false);
+        });
+      }
+    });
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frameId);
+    };
+  }, [centerScrollOnLive]);
 
   // Initial centering scroll (waits for container height to render fully)
   useEffect(() => {
@@ -684,15 +781,9 @@ export default function Widget() {
       }
     };
     requestAnimationFrame(scrollInitial);
-  }, [slots, dayStartH, interval]);
+  }, [slots, dayStartH, interval, centerScrollOnLive]);
 
   // On first launch, act as though Go Live was pressed.
-  //
-  // The centering effect above isn't enough on its own: it can run before the
-  // day's events have arrived and the column has its real height, and the scroll
-  // it performs fires the scroll handler, which reads as "the user scrolled away"
-  // and switches live-tracking off. So re-assert it a few times over the first
-  // second, then leave it alone.
   const didInitialLive = useRef(false);
   useEffect(() => {
     if (didInitialLive.current) return;
@@ -718,13 +809,13 @@ export default function Widget() {
     if (isTrackingLive.current) {
       centerScrollOnLive(true);
     }
-  }, [nowTick, normNowMin]);
+  }, [nowTick, normNowMin, centerScrollOnLive]);
 
-  const scrollToLive = () => {
+  const scrollToLive = useCallback(() => {
     isTrackingLive.current = true;
     setShowLiveBtn(false);
     centerScrollOnLive(true);
-  };
+  }, [centerScrollOnLive]);
 
   const minimizeWidget = () => {
     if ((window as any).pywebview?.api?.minimize) {
@@ -1019,7 +1110,7 @@ export default function Widget() {
     });
   }, []);
 
-  // Configurable widget shortcuts (widgetMinus, widgetPlus, widgetStart).
+  // Configurable widget shortcuts (widgetMinus, widgetPlus, widgetStart, goToLive).
   // Skipped while a text field has focus so typing is not hijacked.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1032,29 +1123,21 @@ export default function Widget() {
       } else if (matchesCombo(shortcuts.widgetPlus, e)) {
         e.preventDefault();
         adjustFocusMinutes(5);
+      } else if (matchesCombo(shortcuts.goToLive, e)) {
+        e.preventDefault();
+        scrollToLive();
       } else if (matchesCombo(shortcuts.widgetStart, e)) {
         e.preventDefault();
-        setFocusTimer(prev => {
-          if (prev.isRunning) {
-            return pauseFocusTimer(prev);
-          } else {
-            const startedAt = new Date().toISOString();
-            setFocusCollapsed(true);
-            if (prev.lastStartedAt) return prev;
-            return {
-              ...prev,
-              isRunning: true,
-              lastStartedAt: startedAt,
-              sessionStartedAt: prev.sessionStartedAt ?? startedAt,
-              lastPausedAt: null,
-            };
-          }
-        });
+        if (focusTimer.isRunning) {
+          pauseFocus();
+        } else {
+          startFocus();
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [adjustFocusMinutes, shortcuts]);
+  }, [adjustFocusMinutes, shortcuts, scrollToLive, focusTimer.isRunning, pauseFocus, startFocus]);
 
   const commitFocusMinutesDraft = () => {
     const parsed = Number(focusMinutesDraft);
@@ -1424,59 +1507,184 @@ export default function Widget() {
 
       {/* Timeline Column */}
       <main ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto flex flex-col no-scrollbar">
-        {/* All-Day Events in Widget (Scrollable with timeline) */}
-        {todayColIdx !== -1 && (() => {
+        {/* All-Day Events & Tasks in Widget (Configurable Sticky & Compacted) */}
+        {(() => {
+          const todayYmd = format(today, 'yyyy-MM-dd');
           const todayAllDay = Object.values(weekEvents).filter(ev => {
             if (!ev.allDay || ev.deleted) return false;
-            const overlap = getEventWeekOverlap(ev, weekStart);
-            if (!overlap) return false;
-            return todayColIdx >= overlap.dayIndex && todayColIdx < overlap.dayIndex + overlap.daysSpan;
+            const startDateStr = ev.occDate || (ev.weekKey && ev.dayIndex != null ? format(addDays(parseDate(ev.weekKey), ev.dayIndex), 'yyyy-MM-dd') : null);
+            if (!startDateStr) return false;
+            const startD = parseDate(startDateStr);
+            const endD = addDays(startD, (ev.daysSpan || 1) - 1);
+            const endStr = format(endD, 'yyyy-MM-dd');
+            return todayYmd >= startDateStr && todayYmd <= endStr;
           });
-          if (todayAllDay.length === 0) return null;
+
+          const MAX_ALL_DAY_VISIBLE = 2;
+          const visibleAllDay = todayAllDay.slice(0, MAX_ALL_DAY_VISIBLE);
+          const hasMoreAllDay = todayAllDay.length > MAX_ALL_DAY_VISIBLE;
+          
+          // Calculate height of sticky All-Day row so sticky Tasks row positions accurately right below it
+          const allDayRowH = todayAllDay.length === 0 ? 0 : (visibleAllDay.length * 28 + (hasMoreAllDay ? 24 : 0) + 12);
+
+          const weekStart = startOfWeek(today, { weekStartsOn });
+          const viewedWeekKey = weekKeyOf(weekStart, weekStartsOn);
+          const res = resolveWeekTasks(tasks, viewedWeekKey);
+          const targetDayIdx = Math.max(0, Math.min(6, differenceInDays(startOfDay(today), startOfDay(weekStart))));
+          const todayTasks = Object.values(res).filter(t => {
+            if (t.deleted || t.startTime) return false;
+            return t.dayIndex === targetDayIdx;
+          });
+
+          const MAX_TASKS_VISIBLE = 3;
+          const visibleTasks = todayTasks.slice(0, MAX_TASKS_VISIBLE);
+          const hasMoreTasks = todayTasks.length > MAX_TASKS_VISIBLE;
+
           return (
-            <div className="flex border-b border-border/50 flex-shrink-0" style={{ background: darkMode ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.2)' }}>
-              {/* Axis spacer */}
-              <div className="flex-shrink-0 border-r border-border/50 flex items-center justify-center p-1" style={{ width: 62 }}>
-                <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50 text-center">All Day</span>
-              </div>
-              {/* Events list */}
-              <div className="flex-1 p-2 flex flex-col gap-1">
-                {todayAllDay.map(ev => {
-                  const { bg, border, text, textMuted } = chipColors(ev);
-                  const dateStr = format(today, 'yyyy-MM-dd');
-                  const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
-                  return (
-                    <div
-                      key={ev.id}
-                      className="px-2 py-1 rounded-md border text-[11px] font-semibold flex items-center gap-1.5 shadow-sm"
-                      style={{ backgroundColor: bg, borderColor: border, color: text }}
-                    >
-                      {!ev.noCheckbox && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleEventCompleted(ev.id);
+            <>
+              {/* All-Day row */}
+              {todayAllDay.length > 0 && (
+                <div
+                  className={`flex border-b border-border/50 flex-shrink-0 ${stickyAllDayWidget ? 'sticky top-0 z-30 shadow-xs backdrop-blur-md' : ''}`}
+                  style={{ background: darkMode ? (widgetTheme.cardBg || 'rgba(15,16,18,0.95)') : 'rgba(255,255,255,0.95)' }}
+                >
+                  {/* Axis spacer */}
+                  <div className="flex-shrink-0 border-r border-border/50 flex items-center justify-center p-1" style={{ width: 62 }}>
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50 text-center">All Day</span>
+                  </div>
+                  {/* Events list */}
+                  <div className="flex-1 p-2 flex flex-col gap-1">
+                    {visibleAllDay.map(ev => {
+                      const { bg, border, text } = chipColors(ev);
+                      const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(todayYmd) ?? false);
+                      return (
+                        <div
+                          key={ev.id}
+                          className="px-2 py-1 rounded-md border text-[11px] font-semibold flex items-center gap-1.5 shadow-xs"
+                          style={{ backgroundColor: bg, borderColor: border, color: text }}
+                        >
+                          {!ev.noCheckbox && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleEventCompleted(ev.id);
+                              }}
+                              className="flex-shrink-0 w-3 h-3 rounded-full border flex items-center justify-center cursor-pointer"
+                              style={{
+                                borderColor: isCompleted ? text : `${text}50`,
+                                backgroundColor: isCompleted ? text : 'transparent',
+                              }}
+                            >
+                              {isCompleted && (
+                                <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                              )}
+                            </button>
+                          )}
+                          <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                            {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {hasMoreAllDay && (
+                      <button
+                        type="button"
+                        onClick={() => setOverflowModal({
+                          type: 'all-day',
+                          title: 'All-Day Events',
+                          items: todayAllDay
+                        })}
+                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-2xs"
+                        style={{
+                          background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                          borderColor: surfaceBdr,
+                          color: menuSub,
+                        }}
+                        title="Click to view all all-day events"
+                      >
+                        <MoreHorizontal size={12} />
+                        <span>+{todayAllDay.length - MAX_ALL_DAY_VISIBLE} more</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Tasks row */}
+              {showTaskRow && todayTasks.length > 0 && (
+                <div
+                  className={`flex border-b border-border/50 flex-shrink-0 ${stickyTasksWidget ? 'sticky z-25 shadow-xs backdrop-blur-md' : ''}`}
+                  style={{
+                    top: stickyTasksWidget ? (stickyAllDayWidget ? allDayRowH : 0) : undefined,
+                    background: darkMode ? (widgetTheme.cardBg || 'rgba(15,16,18,0.95)') : 'rgba(255,255,255,0.95)'
+                  }}
+                >
+                  {/* Axis spacer */}
+                  <div className="flex-shrink-0 border-r border-border/50 flex items-center justify-center gap-1 p-1" style={{ width: 62 }}>
+                    <ListTodo size={9} style={{ color: taskColor, opacity: 0.8 }} />
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50 text-center">Tasks</span>
+                  </div>
+                  {/* Tasks list */}
+                  <div className="flex-1 p-1.5 flex flex-col gap-1">
+                    {visibleTasks.map(t => {
+                      const occ = t.occDate ?? null;
+                      const done = isTaskDone(t, occ);
+                      return (
+                        <div
+                          key={t.id}
+                          onClick={() => {
+                            const occId = t.occDate ? `${t.masterId || t.id}:${t.occDate}` : t.id;
+                            const next = toggleTaskDoneHelper(tasks, occId);
+                            setTasks(next);
+                            localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(next));
+                            fetch('/api/tasks', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify(next),
+                            }).catch(() => {});
                           }}
-                          className="flex-shrink-0 w-3 h-3 rounded-full border flex items-center justify-center cursor-pointer"
+                          className="px-2 py-0.5 rounded-md border text-[10.5px] font-medium flex items-center gap-1.5 shadow-2xs cursor-pointer transition-opacity"
                           style={{
-                            borderColor: isCompleted ? text : `${text}50`,
-                            backgroundColor: isCompleted ? text : 'transparent',
+                            background: `${taskColor}18`,
+                            borderColor: `${taskColor}44`,
+                            color: menuText,
+                            opacity: done ? 0.5 : 1,
                           }}
                         >
-                          {isCompleted && (
-                            <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
-                          )}
-                        </button>
-                      )}
-                      <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                        {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+                          <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
+                            {done ? <CheckSquare size={10} /> : <Square size={10} />}
+                          </span>
+                          <span className={`truncate flex-1 ${done ? 'line-through opacity-60' : ''}`}>
+                            {t.title || 'Untitled task'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {hasMoreTasks && (
+                      <button
+                        type="button"
+                        onClick={() => setOverflowModal({
+                          type: 'tasks',
+                          title: "Today's Tasks",
+                          items: todayTasks
+                        })}
+                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-2xs"
+                        style={{
+                          background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                          borderColor: surfaceBdr,
+                          color: menuSub,
+                        }}
+                        title="Click to view all tasks"
+                      >
+                        <MoreHorizontal size={12} />
+                        <span>+{todayTasks.length - MAX_TASKS_VISIBLE} more</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
           );
         })()}
 
@@ -1518,7 +1726,7 @@ export default function Widget() {
         )}
 
         {/* Timeline Grid (Axis + Grid Area) */}
-        <div className="flex flex-row relative flex-shrink-0" style={{ height: totalH }}>
+        <div ref={timelineGridRef} className="flex flex-row relative flex-shrink-0" style={{ height: totalH }}>
           {/* Time axis */}
           <div className="flex-shrink-0 border-r border-border/50" style={{ width: 62, background: darkMode ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.30)' }}>
             <div className="relative" style={{ height: totalH }}>
@@ -1887,6 +2095,13 @@ export default function Widget() {
           })}
         </div>
         </div>
+
+        {/* Bottom spacer padding so the live line can always be centered even near dayEndH or in small windows */}
+        <div
+          aria-hidden="true"
+          className="flex-shrink-0 pointer-events-none"
+          style={{ height: '50vh' }}
+        />
       </main>
 
       {/* Floating "Go to Live" Button */}
@@ -1901,9 +2116,120 @@ export default function Widget() {
           }}
         >
           <Clock size={12} />
-          Go to Live
+          <span>Go to Live</span>
+          <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
+            {formatCombo(shortcuts.goToLive)}
+          </kbd>
         </button>
       )}
+      {/* Overflow Modal Pop-up */}
+      <AnimatePresence>
+        {overflowModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+            onClick={() => setOverflowModal(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.94, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.94, opacity: 0 }}
+              className="w-full max-w-[280px] rounded-2xl border shadow-2xl p-4 flex flex-col gap-3 max-h-[80vh] overflow-hidden"
+              style={{ background: darkMode ? (widgetTheme.cardBg || '#121316') : '#ffffff', borderColor: surfaceBdr }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b pb-2" style={{ borderColor: surfaceBdr }}>
+                <span className="text-xs font-bold tracking-tight flex items-center gap-1.5" style={{ color: menuText }}>
+                  {overflowModal.type === 'tasks' ? <ListTodo size={13} style={{ color: taskColor }} /> : <Calendar size={13} />}
+                  {overflowModal.title} ({overflowModal.items.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setOverflowModal(null)}
+                  className="w-5 h-5 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                  style={{ color: menuSub }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 pr-0.5 custom-scrollbar max-h-[60vh]">
+                {overflowModal.type === 'all-day' && overflowModal.items.map((ev: PlannerEvent) => {
+                  const { bg, border, text } = chipColors(ev);
+                  const dateStr = format(today, 'yyyy-MM-dd');
+                  const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+                  return (
+                    <div
+                      key={ev.id}
+                      className="px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-2 shadow-xs"
+                      style={{ backgroundColor: bg, borderColor: border, color: text }}
+                    >
+                      {!ev.noCheckbox && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleEventCompleted(ev.id);
+                          }}
+                          className="flex-shrink-0 w-3.5 h-3.5 rounded-full border flex items-center justify-center cursor-pointer"
+                          style={{
+                            borderColor: isCompleted ? text : `${text}50`,
+                            backgroundColor: isCompleted ? text : 'transparent',
+                          }}
+                        >
+                          {isCompleted && (
+                            <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />
+                          )}
+                        </button>
+                      )}
+                      <span className={`break-words flex-1 leading-snug ${isCompleted ? 'line-through opacity-60' : ''}`} style={{ color: text }}>
+                        {ev.content || 'Untitled'}
+                      </span>
+                    </div>
+                  );
+                })}
+
+                {overflowModal.type === 'tasks' && overflowModal.items.map((t: any) => {
+                  const occ = t.occDate ?? null;
+                  const done = isTaskDone(t, occ);
+                  return (
+                    <div
+                      key={t.id}
+                      onClick={() => {
+                        const occId = t.occDate ? `${t.masterId || t.id}:${t.occDate}` : t.id;
+                        const next = toggleTaskDoneHelper(tasks, occId);
+                        setTasks(next);
+                        localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(next));
+                        fetch('/api/tasks', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify(next),
+                        }).catch(() => {});
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-2 shadow-2xs cursor-pointer"
+                      style={{
+                        background: `${taskColor}18`,
+                        borderColor: `${taskColor}44`,
+                        color: menuText,
+                        opacity: done ? 0.5 : 1,
+                      }}
+                    >
+                      <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
+                        {done ? <CheckSquare size={12} /> : <Square size={12} />}
+                      </span>
+                      <span className={`break-words flex-1 leading-snug ${done ? 'line-through opacity-60' : ''}`}>
+                        {t.title || 'Untitled task'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
