@@ -62,3 +62,7 @@ CLAUDE.md
 __pycache__/
 
 .venv-launcher/
+
+# ESP32 firmware
+firmware/.pio/
+firmware/src/secrets.h

@@ -25,6 +25,7 @@ import {
   RotateCcw,
   Zap,
   Compass,
+  Cpu,
 } from 'lucide-react';
 import {
   FOCUS_CHIMES,
@@ -64,6 +65,7 @@ import {
   type PrayerSettings,
   type PrayerStyle,
 } from '@/lib/prayerTimes';
+import { DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from '@/lib/hardwareController';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -282,7 +284,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations';
+type TabCategory = 'appearance' | 'calendar' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware';
 
 interface Toast {
   id: number;
@@ -300,7 +302,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations'];
+      const known: string[] = ['appearance', 'calendar', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
@@ -357,9 +359,13 @@ export default function SettingsPage() {
   const [gcalMirrorLocalDeletions, setGcalMirrorLocalDeletions] = useState<boolean>(initialSettings.gcalMirrorLocalDeletions ?? true);
   const [gcalMirrorGoogleDeletions, setGcalMirrorGoogleDeletions] = useState<boolean>(initialSettings.gcalMirrorGoogleDeletions ?? false);
   const [prayer, setPrayer] = useState<PrayerSettings>(initialSettings.prayer);
+  const [hardware, setHardware] = useState<HardwareSettings>(initialSettings.hardware);
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
   const patchPrayer = useCallback((patch: Partial<PrayerSettings>) => {
     setPrayer(prev => ({ ...prev, ...patch }));
+  }, []);
+  const patchHardware = useCallback((patch: Partial<HardwareSettings>) => {
+    setHardware(prev => ({ ...prev, ...patch }));
   }, []);
 
   // Backup status state
@@ -440,6 +446,7 @@ export default function SettingsPage() {
       if (typeof s.gcalMirrorLocalDeletions === 'boolean') setGcalMirrorLocalDeletions(s.gcalMirrorLocalDeletions);
       if (typeof s.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(s.gcalMirrorGoogleDeletions);
       setPrayer(s.prayer);
+      setHardware(s.hardware);
     });
   }, []);
 
@@ -482,6 +489,7 @@ export default function SettingsPage() {
           setStickyAllDayWidget(coerced.stickyAllDayWidget);
           setStickyTasksWidget(coerced.stickyTasksWidget);
           setPrayer(coerced.prayer);
+          setHardware(coerced.hardware);
         }
       })
       .catch(err => console.error('Failed to load settings:', err));
@@ -548,8 +556,9 @@ export default function SettingsPage() {
       gcalMirrorLocalDeletions,
       gcalMirrorGoogleDeletions,
       prayer,
+      hardware,
     });
-  }, [prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+  }, [hardware, prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -643,6 +652,7 @@ export default function SettingsPage() {
     gcalMirrorLocalDeletions,
     gcalMirrorGoogleDeletions,
     prayer,
+    hardware,
   });
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
@@ -680,6 +690,7 @@ export default function SettingsPage() {
     if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
     setGoogleTasksSync(restored.googleTasksSync);
     setPrayer(restored.prayer);
+    setHardware(restored.hardware);
     broadcastSettingsChange(restored);
   };
 
@@ -835,6 +846,7 @@ export default function SettingsPage() {
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
     { id: 'backup', label: 'Backups & Data', icon: <Database size={17} /> },
     { id: 'integrations', label: 'Integrations', icon: <Link2 size={17} />, badge: gCalStatus.authenticated ? 'Connected' : undefined },
+    { id: 'hardware', label: 'Desk Controller', icon: <Cpu size={17} /> },
   ];
 
   return (
@@ -2091,6 +2103,170 @@ export default function SettingsPage() {
                       <input type="file" accept=".json" onChange={importBackup} className="hidden" />
                     </label>
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* 🖥️ DESK CONTROLLER TAB */}
+            {activeTab === 'hardware' && (
+              <motion.div
+                key="hardware"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+                className="flex flex-col gap-6"
+              >
+                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Desk Controller</h2>
+                      <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                        An ESP32 on the desk with an LCD, two buttons and an ultrasonic presence sensor. It drives the
+                        focus timer through the same actions as the on-screen controls, so nothing here can make the
+                        hardware and the app disagree.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => patchHardware({ enabled: !hardware.enabled })}
+                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                      style={{ background: hardware.enabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={hardware.enabled}
+                      title={hardware.enabled ? 'The desk controller is active' : 'The desk controller is ignored'}
+                    >
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.enabled ? 22 : 2 }} />
+                    </button>
+                  </div>
+
+                  {hardware.enabled && (
+                    <>
+                      {/* Buttons */}
+                      <div className="flex items-start justify-between gap-4 pt-1">
+                        <div className="flex-1">
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Physical buttons</span>
+                          <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                            Button A starts, pauses and resumes. Button B terminates the session — exactly as if you
+                            had clicked the matching control in the app.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => patchHardware({ buttonsEnabled: !hardware.buttonsEnabled })}
+                          className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                          style={{ background: hardware.buttonsEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                          aria-pressed={hardware.buttonsEnabled}
+                        >
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.buttonsEnabled ? 22 : 2 }} />
+                        </button>
+                      </div>
+
+                      {/* Sensor */}
+                      <div className="flex items-start justify-between gap-4 pt-1 border-t" style={{ borderColor: cardBdr }}>
+                        <div className="flex-1 pt-4">
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Presence sensor may control the timer</span>
+                          <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                            Off means the sensor is still read, but only the buttons can start or stop a session.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => patchHardware({ sensorEnabled: !hardware.sensorEnabled })}
+                          className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-4"
+                          style={{ background: hardware.sensorEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                          aria-pressed={hardware.sensorEnabled}
+                        >
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.sensorEnabled ? 22 : 2 }} />
+                        </button>
+                      </div>
+
+                      {hardware.sensorEnabled && (
+                        <>
+                          {/* Arm delay */}
+                          <div className="flex flex-col gap-2">
+                            <span className="text-xs font-semibold" style={{ color: textPrimary }}>Grace period before a session starts</span>
+                            <p className="text-[11px] -mt-1" style={{ color: textSecondary }}>
+                              After you sit down, the countdown runs on the LCD, the widget and the main header at
+                              once. Leaving before it reaches zero cancels it. Set to 0 to start immediately.
+                            </p>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="number"
+                                min={0}
+                                max={300}
+                                value={hardware.armSeconds}
+                                onChange={e => patchHardware({ armSeconds: Math.max(0, Math.min(300, Number(e.target.value) || 0)) })}
+                                className="w-24 px-3 py-2 rounded-xl border text-xs outline-none"
+                                style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                              />
+                              <span className="text-[11px]" style={{ color: textSecondary }}>seconds</span>
+                            </div>
+                          </div>
+
+                          {/* Away pause */}
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <span className="text-xs font-semibold" style={{ color: textPrimary }}>Pause when I leave the desk</span>
+                              <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                                Briefly leaning out of the sensor's view will not trigger this — leaving has to be
+                                sustained for several seconds before it counts.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => patchHardware({ awayPauseEnabled: !hardware.awayPauseEnabled })}
+                              className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                              style={{ background: hardware.awayPauseEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                              aria-pressed={hardware.awayPauseEnabled}
+                            >
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.awayPauseEnabled ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {hardware.awayPauseEnabled && (
+                            <div className="flex flex-col gap-2">
+                              <span className="text-xs font-semibold" style={{ color: textPrimary }}>Terminate the session after being away for</span>
+                              <p className="text-[11px] -mt-1" style={{ color: textSecondary }}>
+                                Come back sooner and the paused session simply resumes. Stay away longer and it is
+                                terminated exactly as pressing stop would — sitting down afterwards begins a new one.
+                              </p>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min={10}
+                                  max={3600}
+                                  step={10}
+                                  value={hardware.awayTerminateSeconds}
+                                  onChange={e => patchHardware({ awayTerminateSeconds: Math.max(10, Math.min(3600, Number(e.target.value) || 10)) })}
+                                  className="w-24 px-3 py-2 rounded-xl border text-xs outline-none"
+                                  style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                                />
+                                <span className="text-[11px]" style={{ color: textSecondary }}>
+                                  seconds ({Math.round(hardware.awayTerminateSeconds / 6) / 10} min)
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      <div className="pt-4 border-t flex items-center justify-between gap-4" style={{ borderColor: cardBdr }}>
+                        <p className="text-[11px]" style={{ color: textSecondary }}>
+                          The distance threshold that decides "at the desk" is calibrated per desk and lives in the
+                          firmware's <span style={{ color: textPrimary }}>config.h</span>, since changing it requires
+                          reflashing the board.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setHardware(DEFAULT_HARDWARE_SETTINGS)}
+                          className="px-3 py-2 rounded-xl border text-xs whitespace-nowrap"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                        >
+                          Reset to defaults
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </motion.div>
             )}

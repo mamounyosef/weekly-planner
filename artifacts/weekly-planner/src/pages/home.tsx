@@ -201,6 +201,7 @@ import {
   type PrayerSettings,
 } from '@/lib/prayerTimes';
 import { usePrayerTimes } from '@/lib/usePrayerTimes';
+import { useHardwareController, type HardwareSettings } from '@/lib/hardwareController';
 
 /** Per-service sync health as reported by /api/google-auth/status. */
 interface SyncLeg {
@@ -451,6 +452,29 @@ function uid(): string {
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+/**
+ * Fold a (column, start-minute) pair into something the grid can actually draw.
+ *
+ * The minute is pinned inside the day window, and the column inside the range
+ * that is CURRENTLY ON SCREEN — the custom view addresses days well outside
+ * 0–6 (e.g. -4 … 14), so clamping to 0–6 silently teleported anything dropped
+ * on those columns back into the anchor week, where it looked like the item had
+ * vanished into a dead zone.
+ */
+function foldToGrid(
+  day: number,
+  startMin: number,
+  cols: number[],
+  dayStartMin: number,
+  dayEndMin: number,
+): { day: number; startMin: number } {
+  const lo = cols.length ? cols[0] : 0;
+  const hi = cols.length ? cols[cols.length - 1] : 6;
+  return {
+    day: clamp(day, lo, hi),
+    startMin: clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP),
+  };
 }
 function normalizeMin(min: number, dayStartH: number): number {
   if (min < dayStartH * 60) {
@@ -789,6 +813,7 @@ export default function WeeklyPlanner() {
   const [stickyTasksMain, setStickyTasksMain]   = useState<boolean>(initialSettings.stickyTasksMain ?? true);
   const [taskColor, setTaskColor]             = useState<string>(initialSettings.taskColor);
   const [prayer, setPrayer]                   = useState<PrayerSettings>(initialSettings.prayer);
+  const [hardware, setHardware]               = useState<HardwareSettings>(initialSettings.hardware);
   const [prayerPanelOpen, setPrayerPanelOpen] = useState(false);
   const prayerPanelRef                        = useRef<HTMLDivElement>(null);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<any>(initialSettings.taskCheckboxShape ?? 'circle');
@@ -915,6 +940,10 @@ export default function WeeklyPlanner() {
     eventId: string; durationMin: number; offsetMin: number; isHeadClick?: boolean;
     origDay: number; curDay: number; curStartMin: number;
     active: boolean; initX: number; initY: number;
+    /** Grab point in the GRID's own coordinates. The floating block is anchored
+     *  inside the scrolling grid, so a delta measured in viewport coordinates
+     *  drifts away from the cursor as soon as edge auto-scroll kicks in. */
+    initGX: number; initGY: number;
   } | null>(null);
 
   const resizeRef = useRef<{
@@ -944,6 +973,8 @@ export default function WeeklyPlanner() {
     eventIds: string[]; baseStartMins: Record<string, number>; baseDays: Record<string, number>; durations: Record<string, number>;
     origDay: number; curDay: number; baseMouseMin: number;
     active: boolean; initX: number; initY: number;
+    /** See dragRef.initGX/initGY. */
+    initGX: number; initGY: number;
   } | null>(null);
   const batchDispRef   = useRef<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
   const selDragRef     = useRef<{ startX: number; startY: number } | null>(null);
@@ -1641,8 +1672,17 @@ export default function WeeklyPlanner() {
    * that is what keeps a new band from silently breaking drag, resize, marquee
    * select and click-to-create. There must be no `HEADER_PX + allDayHeight`
    * anywhere else in this file.
+   *
+   * It MUST be built from the LIVE (scroll-compacted) band heights, not the
+   * uncompacted ones: once the page is scrolled the day header shrinks and an
+   * empty all-day / task row collapses to zero, so using the full heights put
+   * every drop and every dashed placeholder ~20 minutes too high.
    */
-  const topBandsHeight = HEADER_PX + allDayHeight + taskRowHeight + prayerRowHeight;
+  const topBandsHeight =
+    (isScrolled ? HEADER_COMPACT_PX : HEADER_PX)
+    + (isScrolled && maxAllDayRowIndex === 0 ? 0 : allDayHeight)
+    + (isScrolled && maxTasksInAnyCol === 0 ? 0 : taskRowHeight)
+    + prayerRowHeight;
 
   // ── Scroll-aware sticky heights ──────────────────────────────────────────
   // When scrolled, compact the day header and hide empty all-day/tasks rows.
@@ -1765,6 +1805,7 @@ export default function WeeklyPlanner() {
       gcalPullDailyEdits: true, gcalPullDailyNew: true, gcalPullOtherCalendars: true,
       gcalMirrorLocalDeletions: true, gcalMirrorGoogleDeletions: true,
       prayer: true,
+      hardware: true,
     };
     void handled;
 
@@ -1798,6 +1839,7 @@ export default function WeeklyPlanner() {
     setTaskFilters(canonicalFilters(s.taskFilters));
     setGoogleTasksSync(s.googleTasksSync);
     setPrayer(s.prayer);
+    setHardware(s.hardware);
   }, []);
   const applySettingsSnapshotRef = useRef(applySettingsSnapshot);
   useEffect(() => { applySettingsSnapshotRef.current = applySettingsSnapshot; }, [applySettingsSnapshot]);
@@ -1845,8 +1887,9 @@ export default function WeeklyPlanner() {
       gcalMirrorLocalDeletions: initialSettings.gcalMirrorLocalDeletions,
       gcalMirrorGoogleDeletions: initialSettings.gcalMirrorGoogleDeletions,
       prayer,
+      hardware,
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer, initialSettings]);
+  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer, hardware, initialSettings]);
 
   // Patch the occurrence shown as `id`, routed to its stored master (an edit is to
   // the whole item). Remaps UI references if the occurrence id shifted (e.g. a
@@ -2797,6 +2840,42 @@ export default function WeeklyPlanner() {
     completeFocusSession(focusElapsedSeconds);
   };
 
+  // ── ESP32 desk controller ──────────────────────────────────────────────────
+  // The physical buttons and the presence sensor drive the session through the
+  // very same handlers the on-screen controls use, so there is exactly one
+  // definition of what "pause" or "terminate" means.
+  //
+  // The LCD's numbers are computed with the widget's formula rather than
+  // focusStats.todaySeconds: that one is derived from the currently viewed
+  // week, so browsing to another week would blank the total on the display.
+  const hwTodayKey = focusDayKey(new Date(nowTick), focusDayStartHour);
+  const hwTodaySeconds = sumFocusSecondsForDay(focusSessions, new Date(`${hwTodayKey}T00:00:00`), focusDayStartHour)
+    + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === hwTodayKey ? focusElapsedSeconds : 0);
+  const hwSessionsToday = focusSessions.filter(session =>
+    focusDayKey(session.endedAt, focusDayStartHour) === hwTodayKey && isCompletedFocusSession(session)).length;
+
+  const hardwareController = useHardwareController({
+    settings: hardware,
+    session: {
+      isRunning: focusTimer.isRunning,
+      hasSession: Boolean(focusTimer.sessionStartedAt),
+    },
+    display: {
+      mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',
+      remainingSeconds: focusRemainingSeconds,
+      todaySeconds: hwTodaySeconds,
+      sessionsToday: hwSessionsToday,
+    },
+    // Button A cycles start/pause/resume; startFocus already resumes an
+    // existing session rather than beginning a new one.
+    onToggle: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
+    onStart: startFocus,
+    onResume: startFocus,
+    onPause: pauseFocus,
+    onTerminate: stopFocus,
+  });
+  const hardwareArmSeconds = hardwareController.armSeconds;
+
   const setFocusMinutes = (minutes: number) => {
     const safeMinutes = Math.max(1, Math.floor(minutes));
     setFocusTimer(prev => ({ ...prev, plannedSeconds: safeMinutes * 60 }));
@@ -3503,6 +3582,17 @@ export default function WeeklyPlanner() {
 
   // â”€â”€ Global mouse move / up â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
+    /**
+     * How far the cursor has travelled since the grab, measured in the GRID's
+     * own coordinates. The dragged block is positioned inside the scrolling
+     * grid, so a plain viewport delta made it slide away from the cursor by
+     * exactly the amount the edge auto-scroll had scrolled.
+     */
+    const gridDelta = (e: MouseEvent, initGX: number, initGY: number, initX: number, initY: number) => {
+      const gr = daysGridRef.current?.getBoundingClientRect();
+      if (!gr) return { x: e.clientX - initX, y: e.clientY - initY };
+      return { x: (e.clientX - gr.left) - initGX, y: (e.clientY - gr.top) - initGY };
+    };
     const onMove = (e: MouseEvent) => {
       autoScrollLastPosRef.current = { clientX: e.clientX, clientY: e.clientY };
       const dr = dragRef.current;
@@ -3566,7 +3656,7 @@ export default function WeeklyPlanner() {
         if (!coords) return;
         br.curDay = coords.dayIndex;
         const dayDelta = coords.dayIndex - br.origDay;
-        const rawDelta = clamp(snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP), -dayStartMin * 4, dayEndMin);
+        const rawDelta = snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP);
 
         // ONE delta for the whole set, clamped so that every member stays in
         // range — clamping each item separately let the one that hit the edge
@@ -3574,11 +3664,9 @@ export default function WeeklyPlanner() {
         // (or a multi-selection) apart. Relative spacing is the whole point of
         // both features, so the group moves as far as its most constrained
         // member allows, and no further.
-        //
-        // The upper bound deliberately does NOT subtract the item's duration:
-        // an item may legitimately run past the end of the visible window (the
-        // head/tail rendering handles that), and subtracting it teleported any
-        // long overnight block to the bottom of the grid.
+        const cols   = visibleColsRef.current;
+        const colLo  = cols.length ? cols[0] : 0;
+        const colHi  = cols.length ? cols[cols.length - 1] : 6;
         let minDelta = -Infinity;
         let maxDelta = Infinity;
         let minDayDelta = -Infinity;
@@ -3587,8 +3675,8 @@ export default function WeeklyPlanner() {
           const base = br.baseStartMins[id];
           minDelta = Math.max(minDelta, dayStartMin - base);
           maxDelta = Math.min(maxDelta, (dayEndMin - POSITION_SNAP) - base);
-          minDayDelta = Math.max(minDayDelta, 0 - br.baseDays[id]);
-          maxDayDelta = Math.min(maxDayDelta, 6 - br.baseDays[id]);
+          minDayDelta = Math.max(minDayDelta, colLo - br.baseDays[id]);
+          maxDayDelta = Math.min(maxDayDelta, colHi - br.baseDays[id]);
         }
         const deltaMin = clamp(rawDelta, minDelta, maxDelta);
         const dayShift = clamp(dayDelta, minDayDelta, maxDayDelta);
@@ -3602,7 +3690,7 @@ export default function WeeklyPlanner() {
         }
         setBatchDisp(newBatchDisp);
         batchDispRef.current = newBatchDisp;
-        setDragDelta({ x: e.clientX - br.initX, y: e.clientY - br.initY });
+        setDragDelta(gridDelta(e, br.initGX, br.initGY, br.initX, br.initY));
         return;
       }
 
@@ -3661,11 +3749,19 @@ export default function WeeklyPlanner() {
           targetDay = coords.dayIndex - 1;
           rawStart = coords.snappedMin + 1440 - dr.offsetMin;
         }
-        const maxStart = dayEndMin - POSITION_SNAP;
-        const newStart = clamp(snapMin(rawStart, POSITION_SNAP), dayStartMin, maxStart);
+        // Pin, never wrap. The cursor's minute is already clamped to the window,
+        // so subtracting the grab offset near the top edge would push the start
+        // below it — wrapping that around threw the block to the BOTTOM of the
+        // previous column, which reads as the item teleporting away mid-drag.
+        const folded = foldToGrid(
+          targetDay, snapMin(rawStart, POSITION_SNAP),
+          visibleColsRef.current, dayStartMin, dayEndMin,
+        );
+        targetDay = folded.day;
+        const newStart = folded.startMin;
         dr.curDay = targetDay; dr.curStartMin = newStart;
         setDragDisp({ id: dr.eventId, day: targetDay, startMin: newStart });
-        setDragDelta({ x: e.clientX - dr.initX, y: e.clientY - dr.initY });
+        setDragDelta(gridDelta(e, dr.initGX, dr.initGY, dr.initX, dr.initY));
       }
       if (rr) {
         const coords = getGridCoords(e.clientX, e.clientY);
@@ -3736,9 +3832,12 @@ export default function WeeklyPlanner() {
             let endMin   = yToMin(Math.max(0, Math.max(cr.startY, curY)), interval, dayStartH);
             startMin = clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP);
             endMin   = clamp(endMin, startMin + POSITION_SNAP, dayEndMin);
+            const start24 = startMin >= 1440 ? startMin - 1440 : startMin;
+            const dur = endMin - startMin;
+            const end24 = (start24 + dur) % 1440;
             const id = uid();
             createStampedRef.current(
-              { id, dayIndex: cr.col, startTime: minToTime(startMin), endTime: minToTime(endMin), content: '', color: 'sage' },
+              { id, dayIndex: cr.col, startTime: minToTime(start24), endTime: minToTime(end24), content: '', color: 'sage' },
               { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
             );
           }
@@ -3758,7 +3857,12 @@ export default function WeeklyPlanner() {
               const ev = weekEventsRef.current[id] ?? eventsRef.current[id];
               if (!ev || !bd) continue;
               const dur = br.durations[id] ?? timeToMin(ev.endTime) - timeToMin(ev.startTime);
-              patches[id] = { dayIndex: bd.dayIndex, startTime: minToTime(bd.startMin), endTime: minToTime(bd.startMin + dur) };
+              const { day: d, startMin: s } = foldToGrid(
+                bd.dayIndex, bd.startMin, visibleColsRef.current, dayStartMin, dayEndMin,
+              );
+              const start24 = s >= 1440 ? s - 1440 : s;
+              const end24 = (start24 + dur) % 1440;
+              patches[id] = { dayIndex: d, startTime: minToTime(start24), endTime: minToTime(end24) };
             }
             applyEditMany(patches);
           }
@@ -3811,10 +3915,13 @@ export default function WeeklyPlanner() {
         if (dr.active) {
           const ev = weekEventsRef.current[dr.eventId] ?? eventsRef.current[dr.eventId];
           if (ev) {
-            const start24 = dr.curStartMin >= 1440 ? dr.curStartMin - 1440 : dr.curStartMin;
+            const { day: d, startMin: s } = foldToGrid(
+              dr.curDay, dr.curStartMin, visibleColsRef.current, dayStartMin, dayEndMin,
+            );
+            const start24 = s >= 1440 ? s - 1440 : s;
             const end24 = (start24 + dr.durationMin) % 1440;
             applyEditRef.current(dr.eventId, {
-              dayIndex: dr.curDay,
+              dayIndex: d,
               startTime: minToTime(start24),
               endTime: minToTime(end24)
             });
@@ -3892,14 +3999,16 @@ export default function WeeklyPlanner() {
   const handleColClick = (e: React.MouseEvent<HTMLDivElement>, dayIdx: number) => {
     if (didDragRef.current) return;
     if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
-    if (e.ctrlKey || e.metaKey) return; // Ctrl+click â†’ rubber band handled in onMouseDown
+    if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
     setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
     const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
     const dur      = Math.min(DEFAULT_EVENT_MIN, dayEndMin - startMin);
+    const start24  = startMin >= 1440 ? startMin - 1440 : startMin;
+    const end24    = (start24 + dur) % 1440;
     const id       = uid();
     createStamped(
-      { id, dayIndex: dayIdx, startTime: minToTime(startMin), endTime: minToTime(startMin + dur), content: '', color: 'sage' },
+      { id, dayIndex: dayIdx, startTime: minToTime(start24), endTime: minToTime(end24), content: '', color: 'sage' },
       { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
     );
   };
@@ -3933,11 +4042,13 @@ export default function WeeklyPlanner() {
           durations[id] = en - s;
         }
       }
+      const gr = daysGridRef.current?.getBoundingClientRect();
       batchDragRef.current = {
         eventIds: dragIds, baseStartMins, baseDays, durations,
         origDay: ev.dayIndex, curDay: ev.dayIndex,
         baseMouseMin: coords.snappedMin,
         active: false, initX: e.clientX, initY: e.clientY,
+        initGX: e.clientX - (gr?.left ?? 0), initGY: e.clientY - (gr?.top ?? 0),
       };
       return;
     }
@@ -3957,12 +4068,14 @@ export default function WeeklyPlanner() {
       offsetMin = clamp(coords.snappedMin + 1440 - startMin, 0, duration);
     }
 
+    const gridRect = daysGridRef.current?.getBoundingClientRect();
     dragRef.current = {
       eventId: ev.id, durationMin: duration,
       offsetMin,
       isHeadClick: isHead,
       origDay: ev.dayIndex, curDay: ev.dayIndex, curStartMin: startMin,
       active: false, initX: e.clientX, initY: e.clientY,
+      initGX: e.clientX - (gridRect?.left ?? 0), initGY: e.clientY - (gridRect?.top ?? 0),
     };
   };
 
@@ -4807,7 +4920,12 @@ export default function WeeklyPlanner() {
                     : { scale: 1 }}
                   transition={focusCelebrate ? { duration: 1.5, ease: 'easeInOut' } : { duration: 0.3 }}
                 >
-                  {formatCountdown(focusRemainingSeconds)}
+                  {/* While the desk sensor is arming, the countdown replaces the
+                      clock in all three places at once — here, the widget and
+                      the LCD — so they never show different things. */}
+                  {hardwareArmSeconds > 0
+                    ? <span className="text-base font-semibold whitespace-nowrap" style={{ color: '#60a5fa' }}>Starting in {hardwareArmSeconds}s</span>
+                    : formatCountdown(focusRemainingSeconds)}
                   <AnimatePresence>
                     {focusCelebrate && (
                       <motion.span
@@ -5078,6 +5196,9 @@ export default function WeeklyPlanner() {
                       let targetEnd24    = origEnd24;
 
                       if (isDrag && dragDisp) {
+                        // Already folded into the visible grid by the drag handler —
+                        // re-clamping here to 0–6 is what made the custom view's
+                        // out-of-week columns behave like a black hole.
                         targetDayIndex = dragDisp.day;
                         targetStart24  = dragDisp.startMin >= 1440 ? dragDisp.startMin - 1440 : dragDisp.startMin;
                         const dur      = normDuration(ev);
@@ -5089,7 +5210,8 @@ export default function WeeklyPlanner() {
                         const dur      = normDuration(ev);
                         targetEnd24    = (targetStart24 + dur) % 1440;
                       } else if (isResizing && resizeDisp) {
-                        targetStart24  = resizeDisp.startMin >= 1440 ? resizeDisp.startMin - 1440 : resizeDisp.startMin;
+                        const s        = resizeDisp.startMin;
+                        targetStart24  = s >= 1440 ? s - 1440 : s;
                         const dur      = resizeDisp.endMin - resizeDisp.startMin;
                         targetEnd24    = (targetStart24 + dur) % 1440;
                       }

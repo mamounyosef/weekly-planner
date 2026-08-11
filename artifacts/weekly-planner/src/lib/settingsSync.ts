@@ -1,5 +1,6 @@
 import { coerceFocusChime, coerceFocusCue, DEFAULT_FOCUS_CUES, type FocusChimeId, type FocusCueId, type FocusCueSlot } from './focusSessions';
 import { coerceShortcuts, DEFAULT_SHORTCUTS, type ShortcutMap } from './shortcuts';
+import { coerceHardwareSettings, DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from './hardwareController';
 import { coercePrayerSettings, DEFAULT_PRAYER_SETTINGS, type PrayerSettings } from './prayerTimes';
 
 export type TimeFormat = '12h' | '24h';
@@ -206,6 +207,8 @@ export interface AppSettings {
   gcalMirrorGoogleDeletions: boolean; // Deleting an event on Google's Daily Calendar deletes it in app
   // ── Prayer times ───────────────────────────────────────────────────────────
   prayer: PrayerSettings;
+  // ── ESP32 desk controller ──────────────────────────────────────────────────
+  hardware: HardwareSettings;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -250,6 +253,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gcalMirrorLocalDeletions: true,
   gcalMirrorGoogleDeletions: false,
   prayer: DEFAULT_PRAYER_SETTINGS,
+  hardware: DEFAULT_HARDWARE_SETTINGS,
 };
 
 export const TASK_PANEL_MIN_W = 260;
@@ -351,6 +355,7 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.gcalMirrorLocalDeletions === 'boolean') s.gcalMirrorLocalDeletions = r.gcalMirrorLocalDeletions;
   if (typeof r.gcalMirrorGoogleDeletions === 'boolean') s.gcalMirrorGoogleDeletions = r.gcalMirrorGoogleDeletions;
   s.prayer = coercePrayerSettings(r.prayer);
+  s.hardware = coerceHardwareSettings(r.hardware);
   return s;
 }
 

@@ -75,6 +75,12 @@ import {
   type PrayerOccurrence,
   type PrayerSettings,
 } from '@/lib/prayerTimes';
+import {
+  coerceHardwareSettings,
+  DEFAULT_HARDWARE_SETTINGS,
+  useHardwareController,
+  type HardwareSettings,
+} from '@/lib/hardwareController';
 import { usePrayerTimes } from '@/lib/usePrayerTimes';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
@@ -286,6 +292,7 @@ export default function Widget() {
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
+  const [hardware, setHardware] = useState<HardwareSettings>(DEFAULT_HARDWARE_SETTINGS);
   const focusChimeRef = useRef<FocusChimeId>(DEFAULT_FOCUS_CHIME);
   // Start / pause / resume cues, chosen in the main window's settings.
   const focusCuesRef = useRef<Record<FocusCueSlot, FocusCueId>>({ ...DEFAULT_FOCUS_CUES });
@@ -357,6 +364,7 @@ export default function Widget() {
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
+        setHardware(coerceHardwareSettings(s.hardware));
         if (s.focusChime != null) focusChimeRef.current = coerceFocusChime(s.focusChime);
         if (s.focusCues && typeof s.focusCues === 'object') {
           const c = s.focusCues as Record<string, unknown>;
@@ -1090,6 +1098,31 @@ export default function Widget() {
     completeFocusSession(focusElapsedSeconds);
   };
 
+  // ── ESP32 desk controller ──────────────────────────────────────────────────
+  // Both windows run this, but the server hands the lease to exactly one, so a
+  // single button press is never acted on twice. The window without the lease
+  // still tracks the countdown so it can display it — and takes over within
+  // seconds if the main window is closed.
+  const hardwareController = useHardwareController({
+    settings: hardware,
+    session: {
+      isRunning: focusTimer.isRunning,
+      hasSession: Boolean(focusTimer.sessionStartedAt),
+    },
+    display: {
+      mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',
+      remainingSeconds: focusRemainingSeconds,
+      todaySeconds: todayFocusSeconds,
+      sessionsToday: todayFocusSessions,
+    },
+    onToggle: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
+    onStart: startFocus,
+    onResume: startFocus,
+    onPause: pauseFocus,
+    onTerminate: stopFocus,
+  });
+  const hardwareArmSeconds = hardwareController.armSeconds;
+
   const setFocusMinutes = (minutes: number) => {
     const safeMinutes = Math.max(1, Math.floor(minutes));
     setFocusTimer(prev => ({
@@ -1369,7 +1402,9 @@ export default function Widget() {
                   : { scale: 1 }}
                 transition={focusCelebrate ? { duration: 1.5, ease: 'easeInOut' } : { duration: 0.3 }}
               >
-                {formatCountdown(focusRemainingSeconds)}
+                {hardwareArmSeconds > 0
+                  ? <span className="text-[13px] font-semibold whitespace-nowrap" style={{ color: '#60a5fa' }}>Starting in {hardwareArmSeconds}s</span>
+                  : formatCountdown(focusRemainingSeconds)}
               </motion.div>
               <button
                 onClick={() => setFocusCollapsed(v => !v)}

@@ -2505,6 +2505,140 @@ export default defineConfig({
           }
         });
 
+        // ---------------------------------------------------------------
+        // ESP32 focus-timer controller bridge.
+        //
+        // The firmware holds no logic: it posts raw events (button pressed,
+        // desk occupied) and renders whatever display state it is handed. The
+        // app consumes the events and drives the session through its own
+        // existing start/pause/terminate code, so a hardware button and an
+        // on-screen button cannot ever behave differently.
+        //
+        // All of this is live, disposable state regenerated every second, so
+        // it stays in memory -- writing it to disk would just churn the file
+        // database for no benefit.
+        // ---------------------------------------------------------------
+
+        type HardwareEvent = { id: number; type: string; present?: boolean; distanceCm?: number; at: number };
+        const hwEvents: HardwareEvent[] = [];
+        let hwEventSeq = 0;
+
+        // What the ESP32's LCD should show. Pushed by whichever window owns the
+        // controller, so the LCD renders the app's own numbers rather than a
+        // second, independently-computed version of them.
+        let hwDisplay: Record<string, unknown> = { mode: 'idle', remainingSeconds: 0, todaySeconds: 0, sessionsToday: 0, armSeconds: 0 };
+        let hwDisplayAt = 0;
+
+        // Both windows poll the same events. Without arbitration a single
+        // button press would be acted on twice -- started by one window and
+        // immediately paused by the other. A short lease makes exactly one
+        // window the owner, and lets the widget take over within seconds if the
+        // main window is closed.
+        const HW_LEASE_MS = 6000;
+        let hwOwner: string | null = null;
+        let hwOwnerAt = 0;
+
+        server.middlewares.use('/api/hardware', async (req, res, next) => {
+          const url = new URL(req.url ?? '', 'http://x');
+          const route = url.pathname.replace(/\/+$/, '');
+
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          if (req.method === 'OPTIONS') {
+            res.statusCode = 204;
+            res.end();
+            return;
+          }
+
+          const readBody = () => new Promise<string>(resolve => {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', () => resolve(body));
+          });
+
+          const json = (payload: unknown) => {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(payload));
+          };
+
+          // --- ESP32 -> server: a button was pressed, or presence changed ---
+          if (route === '/event' && req.method === 'POST') {
+            try {
+              const parsed = JSON.parse((await readBody()) || '{}');
+              const type = String(parsed?.type ?? '');
+              if (!type) throw new Error('missing type');
+
+              const evt: HardwareEvent = { id: ++hwEventSeq, type, at: Date.now() };
+              if (typeof parsed.present === 'boolean') evt.present = parsed.present;
+              if (Number.isFinite(Number(parsed.distanceCm))) evt.distanceCm = Number(parsed.distanceCm);
+
+              hwEvents.push(evt);
+              // Unconsumed events are worthless once stale, and the queue must
+              // not grow without bound if no window is open to drain it.
+              while (hwEvents.length > 50) hwEvents.shift();
+
+              json({ success: true, id: evt.id });
+            } catch (_) {
+              res.statusCode = 400;
+              json({ error: 'Bad hardware event' });
+            }
+            return;
+          }
+
+          // --- app -> server: drain events newer than the last one seen ---
+          if (route === '/events' && req.method === 'GET') {
+            const since = Number(url.searchParams.get('since') ?? 0) || 0;
+            json({ events: hwEvents.filter(e => e.id > since), latest: hwEventSeq });
+            return;
+          }
+
+          // --- ESP32 <- server: what to draw on the LCD ---
+          if (route === '/state' && req.method === 'GET') {
+            // A display that stopped being refreshed means no window is driving
+            // the controller, which the firmware shows as "not working".
+            const fresh = Date.now() - hwDisplayAt < HW_LEASE_MS;
+            json(fresh ? hwDisplay : { mode: 'offline', remainingSeconds: 0, todaySeconds: 0, sessionsToday: 0, armSeconds: 0 });
+            return;
+          }
+
+          // --- app -> server: publish the numbers the LCD should mirror ---
+          if (route === '/state' && req.method === 'POST') {
+            try {
+              const parsed = JSON.parse((await readBody()) || '{}');
+              hwDisplay = {
+                mode: ['idle', 'arming', 'running', 'paused'].includes(String(parsed?.mode)) ? String(parsed.mode) : 'idle',
+                remainingSeconds: Math.max(0, Math.floor(Number(parsed?.remainingSeconds) || 0)),
+                todaySeconds: Math.max(0, Math.floor(Number(parsed?.todaySeconds) || 0)),
+                sessionsToday: Math.max(0, Math.floor(Number(parsed?.sessionsToday) || 0)),
+                armSeconds: Math.max(0, Math.floor(Number(parsed?.armSeconds) || 0)),
+              };
+              hwDisplayAt = Date.now();
+              json({ success: true });
+            } catch (_) {
+              res.statusCode = 400;
+              json({ error: 'Bad hardware state' });
+            }
+            return;
+          }
+
+          // --- app: which window owns the controller right now? ---
+          if (route === '/claim' && req.method === 'POST') {
+            const key = url.searchParams.get('key') ?? '';
+            const now = Date.now();
+            if (!hwOwner || hwOwner === key || now - hwOwnerAt > HW_LEASE_MS) {
+              hwOwner = key;
+              hwOwnerAt = now;
+              json({ owner: true });
+            } else {
+              json({ owner: false });
+            }
+            return;
+          }
+
+          next();
+        });
+
         server.middlewares.use('/api/focus-timer/toggle', async (req, res, next) => {
           if (req.method !== 'POST') return next();
           const nowMs = Date.now();
