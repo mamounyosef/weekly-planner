@@ -202,12 +202,16 @@ export function reduceHardware(
     if (!settings.sensorEnabled) return { state: next, actions };
 
     if (present) {
+      // Being at the desk ends the absence, whatever else is true. Leaving this
+      // to the individual branches below meant it could survive a return and
+      // then fire against a later, unrelated session.
+      const wasAway = state.awaySince !== null;
+      next.awaySince = null;
+
       if (session.isRunning) {
-        // Already working; just cancel any pending absence timeout.
-        next.awaySince = null;
-      } else if (session.hasSession && state.awaySince !== null) {
+        // Already working; nothing to do beyond cancelling the timeout above.
+      } else if (session.hasSession && wasAway) {
         // Came back within the grace window -- pick the session back up.
-        next.awaySince = null;
         actions.push('resume');
       } else if (!session.hasSession) {
         // Fresh arrival. The countdown gives you time to settle in, and is
@@ -232,11 +236,20 @@ export function reduceHardware(
     if (!session.hasSession) actions.push('start');
   }
 
-  if (state.awaySince !== null && now - state.awaySince >= settings.awayTerminateSeconds * 1000) {
-    next.awaySince = null;
-    // Terminating leaves a clean slate, so returning to the desk arms a brand
-    // new session rather than resuming the abandoned one.
-    if (session.hasSession) actions.push('terminate');
+  if (state.awaySince !== null) {
+    // The countdown to terminate is only meaningful against a session that is
+    // still sitting paused because you walked away. Anything else -- the
+    // session ended, it was resumed from the app or the hotkey rather than the
+    // desk button, or away-pausing was switched off -- means the timer is
+    // stale, and firing it would kill a session that is running perfectly well.
+    if (!session.hasSession || session.isRunning || !settings.awayPauseEnabled) {
+      next.awaySince = null;
+    } else if (now - state.awaySince >= settings.awayTerminateSeconds * 1000) {
+      next.awaySince = null;
+      // Terminating leaves a clean slate, so returning to the desk arms a brand
+      // new session rather than resuming the abandoned one.
+      actions.push('terminate');
+    }
   }
 
   return { state: next, actions };
@@ -299,6 +312,7 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
   const isOwnerRef = useRef(false);
   const lastConfigRef = useRef<string | null>(null);
   const syncedRef = useRef(false);
+  const lastStateRef = useRef<string | null>(null);
 
   // Everything the poll loop needs, kept in refs so the interval does not have
   // to be torn down and rebuilt on every render.
@@ -335,11 +349,31 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       const now = Date.now();
 
       // --- ownership ---
+      const wasOwner = isOwnerRef.current;
       try {
         const res = await fetch(`/api/hardware/claim?key=${encodeURIComponent(controllerKey)}`, { method: 'POST' });
         isOwnerRef.current = res.ok ? Boolean((await res.json())?.owner) : false;
       } catch (_) {
         isOwnerRef.current = false;
+      }
+
+      // --- adopt the shared controller state ---
+      // Read on the first cycle and whenever this window takes over the lease.
+      // The state describes the desk, not the window, so a reload or a hand-off
+      // to the widget must not lose the fact that you walked away -- that is
+      // what left a paused session neither terminating nor resuming.
+      if (isOwnerRef.current && !wasOwner) {
+        try {
+          const res = await fetch('/api/hardware/controller');
+          if (res.ok) {
+            const s = await res.json();
+            stateRef.current = {
+              present: Boolean(s?.present),
+              armingUntil: typeof s?.armingUntil === 'number' ? s.armingUntil : null,
+              awaySince: typeof s?.awaySince === 'number' ? s.awaySince : null,
+            };
+          }
+        } catch (_) { /* keep whatever we had */ }
       }
 
       // --- drain events ---
@@ -385,7 +419,13 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       // display the countdown, but must not perform any action.
       if (!isOwnerRef.current) inputs = [];
 
-      inputs.push({ kind: 'tick' });
+      // The tick is time-driven and reads the session snapshot to decide
+      // whether a pending timer is still meaningful. Running it in the same
+      // cycle as an event would read a snapshot React has not updated yet --
+      // immediately after a pause the session still looks like it is running --
+      // so it waits for the next cycle, by which point the state has settled.
+      const hadEvents = inputs.length > 0;
+      if (!hadEvents) inputs.push({ kind: 'tick' });
 
       for (const input of inputs) {
         const result = reduceHardware(stateRef.current, input, o.session, o.settings, now);
@@ -397,6 +437,24 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       if (!cancelled) {
         setArmSeconds(arming);
         setPresent(stateRef.current.present);
+      }
+
+      // --- persist the controller state ---
+      // Written every cycle rather than only on change: this is the record that
+      // lets another window continue from where this one left off, so it must
+      // never be even one cycle out of date.
+      if (isOwnerRef.current) {
+        const serialized = JSON.stringify(stateRef.current);
+        if (serialized !== lastStateRef.current) {
+          lastStateRef.current = serialized;
+          try {
+            await fetch('/api/hardware/controller', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: serialized,
+            });
+          } catch (_) { lastStateRef.current = null; /* retry next cycle */ }
+        }
       }
 
       // --- publish sensor tuning for the board to pick up ---

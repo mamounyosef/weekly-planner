@@ -2552,6 +2552,13 @@ export default defineConfig({
         let hwLiveDistance: number | null = null;
         let hwLiveAt = 0;
 
+        // The controller's own state (are you here, is a countdown pending, how
+        // long have you been away). This lives on the server rather than in a
+        // window because it has to outlive both: a page reload or the lease
+        // moving to the widget would otherwise lose the fact that you walked
+        // away, so the session would neither terminate nor resume.
+        let hwController: Record<string, unknown> = { present: false, armingUntil: null, awaySince: null };
+
         server.middlewares.use('/api/hardware', async (req, res, next) => {
           const url = new URL(req.url ?? '', 'http://x');
           const route = url.pathname.replace(/\/+$/, '');
@@ -2680,6 +2687,29 @@ export default defineConfig({
           if (route === '/live' && req.method === 'GET') {
             const fresh = Date.now() - hwLiveAt < 3000;
             json({ distanceCm: fresh ? hwLiveDistance : null, fresh });
+            return;
+          }
+
+          // --- controller state, shared across windows and reloads ---
+          if (route === '/controller' && req.method === 'GET') {
+            json(hwController);
+            return;
+          }
+
+          if (route === '/controller' && req.method === 'POST') {
+            try {
+              const parsed = JSON.parse((await readBody()) || '{}');
+              const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : null);
+              hwController = {
+                present: Boolean(parsed?.present),
+                armingUntil: num(parsed?.armingUntil),
+                awaySince: num(parsed?.awaySince),
+              };
+              json({ success: true });
+            } catch (_) {
+              res.statusCode = 400;
+              json({ error: 'Bad controller state' });
+            }
             return;
           }
 
