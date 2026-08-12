@@ -13,6 +13,8 @@
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
+#include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <LiquidCrystal_I2C.h>
 #include <WiFi.h>
@@ -112,6 +114,12 @@ static void ledApply(LedState state, bool blinkPhase) {
 // Ultrasonic sensor
 // ---------------------------------------------------------------------------
 
+// A disconnected or dead HC-SR04 reads exactly like an empty desk: ECHO simply
+// never goes high. Presence is therefore not acted on until the sensor has
+// proved it works at least once, so a sensor that was never wired up cannot
+// pause and then terminate a session you are sitting in front of.
+static bool sensorProven = false;
+
 // One HC-SR04 ping. Returns distance in cm, or DIST_TIMEOUT_AS_CM when nothing
 // echoes back (which means "clear ahead", not "measurement failed").
 static float pingOnce() {
@@ -126,17 +134,41 @@ static float pingOnce() {
 
   float cm = us / 58.0f;
   if (cm < DIST_MIN_VALID_CM || cm > DIST_MAX_VALID_CM) return DIST_TIMEOUT_AS_CM;
+
+  // An echo inside the plausible band is only something a working sensor can
+  // produce, so this is what clears the guard above.
+  if (!sensorProven) {
+    sensorProven = true;
+    Serial.println("[sensor] first valid reading -- presence enabled");
+  }
   return cm;
 }
 
-static float sampleRing[MEDIAN_WINDOW];
+// Live tuning, replaced by whatever the app's settings say. The values here are
+// only what gets used in the seconds before the first config fetch succeeds.
+struct SensorConfig {
+  float enterCm = PRESENCE_ENTER_CM;
+  float exitCm = PRESENCE_EXIT_CM;
+  long sampleIntervalMs = SAMPLE_INTERVAL_MS;
+  int medianWindow = MEDIAN_WINDOW;
+  long presentConfirmMs = PRESENT_CONFIRM_MS;
+  long absentConfirmMs = ABSENT_CONFIRM_MS;
+  bool calibrating = false;
+  bool announceOnConnect = true;
+};
+static SensorConfig cfg;
+
+// Sized for the largest window the app is allowed to ask for; only the first
+// cfg.medianWindow entries are ever used.
+static float sampleRing[MEDIAN_WINDOW_MAX];
 static int sampleCount = 0;
 static int sampleHead = 0;
 
 static void pushSample(float cm) {
+  const int window = constrain(cfg.medianWindow, 1, MEDIAN_WINDOW_MAX);
   sampleRing[sampleHead] = cm;
-  sampleHead = (sampleHead + 1) % MEDIAN_WINDOW;
-  if (sampleCount < MEDIAN_WINDOW) sampleCount++;
+  sampleHead = (sampleHead + 1) % window;
+  if (sampleCount < window) sampleCount++;
 }
 
 // Median rather than mean: a single spurious reading gets sorted to one end and
@@ -144,7 +176,7 @@ static void pushSample(float cm) {
 static float medianDistance() {
   if (sampleCount == 0) return DIST_TIMEOUT_AS_CM;
 
-  float sorted[MEDIAN_WINDOW];
+  float sorted[MEDIAN_WINDOW_MAX];
   for (int i = 0; i < sampleCount; i++) sorted[i] = sampleRing[i];
   for (int i = 1; i < sampleCount; i++) {
     float key = sorted[i];
@@ -173,7 +205,7 @@ static bool updatePresence(float median, unsigned long now) {
   // while you are sitting right in front of it.
   if (!presenceInitialized) {
     presenceInitialized = true;
-    presencePresent = median < PRESENCE_ENTER_CM;
+    presencePresent = median < cfg.enterCm;
     presenceCandidate = presencePresent;
     candidateSince = now;
     return true;
@@ -181,7 +213,7 @@ static bool updatePresence(float median, unsigned long now) {
 
   // Hysteresis: the bar to change state depends on the state we are in, so a
   // distance hovering near the threshold cannot oscillate.
-  bool raw = presencePresent ? (median <= PRESENCE_EXIT_CM) : (median < PRESENCE_ENTER_CM);
+  bool raw = presencePresent ? (median <= cfg.exitCm) : (median < cfg.enterCm);
 
   if (raw != presenceCandidate) {
     presenceCandidate = raw;
@@ -192,7 +224,7 @@ static bool updatePresence(float median, unsigned long now) {
 
   // Leaving needs a longer confirmation than arriving -- briefly leaning out of
   // the beam should not count as walking away.
-  unsigned long needed = raw ? PRESENT_CONFIRM_MS : ABSENT_CONFIRM_MS;
+  unsigned long needed = raw ? cfg.presentConfirmMs : cfg.absentConfirmMs;
   if (now - candidateSince < needed) return false;
 
   presencePresent = raw;
@@ -203,8 +235,25 @@ static bool updatePresence(float median, unsigned long now) {
 // Server link
 // ---------------------------------------------------------------------------
 
+// Resolved once per connection and cached. mDNS is tried first so the PC can
+// change DHCP address without stranding the board; the compiled-in IP is only
+// the fallback for when mDNS is unavailable (some routers block it).
+static String resolvedHost = "";
+
+static void resolveServerHost() {
+  resolvedHost = SERVER_HOST;
+
+  IPAddress ip = MDNS.queryHost(SERVER_MDNS, 3000);
+  if (ip != IPAddress((uint32_t)0)) {
+    resolvedHost = ip.toString();
+    Serial.printf("[mdns] %s.local -> %s\n", SERVER_MDNS, resolvedHost.c_str());
+  } else {
+    Serial.printf("[mdns] no answer, falling back to %s\n", SERVER_HOST);
+  }
+}
+
 static String serverBase() {
-  return String("http://") + SERVER_HOST + ":" + String(SERVER_PORT);
+  return String("http://") + (resolvedHost.length() ? resolvedHost : SERVER_HOST) + ":" + String(SERVER_PORT);
 }
 
 static unsigned long lastServerOkAt = 0;
@@ -271,6 +320,48 @@ static bool jsonString(const String &src, const char *key, String &out) {
   return true;
 }
 
+// Pulls the sensor tuning the app's settings page publishes. A failure just
+// leaves the previous values in force -- the board keeps working on whatever it
+// last knew rather than reverting to compiled-in defaults mid-session.
+static void pollConfig() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(serverBase() + "/api/hardware/config")) return;
+
+  if (http.GET() == 200) {
+    String body = http.getString();
+    long n = 0;
+
+    if (jsonNumber(body, "enterCm", n)) cfg.enterCm = n;
+    if (jsonNumber(body, "exitCm", n)) cfg.exitCm = n;
+    if (jsonNumber(body, "sampleIntervalMs", n)) cfg.sampleIntervalMs = constrain(n, 40L, 2000L);
+    if (jsonNumber(body, "presentConfirmMs", n)) cfg.presentConfirmMs = constrain(n, 0L, 60000L);
+    if (jsonNumber(body, "absentConfirmMs", n)) cfg.absentConfirmMs = constrain(n, 0L, 60000L);
+    cfg.calibrating = body.indexOf("\"calibrating\":true") >= 0;
+    cfg.announceOnConnect = body.indexOf("\"announceOnConnect\":true") >= 0;
+
+    if (jsonNumber(body, "medianWindow", n)) {
+      const int w = constrain((int)n, 1, MEDIAN_WINDOW_MAX);
+      if (w != cfg.medianWindow) {
+        // Resizing the ring invalidates what is in it -- a median taken across
+        // the old and new window sizes would be meaningless.
+        cfg.medianWindow = w;
+        sampleCount = 0;
+        sampleHead = 0;
+      }
+    }
+  }
+  http.end();
+}
+
+// Streams the current median to the settings page while calibrating, so the
+// thresholds can be chosen against what the sensor actually sees on this desk.
+static void streamCalibration(float median) {
+  postEvent(String("{\"type\":\"distance\",\"distanceCm\":") + String(median, 1) + "}");
+}
+
 static void pollState() {
   if (WiFi.status() != WL_CONNECTED) {
     ui.valid = false;
@@ -295,6 +386,21 @@ static void pollState() {
     jsonNumber(body, "armSeconds", ui.armSeconds);
     ui.valid = true;
     lastServerOkAt = millis();
+
+    // "offline" means the server is up but no app window is driving it. The
+    // board typically boots long before the PC has finished starting, so the
+    // presence it detected at power-on was posted into the void. Re-announcing
+    // the moment a window appears is what makes sitting at an already-occupied
+    // desk behave like arriving at it -- otherwise nothing happens until you
+    // get up and sit back down.
+    const bool appAlive = ui.mode != "offline";
+    static bool wasAppAlive = false;
+    if (appAlive && !wasAppAlive && sensorProven && cfg.announceOnConnect) {
+      Serial.printf("[app] window appeared -- re-announcing presence=%s\n", presencePresent ? "true" : "false");
+      postEvent(String("{\"type\":\"presence\",\"present\":") + (presencePresent ? "true" : "false") +
+                ",\"distanceCm\":" + String(medianDistance(), 1) + "}");
+    }
+    wasAppAlive = appAlive;
   }
   else {
     Serial.printf("[poll] failed: %d\n", code);
@@ -365,28 +471,51 @@ static void renderLcd(bool linkUp) {
 // begins and ends between two digitalRead() calls is simply never seen. An
 // interrupt latches the press the instant it happens, whatever the main loop
 // is busy with, and the loop drains the latch when it gets around to it.
-static const unsigned long BTN_LOCKOUT_US = 40000;  // 40ms, swallows contact bounce
+static const unsigned long BTN_LOCKOUT_US = 40000;   // swallows contact bounce
+static const unsigned long BTN_RELEASE_MS = 50;      // held HIGH this long = released
 
+// One event per physical press, enforced by a latch rather than by timing
+// alone. Holding the button down produced repeats because edges kept firing
+// during the hold; requiring the pin to be seen genuinely released before the
+// next press is accepted makes that impossible however noisy the contact is.
 static volatile bool btnAPressed = false;
 static volatile bool btnBPressed = false;
+static volatile bool btnADown = false;
+static volatile bool btnBDown = false;
 static volatile unsigned long btnALastUs = 0;
 static volatile unsigned long btnBLastUs = 0;
 
 static void IRAM_ATTR onBtnA() {
   unsigned long us = micros();
-  if (us - btnALastUs < BTN_LOCKOUT_US) return;
+  if (btnADown || us - btnALastUs < BTN_LOCKOUT_US) return;
   btnALastUs = us;
+  btnADown = true;
   btnAPressed = true;
 }
 
 static void IRAM_ATTR onBtnB() {
   unsigned long us = micros();
-  if (us - btnBLastUs < BTN_LOCKOUT_US) return;
+  if (btnBDown || us - btnBLastUs < BTN_LOCKOUT_US) return;
   btnBLastUs = us;
+  btnBDown = true;
   btnBPressed = true;
 }
 
-static void drainButtons() {
+// Clears the latch once the pin has read HIGH steadily, arming the next press.
+static void serviceRelease(int pin, volatile bool &down, unsigned long &highSince, unsigned long now) {
+  if (!down) return;
+  if (digitalRead(pin) == LOW) {
+    highSince = 0;
+    return;
+  }
+  if (highSince == 0) {
+    highSince = now;
+    return;
+  }
+  if (now - highSince >= BTN_RELEASE_MS) down = false;
+}
+
+static void drainButtons(unsigned long now) {
   if (btnAPressed) {
     btnAPressed = false;
     Serial.println("[btn] A");
@@ -397,6 +526,11 @@ static void drainButtons() {
     Serial.println("[btn] B");
     postEvent("{\"type\":\"button_b\"}");
   }
+
+  static unsigned long aHighSince = 0;
+  static unsigned long bHighSince = 0;
+  serviceRelease(PIN_BTN_A, btnADown, aHighSince, now);
+  serviceRelease(PIN_BTN_B, btnBDown, bHighSince, now);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,9 +551,47 @@ static void connectWifi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("[wifi] connected, ip=%s\n", WiFi.localIP().toString().c_str());
+
+    // Own hostname, so the board itself is reachable as planner-desk.local for
+    // OTA without having to hunt for its address.
+    MDNS.begin("planner-desk");
+    resolveServerHost();
   } else {
     Serial.println("[wifi] join failed -- will keep retrying");
   }
+}
+
+// Over-the-air updates, so firmware changes no longer need the board carried
+// to the PC and plugged in. The display says what is happening -- an update
+// that appears to hang is otherwise indistinguishable from a crash.
+static void setupOta() {
+  ArduinoOTA.setHostname("planner-desk");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() {
+    lcdLine0Shown = "";  // force a full repaint over whatever was there
+    lcdLine1Shown = "";
+    lcdShow(0, "OTA update");
+    lcdShow(1, "0%");
+    Serial.println("[ota] start");
+  });
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    if (!total) return;
+    lcdShow(1, String((done * 100) / total) + "%");
+  });
+  ArduinoOTA.onEnd([]() {
+    lcdShow(0, "OTA done");
+    lcdShow(1, "rebooting");
+    Serial.println("[ota] done");
+  });
+  ArduinoOTA.onError([](ota_error_t err) {
+    lcdShow(0, "OTA failed");
+    lcdShow(1, String("err ") + err);
+    Serial.printf("[ota] error %u\n", err);
+  });
+
+  ArduinoOTA.begin();
+  Serial.println("[ota] ready at planner-desk.local");
 }
 
 void setup() {
@@ -471,24 +643,40 @@ void setup() {
   // WiFi auto-reconnects in the background; the loop tolerates it being down.
   WiFi.setAutoReconnect(true);
   connectWifi();
+  setupOta();
 #endif
 }
 
 void loop() {
   unsigned long now = millis();
 
-  drainButtons();
+#if !DIAG_NO_WIFI
+  ArduinoOTA.handle();
+#endif
+
+  drainButtons(now);
 
   // --- sensor ---
   static unsigned long lastSample = 0;
-  if (now - lastSample >= SAMPLE_INTERVAL_MS) {
+  if (now - lastSample >= (unsigned long)cfg.sampleIntervalMs) {
     lastSample = now;
     pushSample(pingOnce());
 
     // Wait for a full window before trusting the median, otherwise the very
-    // first readings decide the state on partial evidence.
-    if (sampleCount >= MEDIAN_WINDOW) {
+    // first readings decide the state on partial evidence. sensorProven keeps
+    // an absent sensor from being reported as an absent person.
+    if (sensorProven && sampleCount >= constrain(cfg.medianWindow, 1, MEDIAN_WINDOW_MAX)) {
       float med = medianDistance();
+
+      // Calibration streams the raw truth about this desk, independent of the
+      // thresholds being tuned -- otherwise you would be calibrating against
+      // numbers the current thresholds had already filtered.
+      static unsigned long lastStream = 0;
+      if (cfg.calibrating && now - lastStream >= CALIBRATION_STREAM_MS) {
+        lastStream = now;
+        streamCalibration(med);
+      }
+
       bool flipped = updatePresence(med, now);
 
       if (flipped) {
@@ -512,6 +700,13 @@ void loop() {
     } else {
       pollState();
     }
+  }
+
+  // --- config poll ---
+  static unsigned long lastConfigPoll = 0;
+  if (now - lastConfigPoll >= CONFIG_POLL_INTERVAL_MS) {
+    lastConfigPoll = now;
+    pollConfig();
   }
 
   // --- display + LED ---

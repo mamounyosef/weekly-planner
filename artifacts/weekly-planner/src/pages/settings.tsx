@@ -65,7 +65,7 @@ import {
   type PrayerSettings,
   type PrayerStyle,
 } from '@/lib/prayerTimes';
-import { DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from '@/lib/hardwareController';
+import { DEFAULT_HARDWARE_SETTINGS, MEDIAN_WINDOW_MAX, type HardwareSettings } from '@/lib/hardwareController';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -154,6 +154,150 @@ function RedirectUriHelp({ textPrimary, textSecondary, cardBdr, darkMode, onCopi
         <b> Testing</b>, Google expires its refresh tokens after 7 days — sync then dies
         every week until you press Publish.
       </p>
+    </div>
+  );
+}
+
+/**
+ * Live distance readout plus a two-sample calibration.
+ *
+ * Thresholds cannot be guessed: they depend on where the sensor ended up, the
+ * chair, and how you sit. Capturing what the sensor genuinely reports in each
+ * state and deriving the thresholds from that is the only way to get a gap
+ * that actually separates them — and it makes an unworkable placement (the two
+ * readings overlapping) immediately obvious instead of a mystery later.
+ */
+function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPrimary, textSecondary }: {
+  hardware: HardwareSettings;
+  patchHardware: (patch: Partial<HardwareSettings>) => void;
+  cardBg: string;
+  cardBdr: string;
+  textPrimary: string;
+  textSecondary: string;
+}) {
+  const [live, setLive] = useState<number | null>(null);
+  const [seated, setSeated] = useState<number | null>(null);
+  const [empty, setEmpty] = useState<number | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  // Only poll while calibrating; the board only streams in that mode anyway.
+  useEffect(() => {
+    if (!hardware.calibrating) {
+      setLive(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/hardware/live');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setLive(typeof data?.distanceCm === 'number' ? data.distanceCm : null);
+      } catch (_) { /* transient */ }
+    };
+    void tick();
+    const id = window.setInterval(() => { void tick(); }, 300);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [hardware.calibrating]);
+
+  const apply = (seatedCm: number, emptyCm: number) => {
+    if (seatedCm >= emptyCm) {
+      setNote('Seated reads no closer than empty — the sensor is aimed at something fixed (a chair back or armrest). Re-aim it and capture again.');
+      return;
+    }
+    const gap = emptyCm - seatedCm;
+    if (gap < 10) {
+      setNote(`Only ${gap.toFixed(0)} cm between the two states. That is too narrow to be reliable — re-aim for a clearer gap.`);
+      return;
+    }
+    // Thresholds placed inside the gap rather than at its centre: the band
+    // between them is the hysteresis, and biasing it slightly towards "empty"
+    // makes the sensor quicker to notice you than to give up on you.
+    patchHardware({
+      enterCm: Math.round(seatedCm + gap * 0.45),
+      exitCm: Math.round(seatedCm + gap * 0.65),
+      calibrating: false,
+    });
+    setNote(`Done — ${gap.toFixed(0)} cm of separation. Thresholds set and calibration turned off.`);
+  };
+
+  return (
+    <div className="rounded-2xl border p-4 flex flex-col gap-3" style={{ borderColor: cardBdr }}>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Calibration</span>
+        <button
+          type="button"
+          onClick={() => {
+            patchHardware({ calibrating: !hardware.calibrating });
+            setSeated(null); setEmpty(null); setNote(null);
+          }}
+          className="px-3 py-1.5 rounded-lg border text-[11px]"
+          style={{
+            background: hardware.calibrating ? '#3b82f6' : cardBg,
+            borderColor: hardware.calibrating ? '#3b82f6' : cardBdr,
+            color: hardware.calibrating ? '#fff' : textPrimary,
+          }}
+        >
+          {hardware.calibrating ? 'Stop' : 'Start calibration'}
+        </button>
+      </div>
+
+      {hardware.calibrating ? (
+        <>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-semibold tabular-nums" style={{ color: textPrimary }}>
+              {live === null ? '--' : live.toFixed(1)}
+            </span>
+            <span className="text-[11px]" style={{ color: textSecondary }}>
+              {live === null ? 'waiting for the board…' : 'cm right now'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              disabled={live === null}
+              onClick={() => { setSeated(live); setNote(null); }}
+              className="px-3 py-2 rounded-xl border text-[11px] disabled:opacity-40"
+              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+            >
+              Capture seated{seated !== null ? ` · ${seated.toFixed(0)}cm` : ''}
+            </button>
+            <button
+              type="button"
+              disabled={live === null}
+              onClick={() => { setEmpty(live); setNote(null); }}
+              className="px-3 py-2 rounded-xl border text-[11px] disabled:opacity-40"
+              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+            >
+              Capture empty{empty !== null ? ` · ${empty.toFixed(0)}cm` : ''}
+            </button>
+          </div>
+
+          <p className="text-[10px]" style={{ color: textSecondary }}>
+            Sit normally and capture seated. Then get up, step away, and capture empty — leave the chair where it
+            normally sits, since it stays in the beam when you go.
+          </p>
+
+          <button
+            type="button"
+            disabled={seated === null || empty === null}
+            onClick={() => { if (seated !== null && empty !== null) apply(seated, empty); }}
+            className="px-3 py-2 rounded-xl text-[11px] font-semibold disabled:opacity-40"
+            style={{ background: '#3b82f6', color: '#fff' }}
+          >
+            Set thresholds from these readings
+          </button>
+        </>
+      ) : (
+        <p className="text-[10px]" style={{ color: textSecondary }}>
+          Streams live distance from the sensor so the thresholds can be measured rather than guessed.
+        </p>
+      )}
+
+      {note && (
+        <p className="text-[10px] leading-relaxed" style={{ color: textSecondary }}>{note}</p>
+      )}
     </div>
   );
 }
@@ -2223,6 +2367,28 @@ export default function SettingsPage() {
                             </button>
                           </div>
 
+                          {/* What happens when the app first becomes reachable */}
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <span className="text-xs font-semibold" style={{ color: textPrimary }}>Start a session when the app comes online</span>
+                              <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                                The board is powered before the PC finishes booting, so it detects you long before
+                                anything is listening. With this on, it re-reports the desk as occupied the moment a
+                                window appears and you get the usual grace period, as though you had just sat down.
+                                With it off, nothing happens until you actually leave and return.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => patchHardware({ announceOnConnect: !hardware.announceOnConnect })}
+                              className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                              style={{ background: hardware.announceOnConnect ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                              aria-pressed={hardware.announceOnConnect}
+                            >
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.announceOnConnect ? 22 : 2 }} />
+                            </button>
+                          </div>
+
                           {hardware.awayPauseEnabled && (
                             <div className="flex flex-col gap-2">
                               <span className="text-xs font-semibold" style={{ color: textPrimary }}>Terminate the session after being away for</span>
@@ -2250,11 +2416,114 @@ export default function SettingsPage() {
                         </>
                       )}
 
+                      {/* Sensor tuning — applied over WiFi, no reflashing */}
+                      <div className="pt-4 border-t flex flex-col gap-4" style={{ borderColor: cardBdr }}>
+                        <div>
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sensor tuning</span>
+                          <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                            The board re-reads these every few seconds over WiFi, so it never has to be plugged into
+                            the PC to be retuned. Use calibration below rather than guessing at the distances.
+                          </p>
+                        </div>
+
+                        <HardwareCalibration
+                          hardware={hardware}
+                          patchHardware={patchHardware}
+                          cardBg={cardBg}
+                          cardBdr={cardBdr}
+                          textPrimary={textPrimary}
+                          textSecondary={textSecondary}
+                        />
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>At desk below (cm)</span>
+                            <input
+                              type="number" min={2} max={400} step={1}
+                              value={hardware.enterCm}
+                              onChange={e => patchHardware({ enterCm: Number(e.target.value) || 0 })}
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Away above (cm)</span>
+                            <input
+                              type="number" min={2} max={400} step={1}
+                              value={hardware.exitCm}
+                              onChange={e => patchHardware({ exitCm: Number(e.target.value) || 0 })}
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                        </div>
+                        <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
+                          The gap between these two is deliberate: a reading sitting exactly on one threshold would
+                          otherwise flip the state back and forth every sample.
+                        </p>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Median window size</span>
+                            <input
+                              type="number" min={1} max={MEDIAN_WINDOW_MAX} step={2}
+                              value={hardware.medianWindow}
+                              onChange={e => patchHardware({ medianWindow: Number(e.target.value) || 1 })}
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                            <span className="text-[10px]" style={{ color: textSecondary }}>
+                              The board takes the <span style={{ color: textPrimary }}>median</span> (middle value) of
+                              the last N readings, not the average — a wild reading sorts to an end and is discarded
+                              outright, where an average would let it drag the result. At {hardware.medianWindow},
+                              up to {Math.floor(hardware.medianWindow / 2)} bad reading
+                              {Math.floor(hardware.medianWindow / 2) === 1 ? '' : 's'} in every {hardware.medianWindow} are
+                              ignored. Odd numbers only, max {MEDIAN_WINDOW_MAX}.
+                            </span>
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Time between readings (ms)</span>
+                            <input
+                              type="number" min={40} max={2000} step={10}
+                              value={hardware.sampleIntervalMs}
+                              onChange={e => patchHardware({ sampleIntervalMs: Number(e.target.value) || 40 })}
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Confirm arrival after (ms)</span>
+                            <input
+                              type="number" min={0} max={60000} step={250}
+                              value={hardware.presentConfirmMs}
+                              onChange={e => patchHardware({ presentConfirmMs: Number(e.target.value) || 0 })}
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Confirm leaving after (ms)</span>
+                            <input
+                              type="number" min={0} max={60000} step={250}
+                              value={hardware.absentConfirmMs}
+                              onChange={e => patchHardware({ absentConfirmMs: Number(e.target.value) || 0 })}
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                        </div>
+                        <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
+                          A state has to hold this long before it is believed. Leaving is usually given the longer
+                          fuse, so briefly leaning out of the beam does not read as walking away.
+                        </p>
+                      </div>
+
                       <div className="pt-4 border-t flex items-center justify-between gap-4" style={{ borderColor: cardBdr }}>
                         <p className="text-[11px]" style={{ color: textSecondary }}>
-                          The distance threshold that decides "at the desk" is calibrated per desk and lives in the
-                          firmware's <span style={{ color: textPrimary }}>config.h</span>, since changing it requires
-                          reflashing the board.
+                          Pin assignments and the WiFi credentials are the only things still fixed in the firmware.
                         </p>
                         <button
                           type="button"

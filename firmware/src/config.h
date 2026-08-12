@@ -29,6 +29,10 @@
 // Two thresholds instead of one gives hysteresis -- once you are detected as
 // present it takes a clearly larger distance to drop you, so a reading sitting
 // right on the boundary cannot rattle the state back and forth.
+//
+// NOTE: these are only the fallbacks used before the app has been reached.
+// The live values come from the app's settings over /api/hardware/config, so
+// the sensor can be retuned without plugging the board into the PC.
 #define PRESENCE_ENTER_CM 48.0f  // absent -> present when median drops below this
 #define PRESENCE_EXIT_CM 52.0f   // present -> absent when median rises above this
 
@@ -43,6 +47,18 @@
 // ignored. An odd window size means there is always a true middle element.
 #define SAMPLE_INTERVAL_MS 100
 #define MEDIAN_WINDOW 5
+
+// The sample ring is a fixed array, so the window the app may request has to be
+// bounded at compile time. Keep in step with MEDIAN_WINDOW_MAX in
+// hardwareController.ts.
+#define MEDIAN_WINDOW_MAX 15
+
+// How often the board re-reads its tuning from the app.
+#define CONFIG_POLL_INTERVAL_MS 3000
+
+// While calibrating, how often the live distance is streamed to the settings
+// page. Fast enough to feel live, slow enough not to flood the dev server.
+#define CALIBRATION_STREAM_MS 250
 
 // Even a clean median flickers while you shift in your seat, so a candidate
 // state must hold continuously for this long before it is believed. Leaving is

@@ -2538,6 +2538,20 @@ export default defineConfig({
         let hwOwner: string | null = null;
         let hwOwnerAt = 0;
 
+        // Sensor tuning, owned by the app's settings and fetched by the board.
+        // Keeping it here rather than in firmware means the thresholds and
+        // filter parameters can be changed without plugging the ESP32 into the
+        // PC to reflash it. Defaults match the firmware's own fallbacks.
+        let hwConfig: Record<string, unknown> = {
+          enterCm: 48, exitCm: 52, sampleIntervalMs: 100, medianWindow: 5,
+          presentConfirmMs: 2000, absentConfirmMs: 5000, calibrating: false,
+          announceOnConnect: true,
+        };
+
+        // Live distance, streamed by the board only while calibrating.
+        let hwLiveDistance: number | null = null;
+        let hwLiveAt = 0;
+
         server.middlewares.use('/api/hardware', async (req, res, next) => {
           const url = new URL(req.url ?? '', 'http://x');
           const route = url.pathname.replace(/\/+$/, '');
@@ -2568,6 +2582,15 @@ export default defineConfig({
               const parsed = JSON.parse((await readBody()) || '{}');
               const type = String(parsed?.type ?? '');
               if (!type) throw new Error('missing type');
+
+              // Calibration samples are a live readout, not a queued event --
+              // they arrive several times a second and only the latest matters.
+              if (type === 'distance') {
+                hwLiveDistance = Number(parsed?.distanceCm);
+                hwLiveAt = Date.now();
+                json({ success: true });
+                return;
+              }
 
               const evt: HardwareEvent = { id: ++hwEventSeq, type, at: Date.now() };
               if (typeof parsed.present === 'boolean') evt.present = parsed.present;
@@ -2619,6 +2642,44 @@ export default defineConfig({
               res.statusCode = 400;
               json({ error: 'Bad hardware state' });
             }
+            return;
+          }
+
+          // --- ESP32 <- server: sensor tuning to apply at runtime ---
+          if (route === '/config' && req.method === 'GET') {
+            json(hwConfig);
+            return;
+          }
+
+          // --- app -> server: publish sensor tuning from settings ---
+          if (route === '/config' && req.method === 'POST') {
+            try {
+              const parsed = JSON.parse((await readBody()) || '{}');
+              // Already validated and clamped by coerceHardwareSettings before
+              // being sent; stored as-is so the firmware sees exactly what the
+              // settings page shows.
+              hwConfig = {
+                enterCm: Number(parsed?.enterCm) || 48,
+                exitCm: Number(parsed?.exitCm) || 52,
+                sampleIntervalMs: Number(parsed?.sampleIntervalMs) || 100,
+                medianWindow: Number(parsed?.medianWindow) || 5,
+                presentConfirmMs: Number(parsed?.presentConfirmMs) || 0,
+                absentConfirmMs: Number(parsed?.absentConfirmMs) || 0,
+                calibrating: Boolean(parsed?.calibrating),
+                announceOnConnect: Boolean(parsed?.announceOnConnect),
+              };
+              json({ success: true });
+            } catch (_) {
+              res.statusCode = 400;
+              json({ error: 'Bad hardware config' });
+            }
+            return;
+          }
+
+          // --- app <- server: latest calibration reading ---
+          if (route === '/live' && req.method === 'GET') {
+            const fresh = Date.now() - hwLiveAt < 3000;
+            json({ distanceCm: fresh ? hwLiveDistance : null, fresh });
             return;
           }
 

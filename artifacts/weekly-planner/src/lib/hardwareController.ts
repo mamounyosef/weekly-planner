@@ -27,7 +27,40 @@ export interface HardwareSettings {
   awayPauseEnabled: boolean;
   /** How long you may stay away before the paused session is terminated. */
   awayTerminateSeconds: number;
+
+  // ── Sensor tuning ─────────────────────────────────────────────────────────
+  // These live here rather than in the firmware so the board never has to be
+  // plugged into the PC to be re-tuned. The ESP32 fetches them periodically and
+  // applies them at runtime.
+
+  /** Absent → present once the median distance drops below this (cm). */
+  enterCm: number;
+  /** Present → absent once the median rises above this (cm). Must exceed
+   *  enterCm: the gap between the two is the hysteresis that stops a reading
+   *  sitting on the boundary from rattling the state back and forth. */
+  exitCm: number;
+  /** Milliseconds between ultrasonic pings. */
+  sampleIntervalMs: number;
+  /** How many samples the median is taken over. Odd values only, so there is
+   *  always a true middle element. Capped by the firmware's buffer. */
+  medianWindow: number;
+  /** Sustained time before arriving is believed (ms). */
+  presentConfirmMs: number;
+  /** Sustained time before leaving is believed (ms). Normally longer than
+   *  presentConfirmMs so leaning out of the beam is not read as walking away. */
+  absentConfirmMs: number;
+  /** While true the board streams live distance readings for calibration. */
+  calibrating: boolean;
+  /** Re-announce presence when an app window first becomes reachable. The
+   *  board is usually up long before the PC has finished booting, so without
+   *  this, sitting at an already-occupied desk starts nothing until you get up
+   *  and sit back down. Evaluated on the board, since it is the thing that
+   *  knows when the link came back. */
+  announceOnConnect: boolean;
 }
+
+/** Matches MEDIAN_WINDOW_MAX in the firmware's config.h. */
+export const MEDIAN_WINDOW_MAX = 15;
 
 export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   enabled: true,
@@ -36,6 +69,15 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   armSeconds: 30,
   awayPauseEnabled: true,
   awayTerminateSeconds: 120,
+  // Measured on this desk: seated reads 30-39 cm, empty chair 57-59 cm.
+  enterCm: 48,
+  exitCm: 52,
+  sampleIntervalMs: 100,
+  medianWindow: 5,
+  presentConfirmMs: 2000,
+  absentConfirmMs: 5000,
+  calibrating: false,
+  announceOnConnect: true,
 };
 
 export function coerceHardwareSettings(raw: unknown): HardwareSettings {
@@ -53,6 +95,30 @@ export function coerceHardwareSettings(raw: unknown): HardwareSettings {
   if (Number.isFinite(Number(r.awayTerminateSeconds))) {
     s.awayTerminateSeconds = Math.max(10, Math.min(3600, Math.round(Number(r.awayTerminateSeconds))));
   }
+
+  if (typeof r.calibrating === 'boolean') s.calibrating = r.calibrating;
+  if (typeof r.announceOnConnect === 'boolean') s.announceOnConnect = r.announceOnConnect;
+  if (Number.isFinite(Number(r.enterCm))) s.enterCm = Math.max(2, Math.min(400, Number(r.enterCm)));
+  if (Number.isFinite(Number(r.exitCm))) s.exitCm = Math.max(2, Math.min(400, Number(r.exitCm)));
+  if (Number.isFinite(Number(r.sampleIntervalMs))) {
+    s.sampleIntervalMs = Math.max(40, Math.min(2000, Math.round(Number(r.sampleIntervalMs))));
+  }
+  if (Number.isFinite(Number(r.medianWindow))) {
+    const w = Math.max(1, Math.min(MEDIAN_WINDOW_MAX, Math.round(Number(r.medianWindow))));
+    s.medianWindow = w % 2 === 0 ? w - 1 : w;  // even windows have no true middle
+  }
+  if (Number.isFinite(Number(r.presentConfirmMs))) {
+    s.presentConfirmMs = Math.max(0, Math.min(60000, Math.round(Number(r.presentConfirmMs))));
+  }
+  if (Number.isFinite(Number(r.absentConfirmMs))) {
+    s.absentConfirmMs = Math.max(0, Math.min(60000, Math.round(Number(r.absentConfirmMs))));
+  }
+
+  // Hysteresis only works if leaving needs a strictly larger distance than
+  // arriving. An inverted pair would make the state flip on every sample, so it
+  // is corrected here rather than trusted.
+  if (s.exitCm <= s.enterCm) s.exitCm = s.enterCm + 4;
+
   return s;
 }
 
@@ -213,6 +279,10 @@ export interface HardwareControllerOptions {
 // extrapolating between updates, so the publish rate is what the LCD's
 // smoothness depends on.
 const POLL_MS = 500;
+
+// An event older than this is history, not news. Acting on one would mean
+// reacting to where you were, not where you are.
+const STALE_EVENT_MS = 10_000;
 const controllerKey = `hw-${Math.random().toString(36).slice(2)}-${Date.now()}`;
 
 /**
@@ -227,6 +297,8 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
   const stateRef = useRef<HardwareControllerState>(INITIAL_CONTROLLER_STATE);
   const lastEventIdRef = useRef(0);
   const isOwnerRef = useRef(false);
+  const lastConfigRef = useRef<string | null>(null);
+  const syncedRef = useRef(false);
 
   // Everything the poll loop needs, kept in refs so the interval does not have
   // to be torn down and rebuilt on every render.
@@ -276,9 +348,25 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
         const res = await fetch(`/api/hardware/events?since=${lastEventIdRef.current}`);
         if (res.ok) {
           const data = await res.json();
-          const events: Array<{ id: number; type: string; present?: boolean }> = data?.events ?? [];
+          const events: Array<{ id: number; type: string; present?: boolean; at?: number }> = data?.events ?? [];
+
+          // The server keeps a backlog so a briefly-disconnected window can
+          // catch up. A window that has just opened has no business replaying
+          // it: acting on a presence change from ten minutes ago would pause
+          // and then terminate a session that is running perfectly well. So the
+          // first poll only adopts the position in the stream.
+          if (!syncedRef.current) {
+            syncedRef.current = true;
+            lastEventIdRef.current = Number(data?.latest) || 0;
+            if (!cancelled) setOnline(true);
+            return;
+          }
+
           for (const e of events) {
             lastEventIdRef.current = Math.max(lastEventIdRef.current, e.id);
+            // Belt and braces: an event that has been sitting unconsumed for a
+            // while no longer describes the present, whatever the reason.
+            if (typeof e.at === 'number' && now - e.at > STALE_EVENT_MS) continue;
             if (e.type === 'presence') inputs.push({ kind: 'presence', present: e.present });
             else if (e.type === 'button_a') inputs.push({ kind: 'button_a' });
             else if (e.type === 'button_b') inputs.push({ kind: 'button_b' });
@@ -309,6 +397,33 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       if (!cancelled) {
         setArmSeconds(arming);
         setPresent(stateRef.current.present);
+      }
+
+      // --- publish sensor tuning for the board to pick up ---
+      // Only when it actually changes: the board polls this, and rewriting it
+      // every tick would be pure churn.
+      if (isOwnerRef.current) {
+        const cfg = {
+          enterCm: o.settings.enterCm,
+          exitCm: o.settings.exitCm,
+          sampleIntervalMs: o.settings.sampleIntervalMs,
+          medianWindow: o.settings.medianWindow,
+          presentConfirmMs: o.settings.presentConfirmMs,
+          absentConfirmMs: o.settings.absentConfirmMs,
+          calibrating: o.settings.calibrating,
+          announceOnConnect: o.settings.announceOnConnect,
+        };
+        const serialized = JSON.stringify(cfg);
+        if (serialized !== lastConfigRef.current) {
+          lastConfigRef.current = serialized;
+          try {
+            await fetch('/api/hardware/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: serialized,
+            });
+          } catch (_) { lastConfigRef.current = null; /* retry next tick */ }
+        }
       }
 
       // --- publish what the LCD should show ---
