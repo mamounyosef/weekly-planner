@@ -60,6 +60,12 @@
 // page. Fast enough to feel live, slow enough not to flood the dev server.
 #define CALIBRATION_STREAM_MS 250
 
+// Outside calibration the reading is still streamed, just slower, so the
+// settings page can always show what the sensor sees. Being able to watch the
+// live number is the difference between diagnosing a placement problem and
+// guessing at one.
+#define LIVE_STREAM_MS 1000
+
 // Even a clean median flickers while you shift in your seat, so a candidate
 // state must hold continuously for this long before it is believed. Leaving is
 // given a longer fuse than arriving: briefly leaning out of the beam to grab
@@ -71,6 +77,19 @@
 // That is a legitimate "absent" observation, not a failed reading, so it feeds
 // the filter as a far distance rather than being thrown away.
 #define DIST_TIMEOUT_AS_CM 400.0f
+
+// Cheap ultrasonic modules occasionally spray maximum-range values for a second
+// or two for no reason. There is a wall behind this desk, so nothing can
+// legitimately read past about a metre -- anything further is the module
+// misfiring, and is dropped rather than fed to the filter.
+//
+// Dropping alone would be dangerous: an empty desk with nothing at all in the
+// beam produces exactly the same readings, so discarding them forever would
+// mean leaving was never detected. A run that survives GLITCH_HOLD_MS unbroken
+// is therefore believed and allowed through. Fallbacks only -- the live values
+// come from the app's settings.
+#define GLITCH_MAX_CM 100.0f
+#define GLITCH_HOLD_MS 10000
 
 // ---------------------------------------------------------------------------
 // Networking

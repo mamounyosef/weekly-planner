@@ -66,6 +66,7 @@ import {
   type PrayerStyle,
 } from '@/lib/prayerTimes';
 import { DEFAULT_HARDWARE_SETTINGS, MEDIAN_WINDOW_MAX, type HardwareSettings } from '@/lib/hardwareController';
+import { NumberField } from '@/components/NumberField';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -176,27 +177,28 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
   textSecondary: string;
 }) {
   const [live, setLive] = useState<number | null>(null);
+  const [livePresent, setLivePresent] = useState<boolean | null>(null);
   const [seated, setSeated] = useState<number | null>(null);
   const [empty, setEmpty] = useState<number | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  // Only poll while calibrating; the board only streams in that mode anyway.
+  // Polled whenever this section is open, not just while calibrating: seeing
+  // the number the sensor is actually producing is the fastest way to tell a
+  // placement problem from a threshold problem.
   useEffect(() => {
-    if (!hardware.calibrating) {
-      setLive(null);
-      return;
-    }
     let cancelled = false;
     const tick = async () => {
       try {
         const res = await fetch('/api/hardware/live');
         if (!res.ok) return;
         const data = await res.json();
-        if (!cancelled) setLive(typeof data?.distanceCm === 'number' ? data.distanceCm : null);
+        if (cancelled) return;
+        setLive(typeof data?.distanceCm === 'number' ? data.distanceCm : null);
+        setLivePresent(typeof data?.present === 'boolean' ? data.present : null);
       } catch (_) { /* transient */ }
     };
     void tick();
-    const id = window.setInterval(() => { void tick(); }, 300);
+    const id = window.setInterval(() => { void tick(); }, hardware.calibrating ? 300 : 1000);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [hardware.calibrating]);
 
@@ -242,17 +244,37 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
         </button>
       </div>
 
+      {/* Live readout, shown whether or not calibration is running */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-baseline gap-2">
+          <span className="text-2xl font-semibold tabular-nums" style={{ color: textPrimary }}>
+            {live === null ? '--' : live.toFixed(1)}
+          </span>
+          <span className="text-[11px]" style={{ color: textSecondary }}>
+            {live === null ? 'board not reporting' : 'cm'}
+          </span>
+        </div>
+        {live !== null && livePresent !== null && (
+          <span
+            className="px-2 py-1 rounded-lg text-[10px] font-semibold"
+            style={{
+              background: livePresent ? 'rgba(34,197,94,0.15)' : 'rgba(148,163,184,0.15)',
+              color: livePresent ? '#22c55e' : textSecondary,
+            }}
+          >
+            {livePresent ? 'AT DESK' : 'AWAY'}
+          </span>
+        )}
+      </div>
+      {live !== null && (
+        <p className="text-[10px] -mt-1" style={{ color: textSecondary }}>
+          Counts as at the desk below {hardware.enterCm}cm, as away above {hardware.exitCm}cm; in between it holds
+          whatever it already decided.
+        </p>
+      )}
+
       {hardware.calibrating ? (
         <>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-semibold tabular-nums" style={{ color: textPrimary }}>
-              {live === null ? '--' : live.toFixed(1)}
-            </span>
-            <span className="text-[11px]" style={{ color: textSecondary }}>
-              {live === null ? 'waiting for the board…' : 'cm right now'}
-            </span>
-          </div>
-
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
@@ -655,10 +677,13 @@ export default function SettingsPage() {
       .catch(() => {});
   }, []);
 
-  // Broadcast settings change live whenever local state changes
+  // Broadcast settings change live whenever local state changes.
+  // Coalesced on a short trailing timer: a broadcast re-serialises every setting,
+  // writes localStorage synchronously and POSTs, so a control that changes rapidly
+  // (or several that change together) used to pay that cost once per change.
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    broadcastSettingsChange({
+    const broadcastId = window.setTimeout(() => broadcastSettingsChange({
       interval,
       darkMode,
       darkPreset,
@@ -701,7 +726,8 @@ export default function SettingsPage() {
       gcalMirrorGoogleDeletions,
       prayer,
       hardware,
-    });
+    }), 150);
+    return () => window.clearTimeout(broadcastId);
   }, [hardware, prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
@@ -1876,17 +1902,12 @@ export default function SettingsPage() {
                           </span>
                         </span>
                         <div className="flex items-center gap-2 flex-shrink-0">
-                          <input
-                            type="number"
+                          <NumberField
                             min={PRAYER_HORIZON_MIN}
                             max={PRAYER_HORIZON_MAX}
                             value={prayer.horizonDays}
-                            onChange={e => {
-                              const n = Number(e.target.value);
-                              if (Number.isFinite(n)) {
-                                patchPrayer({ horizonDays: Math.max(PRAYER_HORIZON_MIN, Math.min(PRAYER_HORIZON_MAX, Math.round(n))) });
-                              }
-                            }}
+                            onCommit={n => patchPrayer({ horizonDays: n })}
+                            ariaLabel="Days ahead"
                             className="w-20 px-3 py-2 rounded-xl border text-xs outline-none tabular-nums"
                             style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                           />
@@ -1923,18 +1944,18 @@ export default function SettingsPage() {
                           {PRAYER_KEYS.map(k => (
                             <label key={k} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl border" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
                               <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>{PRAYER_LABELS[k]}</span>
-                              <input
-                                type="number"
+                              <NumberField
                                 min={-60}
                                 max={60}
                                 value={prayer.offsets[k] ?? 0}
-                                onChange={e => {
-                                  const n = Number(e.target.value);
+                                onCommit={n => {
                                   const next: Partial<Record<PrayerKey, number>> = { ...prayer.offsets };
-                                  if (!Number.isFinite(n) || n === 0) delete next[k];
-                                  else next[k] = Math.max(-60, Math.min(60, Math.round(n)));
+                                  if (n === 0) delete next[k];
+                                  else next[k] = n;
                                   patchPrayer({ offsets: next });
                                 }}
+                                ariaLabel={`${PRAYER_LABELS[k]} correction in minutes`}
+                                showErrorText={false}
                                 className="w-14 bg-transparent text-xs text-right outline-none tabular-nums"
                                 style={{ color: textPrimary }}
                               />
@@ -2200,13 +2221,14 @@ export default function SettingsPage() {
 
                       <div className="flex flex-col gap-1.5">
                         <label className="text-[11px] font-medium" style={{ color: textSecondary }}>Snapshots Retained</label>
-                        <input
-                          type="number"
+                        <NumberField
                           min={1}
                           max={500}
                           value={autoBackup.keep}
-                          onChange={e => setAutoBackup(c => ({ ...c, keep: Math.max(1, parseInt(e.target.value) || 1) }))}
+                          onCommit={n => setAutoBackup(c => ({ ...c, keep: n }))}
                           disabled={!autoBackup.enabled}
+                          ariaLabel="Snapshots retained"
+                          wrapStyle={{ width: '100%' }}
                           className="w-full py-2 px-3 text-xs font-semibold rounded-xl border outline-none"
                           style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, opacity: autoBackup.enabled ? 1 : 0.4 }}
                         />
@@ -2334,12 +2356,12 @@ export default function SettingsPage() {
                               once. Leaving before it reaches zero cancels it. Set to 0 to start immediately.
                             </p>
                             <div className="flex items-center gap-2">
-                              <input
-                                type="number"
+                              <NumberField
                                 min={0}
                                 max={300}
                                 value={hardware.armSeconds}
-                                onChange={e => patchHardware({ armSeconds: Math.max(0, Math.min(300, Number(e.target.value) || 0)) })}
+                                onCommit={n => patchHardware({ armSeconds: n })}
+                                ariaLabel="Grace period in seconds"
                                 className="w-24 px-3 py-2 rounded-xl border text-xs outline-none"
                                 style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                               />
@@ -2364,6 +2386,28 @@ export default function SettingsPage() {
                               aria-pressed={hardware.awayPauseEnabled}
                             >
                               <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.awayPauseEnabled ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {/* Chaining sessions back to back */}
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <span className="text-xs font-semibold" style={{ color: textPrimary }}>Start the next session automatically</span>
+                              <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                                When a session finishes and you are still sitting there, the grace period runs again
+                                and the next one begins. Staying put produces no sensor reading to react to, so
+                                without this the day stops after the first session. Stopping one yourself with the
+                                terminate button does not restart it — leaving and returning does.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => patchHardware({ autoRestartEnabled: !hardware.autoRestartEnabled })}
+                              className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                              style={{ background: hardware.autoRestartEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                              aria-pressed={hardware.autoRestartEnabled}
+                            >
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.autoRestartEnabled ? 22 : 2 }} />
                             </button>
                           </div>
 
@@ -2397,13 +2441,13 @@ export default function SettingsPage() {
                                 terminated exactly as pressing stop would — sitting down afterwards begins a new one.
                               </p>
                               <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
+                                <NumberField
                                   min={10}
                                   max={3600}
                                   step={10}
                                   value={hardware.awayTerminateSeconds}
-                                  onChange={e => patchHardware({ awayTerminateSeconds: Math.max(10, Math.min(3600, Number(e.target.value) || 10)) })}
+                                  onCommit={n => patchHardware({ awayTerminateSeconds: n })}
+                                  ariaLabel="Terminate after away seconds"
                                   className="w-24 px-3 py-2 rounded-xl border text-xs outline-none"
                                   style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                                 />
@@ -2438,20 +2482,24 @@ export default function SettingsPage() {
                         <div className="grid grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>At desk below (cm)</span>
-                            <input
-                              type="number" min={2} max={400} step={1}
+                            <NumberField
+                              min={2} max={400} step={1}
                               value={hardware.enterCm}
-                              onChange={e => patchHardware({ enterCm: Number(e.target.value) || 0 })}
+                              onCommit={n => patchHardware({ enterCm: n })}
+                              validateExtra={n => (n >= hardware.exitCm ? `Must stay below the away distance (${hardware.exitCm})` : null)}
+                              ariaLabel="At desk below, cm"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
                           </label>
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Away above (cm)</span>
-                            <input
-                              type="number" min={2} max={400} step={1}
+                            <NumberField
+                              min={2} max={400} step={1}
                               value={hardware.exitCm}
-                              onChange={e => patchHardware({ exitCm: Number(e.target.value) || 0 })}
+                              onCommit={n => patchHardware({ exitCm: n })}
+                              validateExtra={n => (n <= hardware.enterCm ? `Must stay above the at-desk distance (${hardware.enterCm})` : null)}
+                              ariaLabel="Away above, cm"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
@@ -2465,10 +2513,11 @@ export default function SettingsPage() {
                         <div className="grid grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Median window size</span>
-                            <input
-                              type="number" min={1} max={MEDIAN_WINDOW_MAX} step={2}
+                            <NumberField
+                              min={1} max={MEDIAN_WINDOW_MAX} step={2} oddOnly
                               value={hardware.medianWindow}
-                              onChange={e => patchHardware({ medianWindow: Number(e.target.value) || 1 })}
+                              onCommit={n => patchHardware({ medianWindow: n })}
+                              ariaLabel="Median window size"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
@@ -2483,10 +2532,11 @@ export default function SettingsPage() {
                           </label>
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Time between readings (ms)</span>
-                            <input
-                              type="number" min={40} max={2000} step={10}
+                            <NumberField
+                              min={40} max={2000} step={10}
                               value={hardware.sampleIntervalMs}
-                              onChange={e => patchHardware({ sampleIntervalMs: Number(e.target.value) || 40 })}
+                              onCommit={n => patchHardware({ sampleIntervalMs: n })}
+                              ariaLabel="Time between readings, ms"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
@@ -2496,20 +2546,22 @@ export default function SettingsPage() {
                         <div className="grid grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Confirm arrival after (ms)</span>
-                            <input
-                              type="number" min={0} max={60000} step={250}
+                            <NumberField
+                              min={0} max={60000} step={250}
                               value={hardware.presentConfirmMs}
-                              onChange={e => patchHardware({ presentConfirmMs: Number(e.target.value) || 0 })}
+                              onCommit={n => patchHardware({ presentConfirmMs: n })}
+                              ariaLabel="Confirm arrival after, ms"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
                           </label>
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Confirm leaving after (ms)</span>
-                            <input
-                              type="number" min={0} max={60000} step={250}
+                            <NumberField
+                              min={0} max={60000} step={250}
                               value={hardware.absentConfirmMs}
-                              onChange={e => patchHardware({ absentConfirmMs: Number(e.target.value) || 0 })}
+                              onCommit={n => patchHardware({ absentConfirmMs: n })}
+                              ariaLabel="Confirm leaving after, ms"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
@@ -2518,6 +2570,37 @@ export default function SettingsPage() {
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
                           A state has to hold this long before it is believed. Leaving is usually given the longer
                           fuse, so briefly leaning out of the beam does not read as walking away.
+                        </p>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Ignore readings beyond (cm)</span>
+                            <NumberField
+                              min={20} max={400} step={5}
+                              value={hardware.maxValidCm}
+                              onCommit={n => patchHardware({ maxValidCm: n })}
+                              ariaLabel="Ignore readings beyond, cm"
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>…unless they persist for (ms)</span>
+                            <NumberField
+                              min={0} max={60000} step={500}
+                              value={hardware.glitchHoldMs}
+                              onCommit={n => patchHardware({ glitchHoldMs: n })}
+                              ariaLabel="Persist for, ms"
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                        </div>
+                        <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
+                          Cheap ultrasonic modules sometimes spray maximum-range values for a second or two. Those are
+                          dropped outright, so a burst cannot disturb a running session. They cannot be ignored
+                          forever though — an empty desk with nothing in the beam reads exactly the same — so a run
+                          lasting longer than {(hardware.glitchHoldMs / 1000).toFixed(0)}s is taken at face value.
                         </p>
                       </div>
 

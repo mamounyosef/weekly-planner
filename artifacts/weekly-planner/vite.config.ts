@@ -2545,19 +2545,30 @@ export default defineConfig({
         let hwConfig: Record<string, unknown> = {
           enterCm: 48, exitCm: 52, sampleIntervalMs: 100, medianWindow: 5,
           presentConfirmMs: 2000, absentConfirmMs: 5000, calibrating: false,
-          announceOnConnect: true,
+          announceOnConnect: true, maxValidCm: 100, glitchHoldMs: 10000,
         };
 
         // Live distance, streamed by the board only while calibrating.
         let hwLiveDistance: number | null = null;
+        let hwLivePresent = false;
+        let hwLiveBtnA = 1;
+        let hwLiveBtnB = 1;
+        let hwLiveEdgesA = 0;
+        let hwLiveEdgesB = 0;
+        let hwLiveDiag: Record<string, unknown> = {};
         let hwLiveAt = 0;
+
+        // A short trail of what the controller actually decided and why. Two
+        // bugs here were diagnosed by guesswork and the guesses were wrong;
+        // this makes the sequence inspectable after the fact instead.
+        const hwLog: Array<Record<string, unknown>> = [];
 
         // The controller's own state (are you here, is a countdown pending, how
         // long have you been away). This lives on the server rather than in a
         // window because it has to outlive both: a page reload or the lease
         // moving to the widget would otherwise lose the fact that you walked
         // away, so the session would neither terminate nor resume.
-        let hwController: Record<string, unknown> = { present: false, armingUntil: null, awaySince: null };
+        let hwController: Record<string, unknown> = { present: false, armingUntil: null, awaySince: null, stoppedByHand: false };
 
         server.middlewares.use('/api/hardware', async (req, res, next) => {
           const url = new URL(req.url ?? '', 'http://x');
@@ -2594,6 +2605,17 @@ export default defineConfig({
               // they arrive several times a second and only the latest matters.
               if (type === 'distance') {
                 hwLiveDistance = Number(parsed?.distanceCm);
+                hwLivePresent = Boolean(parsed?.present);
+                hwLiveBtnA = Number(parsed?.btnA);
+                hwLiveBtnB = Number(parsed?.btnB);
+                hwLiveEdgesA = Number(parsed?.edgesA);
+                hwLiveEdgesB = Number(parsed?.edgesB);
+                hwLiveDiag = {
+                  host: String(parsed?.host ?? ''),
+                  pollCode: Number(parsed?.pollCode),
+                  uiMode: String(parsed?.uiMode ?? ''),
+                  uiValid: Boolean(parsed?.uiValid),
+                };
                 hwLiveAt = Date.now();
                 json({ success: true });
                 return;
@@ -2674,6 +2696,8 @@ export default defineConfig({
                 absentConfirmMs: Number(parsed?.absentConfirmMs) || 0,
                 calibrating: Boolean(parsed?.calibrating),
                 announceOnConnect: Boolean(parsed?.announceOnConnect),
+                maxValidCm: Number(parsed?.maxValidCm) || 100,
+                glitchHoldMs: Number(parsed?.glitchHoldMs) || 0,
               };
               json({ success: true });
             } catch (_) {
@@ -2683,10 +2707,39 @@ export default defineConfig({
             return;
           }
 
-          // --- app <- server: latest calibration reading ---
+          // --- app <- server: latest sensor reading ---
           if (route === '/live' && req.method === 'GET') {
-            const fresh = Date.now() - hwLiveAt < 3000;
-            json({ distanceCm: fresh ? hwLiveDistance : null, fresh });
+            const fresh = Date.now() - hwLiveAt < 4000;
+            json({
+              distanceCm: fresh ? hwLiveDistance : null,
+              present: fresh ? hwLivePresent : null,
+              btnA: fresh ? hwLiveBtnA : null,
+              btnB: fresh ? hwLiveBtnB : null,
+              edgesA: fresh ? hwLiveEdgesA : null,
+              edgesB: fresh ? hwLiveEdgesB : null,
+              diag: fresh ? hwLiveDiag : null,
+              fresh,
+              ageMs: hwLiveAt ? Date.now() - hwLiveAt : null,
+            });
+            return;
+          }
+
+          // --- decision trail, for diagnosing the controller after the fact ---
+          if (route === '/log' && req.method === 'POST') {
+            try {
+              const parsed = JSON.parse((await readBody()) || '{}');
+              hwLog.push({ at: Date.now(), ...parsed });
+              while (hwLog.length > 200) hwLog.shift();
+              json({ success: true });
+            } catch (_) {
+              res.statusCode = 400;
+              json({ error: 'Bad log entry' });
+            }
+            return;
+          }
+
+          if (route === '/log' && req.method === 'GET') {
+            json({ entries: hwLog });
             return;
           }
 
@@ -2699,11 +2752,16 @@ export default defineConfig({
           if (route === '/controller' && req.method === 'POST') {
             try {
               const parsed = JSON.parse((await readBody()) || '{}');
-              const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : null);
+              // Must test the value itself, not Number(value): Number(null) is
+              // 0, which is finite, so "no timer set" came back as a timestamp
+              // in 1970 -- instantly older than any timeout, which terminated
+              // sessions the moment they paused.
+              const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
               hwController = {
                 present: Boolean(parsed?.present),
                 armingUntil: num(parsed?.armingUntil),
                 awaySince: num(parsed?.awaySince),
+                stoppedByHand: Boolean(parsed?.stoppedByHand),
               };
               json({ success: true });
             } catch (_) {

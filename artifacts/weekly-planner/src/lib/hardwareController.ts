@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // ESP32 focus-timer controller.
 //
 // An ESP32 on the desk drives a 16x2 LCD, two buttons and an ultrasonic
@@ -25,17 +25,21 @@ export interface HardwareSettings {
   armSeconds: number;
   /** Leaving the desk pauses a running session. */
   awayPauseEnabled: boolean;
+  /** When a session finishes and you are still at the desk, arm the next one.
+   *  Without it the day stops after the first session, since staying put
+   *  produces no sensor event to react to. */
+  autoRestartEnabled: boolean;
   /** How long you may stay away before the paused session is terminated. */
   awayTerminateSeconds: number;
 
-  // ── Sensor tuning ─────────────────────────────────────────────────────────
+  // â”€â”€ Sensor tuning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // These live here rather than in the firmware so the board never has to be
   // plugged into the PC to be re-tuned. The ESP32 fetches them periodically and
   // applies them at runtime.
 
-  /** Absent → present once the median distance drops below this (cm). */
+  /** Absent â†’ present once the median distance drops below this (cm). */
   enterCm: number;
-  /** Present → absent once the median rises above this (cm). Must exceed
+  /** Present â†’ absent once the median rises above this (cm). Must exceed
    *  enterCm: the gap between the two is the hysteresis that stops a reading
    *  sitting on the boundary from rattling the state back and forth. */
   exitCm: number;
@@ -49,6 +53,16 @@ export interface HardwareSettings {
   /** Sustained time before leaving is believed (ms). Normally longer than
    *  presentConfirmMs so leaning out of the beam is not read as walking away. */
   absentConfirmMs: number;
+  /** Readings beyond this are treated as sensor glitches and dropped, rather
+   *  than fed to the filter. Cheap ultrasonic modules occasionally spray
+   *  maximum-range values for a second or two. NOT the same as ignoring them
+   *  outright: see glitchHoldMs. */
+  maxValidCm: number;
+  /** How long a run of over-range readings may be discarded before it is
+   *  believed. Without this, discarding them would be indistinguishable from
+   *  the desk genuinely being empty with nothing in the beam, and leaving would
+   *  never be detected at all. */
+  glitchHoldMs: number;
   /** While true the board streams live distance readings for calibration. */
   calibrating: boolean;
   /** Re-announce presence when an app window first becomes reachable. The
@@ -68,6 +82,7 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   sensorEnabled: true,
   armSeconds: 30,
   awayPauseEnabled: true,
+  autoRestartEnabled: true,
   awayTerminateSeconds: 120,
   // Measured on this desk: seated reads 30-39 cm, empty chair 57-59 cm.
   enterCm: 48,
@@ -76,6 +91,10 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   medianWindow: 5,
   presentConfirmMs: 2000,
   absentConfirmMs: 5000,
+  // There is a wall behind this desk, so nothing can legitimately read beyond
+  // about a metre; anything further is the module misfiring.
+  maxValidCm: 100,
+  glitchHoldMs: 10000,
   calibrating: false,
   announceOnConnect: true,
 };
@@ -89,6 +108,7 @@ export function coerceHardwareSettings(raw: unknown): HardwareSettings {
   if (typeof r.buttonsEnabled === 'boolean') s.buttonsEnabled = r.buttonsEnabled;
   if (typeof r.sensorEnabled === 'boolean') s.sensorEnabled = r.sensorEnabled;
   if (typeof r.awayPauseEnabled === 'boolean') s.awayPauseEnabled = r.awayPauseEnabled;
+  if (typeof r.autoRestartEnabled === 'boolean') s.autoRestartEnabled = r.autoRestartEnabled;
   // Clamped rather than rejected: a nonsensical value should degrade to a sane
   // one, not silently disable the feature.
   if (Number.isFinite(Number(r.armSeconds))) s.armSeconds = Math.max(0, Math.min(300, Math.round(Number(r.armSeconds))));
@@ -113,6 +133,12 @@ export function coerceHardwareSettings(raw: unknown): HardwareSettings {
   if (Number.isFinite(Number(r.absentConfirmMs))) {
     s.absentConfirmMs = Math.max(0, Math.min(60000, Math.round(Number(r.absentConfirmMs))));
   }
+  if (Number.isFinite(Number(r.maxValidCm))) {
+    s.maxValidCm = Math.max(20, Math.min(400, Math.round(Number(r.maxValidCm))));
+  }
+  if (Number.isFinite(Number(r.glitchHoldMs))) {
+    s.glitchHoldMs = Math.max(0, Math.min(60000, Math.round(Number(r.glitchHoldMs))));
+  }
 
   // Hysteresis only works if leaving needs a strictly larger distance than
   // arriving. An inverted pair would make the state flip on every sample, so it
@@ -133,12 +159,17 @@ export interface HardwareControllerState {
   armingUntil: number | null;
   /** Epoch ms at which we paused because you left, or null. */
   awaySince: number | null;
+  /** Set when you stop a session yourself. Sitting at the desk normally arms a
+   *  new one, which would otherwise restart the session you just deliberately
+   *  ended. Cleared by actually leaving and coming back. */
+  stoppedByHand: boolean;
 }
 
 export const INITIAL_CONTROLLER_STATE: HardwareControllerState = {
   present: false,
   armingUntil: null,
   awaySince: null,
+  stoppedByHand: false,
 };
 
 /** What the reducer wants done, expressed in the app's own vocabulary. */
@@ -192,6 +223,9 @@ export function reduceHardware(
     if (!settings.buttonsEnabled) return { state: next, actions };
     next.armingUntil = null;
     next.awaySince = null;
+    // Stopping by hand means "I am done", not "start the next one" -- without
+    // this, still being sat at the desk would arm a fresh session moments later.
+    next.stoppedByHand = true;
     if (session.hasSession) actions.push('terminate');
     return { state: next, actions };
   }
@@ -207,6 +241,9 @@ export function reduceHardware(
       // then fire against a later, unrelated session.
       const wasAway = state.awaySince !== null;
       next.awaySince = null;
+      // Arriving is a fresh intent to work, so a previous manual stop no longer
+      // applies.
+      next.stoppedByHand = false;
 
       if (session.isRunning) {
         // Already working; nothing to do beyond cancelling the timeout above.
@@ -231,12 +268,37 @@ export function reduceHardware(
   }
 
   // --- tick: the time-driven half of the machine ---
-  if (state.armingUntil !== null && now >= state.armingUntil) {
+
+  // Sitting at the desk with no session running arms one. Usually that is
+  // driven by the arrival event, but a session that simply ran out while you
+  // stayed put produces no event at all -- presence never changed -- so without
+  // this the day would stop dead at the end of the first hour. Suppressed after
+  // a manual stop, and while a countdown is already pending.
+  if (settings.sensorEnabled
+      && settings.autoRestartEnabled
+      && state.present
+      && !session.hasSession
+      && state.armingUntil === null
+      && !state.stoppedByHand) {
+    next.armingUntil = now + settings.armSeconds * 1000;
+  }
+  // A countdown that supposedly expired more than a few minutes ago is corrupt,
+  // not merely due: firing it would start a session nobody asked for.
+  if (state.armingUntil !== null && now - state.armingUntil > 300_000) {
+    next.armingUntil = null;
+  } else if (state.armingUntil !== null && now >= state.armingUntil) {
     next.armingUntil = null;
     if (!session.hasSession) actions.push('start');
   }
 
-  if (state.awaySince !== null) {
+  // A timestamp that is in the future, or absurdly far in the past, is
+  // corrupt rather than merely old. Terminating on one would end a session for
+  // an absence that never happened, so it is discarded instead of trusted.
+  const awayImplausible = state.awaySince !== null
+    && (state.awaySince > now || now - state.awaySince > 24 * 3600 * 1000);
+  if (awayImplausible) {
+    next.awaySince = null;
+  } else if (state.awaySince !== null) {
     // The countdown to terminate is only meaningful against a session that is
     // still sitting paused because you walked away. Anything else -- the
     // session ended, it was resumed from the app or the hotkey rather than the
@@ -296,6 +358,44 @@ const POLL_MS = 500;
 // An event older than this is history, not news. Acting on one would mean
 // reacting to where you were, not where you are.
 const STALE_EVENT_MS = 10_000;
+
+/**
+ * Drops phantom button presses caused by electrical crosstalk.
+ *
+ * Measured on this desk: every press of button A was followed ~80ms later by a
+ * button B that nobody pressed, which terminated the session. The weak internal
+ * pull-ups and the two button wires running together are enough for one line to
+ * induce a falling edge on the other.
+ *
+ * Two *different* buttons cannot be pressed a fraction of a second apart by a
+ * human hand, so the second one is noise and is discarded. Repeated presses of
+ * the SAME button are left alone -- those are a real thing people do.
+ */
+export const CROSSTALK_WINDOW_MS = 250;
+
+export function dropCrosstalkButtons<T extends { type: string; at?: number }>(
+  events: T[],
+  windowMs = CROSSTALK_WINDOW_MS,
+): T[] {
+  const kept: T[] = [];
+  let lastButtonType: string | null = null;
+  let lastButtonAt = 0;
+
+  for (const e of events) {
+    if (e.type !== 'button_a' && e.type !== 'button_b') {
+      kept.push(e);
+      continue;
+    }
+    const at = typeof e.at === 'number' ? e.at : 0;
+    if (lastButtonType !== null && e.type !== lastButtonType && at - lastButtonAt < windowMs) {
+      continue;  // the other button, far too soon to be a real press
+    }
+    lastButtonType = e.type;
+    lastButtonAt = at;
+    kept.push(e);
+  }
+  return kept;
+}
 const controllerKey = `hw-${Math.random().toString(36).slice(2)}-${Date.now()}`;
 
 /**
@@ -307,12 +407,39 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
   const [present, setPresent] = useState(false);
   const [online, setOnline] = useState(false);
 
+  // Mirrors of the three pieces of state above. A functional setter that returns
+  // the previous value still *dispatches*, and React only skips the re-render
+  // when nothing else is pending -- which, on a page with a one-second clock,
+  // is rarely true. Twice a second that turned into a full re-render of the
+  // planner producing byte-identical output. Comparing here means the setter is
+  // never called at all unless the value really moved.
+  const armSecondsRef = useRef(0);
+  const presentRef = useRef(false);
+  const onlineRef = useRef(false);
+
+  const publishArmSeconds = useCallback((v: number) => {
+    if (armSecondsRef.current === v) return;
+    armSecondsRef.current = v;
+    setArmSeconds(v);
+  }, []);
+  const publishPresent = useCallback((v: boolean) => {
+    if (presentRef.current === v) return;
+    presentRef.current = v;
+    setPresent(v);
+  }, []);
+  const publishOnline = useCallback((v: boolean) => {
+    if (onlineRef.current === v) return;
+    onlineRef.current = v;
+    setOnline(v);
+  }, []);
+
   const stateRef = useRef<HardwareControllerState>(INITIAL_CONTROLLER_STATE);
   const lastEventIdRef = useRef(0);
   const isOwnerRef = useRef(false);
   const lastConfigRef = useRef<string | null>(null);
   const syncedRef = useRef(false);
   const lastStateRef = useRef<string | null>(null);
+  const lastButtonRef = useRef<{ type: string; at: number } | null>(null);
 
   // Everything the poll loop needs, kept in refs so the interval does not have
   // to be torn down and rebuilt on every render.
@@ -340,8 +467,8 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       if (!o.settings.enabled) {
         stateRef.current = INITIAL_CONTROLLER_STATE;
         if (!cancelled) {
-          setArmSeconds(0);
-          setOnline(false);
+          publishArmSeconds(0);
+          publishOnline(false);
         }
         return;
       }
@@ -362,15 +489,22 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       // The state describes the desk, not the window, so a reload or a hand-off
       // to the widget must not lose the fact that you walked away -- that is
       // what left a paused session neither terminating nor resuming.
-      if (isOwnerRef.current && !wasOwner) {
+      // A window that does not hold the lease never processes events, so it has
+      // no state of its own to draw -- which is why the countdown was missing
+      // from the widget. It mirrors the shared state every cycle instead.
+      if (!isOwnerRef.current || !wasOwner) {
         try {
           const res = await fetch('/api/hardware/controller');
           if (res.ok) {
             const s = await res.json();
+            // Zero is not a plausible timestamp -- treat it as "unset" rather
+            // than as 1970, which would read as an infinitely old timer.
+            const stamp = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
             stateRef.current = {
               present: Boolean(s?.present),
-              armingUntil: typeof s?.armingUntil === 'number' ? s.armingUntil : null,
-              awaySince: typeof s?.awaySince === 'number' ? s.awaySince : null,
+              armingUntil: stamp(s?.armingUntil),
+              awaySince: stamp(s?.awaySince),
+              stoppedByHand: Boolean(s?.stoppedByHand),
             };
           }
         } catch (_) { /* keep whatever we had */ }
@@ -392,12 +526,27 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
           if (!syncedRef.current) {
             syncedRef.current = true;
             lastEventIdRef.current = Number(data?.latest) || 0;
-            if (!cancelled) setOnline(true);
+            if (!cancelled) publishOnline(true);
             return;
           }
 
-          for (const e of events) {
-            lastEventIdRef.current = Math.max(lastEventIdRef.current, e.id);
+          // Crosstalk can straddle two polls, so the last button seen in the
+          // previous batch is carried in and filtered alongside this one.
+          const carried = lastButtonRef.current
+            ? [{ id: -1, type: lastButtonRef.current.type, at: lastButtonRef.current.at, carried: true }, ...events]
+            : events;
+          const clean = dropCrosstalkButtons(carried as Array<{ id: number; type: string; at?: number; carried?: boolean }>)
+            .filter(e => !(e as { carried?: boolean }).carried) as typeof events;
+
+          for (const e of events) lastEventIdRef.current = Math.max(lastEventIdRef.current, e.id);
+          for (const e of [...events].reverse()) {
+            if (e.type === 'button_a' || e.type === 'button_b') {
+              lastButtonRef.current = { type: e.type, at: typeof e.at === 'number' ? e.at : now };
+              break;
+            }
+          }
+
+          for (const e of clean) {
             // Belt and braces: an event that has been sitting unconsumed for a
             // while no longer describes the present, whatever the reason.
             if (typeof e.at === 'number' && now - e.at > STALE_EVENT_MS) continue;
@@ -405,12 +554,12 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
             else if (e.type === 'button_a') inputs.push({ kind: 'button_a' });
             else if (e.type === 'button_b') inputs.push({ kind: 'button_b' });
           }
-          if (!cancelled) setOnline(true);
+          if (!cancelled) publishOnline(true);
         } else if (!cancelled) {
-          setOnline(false);
+          publishOnline(false);
         }
       } catch (_) {
-        if (!cancelled) setOnline(false);
+        if (!cancelled) publishOnline(false);
         // Server unreachable: still run the tick so a pending countdown does
         // not freeze mid-flight.
       }
@@ -428,15 +577,38 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       if (!hadEvents) inputs.push({ kind: 'tick' });
 
       for (const input of inputs) {
+        const before = stateRef.current;
         const result = reduceHardware(stateRef.current, input, o.session, o.settings, now);
         stateRef.current = result.state;
-        if (isOwnerRef.current && result.actions.length) runActions(result.actions);
+        if (isOwnerRef.current && result.actions.length) {
+          runActions(result.actions);
+          // Recorded with everything the decision was based on, so a wrong one
+          // can be read back rather than reconstructed from memory.
+          void fetch('/api/hardware/log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              input: input.kind,
+              present: input.present,
+              actions: result.actions,
+              wasRunning: o.session.isRunning,
+              hadSession: o.session.hasSession,
+              awaySinceMsAgo: before.awaySince === null ? null : now - before.awaySince,
+              armingInMs: before.armingUntil === null ? null : before.armingUntil - now,
+              awayTimeoutS: o.settings.awayTerminateSeconds,
+            }),
+          }).catch(() => {});
+        }
       }
 
       const arming = armingSecondsLeft(stateRef.current, now);
       if (!cancelled) {
-        setArmSeconds(arming);
-        setPresent(stateRef.current.present);
+        // Only ever set state on a real change. These setters feed the whole
+        // planner tree, and calling them unconditionally re-rendered it twice a
+        // second forever -- which is invisible in isolation and ruinous for the
+        // frame rate of everything else on the page.
+        publishArmSeconds(arming);
+        publishPresent(stateRef.current.present);
       }
 
       // --- persist the controller state ---
@@ -468,6 +640,8 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
           medianWindow: o.settings.medianWindow,
           presentConfirmMs: o.settings.presentConfirmMs,
           absentConfirmMs: o.settings.absentConfirmMs,
+          maxValidCm: o.settings.maxValidCm,
+          glitchHoldMs: o.settings.glitchHoldMs,
           calibrating: o.settings.calibrating,
           announceOnConnect: o.settings.announceOnConnect,
         };
@@ -509,7 +683,7 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [runActions]);
+  }, [runActions, publishArmSeconds, publishPresent, publishOnline]);
 
   return { armSeconds, present, online };
 }

@@ -208,6 +208,21 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
   box-shadow: 0 0 0 2px hsl(var(--ring) / 0.45);
 }
 
+/* The now-line's pulsing dot. Deliberately a CSS keyframe rather than a JS
+   animation: it runs forever, and a forever-running JS animation keeps a
+   requestAnimationFrame loop and a style write alive on the main thread for the
+   entire life of the window, so every other interaction has to queue behind it.
+   As a CSS animation on opacity + transform it runs on the compositor and costs
+   the main thread nothing. */
+@keyframes now-dot-pulse {
+  0%, 100% { opacity: 0.65; transform: scale(0.92); }
+  50%      { opacity: 1;    transform: scale(1.08); }
+}
+.now-dot-pulse {
+  animation: now-dot-pulse 2.6s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
 /* Respect users who prefer less motion. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

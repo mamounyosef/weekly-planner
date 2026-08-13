@@ -21,10 +21,11 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
+  FOCUS_EXCLUDED_DATES_KEY,
   FOCUS_TIMER_KEY,
   DEFAULT_FOCUS_TIMER,
   type FocusSession,
@@ -37,6 +38,9 @@ import {
   checkpointFocusTimer,
   pauseFocusTimer,
   loadLocalFocusSessions,
+  loadLocalFocusExcludedDates,
+  saveLocalFocusExcludedDates,
+  safeFocusExcludedDates,
   loadLocalFocusTimer,
   coerceFocusTimer,
   focusTimerPushKey,
@@ -871,6 +875,45 @@ export default function WeeklyPlanner() {
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
   const [editingFocusDayKey, setEditingFocusDayKey]   = useState<string | null>(null);
   const [editingFocusInput, setEditingFocusInput]     = useState<string>('');
+  const [focusExcludedDates, setFocusExcludedDates]   = useState<string[]>(loadLocalFocusExcludedDates());
+  const focusExcludedSet = useMemo(() => new Set(focusExcludedDates), [focusExcludedDates]);
+  const toggleExcludeFocusDay = useCallback((dateKeyStr: string) => {
+    setFocusExcludedDates(prev => {
+      const set = new Set(prev);
+      if (set.has(dateKeyStr)) {
+        set.delete(dateKeyStr);
+      } else {
+        set.add(dateKeyStr);
+      }
+      const next = Array.from(set);
+      saveLocalFocusExcludedDates(next);
+      return next;
+    });
+  }, []);
+  const [openDayMenuKey, setOpenDayMenuKey]           = useState<string | null>(null);
+  const dayMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!openDayMenuKey) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (dayMenuRef.current && !dayMenuRef.current.contains(e.target as Node)) {
+        setOpenDayMenuKey(null);
+      }
+    };
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [openDayMenuKey]);
+
+  useEffect(() => {
+    const handleStorage = (evt: StorageEvent) => {
+      if (evt.key === FOCUS_EXCLUDED_DATES_KEY) {
+        setFocusExcludedDates(loadLocalFocusExcludedDates());
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
   const [confirmFocusModal, setConfirmFocusModal]     = useState<{
     date: Date;
     dateKey: string;
@@ -1495,9 +1538,31 @@ export default function WeeklyPlanner() {
   // Long-lived mouse handlers read the visible columns through a ref.
   const visibleColsRef = useRef<number[]>(visibleCols);
   visibleColsRef.current = visibleCols;
-  const slots       = generateSlots(interval, dayStartH, dayEndH);
+  const slots       = useMemo(() => generateSlots(interval, dayStartH, dayEndH), [interval, dayStartH, dayEndH]);
   const sh          = SLOT_H[interval];
   const totalH      = slots.length * sh;
+  // The hour rules and the time axis are the two biggest blocks of markup on the
+  // page — a hundred rows each, and the rules are repeated in every day column.
+  // They depend on nothing but the grid geometry, so they are built once and the
+  // same elements are handed to all columns instead of being rebuilt from
+  // scratch on every render of the planner.
+  const gridLineRows = useMemo(() => slots.map((time, i) => (
+    <div
+      key={time}
+      className={`absolute w-full pointer-events-none border-b ${time.endsWith(':00') ? 'border-border/35' : 'border-border/12'}`}
+      style={{ top: i * sh, height: sh }}
+    />
+  )), [slots, sh]);
+  const timeAxisRows = useMemo(() => slots.map((time, i) => {
+    const isHour = time.endsWith(':00');
+    return (
+      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i * sh, height: sh, transform: 'translateY(-50%)' }}>
+        <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-bold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/40'}`}>
+          {formatSlotLabel(time, timeFormat)}
+        </span>
+      </div>
+    );
+  }), [slots, sh, timeFormat]);
   const dayEndMin   = dayEndH * 60;
   const dayStartMin = dayStartH * 60;
   const darkPalette = (eventColorStyle as string) === 'classic' ? CLASSIC_DARK_EVENT_COLORS : VIVID_DARK_EVENT_COLORS;
@@ -1521,6 +1586,14 @@ export default function WeeklyPlanner() {
   const isPastWeek        = viewedWeekKey < currentRealWeekKey;
   // Items visible in the viewed week, keyed by the storage id actually shown.
   const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey, viewRange), [events, viewedWeekKey, viewRange]);
+  // The timeline events, listed once. Every day column used to call
+  // Object.values(weekEvents) and skip the all-day ones itself, so a 7-column
+  // week rebuilt and re-filtered the same array seven times per render — and a
+  // drag renders on every frame.
+  const weekTimedEvents = useMemo(
+    () => Object.values(weekEvents).filter(ev => !ev.allDay),
+    [weekEvents],
+  );
   const weekAllDayEvents = useMemo(() => {
     const rawAllDays = Object.values(weekEvents).filter(ev => ev.allDay && !ev.deleted);
     const mapped: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
@@ -2111,6 +2184,10 @@ export default function WeeklyPlanner() {
     writeTasks(toggleTaskDone(tasksRef.current, occId));
   }, [writeTasks]);
 
+  // Stable identities so the memoised tasks panel isn't invalidated every render.
+  const handleTasksPanelResize = useCallback((w: number) => setTasksPanelWidth(clampPanelWidth(w)), []);
+  const closeTasksPanel = useCallback(() => setTasksPanelOpen(false), []);
+
   const openTaskMenu = useCallback((occId: string, at: { x: number; y: number }) => {
     setTaskMenuId(occId);
     setTaskMenuPos(at);
@@ -2222,34 +2299,58 @@ export default function WeeklyPlanner() {
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
   const activeFocusDayKey = focusTimer.sessionStartedAt ? focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) : '';
+  // Bucketing the sessions by focus-day once gives the same numbers as asking
+  // every visible day to re-filter the whole list, but it depends only on the
+  // sessions — so the per-second tick below no longer walks 7 × every session
+  // ever logged on its way to re-rendering the entire planner.
+  const focusLoggedByDay = useMemo(() => {
+    const seconds = new Map<string, number>();
+    const sessions = new Map<string, number>();
+    for (const s of focusSessions) {
+      const k = focusDayKey(s.endedAt, focusDayStartHour);
+      seconds.set(k, (seconds.get(k) ?? 0) + s.durationSeconds);
+      if (isCompletedFocusSession(s)) sessions.set(k, (sessions.get(k) ?? 0) + 1);
+    }
+    return { seconds, sessions };
+  }, [focusSessions, focusDayStartHour]);
+
+  const focusLoggedWeek = useMemo(() => days.map(day => {
+    const key = dateKey(day);
+    return {
+      day,
+      key,
+      isExcluded: focusExcludedSet.has(key),
+      loggedSeconds: focusLoggedByDay.seconds.get(key) ?? 0,
+      sessions: focusLoggedByDay.sessions.get(key) ?? 0,
+    };
+  }), [days, focusLoggedByDay, focusExcludedSet]);
+
   const focusStats = useMemo(() => {
     const todayFocusKey = focusDayKey(new Date(nowTick), focusDayStartHour);
-    const perDay = days.map(day => {
-      const key = dateKey(day);
-      const loggedSeconds = sumFocusSecondsForDay(focusSessions, day, focusDayStartHour);
-      const activeSeconds = activeFocusDayKey === key ? focusElapsedSeconds : 0;
-      const sessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === key && isCompletedFocusSession(session)).length;
-      return {
-        day,
-        key,
-        seconds: loggedSeconds + activeSeconds,
-        sessions,
-      };
-    });
-    const weekSeconds = perDay.reduce((sum, day) => sum + day.seconds, 0);
-    const sessionCount = perDay.reduce((sum, day) => sum + day.sessions, 0);
-    const bestDay = perDay.reduce((best, day) => day.seconds > best.seconds ? day : best, perDay[0]);
+    const perDay = focusLoggedWeek.map(d => ({
+      day: d.day,
+      key: d.key,
+      isExcluded: d.isExcluded,
+      // A session that is still running hasn't been logged yet, so its elapsed
+      // time is folded onto the day it belongs to.
+      seconds: d.loggedSeconds + (activeFocusDayKey === d.key ? focusElapsedSeconds : 0),
+      sessions: d.sessions,
+    }));
+    const validDays = perDay.filter(d => !d.isExcluded);
+    const weekSeconds = validDays.reduce((sum, day) => sum + day.seconds, 0);
+    const sessionCount = validDays.reduce((sum, day) => sum + day.sessions, 0);
+    const bestDay = validDays.reduce((best, day) => day.seconds > (best?.seconds ?? -1) ? day : best, validDays[0] || perDay[0]);
     const maxSeconds = Math.max(1, ...perDay.map(day => day.seconds));
     return {
       perDay,
       weekSeconds,
       sessionCount,
-      averageSeconds: Math.floor(weekSeconds / 7),
+      averageSeconds: validDays.length > 0 ? Math.floor(weekSeconds / validDays.length) : 0,
       bestDay,
       maxSeconds,
       todaySeconds: perDay.find(day => day.key === todayFocusKey)?.seconds ?? 0,
     };
-  }, [activeFocusDayKey, focusElapsedSeconds, days, focusSessions, focusDayStartHour, nowTick]);
+  }, [activeFocusDayKey, focusElapsedSeconds, focusLoggedWeek, focusDayStartHour, nowTick]);
 
   // â”€â”€ Focus analysis (month / year) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const focusAnalysis = useMemo(() => {
@@ -2270,17 +2371,18 @@ export default function WeeklyPlanner() {
       return {
         date: d,
         key: k,
+        isExcluded: focusExcludedSet.has(k),
         seconds: byDaySeconds.get(k) ?? 0,
         sessions: byDaySessions.get(k) ?? 0,
       };
     });
-    const wkSeconds     = weekDays.reduce((s, d) => s + d.seconds, 0);
-    const wkSessions    = weekDays.reduce((s, d) => s + d.sessions, 0);
-    const wkActiveDays  = weekDays.filter(d => d.seconds > 0).length;
+    const validWeekDays = weekDays.filter(d => !d.isExcluded);
+    const wkSeconds     = validWeekDays.reduce((s, d) => s + d.seconds, 0);
+    const wkSessions    = validWeekDays.reduce((s, d) => s + d.sessions, 0);
+    const wkActiveDays  = validWeekDays.filter(d => d.seconds > 0).length;
     const wkMaxSeconds  = Math.max(1, ...weekDays.map(d => d.seconds));
-    const wkBestDay     = weekDays.reduce((b, d) => (d.seconds > b.seconds ? d : b), weekDays[0]);
-    // Average across days that actually had focus, not a flat /7 — a blank
-    // Sunday shouldn't drag down what a working day really looks like.
+    const wkBestDay     = validWeekDays.reduce((b, d) => (d.seconds > (b?.seconds ?? -1) ? d : b), validWeekDays[0] || weekDays[0]);
+    // Average across days that actually had focus (excluding explicitly excluded days)
     const wkAvgActive   = wkActiveDays > 0 ? Math.floor(wkSeconds / wkActiveDays) : 0;
 
     // Month view
@@ -2291,22 +2393,26 @@ export default function WeeklyPlanner() {
       end: endOfWeek(monthEnd, { weekStartsOn }),
     });
     const monthDaysInMonth = eachDayOfInterval({ start: monthStart, end: monthEnd });
-    const monthSeconds = monthDaysInMonth.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
-    const monthSessions = monthDaysInMonth.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
-    const monthActiveDays = monthDaysInMonth.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
+    const validMonthDays = monthDaysInMonth.filter(d => !focusExcludedSet.has(dateKey(d)));
+    const monthSeconds = validMonthDays.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
+    const monthSessions = validMonthDays.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
+    const monthActiveDays = validMonthDays.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
     const monthMaxSeconds = Math.max(1, ...monthDaysInMonth.map(d => byDaySeconds.get(dateKey(d)) ?? 0));
-    const monthBestDay = monthDaysInMonth.reduce(
-      (best, d) => (byDaySeconds.get(dateKey(d)) ?? 0) > (byDaySeconds.get(dateKey(best)) ?? 0) ? d : best,
-      monthDaysInMonth[0],
-    );
+    const monthBestDay = validMonthDays.length > 0
+      ? validMonthDays.reduce(
+          (best, d) => (byDaySeconds.get(dateKey(d)) ?? 0) > (byDaySeconds.get(dateKey(best)) ?? 0) ? d : best,
+          validMonthDays[0],
+        )
+      : monthDaysInMonth[0];
 
     // Year view
     const monthsOfYear = Array.from({ length: 12 }, (_, m) => new Date(analysisYearCursor, m, 1));
     const monthTotals = monthsOfYear.map(m => {
       const dayList = eachDayOfInterval({ start: startOfMonth(m), end: endOfMonth(m) });
-      const seconds = dayList.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
-      const sessions = dayList.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
-      const activeDays = dayList.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
+      const validDays = dayList.filter(d => !focusExcludedSet.has(dateKey(d)));
+      const seconds = validDays.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
+      const sessions = validDays.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
+      const activeDays = validDays.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
       return { month: m, seconds, sessions, activeDays };
     });
     const yearSeconds = monthTotals.reduce((sum, m) => sum + m.seconds, 0);
@@ -2315,29 +2421,60 @@ export default function WeeklyPlanner() {
     const yearMaxSeconds = Math.max(1, ...monthTotals.map(m => m.seconds));
     const yearBestMonth = monthTotals.reduce((best, m) => m.seconds > best.seconds ? m : best, monthTotals[0]);
 
-    // Streaks (all-time, based on any day with logged focus time)
-    const activeDayKeys = new Set(Array.from(byDaySeconds.entries()).filter(([, secs]) => secs > 0).map(([k]) => k));
+    // Streaks (all-time, based on any non-excluded day with logged focus time)
+    const activeDayKeys = new Set(Array.from(byDaySeconds.entries()).filter(([k, secs]) => secs > 0 && !focusExcludedSet.has(k)).map(([k]) => k));
     let currentStreak = 0;
     {
       let cursorDate = new Date(`${focusDayKey(new Date(), focusDayStartHour)}T00:00:00`);
-      while (activeDayKeys.has(dateKey(cursorDate))) {
-        currentStreak++;
-        cursorDate = new Date(cursorDate.getTime() - 86400000);
+      let maxLookback = 1000;
+      while (maxLookback-- > 0) {
+        const k = dateKey(cursorDate);
+        if (focusExcludedSet.has(k)) {
+          // Excluded day (e.g. sick day): pass through without breaking streak
+          cursorDate = new Date(cursorDate.getTime() - 86400000);
+          continue;
+        }
+        if (activeDayKeys.has(k)) {
+          currentStreak++;
+          cursorDate = new Date(cursorDate.getTime() - 86400000);
+        } else {
+          break;
+        }
       }
     }
     let longestStreak = 0, run = 0;
     let prevDate: Date | null = null;
-    for (const k of Array.from(activeDayKeys).sort()) {
+    const sortedActiveKeys = Array.from(activeDayKeys).sort();
+    for (const k of sortedActiveKeys) {
       const d = new Date(`${k}T00:00:00`);
-      run = (prevDate && d.getTime() - prevDate.getTime() === 86400000) ? run + 1 : 1;
+      if (!prevDate) {
+        run = 1;
+      } else {
+        let gapDate = new Date(prevDate.getTime() + 86400000);
+        let validGapDays = 0;
+        while (gapDate < d) {
+          if (!focusExcludedSet.has(dateKey(gapDate))) {
+            validGapDays++;
+          }
+          gapDate = new Date(gapDate.getTime() + 86400000);
+        }
+        if (validGapDays === 0) {
+          run++;
+        } else {
+          run = 1;
+        }
+      }
       longestStreak = Math.max(longestStreak, run);
       prevDate = d;
     }
 
-    const allTimeSeconds = Array.from(byDaySeconds.values()).reduce((a, b) => a + b, 0);
-    const allTimeSessions = completedSessions.length;
+    const allTimeSeconds = Array.from(byDaySeconds.entries())
+      .filter(([k]) => !focusExcludedSet.has(k))
+      .reduce((a, [, b]) => a + b, 0);
+    const nonExcludedCompletedSessions = completedSessions.filter(s => !focusExcludedSet.has(focusDayKey(s.endedAt, focusDayStartHour)));
+    const allTimeSessions = nonExcludedCompletedSessions.length;
     const avgSessionLength = allTimeSessions > 0
-      ? Math.floor(completedSessions.reduce((s, x) => s + x.durationSeconds, 0) / allTimeSessions)
+      ? Math.floor(nonExcludedCompletedSessions.reduce((s, x) => s + x.durationSeconds, 0) / allTimeSessions)
       : 0;
 
     return {
@@ -2347,7 +2484,7 @@ export default function WeeklyPlanner() {
       monthTotals, yearSeconds, yearSessions, yearActiveDays, yearMaxSeconds, yearBestMonth,
       currentStreak, longestStreak, allTimeSeconds, allTimeSessions, avgSessionLength,
     };
-  }, [focusSessions, analysisWeekCursor, analysisMonthCursor, analysisYearCursor, weekStartsOn, focusDayStartHour]);
+  }, [focusSessions, analysisWeekCursor, analysisMonthCursor, analysisYearCursor, weekStartsOn, focusDayStartHour, focusExcludedSet]);
 
   // The memo above only counts *logged* sessions. A session that's still running
   // hasn't been written yet, so fold its elapsed time into the day it belongs to —
@@ -2358,27 +2495,44 @@ export default function WeeklyPlanner() {
       ...d,
       seconds: d.seconds + (activeFocusDayKey === d.key ? focusElapsedSeconds : 0),
     }));
-    const total  = dayList.reduce((s, d) => s + d.seconds, 0);
-    const active = dayList.filter(d => d.seconds > 0).length;
+    const validDays = dayList.filter(d => !d.isExcluded);
+    const total  = validDays.reduce((s, d) => s + d.seconds, 0);
+    const active = validDays.filter(d => d.seconds > 0).length;
     return {
       days: dayList,
       seconds: total,
       activeDays: active,
       maxSeconds: Math.max(1, ...dayList.map(d => d.seconds)),
       avgActive: active > 0 ? Math.floor(total / active) : 0,
-      bestKey: dayList.reduce((b, d) => (d.seconds > b.seconds ? d : b), dayList[0]).key,
+      bestKey: (validDays.length > 0 ? validDays : dayList).reduce((b, d) => (d.seconds > b.seconds ? d : b), dayList[0]).key,
     };
   }, [focusAnalysis.weekDays, activeFocusDayKey, focusElapsedSeconds]);
 
   // Same idea for the month tab's total: the in-progress session isn't logged yet.
   const monthLiveExtraSeconds = useMemo(() => {
     if (!activeFocusDayKey || !focusElapsedSeconds) return 0;
+    if (focusExcludedSet.has(activeFocusDayKey)) return 0;
     const d = new Date(`${activeFocusDayKey}T00:00:00`);
     return isSameMonth(d, analysisMonthCursor) ? focusElapsedSeconds : 0;
-  }, [activeFocusDayKey, focusElapsedSeconds, analysisMonthCursor]);
+  }, [activeFocusDayKey, focusElapsedSeconds, analysisMonthCursor, focusExcludedSet]);
 
+  // `nowTick` is read from one end of this component to the other, so publishing
+  // one every second re-renders the entire planner every second — several
+  // hundred milliseconds of element building that lands squarely in the middle
+  // of whatever is animating. Only the focus countdown is second-accurate, and
+  // only while a session is actually running; the now-line, the next-prayer
+  // chip, the day rollover and the week cursor are all minute-accurate. So the
+  // clock is still *sampled* every second but only *committed* when something
+  // would actually change: every second while the timer runs, otherwise when
+  // the minute turns.
   useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    const id = setInterval(() => {
+      const now = Date.now();
+      setNowTick(prev => {
+        if (focusTimerRef.current.isRunning) return now;
+        return Math.floor(prev / 60_000) === Math.floor(now / 60_000) ? prev : now;
+      });
+    }, 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -2849,10 +3003,11 @@ export default function WeeklyPlanner() {
   // focusStats.todaySeconds: that one is derived from the currently viewed
   // week, so browsing to another week would blank the total on the display.
   const hwTodayKey = focusDayKey(new Date(nowTick), focusDayStartHour);
-  const hwTodaySeconds = sumFocusSecondsForDay(focusSessions, new Date(`${hwTodayKey}T00:00:00`), focusDayStartHour)
+  // Read out of the same per-day buckets the week strip uses, rather than
+  // re-scanning every session ever logged on each render.
+  const hwTodaySeconds = (focusLoggedByDay.seconds.get(hwTodayKey) ?? 0)
     + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === hwTodayKey ? focusElapsedSeconds : 0);
-  const hwSessionsToday = focusSessions.filter(session =>
-    focusDayKey(session.endedAt, focusDayStartHour) === hwTodayKey && isCompletedFocusSession(session)).length;
+  const hwSessionsToday = focusLoggedByDay.sessions.get(hwTodayKey) ?? 0;
 
   const hardwareController = useHardwareController({
     settings: hardware,
@@ -3004,9 +3159,15 @@ export default function WeeklyPlanner() {
   }, [darkMode, darkPreset, lightPreset]);
 
   // Persist settings to the shared backend whenever any of them change (after initial load).
+  // Coalesced on a short trailing timer: a continuous gesture (dragging the tasks
+  // panel's resize handle) changes a setting on every frame, and broadcasting each
+  // one meant a full re-serialise + a synchronous localStorage write + a POST per
+  // frame — the single biggest stall while resizing. 150ms is below the threshold
+  // where the other window looks out of date, and the final value always lands.
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    broadcastSettingsChange(currentSettingsSnapshot());
+    const id = window.setTimeout(() => broadcastSettingsChange(currentSettingsSnapshot()), 150);
+    return () => window.clearTimeout(id);
   }, [currentSettingsSnapshot]);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
@@ -3593,7 +3754,7 @@ export default function WeeklyPlanner() {
       if (!gr) return { x: e.clientX - initX, y: e.clientY - initY };
       return { x: (e.clientX - gr.left) - initGX, y: (e.clientY - gr.top) - initGY };
     };
-    const onMove = (e: MouseEvent) => {
+    const processMove = (e: MouseEvent) => {
       autoScrollLastPosRef.current = { clientX: e.clientX, clientY: e.clientY };
       const dr = dragRef.current;
       const rr = resizeRef.current;
@@ -3634,7 +3795,7 @@ export default function WeeklyPlanner() {
                   const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
                   // Apply the position update synchronously in this same frame so the
                   // item doesn't visually lag a render behind the instant DOM scroll.
-                  flushSync(() => onMove(fakeEvent));
+                  flushSync(() => processMove(fakeEvent));
                 }
               }
             }, 16);
@@ -3806,7 +3967,38 @@ export default function WeeklyPlanner() {
         }
       }
     };
+
+    // A mouse reports 125–1000 moves per second; the screen only paints 60–165.
+    // Running the drag math (and its setState cascade, which re-renders the whole
+    // grid) once per *event* meant several full renders per frame — the work piled
+    // up and the dragged block visibly lagged the cursor. Coalesce to one run per
+    // animation frame, always using the newest position, so we do exactly as much
+    // work as there are frames to show it in.
+    let pendingMove: MouseEvent | null = null;
+    let moveFrame = 0;
+    const flushMove = () => {
+      moveFrame = 0;
+      const ev = pendingMove;
+      pendingMove = null;
+      if (ev) processMove(ev);
+    };
+    const cancelPendingMove = () => {
+      if (moveFrame) { cancelAnimationFrame(moveFrame); moveFrame = 0; }
+      pendingMove = null;
+    };
+    const onMove = (e: MouseEvent) => {
+      // preventDefault only counts on the real event, so it can't be deferred:
+      // without it the rubber-band and drag-to-create gestures select page text.
+      if (selDragRef.current || createDragRef.current) e.preventDefault();
+      pendingMove = e;
+      if (!moveFrame) moveFrame = requestAnimationFrame(flushMove);
+    };
+
     const onUp = (e: MouseEvent) => {
+      // Land on the newest position before committing, then drop anything queued
+      // so a stale frame can't fire after the gesture's refs are torn down.
+      if (pendingMove) { const last = pendingMove; cancelPendingMove(); processMove(last); }
+      cancelPendingMove();
       if (autoScrollTimerRef.current) {
         clearInterval(autoScrollTimerRef.current);
         autoScrollTimerRef.current = null;
@@ -3961,7 +4153,11 @@ export default function WeeklyPlanner() {
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
-    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    return () => {
+      cancelPendingMove();
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
   }, [getGridCoords, interval, dayStartMin, dayEndMin]);
 
   // Clear multi-selection when clicking/pressing on empty space anywhere
@@ -4355,11 +4551,14 @@ export default function WeeklyPlanner() {
 
   // Everything the tasks panel and popover need to paint, bundled once so they
   // stay in step with the calendar's theme without importing the palettes.
-  const taskPanelTheme: TaskTheme = {
+  // Memoised because it is the tasks panel's `theme` prop: a fresh object every
+  // render would defeat the panel's memo and re-render the whole task list on
+  // every hover, tick and drag frame in the calendar.
+  const taskPanelTheme: TaskTheme = useMemo(() => ({
     darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, surfaceBdr, hoverBg,
     accent: taskColor,
     chip: taskChipColors,
-  };
+  }), [darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, surfaceBdr, hoverBg, taskColor, taskChipColors]);
 
   // The task the popover is editing. Occurrence ids ("master::date") aren't in the
   // raw store, so resolve through the week expansion first — same rule as events.
@@ -4444,7 +4643,11 @@ export default function WeeklyPlanner() {
       <div className="flex-1 min-h-0 flex relative z-10">
         <div className="flex-1 min-w-0 flex flex-col relative">
       {/* â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md border-b border-border/50">
+      {/* No backdrop-blur here. It spans the full window width, so every frame of
+          the tasks-panel animation (and anything else that changes this column's
+          width) had to re-blur the whole strip. At 95% opacity there is almost
+          nothing showing through to blur in the first place. */}
+      <header className="sticky top-0 z-30 bg-background/95 border-b border-border/50">
         {/* The toolbar spans the full content width (the grid below stays capped at
             1400 and centred) — capping it too wasted the side margins and forced the
             controls onto a second line. It still wraps if the window gets narrow. */}
@@ -4664,11 +4867,11 @@ export default function WeeklyPlanner() {
                   className="flex items-center gap-1.5 overflow-hidden whitespace-nowrap"
                   title="Syncing with Google Calendar"
                 >
-                  <motion.span
-                    className="inline-block rounded-full flex-shrink-0"
+                  {/* CSS spin, not a JS one — it runs for the whole sync and the
+                      main thread has better things to do during a sync. */}
+                  <span
+                    className="inline-block rounded-full flex-shrink-0 animate-spin"
                     style={{ width: 8, height: 8, border: '1.5px solid #60a5fa', borderTopColor: 'transparent' }}
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
                   />
                   <span className="text-[10px] font-semibold" style={{ color: '#60a5fa' }}>Syncing</span>
                 </motion.span>
@@ -4850,13 +5053,25 @@ export default function WeeklyPlanner() {
 
               <div className="grid grid-cols-3 gap-3 min-w-[300px]">
                 {[
-                  ['Today', formatFocusDuration(focusStats.todaySeconds)],
-                  ['Sessions', `${focusStats.sessionCount}`],
-                  ['Daily Avg', formatFocusDuration(focusStats.averageSeconds)],
-                ].map(([label, value]) => (
-                  <div key={label} className="min-w-0">
+                  ['Today', formatFocusDuration(focusStats.todaySeconds), true],
+                  ['Sessions', `${focusStats.sessionCount}`, false],
+                  ['Daily Avg', formatFocusDuration(focusStats.averageSeconds), false],
+                ].map(([label, value, editable]) => (
+                  <div key={label as string} className="min-w-0">
                     <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
-                    <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                    <div
+                      onDoubleClick={(e) => {
+                        if (editable) {
+                          e.stopPropagation();
+                          startEditingFocusDay(dateKey(nowOwnerDate), nowOwnerDate, focusStats.todaySeconds);
+                        }
+                      }}
+                      className={`text-sm font-semibold tabular-nums truncate ${editable ? 'cursor-pointer hover:underline' : ''}`}
+                      style={{ color: menuText }}
+                      title={editable ? "Double-click to edit today's focus time" : undefined}
+                    >
+                      {value}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -4866,28 +5081,121 @@ export default function WeeklyPlanner() {
                   const pct = day.seconds > 0 ? Math.max(5, (day.seconds / focusStats.maxSeconds) * 100) : 0;
                   const active = isSameDay(day.day, nowOwnerDate);
                   return (
-                    <div key={day.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
+                    <div key={day.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0 relative group">
+                      {/* 3-dots day options menu on hover */}
+                      <div className="absolute top-0 right-0 z-20 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenDayMenuKey(openDayMenuKey === day.key ? null : day.key);
+                          }}
+                          className="p-0.5 rounded hover:bg-black/20 transition-colors"
+                          style={{ color: active ? '#60a5fa' : menuSub }}
+                          title="Day options"
+                        >
+                          <MoreHorizontal size={11} />
+                        </button>
+                        {openDayMenuKey === day.key && (
+                          <div
+                            ref={dayMenuRef}
+                            onClick={(e) => e.stopPropagation()}
+                            className="absolute right-0 top-full mt-1 w-44 rounded-lg shadow-xl z-50 p-1 border text-xs flex flex-col gap-0.5 text-left"
+                            style={{ background: darkMode ? '#121316' : '#ffffff', borderColor: surfaceBdr }}
+                          >
+                            <button
+                              onClick={() => {
+                                setOpenDayMenuKey(null);
+                                startEditingFocusDay(day.key, day.day, day.seconds);
+                              }}
+                              className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
+                              style={{ color: menuText }}
+                            >
+                              <Pencil size={12} className="text-blue-400" />
+                              Edit time
+                            </button>
+                            <button
+                              onClick={() => {
+                                toggleExcludeFocusDay(day.key);
+                              }}
+                              className="w-full flex items-center justify-between px-2 py-1.5 rounded-md hover:bg-amber-500/15 font-medium transition-colors"
+                              style={{ color: day.isExcluded ? '#f59e0b' : menuText }}
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0 truncate">
+                                <CalendarX size={12} className={day.isExcluded ? 'text-amber-400' : 'text-slate-400'} />
+                                <span className="truncate">Exclude date</span>
+                              </div>
+                              <input
+                                type="checkbox"
+                                checked={day.isExcluded}
+                                onChange={() => {}}
+                                className="rounded cursor-pointer accent-amber-500 shrink-0 ml-1"
+                              />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
                       {/* Exact hours for this day, right above its bar. */}
                       <div
                         className="text-[9px] font-bold tabular-nums text-center truncate leading-none"
-                        style={{ color: day.seconds > 0 ? (active ? '#60a5fa' : menuText) : menuSub, opacity: day.seconds > 0 ? 1 : 0.45 }}
+                        style={{ color: day.isExcluded ? '#f59e0b' : (day.seconds > 0 ? (active ? '#60a5fa' : menuText) : menuSub), opacity: day.seconds > 0 || day.isExcluded ? 1 : 0.45 }}
                       >
-                        {day.seconds > 0 ? formatFocusDuration(day.seconds) : '—'}
+                        {editingFocusDayKey === day.key ? (
+                          <input
+                            autoFocus
+                            onFocus={e => e.target.select()}
+                            value={editingFocusInput}
+                            onChange={e => setEditingFocusInput(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                submitFocusDayEdit(day.key, day.day, day.seconds, e.currentTarget.value);
+                              }
+                              if (e.key === 'Escape') {
+                                submittingEditRef.current = true;
+                                setEditingFocusDayKey(null);
+                              }
+                            }}
+                            onBlur={e => submitFocusDayEdit(day.key, day.day, day.seconds, e.target.value)}
+                            className="w-12 text-center text-[9px] font-bold bg-transparent border-b outline-none z-30"
+                            style={{ color: menuText, borderColor: '#60a5fa' }}
+                            onClick={e => e.stopPropagation()}
+                          />
+                        ) : (
+                          <span
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              startEditingFocusDay(day.key, day.day, day.seconds);
+                            }}
+                            className={`cursor-pointer hover:underline ${day.isExcluded ? 'line-through text-amber-400 opacity-75' : ''}`}
+                            title="Double-click to edit focus time"
+                          >
+                            {day.seconds > 0 ? formatFocusDuration(day.seconds) : '—'}
+                          </span>
+                        )}
                       </div>
                       <div className="flex-1 flex items-end">
                         <div
-                          className="w-full rounded-t-md transition-all duration-300"
-                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}${day.sessions ? ` · ${day.sessions} session${day.sessions === 1 ? '' : 's'}` : ''}`}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            startEditingFocusDay(day.key, day.day, day.seconds);
+                          }}
+                          className="w-full rounded-t-md transition-all duration-300 cursor-pointer"
+                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}${day.isExcluded ? ' (Excluded from analysis)' : (day.sessions ? ` · ${day.sessions} session${day.sessions === 1 ? '' : 's'}` : '')} (Double-click to edit)`}
                           style={{
                             height: `${pct}%`,
-                            minHeight: day.seconds > 0 ? 3 : 0,
-                            background: active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)',
-                            border: `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
+                            minHeight: day.seconds > 0 || day.isExcluded ? 3 : 0,
+                            background: day.isExcluded
+                              ? 'rgba(245,158,11,0.22)'
+                              : (active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)'),
+                            border: day.isExcluded
+                              ? '1px dashed #f59e0b'
+                              : `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
                           }}
                         />
                       </div>
-                      <div className="text-[9px] font-semibold text-center uppercase truncate leading-none" style={{ color: active ? '#60a5fa' : menuSub }}>
-                        {format(day.day, 'EEE')}
+                      <div className="text-[9px] font-semibold text-center uppercase truncate leading-none flex items-center justify-center gap-0.5" style={{ color: day.isExcluded ? '#f59e0b' : (active ? '#60a5fa' : menuSub) }}>
+                        <span>{format(day.day, 'EEE')}</span>
                       </div>
                     </div>
                   );
@@ -5034,6 +5342,59 @@ export default function WeeklyPlanner() {
                 >
                   Stop
                 </button>
+                {/* 3-dots options menu for today */}
+                <div className="relative">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const k = dateKey(nowOwnerDate);
+                      setOpenDayMenuKey(openDayMenuKey === k ? null : k);
+                    }}
+                    className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+                    style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub }}
+                    title="Today's focus options"
+                  >
+                    <MoreHorizontal size={13} />
+                  </button>
+                  {openDayMenuKey === dateKey(nowOwnerDate) && (
+                    <div
+                      ref={dayMenuRef}
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute right-0 top-full mt-1 w-48 rounded-lg shadow-xl z-50 p-1 border text-xs flex flex-col gap-0.5 text-left"
+                      style={{ background: darkMode ? '#121316' : '#ffffff', borderColor: surfaceBdr }}
+                    >
+                      <button
+                        onClick={() => {
+                          setOpenDayMenuKey(null);
+                          startEditingFocusDay(dateKey(nowOwnerDate), nowOwnerDate, focusStats.todaySeconds);
+                        }}
+                        className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
+                        style={{ color: menuText }}
+                      >
+                        <Pencil size={13} className="text-blue-400" />
+                        Edit today's time
+                      </button>
+                      <button
+                        onClick={() => {
+                          toggleExcludeFocusDay(dateKey(nowOwnerDate));
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-md hover:bg-amber-500/15 font-medium transition-colors"
+                        style={{ color: focusExcludedSet.has(dateKey(nowOwnerDate)) ? '#f59e0b' : menuText }}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 truncate">
+                          <CalendarX size={13} className={focusExcludedSet.has(dateKey(nowOwnerDate)) ? 'text-amber-400' : 'text-slate-400'} />
+                          <span className="truncate">Exclude today</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={focusExcludedSet.has(dateKey(nowOwnerDate))}
+                          onChange={() => {}}
+                          className="rounded cursor-pointer accent-amber-500 shrink-0 ml-1.5"
+                        />
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </section>
@@ -5138,16 +5499,7 @@ export default function WeeklyPlanner() {
                   </div>
                 )}
                 <div className="relative" style={{ height: totalH }}>
-                  {slots.map((time, i) => {
-                    const isHour = time.endsWith(':00');
-                    return (
-                      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i*sh, height: sh, transform: 'translateY(-50%)' }}>
-                        <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-bold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/40'}`}>
-                          {formatSlotLabel(time, timeFormat)}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  {timeAxisRows}
                 </div>
               </div>
 
@@ -5177,9 +5529,8 @@ export default function WeeklyPlanner() {
 
                     type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
                     const renderItems: RenderItem[] = [];
-                    for (const ev of Object.values(weekEvents)) {
-                      if (ev.allDay) continue; // Skip all-day events in the timeline grid
-                      
+                    for (const ev of weekTimedEvents) {
+
                       const isDrag      = dragDisp?.id === ev.id;
                       const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
                       const isDragging  = isDrag || isBatchDrag;
@@ -5589,8 +5940,20 @@ export default function WeeklyPlanner() {
                         </div>
                       )}
 
-                      {/* Content area */}
-                      <div className="relative" style={{ height: totalH, cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
+                      {/* Content area.
+                          `contain: layout style` tells the browser this column's
+                          internals can't affect anything outside it. Without it,
+                          resizing the grid (which is what showing/hiding the tasks
+                          panel does, every frame of the animation) made the layout
+                          engine walk one enormous tree; with it each column is an
+                          independent, much cheaper sub-layout. Paint is left OUT of
+                          the containment on purpose — the drag time tooltip and the
+                          resize grip sit slightly outside the column and would be
+                          clipped by `contain: paint`. It is also dropped for the
+                          duration of a drag/resize, because containment creates a
+                          stacking context and the drag time tooltip is allowed to
+                          spill over the neighbouring column. */}
+                      <div className="relative" style={{ height: totalH, contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style', cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
                         onClick={(e) => handleColClick(e, colIdx)}
                         onMouseDown={(e) => {
                           if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
@@ -5615,9 +5978,7 @@ export default function WeeklyPlanner() {
                         }}
                       >
                         {/* Grid lines */}
-                        {slots.map((time, i) => (
-                          <div key={time} className={`absolute w-full pointer-events-none border-b ${time.endsWith(':00') ? 'border-border/35' : 'border-border/12'}`} style={{ top: i*sh, height: sh }} />
-                        ))}
+                        {gridLineRows}
 
                         {/* Live time indicator */}
                         {isNowCol && nowInView && (() => {
@@ -5630,11 +5991,9 @@ export default function WeeklyPlanner() {
                                 style={{ height: 12, top: -6, background: `linear-gradient(to bottom, transparent, ${nowAccentSoft}, transparent)` }}
                               />
                               {/* Pulsing dot with a matching halo */}
-                              <motion.div
-                                className="absolute -left-[2px]"
+                              <div
+                                className="absolute -left-[2px] now-dot-pulse"
                                 style={{ width: 9, height: 9, borderRadius: '50%', background: nowAccent, top: -3.5, boxShadow: `0 0 0 3px ${nowAccentSoft}` }}
-                                animate={{ opacity: [0.65, 1, 0.65], scale: [0.92, 1.08, 0.92] }}
-                                transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
                               />
                               {/* Hairline that fades out toward the right edge */}
                               <div
@@ -5707,9 +6066,16 @@ export default function WeeklyPlanner() {
                                 className="absolute flex items-center gap-1 rounded-full pl-1 pr-1.5 pointer-events-auto"
                                 style={{
                                   left: 2, top: -7, height: 14,
-                                  background: `${prayer.color}26`,
+                                  // Was `backdropFilter: blur(2px)`. There is one of
+                                  // these per prayer per day column, and every
+                                  // backdrop-filter forces its own compositing layer
+                                  // plus a readback of whatever is behind it — ~35 of
+                                  // them re-rasterising on every frame of any width
+                                  // change. Behind this chip is a flat column and a
+                                  // grid line, so a 2px blur was invisible anyway; a
+                                  // slightly stronger fill looks the same for free.
+                                  background: `${prayer.color}33`,
                                   border: `1px solid ${prayer.color}80`,
-                                  backdropFilter: 'blur(2px)',
                                 }}
                                 title={`${label}${done ? ' · done' : ''}`}
                               >
@@ -6908,57 +7274,120 @@ export default function WeeklyPlanner() {
                       })}
                     </div>
 
-                    {/* Exact per-day breakdown table (double-click row or duration to modify) */}
+                    {/* Exact per-day breakdown table (double-click row or duration to modify, or use 3-dots menu) */}
                     <div className="mt-4 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
                       {weekAnalysisLive.days.map((d, i) => (
                         <div
                           key={d.key}
                           onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
-                          className="flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5"
+                          className="flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5 relative group"
                           style={{
-                            background: isSameDay(d.date, nowOwnerDate)
-                              ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
-                              : i % 2 === 0 ? surfaceBg : 'transparent',
+                            background: d.isExcluded
+                              ? (darkMode ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.05)')
+                              : (isSameDay(d.date, nowOwnerDate)
+                                  ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
+                                  : (i % 2 === 0 ? surfaceBg : 'transparent')),
                             borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
                           }}
                         >
-                          <span className="font-medium flex items-center gap-1.5" style={{ color: isSameDay(d.date, nowOwnerDate) ? '#60a5fa' : menuText }}>
-                            <Clock size={11} style={{ opacity: 0.5 }} />
-                            {format(d.date, 'EEEE, MMM d')}
-                            {isSameDay(d.date, nowOwnerDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
-                          </span>
-                          <span
-                            className="tabular-nums flex items-center gap-2"
-                            style={{ color: d.seconds > 0 ? menuText : menuSub }}
-                          >
-                            {editingFocusDayKey === d.key ? (
-                              <input
-                                autoFocus
-                                onFocus={e => e.target.select()}
-                                value={editingFocusInput}
-                                onChange={e => setEditingFocusInput(e.target.value)}
-                                onKeyDown={e => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    submitFocusDayEdit(d.key, d.date, d.seconds, e.currentTarget.value);
-                                  }
-                                  if (e.key === 'Escape') {
-                                    submittingEditRef.current = true;
-                                    setEditingFocusDayKey(null);
-                                  }
-                                }}
-                                onBlur={e => submitFocusDayEdit(d.key, d.date, d.seconds, e.target.value)}
-                                className="w-24 text-right text-xs font-bold bg-transparent border-b-2 outline-none"
-                                style={{ color: menuText, borderColor: '#60a5fa' }}
-                                onClick={e => e.stopPropagation()}
-                              />
-                            ) : (
-                              <>
-                                <span className="font-semibold">{formatFocusDuration(d.seconds)}</span>
-                                <span style={{ color: menuSub }}> · {d.sessions} session{d.sessions === 1 ? '' : 's'}</span>
-                              </>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-medium flex items-center gap-1.5" style={{ color: isSameDay(d.date, nowOwnerDate) ? '#60a5fa' : menuText }}>
+                              <Clock size={11} style={{ opacity: 0.5 }} />
+                              {format(d.date, 'EEEE, MMM d')}
+                              {isSameDay(d.date, nowOwnerDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
+                            </span>
+                            {d.isExcluded && (
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-500 border border-amber-500/30">
+                                Excluded
+                              </span>
                             )}
-                          </span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span
+                              className="tabular-nums flex items-center gap-2"
+                              style={{ color: d.isExcluded ? '#f59e0b' : (d.seconds > 0 ? menuText : menuSub) }}
+                            >
+                              {editingFocusDayKey === d.key ? (
+                                <input
+                                  autoFocus
+                                  onFocus={e => e.target.select()}
+                                  value={editingFocusInput}
+                                  onChange={e => setEditingFocusInput(e.target.value)}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      submitFocusDayEdit(d.key, d.date, d.seconds, e.currentTarget.value);
+                                    }
+                                    if (e.key === 'Escape') {
+                                      submittingEditRef.current = true;
+                                      setEditingFocusDayKey(null);
+                                    }
+                                  }}
+                                  onBlur={e => submitFocusDayEdit(d.key, d.date, d.seconds, e.target.value)}
+                                  className="w-24 text-right text-xs font-bold bg-transparent border-b-2 outline-none"
+                                  style={{ color: menuText, borderColor: '#60a5fa' }}
+                                  onClick={e => e.stopPropagation()}
+                                />
+                              ) : (
+                                <>
+                                  <span className={`font-semibold ${d.isExcluded ? 'line-through opacity-75' : ''}`}>{formatFocusDuration(d.seconds)}</span>
+                                  <span style={{ color: menuSub }}> · {d.sessions} session{d.sessions === 1 ? '' : 's'}</span>
+                                </>
+                              )}
+                            </span>
+                            {/* 3-dots day context menu */}
+                            <div className="relative">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenDayMenuKey(openDayMenuKey === d.key ? null : d.key);
+                                }}
+                                className="p-1 rounded hover:bg-black/20 transition-colors"
+                                style={{ color: menuSub }}
+                                title="Day options"
+                              >
+                                <MoreHorizontal size={14} />
+                              </button>
+                              {openDayMenuKey === d.key && (
+                                <div
+                                  ref={dayMenuRef}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="absolute right-0 top-full mt-1 w-48 rounded-lg shadow-xl z-30 p-1 border text-xs flex flex-col gap-0.5 text-left"
+                                  style={{ background: darkMode ? '#121316' : '#ffffff', borderColor: surfaceBdr }}
+                                >
+                                  <button
+                                    onClick={() => {
+                                      setOpenDayMenuKey(null);
+                                      startEditingFocusDay(d.key, d.date, d.seconds);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
+                                    style={{ color: menuText }}
+                                  >
+                                    <Pencil size={13} className="text-blue-400" />
+                                    Edit focus time
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      toggleExcludeFocusDay(d.key);
+                                    }}
+                                    className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-md hover:bg-amber-500/15 font-medium transition-colors"
+                                    style={{ color: d.isExcluded ? '#f59e0b' : menuText }}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0 truncate">
+                                      <CalendarX size={13} className={d.isExcluded ? 'text-amber-400' : 'text-slate-400'} />
+                                      <span className="truncate">Exclude date</span>
+                                    </div>
+                                    <input
+                                      type="checkbox"
+                                      checked={d.isExcluded}
+                                      onChange={() => {}}
+                                      className="rounded cursor-pointer accent-amber-500 shrink-0 ml-1.5"
+                                    />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -7012,6 +7441,7 @@ export default function WeeklyPlanner() {
                     <div className="grid grid-cols-7 gap-1.5">
                       {focusAnalysis.monthGridDays.map(d => {
                         const key = dateKey(d);
+                        const isExcluded = focusExcludedSet.has(key);
                         // Fold in the session that's running right now, same as the week tab.
                         const secs = (focusAnalysis.byDaySeconds.get(key) ?? 0)
                           + (activeFocusDayKey === key ? focusElapsedSeconds : 0);
@@ -7023,15 +7453,70 @@ export default function WeeklyPlanner() {
                         return (
                           <div
                             key={key}
-                            title={`${format(d, 'EEEE, MMM d')}: ${formatFocusDuration(secs)}${sessions ? ` · ${sessions} session${sessions === 1 ? '' : 's'}` : ''}`}
-                            className="aspect-square rounded-md flex flex-col items-center justify-center gap-0.5 relative"
+                            title={`${format(d, 'EEEE, MMM d')}: ${formatFocusDuration(secs)}${isExcluded ? ' (Excluded from analysis)' : (sessions ? ` · ${sessions} session${sessions === 1 ? '' : 's'}` : '')}`}
+                            className="aspect-square rounded-md flex flex-col items-center justify-center gap-0.5 relative group"
                             style={{
-                              background: secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg,
-                              border: `1px solid ${todayCell ? '#60a5fa' : surfaceBdr}`,
+                              background: isExcluded
+                                ? (darkMode ? 'rgba(245,158,11,0.12)' : 'rgba(245,158,11,0.08)')
+                                : (secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg),
+                              border: `1px ${isExcluded ? 'dashed #f59e0b' : 'solid'} ${todayCell ? '#60a5fa' : surfaceBdr}`,
                               opacity: inMonth ? 1 : 0.35,
                             }}
                           >
-                            <span className="text-[17px] font-semibold tabular-nums leading-none" style={{ color: hot ? '#fff' : menuText }}>
+                            {/* 3-dots day options menu */}
+                            <div className="absolute top-1 right-1 z-20 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenDayMenuKey(openDayMenuKey === key ? null : key);
+                                }}
+                                className="p-0.5 rounded hover:bg-black/20 transition-colors"
+                                style={{ color: hot ? '#fff' : menuSub }}
+                                title="Day options"
+                              >
+                                <MoreHorizontal size={12} />
+                              </button>
+                              {openDayMenuKey === key && (
+                                <div
+                                  ref={dayMenuRef}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="absolute right-0 top-full mt-1 w-44 rounded-lg shadow-xl z-50 p-1 border text-xs flex flex-col gap-0.5 text-left"
+                                  style={{ background: darkMode ? '#121316' : '#ffffff', borderColor: surfaceBdr }}
+                                >
+                                  <button
+                                    onClick={() => {
+                                      setOpenDayMenuKey(null);
+                                      startEditingFocusDay(key, d, secs);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
+                                    style={{ color: menuText }}
+                                  >
+                                    <Pencil size={12} className="text-blue-400" />
+                                    Edit time
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      toggleExcludeFocusDay(key);
+                                    }}
+                                    className="w-full flex items-center justify-between px-2 py-1.5 rounded-md hover:bg-amber-500/15 font-medium transition-colors"
+                                    style={{ color: isExcluded ? '#f59e0b' : menuText }}
+                                  >
+                                    <div className="flex items-center gap-1.5 min-w-0 truncate">
+                                      <CalendarX size={12} className={isExcluded ? 'text-amber-400' : 'text-slate-400'} />
+                                      <span className="truncate">Exclude date</span>
+                                    </div>
+                                    <input
+                                      type="checkbox"
+                                      checked={isExcluded}
+                                      onChange={() => {}}
+                                      className="rounded cursor-pointer accent-amber-500 shrink-0 ml-1"
+                                    />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
+                            <span className="text-[17px] font-semibold tabular-nums leading-none" style={{ color: isExcluded ? '#f59e0b' : (hot ? '#fff' : menuText) }}>
                               {format(d, 'd')}
                             </span>
                             {/* Exact time for this day, always visible — not just in the tooltip. */}
@@ -7040,8 +7525,8 @@ export default function WeeklyPlanner() {
                                 e.stopPropagation();
                                 startEditingFocusDay(key, d, secs);
                               }}
-                              className="text-[15px] font-bold tabular-nums leading-none cursor-pointer"
-                              style={{ color: secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub, opacity: secs > 0 ? 1 : 0.45 }}
+                              className={`text-[15px] font-bold tabular-nums leading-none cursor-pointer ${isExcluded ? 'line-through opacity-75 text-amber-400' : ''}`}
+                              style={{ color: isExcluded ? '#f59e0b' : (secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub), opacity: secs > 0 || isExcluded ? 1 : 0.45 }}
                             >
                               {editingFocusDayKey === key ? (
                                 <input
@@ -7068,10 +7553,14 @@ export default function WeeklyPlanner() {
                                 <span>{secs > 0 ? formatFocusDuration(secs) : '—'}</span>
                               )}
                             </span>
-                            {sessions > 0 && (
-                              <span className="text-[11px] font-bold tabular-nums leading-none" style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
-                                {sessions}×
-                              </span>
+                            {isExcluded ? (
+                              <span className="text-[9px] font-bold uppercase tracking-wider text-amber-400 leading-none">Excl</span>
+                            ) : (
+                              sessions > 0 && (
+                                <span className="text-[11px] font-bold tabular-nums leading-none" style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
+                                  {sessions}×
+                                </span>
+                              )
                             )}
                           </div>
                         );
@@ -7216,8 +7705,8 @@ export default function WeeklyPlanner() {
           onEdit={editTask}
           onDelete={deleteTask}
           onOpenMenu={openTaskMenu}
-          onResize={(w: number) => setTasksPanelWidth(clampPanelWidth(w))}
-          onClose={() => setTasksPanelOpen(false)}
+          onResize={handleTasksPanelResize}
+          onClose={closeTasksPanel}
         />
       </div>
 

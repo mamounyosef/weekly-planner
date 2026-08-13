@@ -13,6 +13,7 @@ import {
   INITIAL_CONTROLLER_STATE,
   DEFAULT_HARDWARE_SETTINGS,
   armingSecondsLeft,
+  dropCrosstalkButtons,
   type HardwareAction,
   type HardwareControllerState,
   type HardwareSettings,
@@ -307,6 +308,168 @@ section('Duplicate and noisy events');
   check('away timer restarts on each departure', d.hasSession, `hasSession=${d.hasSession}`);
   d.advance(20);
   check('and still terminates eventually', !d.hasSession);
+}
+
+// ── corrupt persisted state ──────────────────────────────────────────────────
+// The bug that actually bit: the server stored a cleared timer as 0 rather than
+// null, so a paused session saw an away timer 56 years old and died instantly.
+section('Corrupt or implausible timestamps');
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.state = { ...d.state, awaySince: 0 };        // epoch, as the server used to return
+  d.event('presence', false);
+  d.advance(1);
+  check('epoch away-stamp does not terminate on pause', d.paused, `hasSession=${d.hasSession} running=${d.isRunning}`);
+  d.advance(60);
+  check('and still only pauses a minute later', d.paused, `hasSession=${d.hasSession}`);
+  d.advance(65);
+  check('then terminates on the real timeout', !d.hasSession);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.event('button_a');                            // paused by button
+  d.state = { ...d.state, awaySince: 0 };
+  d.advance(600);
+  check('epoch stamp never terminates a button-paused session', d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.event('presence', false); d.advance(1);
+  d.state = { ...d.state, awaySince: d.t + 60_000 };  // future timestamp
+  d.advance(600);
+  check('future away-stamp is discarded, not trusted', d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true);
+  d.state = { ...d.state, armingUntil: 0 };       // epoch arming stamp
+  d.advance(2);
+  check('epoch arming stamp does not start a session', !d.hasSession, `hasSession=${d.hasSession}`);
+}
+
+// ── back-to-back sessions ────────────────────────────────────────────────────
+// Staying at the desk produces no sensor event, so a session that simply ran
+// out left the day stopped until the user got up and sat down again.
+section('Session chaining');
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  check('first session running', d.isRunning);
+  d.isRunning = false; d.hasSession = false;      // the hour is up, timer completes
+  d.advance(2);
+  check('countdown re-arms while still seated', armingSecondsLeft(d.state, d.t) > 0,
+    `arming=${armingSecondsLeft(d.state, d.t)}`);
+  d.advance(32);
+  check('next session starts by itself', d.isRunning && d.hasSession, `running=${d.isRunning}`);
+}
+{
+  const d = new Desk({ autoRestartEnabled: false });
+  d.event('presence', true); d.advance(32);
+  d.isRunning = false; d.hasSession = false;
+  d.advance(60);
+  check('respects the setting when switched off', !d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.event('button_b');                            // stopped deliberately
+  d.advance(120);
+  check('a manual stop does not restart itself', !d.hasSession, `hasSession=${d.hasSession}`);
+  d.event('presence', false); d.advance(2);
+  d.event('presence', true); d.advance(32);
+  check('but leaving and returning starts a new one', d.isRunning, `running=${d.isRunning}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.event('presence', false); d.advance(150);     // terminated by the away timeout
+  d.advance(60);
+  check('does not restart while you are away', !d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.isRunning = false; d.hasSession = false;      // session completes
+  d.advance(10);
+  d.event('presence', false); d.advance(30);      // you leave mid-countdown
+  check('leaving cancels the re-armed countdown', !d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.event('button_a');                            // paused, not ended
+  d.advance(60);
+  check('a paused session is not treated as finished', d.hasSession && !d.isRunning,
+    `hasSession=${d.hasSession} running=${d.isRunning}`);
+}
+
+// ── crosstalk ────────────────────────────────────────────────────────────────
+// Real captured data: every press of A was followed ~80ms later by a phantom B
+// that terminated the session.
+section('Button crosstalk rejection');
+{
+  const evts = [
+    { id: 1, type: 'button_a', at: 1000 },
+    { id: 2, type: 'button_b', at: 1077 },
+  ];
+  const clean = dropCrosstalkButtons(evts);
+  check('phantom B 77ms after A is dropped', clean.length === 1 && clean[0].type === 'button_a',
+    JSON.stringify(clean.map(e => e.type)));
+}
+{
+  const evts = [
+    { id: 1, type: 'button_a', at: 1000 },
+    { id: 2, type: 'button_b', at: 1079 },
+    { id: 3, type: 'button_a', at: 1300 },
+    { id: 4, type: 'button_b', at: 1377 },
+  ];
+  const clean = dropCrosstalkButtons(evts);
+  check('two press+phantom pairs leave two A presses',
+    clean.length === 2 && clean.every(e => e.type === 'button_a'),
+    JSON.stringify(clean.map(e => e.type)));
+}
+{
+  const evts = [
+    { id: 1, type: 'button_a', at: 1000 },
+    { id: 2, type: 'button_b', at: 1600 },
+  ];
+  const clean = dropCrosstalkButtons(evts);
+  check('a deliberate B 600ms later is kept', clean.length === 2, JSON.stringify(clean.map(e => e.type)));
+}
+{
+  const evts = [
+    { id: 1, type: 'button_a', at: 1000 },
+    { id: 2, type: 'button_a', at: 1080 },
+    { id: 3, type: 'button_a', at: 1160 },
+  ];
+  const clean = dropCrosstalkButtons(evts);
+  check('rapid presses of the SAME button all survive', clean.length === 3, JSON.stringify(clean.map(e => e.type)));
+}
+{
+  const evts = [
+    { id: 1, type: 'presence', at: 1000 },
+    { id: 2, type: 'button_b', at: 1010 },
+    { id: 3, type: 'presence', at: 1020 },
+  ];
+  const clean = dropCrosstalkButtons(evts);
+  check('presence events are never filtered', clean.length === 3, JSON.stringify(clean.map(e => e.type)));
+}
+{
+  // The whole point: a lone A press must not terminate the session.
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  const evts = [
+    { id: 1, type: 'button_a', at: d.t },
+    { id: 2, type: 'button_b', at: d.t + 78 },
+  ];
+  for (const e of dropCrosstalkButtons(evts)) {
+    d.event(e.type as 'button_a' | 'button_b');
+  }
+  check('pressing A pauses, and does NOT terminate', d.hasSession && !d.isRunning,
+    `hasSession=${d.hasSession} running=${d.isRunning}`);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);

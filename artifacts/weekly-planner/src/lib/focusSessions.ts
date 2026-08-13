@@ -30,6 +30,7 @@ export interface FocusTimerState {
 }
 
 export const FOCUS_SESSIONS_KEY = 'planner-focus-sessions';
+export const FOCUS_EXCLUDED_DATES_KEY = 'planner-focus-excluded-dates';
 export const FOCUS_TIMER_KEY = 'planner-focus-timer';
 export const MIN_COMPLETED_SESSION_SECONDS = 20 * 60;
 
@@ -645,6 +646,27 @@ export function loadLocalFocusSessions(): FocusSession[] {
     return safeFocusSessions(JSON.parse(localStorage.getItem(FOCUS_SESSIONS_KEY) || '[]'));
   } catch (_) {
     return [];
+  }
+}
+
+export function safeFocusExcludedDates(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((k): k is string => typeof k === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(k));
+}
+
+export function loadLocalFocusExcludedDates(): string[] {
+  try {
+    return safeFocusExcludedDates(JSON.parse(localStorage.getItem(FOCUS_EXCLUDED_DATES_KEY) || '[]'));
+  } catch (_) {
+    return [];
+  }
+}
+
+export function saveLocalFocusExcludedDates(excluded: string[]): void {
+  try {
+    localStorage.setItem(FOCUS_EXCLUDED_DATES_KEY, JSON.stringify(safeFocusExcludedDates(excluded)));
+  } catch (_) {
+    /* ignore private mode */
   }
 }
 

@@ -1228,6 +1228,19 @@ export default function Widget() {
     let startX = e.screenX;
     let startY = e.screenY;
 
+    // Each move_window_relative is a round-trip into pywebview. Firing one per
+    // mouse event (hundreds a second) queued far more window moves than the
+    // compositor could show, so the window trailed the cursor. Accumulate the
+    // deltas and send a single move per frame instead — same total distance,
+    // one call per painted frame.
+    let pendingDx = 0, pendingDy = 0, moveFrame = 0;
+    const flushWindowMove = () => {
+      moveFrame = 0;
+      const dx = pendingDx, dy = pendingDy;
+      pendingDx = 0; pendingDy = 0;
+      if (!isDragging || (dx === 0 && dy === 0)) return;
+      (window as any).pywebview?.api?.move_window_relative?.(dx, dy);
+    };
     const handleMouseMove = (ev: MouseEvent) => {
       if (!isDragging) return;
       const dx = ev.screenX - startX;
@@ -1235,13 +1248,14 @@ export default function Widget() {
       if (dx !== 0 || dy !== 0) {
         startX = ev.screenX;
         startY = ev.screenY;
-        if ((window as any).pywebview?.api?.move_window_relative) {
-          (window as any).pywebview.api.move_window_relative(dx, dy);
-        }
+        pendingDx += dx;
+        pendingDy += dy;
+        if (!moveFrame) moveFrame = requestAnimationFrame(flushWindowMove);
       }
     };
 
     const handleMouseUp = () => {
+      if (moveFrame) { cancelAnimationFrame(moveFrame); moveFrame = 0; flushWindowMove(); }
       isDragging = false;
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
@@ -1798,11 +1812,9 @@ export default function Widget() {
                   style={{ height: 12, top: -6, background: `linear-gradient(to bottom, transparent, ${nowAccentSoft}, transparent)` }}
                 />
                 {/* Pulsing dot with a matching halo */}
-                <motion.div
-                  className="absolute -left-[2px]"
+                <div
+                  className="absolute -left-[2px] now-dot-pulse"
                   style={{ width: 9, height: 9, borderRadius: '50%', background: nowAccent, top: -3.5, boxShadow: `0 0 0 3px ${nowAccentSoft}` }}
-                  animate={{ opacity: [0.65, 1, 0.65], scale: [0.92, 1.08, 0.92] }}
-                  transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
                 />
                 {/* Hairline that fades out toward the right edge */}
                 <div

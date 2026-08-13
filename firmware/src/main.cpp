@@ -27,6 +27,13 @@
 // Display
 // ---------------------------------------------------------------------------
 
+// Counts every edge each button pin sees, accepted or not. Sampling the level
+// from the main loop kept missing the press; a counter cannot, whenever the
+// button happens to be pressed. Declared here so the live stream can report
+// them alongside the sensor reading.
+static volatile unsigned long btnAEdges = 0;
+static volatile unsigned long btnBEdges = 0;
+
 // Most PCF8574 backpacks are 0x27, some are 0x3F. Detected at boot.
 static uint8_t lcdAddr = 0x27;
 static LiquidCrystal_I2C *lcd = nullptr;
@@ -155,6 +162,8 @@ struct SensorConfig {
   long absentConfirmMs = ABSENT_CONFIRM_MS;
   bool calibrating = false;
   bool announceOnConnect = true;
+  float maxValidCm = GLITCH_MAX_CM;
+  long glitchHoldMs = GLITCH_HOLD_MS;
 };
 static SensorConfig cfg;
 
@@ -241,14 +250,16 @@ static bool updatePresence(float median, unsigned long now) {
 static String resolvedHost = "";
 
 static void resolveServerHost() {
-  resolvedHost = SERVER_HOST;
-
   IPAddress ip = MDNS.queryHost(SERVER_MDNS, 3000);
-  if (ip != IPAddress((uint32_t)0)) {
+  // A resolved address is only preferred over the compiled-in one if it is
+  // actually plausible. A resolver answering with something off-network would
+  // otherwise be latched in permanently.
+  if (ip != IPAddress((uint32_t)0) && ip[0] == WiFi.localIP()[0] && ip[1] == WiFi.localIP()[1]) {
     resolvedHost = ip.toString();
     Serial.printf("[mdns] %s.local -> %s\n", SERVER_MDNS, resolvedHost.c_str());
   } else {
-    Serial.printf("[mdns] no answer, falling back to %s\n", SERVER_HOST);
+    resolvedHost = SERVER_HOST;
+    Serial.printf("[mdns] no usable answer, using %s\n", SERVER_HOST);
   }
 }
 
@@ -257,6 +268,15 @@ static String serverBase() {
 }
 
 static unsigned long lastServerOkAt = 0;
+
+// Resolving the server once at boot is not enough. The board is normally
+// powered before the PC, so the first lookup happens while nothing is there to
+// answer it, and a wrong or stale answer would then stick forever -- which is
+// exactly how it ended up posting into the void after a reboot. Repeated
+// failures trigger a fresh lookup instead.
+static int consecutiveFailures = 0;
+static const int FAILURES_BEFORE_RERESOLVE = 5;
+static int lastPollCode = 0;
 
 // Fire-and-forget event POST. The server decides what it means.
 static bool postEvent(const String &json) {
@@ -339,6 +359,8 @@ static void pollConfig() {
     if (jsonNumber(body, "sampleIntervalMs", n)) cfg.sampleIntervalMs = constrain(n, 40L, 2000L);
     if (jsonNumber(body, "presentConfirmMs", n)) cfg.presentConfirmMs = constrain(n, 0L, 60000L);
     if (jsonNumber(body, "absentConfirmMs", n)) cfg.absentConfirmMs = constrain(n, 0L, 60000L);
+    if (jsonNumber(body, "maxValidCm", n)) cfg.maxValidCm = constrain(n, 20L, 400L);
+    if (jsonNumber(body, "glitchHoldMs", n)) cfg.glitchHoldMs = constrain(n, 0L, 60000L);
     cfg.calibrating = body.indexOf("\"calibrating\":true") >= 0;
     cfg.announceOnConnect = body.indexOf("\"announceOnConnect\":true") >= 0;
 
@@ -356,10 +378,23 @@ static void pollConfig() {
   http.end();
 }
 
-// Streams the current median to the settings page while calibrating, so the
-// thresholds can be chosen against what the sensor actually sees on this desk.
-static void streamCalibration(float median) {
-  postEvent(String("{\"type\":\"distance\",\"distanceCm\":") + String(median, 1) + "}");
+// Streams the current reading and the board's own verdict on it, so the
+// settings page can show what the sensor sees and whether it counts as being
+// at the desk. Fast while calibrating, slow otherwise.
+static void streamLive(float median) {
+  // Raw button levels ride along: a button that produces no events at all is
+  // otherwise indistinguishable from one that is never pressed, and the board
+  // has no cable attached to check with.
+  postEvent(String("{\"type\":\"distance\",\"distanceCm\":") + String(median, 1) +
+            ",\"present\":" + (presencePresent ? "true" : "false") +
+            ",\"btnA\":" + String(digitalRead(PIN_BTN_A)) +
+            ",\"btnB\":" + String(digitalRead(PIN_BTN_B)) +
+            ",\"edgesA\":" + String(btnAEdges) +
+            ",\"edgesB\":" + String(btnBEdges) +
+            ",\"host\":\"" + resolvedHost + "\"" +
+            ",\"pollCode\":" + String(lastPollCode) +
+            ",\"uiMode\":\"" + ui.mode + "\"" +
+            ",\"uiValid\":" + (ui.valid ? "true" : "false") + "}");
 }
 
 static void pollState() {
@@ -376,6 +411,7 @@ static void pollState() {
   }
 
   int code = http.GET();
+  lastPollCode = code;
   if (code == 200) {
     String body = http.getString();
     String mode;
@@ -385,6 +421,7 @@ static void pollState() {
     jsonNumber(body, "sessionsToday", ui.sessionsToday);
     jsonNumber(body, "armSeconds", ui.armSeconds);
     ui.valid = true;
+    consecutiveFailures = 0;
     lastServerOkAt = millis();
 
     // "offline" means the server is up but no app window is driving it. The
@@ -403,7 +440,13 @@ static void pollState() {
     wasAppAlive = appAlive;
   }
   else {
-    Serial.printf("[poll] failed: %d\n", code);
+    Serial.printf("[poll] failed: %d (host %s)\n", code, resolvedHost.c_str());
+    if (++consecutiveFailures >= FAILURES_BEFORE_RERESOLVE) {
+      consecutiveFailures = 0;
+      http.end();
+      resolveServerHost();
+      return;
+    }
   }
   // A failed poll deliberately leaves the last good values in place. One
   // dropped request is normal and must not blank the screen -- the staleness
@@ -471,66 +514,122 @@ static void renderLcd(bool linkUp) {
 // begins and ends between two digitalRead() calls is simply never seen. An
 // interrupt latches the press the instant it happens, whatever the main loop
 // is busy with, and the loop drains the latch when it gets around to it.
-static const unsigned long BTN_LOCKOUT_US = 40000;   // swallows contact bounce
-static const unsigned long BTN_RELEASE_MS = 50;      // held HIGH this long = released
+// Presses are identified by how long the line is actually held down, measured
+// entirely inside the interrupt.
+//
+// The buttons here run on long parallel wires with only the weak internal
+// pull-up holding them high, so pressing one couples a spike into the other:
+// every press of A produced a phantom B about 80ms later, which terminated the
+// session. A finger holds a line down for tens of milliseconds; induced
+// coupling lasts microseconds. Timing the pulse tells them apart with no
+// ambiguity and no extra hardware.
+//
+// It has to be done in the ISR, not the main loop: the loop blocks for 50-100ms
+// on HTTP requests, so anything that samples the pin "shortly after" the edge
+// is really sampling whenever the loop next gets a turn -- long after a quick
+// tap has been released, which threw away real presses.
+static const unsigned long BTN_MIN_PRESS_US = 15000;   // 15ms: far longer than any spike
+static const unsigned long BTN_MAX_PRESS_US = 5000000; // 5s: beyond this it is stuck, not pressed
+static const unsigned long BTN_CROSS_LOCKOUT_MS = 250;
 
-// One event per physical press, enforced by a latch rather than by timing
-// alone. Holding the button down produced repeats because edges kept firing
-// during the hold; requiring the pin to be seen genuinely released before the
-// next press is accepted makes that impossible however noisy the contact is.
 static volatile bool btnAPressed = false;
 static volatile bool btnBPressed = false;
-static volatile bool btnADown = false;
-static volatile bool btnBDown = false;
-static volatile unsigned long btnALastUs = 0;
-static volatile unsigned long btnBLastUs = 0;
+static volatile unsigned long btnAFellAt = 0;
+static volatile unsigned long btnBFellAt = 0;
+static volatile unsigned long btnARejectedUs = 0;  // width of the last spike, for diagnosis
+static volatile unsigned long btnBRejectedUs = 0;
 
-static void IRAM_ATTR onBtnA() {
-  unsigned long us = micros();
-  if (btnADown || us - btnALastUs < BTN_LOCKOUT_US) return;
-  btnALastUs = us;
-  btnADown = true;
-  btnAPressed = true;
+// Raw trace of the last few edges, so a button that produces neither a press
+// nor a rejection can be diagnosed without a cable.
+struct EdgeTrace { unsigned long us; int pin; int level; unsigned long width; };
+static volatile EdgeTrace edgeTrace[12];
+static volatile int edgeTraceHead = 0;
+static volatile int edgeTracePending = 0;
+
+static void IRAM_ATTR traceEdge(int pin, int level, unsigned long us, unsigned long width) {
+  const int i = edgeTraceHead;
+  edgeTrace[i].us = us;
+  edgeTrace[i].pin = pin;
+  edgeTrace[i].level = level;
+  edgeTrace[i].width = width;
+  edgeTraceHead = (i + 1) % 12;
+  if (edgeTracePending < 12) edgeTracePending++;
 }
 
-static void IRAM_ATTR onBtnB() {
-  unsigned long us = micros();
-  if (btnBDown || us - btnBLastUs < BTN_LOCKOUT_US) return;
-  btnBLastUs = us;
-  btnBDown = true;
-  btnBPressed = true;
-}
-
-// Clears the latch once the pin has read HIGH steadily, arming the next press.
-static void serviceRelease(int pin, volatile bool &down, unsigned long &highSince, unsigned long now) {
-  if (!down) return;
+static void IRAM_ATTR onBtnEdge(int pin, volatile unsigned long &fellAt,
+                                volatile bool &pressed, volatile unsigned long &rejectedUs) {
+  const unsigned long us = micros();
+  if (pin == PIN_BTN_A) btnAEdges++; else btnBEdges++;
+  traceEdge(pin, digitalRead(pin), us, fellAt ? us - fellAt : 0);
   if (digitalRead(pin) == LOW) {
-    highSince = 0;
+    if (fellAt == 0) fellAt = us;   // press begins; a re-trigger mid-press is bounce
     return;
   }
-  if (highSince == 0) {
-    highSince = now;
+  if (fellAt == 0) return;          // a rising edge with no matching fall
+  const unsigned long width = us - fellAt;
+  fellAt = 0;
+  if (width >= BTN_MIN_PRESS_US && width <= BTN_MAX_PRESS_US) pressed = true;
+  else rejectedUs = width;          // too brief to be a finger
+}
+
+static void IRAM_ATTR onBtnA() { onBtnEdge(PIN_BTN_A, btnAFellAt, btnAPressed, btnARejectedUs); }
+static void IRAM_ATTR onBtnB() { onBtnEdge(PIN_BTN_B, btnBFellAt, btnBPressed, btnBRejectedUs); }
+
+static unsigned long lastAcceptedAt = 0;
+static int lastAcceptedPin = -1;
+
+// Rejections are reported to the app's log as well as the serial monitor: the
+// board normally runs on a phone charger with no cable attached, and a button
+// that silently does nothing is impossible to diagnose from the desk.
+static void reportRejected(const char *event, unsigned long widthUs) {
+  Serial.printf("[btn] %s rejected: %luus pulse\n", event, widthUs);
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  if (!http.begin(serverBase() + "/api/hardware/log")) return;
+  http.addHeader("Content-Type", "application/json");
+  http.POST(String("{\"source\":\"firmware\",\"rejected\":\"") + event + "\",\"widthUs\":" + String(widthUs) + "}");
+  http.end();
+}
+
+static void acceptButton(int pin, const char *event, unsigned long now) {
+  // Belt and braces on top of the pulse-width test: two different buttons a
+  // fraction of a second apart is not something a hand does.
+  if (lastAcceptedPin != -1 && lastAcceptedPin != pin && now - lastAcceptedAt < BTN_CROSS_LOCKOUT_MS) {
+    Serial.printf("[btn] %s rejected: %lums after the other button\n", event, now - lastAcceptedAt);
     return;
   }
-  if (now - highSince >= BTN_RELEASE_MS) down = false;
+  lastAcceptedAt = now;
+  lastAcceptedPin = pin;
+  Serial.printf("[btn] %s\n", event);
+  postEvent(String("{\"type\":\"") + event + "\"}");
 }
 
 static void drainButtons(unsigned long now) {
-  if (btnAPressed) {
-    btnAPressed = false;
-    Serial.println("[btn] A");
-    postEvent("{\"type\":\"button_a\"}");
-  }
-  if (btnBPressed) {
-    btnBPressed = false;
-    Serial.println("[btn] B");
-    postEvent("{\"type\":\"button_b\"}");
-  }
+  if (btnAPressed) { btnAPressed = false; acceptButton(PIN_BTN_A, "button_a", now); }
+  if (btnBPressed) { btnBPressed = false; acceptButton(PIN_BTN_B, "button_b", now); }
 
-  static unsigned long aHighSince = 0;
-  static unsigned long bHighSince = 0;
-  serviceRelease(PIN_BTN_A, btnADown, aHighSince, now);
-  serviceRelease(PIN_BTN_B, btnBDown, bHighSince, now);
+  if (btnARejectedUs) { const unsigned long w = btnARejectedUs; btnARejectedUs = 0; reportRejected("button_a", w); }
+  if (btnBRejectedUs) { const unsigned long w = btnBRejectedUs; btnBRejectedUs = 0; reportRejected("button_b", w); }
+
+  // Flush the raw edge trace, one entry per pass so a burst cannot stall the
+  // loop with a queue of HTTP posts.
+  if (edgeTracePending > 0 && WiFi.status() == WL_CONNECTED) {
+    noInterrupts();
+    const int idx = (edgeTraceHead - edgeTracePending + 12) % 12;
+    const EdgeTrace e = { edgeTrace[idx].us, edgeTrace[idx].pin, edgeTrace[idx].level, edgeTrace[idx].width };
+    edgeTracePending--;
+    interrupts();
+
+    HTTPClient http;
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    if (http.begin(serverBase() + "/api/hardware/log")) {
+      http.addHeader("Content-Type", "application/json");
+      http.POST(String("{\"source\":\"edge\",\"pin\":") + e.pin + ",\"level\":" + e.level +
+                ",\"us\":" + e.us + ",\"width\":" + e.width + "}");
+      http.end();
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -609,8 +708,10 @@ void setup() {
   pinMode(PIN_LED_YELLOW, OUTPUT);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_YELLOW, HIGH);  // nothing is running at boot
-  attachInterrupt(digitalPinToInterrupt(PIN_BTN_A), onBtnA, FALLING);
-  attachInterrupt(digitalPinToInterrupt(PIN_BTN_B), onBtnB, FALLING);
+  // CHANGE, not FALLING: the press is identified by its width, which needs both
+  // edges.
+  attachInterrupt(digitalPinToInterrupt(PIN_BTN_A), onBtnA, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_BTN_B), onBtnB, CHANGE);
 
   Wire.begin(PIN_SDA, PIN_SCL);
   // Left at the standard 100kHz: partial redraws cut the traffic enough that
@@ -660,7 +761,33 @@ void loop() {
   static unsigned long lastSample = 0;
   if (now - lastSample >= (unsigned long)cfg.sampleIntervalMs) {
     lastSample = now;
-    pushSample(pingOnce());
+
+    // An over-range reading is dropped rather than pushed, so a burst of them
+    // cannot move the median at all -- the window simply holds its last good
+    // values and the session carries on undisturbed. But an empty desk with
+    // nothing in the beam reads identically, so a run that lasts longer than
+    // any plausible glitch is let through instead: at that point it is not a
+    // misfire, it is the truth, and refusing it would mean never noticing that
+    // you left. Any valid reading ends the run.
+    const float reading = pingOnce();
+    static unsigned long glitchRunSince = 0;
+
+    if (reading > cfg.maxValidCm) {
+      if (glitchRunSince == 0) glitchRunSince = now;
+      const bool believeIt = (unsigned long)(now - glitchRunSince) >= (unsigned long)cfg.glitchHoldMs;
+      if (believeIt) {
+        pushSample(reading);
+      } else {
+        static unsigned long lastGlitchLog = 0;
+        if (now - lastGlitchLog > 2000) {
+          lastGlitchLog = now;
+          Serial.printf("[glitch] ignoring %.0fcm (%lums into the run)\n", reading, now - glitchRunSince);
+        }
+      }
+    } else {
+      glitchRunSince = 0;
+      pushSample(reading);
+    }
 
     // Wait for a full window before trusting the median, otherwise the very
     // first readings decide the state on partial evidence. sensorProven keeps
@@ -668,13 +795,14 @@ void loop() {
     if (sensorProven && sampleCount >= constrain(cfg.medianWindow, 1, MEDIAN_WINDOW_MAX)) {
       float med = medianDistance();
 
-      // Calibration streams the raw truth about this desk, independent of the
-      // thresholds being tuned -- otherwise you would be calibrating against
-      // numbers the current thresholds had already filtered.
+      // The raw truth about this desk, independent of the thresholds being
+      // tuned -- otherwise you would be calibrating against numbers the current
+      // thresholds had already filtered.
       static unsigned long lastStream = 0;
-      if (cfg.calibrating && now - lastStream >= CALIBRATION_STREAM_MS) {
+      const unsigned long streamEvery = cfg.calibrating ? CALIBRATION_STREAM_MS : LIVE_STREAM_MS;
+      if (now - lastStream >= streamEvery) {
         lastStream = now;
-        streamCalibration(med);
+        streamLive(med);
       }
 
       bool flipped = updatePresence(med, now);

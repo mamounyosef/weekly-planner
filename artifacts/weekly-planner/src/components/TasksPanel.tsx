@@ -114,7 +114,7 @@ function useTaskRows(tasks: TaskData, today: string): Row[] {
   }, [tasks, today]);
 }
 
-export default function TasksPanel({
+function TasksPanel({
   open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle', theme,
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
 }: TasksPanelProps) {
@@ -280,11 +280,23 @@ export default function TasksPanel({
   const onHandleDown = (e: React.MouseEvent) => {
     e.preventDefault();
     dragRef.current = { startX: e.clientX, startW: width };
+    // Resizing changes the calendar's width, so every reported width costs a full
+    // grid re-layout. Mice report far more often than the screen repaints, so run
+    // the resize at most once per frame with the newest position.
+    let pendingX = 0;
+    let frame = 0;
+    const apply = () => {
+      frame = 0;
+      if (!dragRef.current) return;
+      onResize(dragRef.current.startW + (dragRef.current.startX - pendingX));
+    };
     const move = (ev: MouseEvent) => {
       if (!dragRef.current) return;
-      onResize(dragRef.current.startW + (dragRef.current.startX - ev.clientX));
+      pendingX = ev.clientX;
+      if (!frame) frame = requestAnimationFrame(apply);
     };
     const up = () => {
+      if (frame) { cancelAnimationFrame(frame); frame = 0; apply(); }
       dragRef.current = null;
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
@@ -327,17 +339,29 @@ export default function TasksPanel({
   }, [onToggleDone]);
 
   return (
-    <motion.aside
-      initial={false}
-      animate={{ width: open ? width : 0 }}
-      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+    <aside
       className="flex-shrink-0 overflow-hidden relative shadow-lg"
       style={{
+        // Plain CSS transition rather than a JS-driven one. Width is a layout
+        // property either way, but framer-motion also ran a per-frame rAF that
+        // wrote inline styles from JS — on top of the reflow the calendar next
+        // door already owes, that extra main-thread work is what made the
+        // show/hide stutter. The browser drives this one on its own.
+        // No will-change: width is not a compositable property, so declaring it
+        // buys nothing and keeps the panel permanently promoted to its own
+        // layer that has to be re-rastered every time its contents change.
+        width: open ? width : 0,
+        // 130ms, not 200ms: each frame of this animation costs the calendar next
+        // door a full re-layout, so the cheapest thing we can do is ask for fewer
+        // of them. The easing keeps most of the travel in the first third, so it
+        // still reads as a slide rather than a jump.
+        transition: 'width 130ms cubic-bezier(0.16, 1, 0.3, 1)',
         borderLeft: open ? `1px solid ${theme.surfaceBdr}` : 'none',
-        willChange: 'width',
       }}
       aria-hidden={!open}
     >
+      {/* Fixed inner width so the panel's own contents never re-layout while the
+          shell animates — only the shell's clip rectangle moves. */}
       <div className="h-full flex flex-col select-none" style={{ width, background: theme.menuBg }}>
         {/* Resize handle */}
         <div
@@ -724,9 +748,17 @@ export default function TasksPanel({
           )}
         </div>
       </div>
-    </motion.aside>
+    </aside>
   );
 }
+
+/**
+ * Memoised. The panel is a sibling of the calendar inside one very large page
+ * component, so without this it re-rendered its entire task list on every
+ * calendar hover, every drag frame and every clock tick — none of which change
+ * a single one of its props.
+ */
+export default React.memo(TasksPanel);
 
 function TimePickerPopover({ value, timeFormat, theme, taskColor, onChange, onClose }: {
   value: string | null;
