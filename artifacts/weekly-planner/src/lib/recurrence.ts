@@ -47,6 +47,7 @@ export interface RecurFields {
   // detaches it into a standalone non-repeating item, leaving the rest of the series
   // untouched. Only meaningful on a repeating master.
   locked?: boolean;
+  categoryId?: string;
   // View-only fields stamped onto expanded occurrences (never persisted):
   masterId?: string;
   occDate?: string;
@@ -347,11 +348,11 @@ export function editSeries<T extends RecurFields>(
     return { events: { ...raw, [masterId]: next }, targetId: masterId };
   }
 
-  // Series-level fields (the repeat rule itself, the lock flag, or which link
-  // group the item belongs to) always apply to the whole master and never detach
+  // Series-level fields (the repeat rule itself, the lock flag, which link
+  // group the item belongs to, or category) always apply to the whole master and never detach
   // — they define the series, not one occurrence. Linking in particular must not
   // detach: pressing "link" is describing the item, not editing one day of it.
-  const seriesLevel = 'recur' in patch || 'locked' in patch || 'linkGroup' in patch;
+  const seriesLevel = 'recur' in patch || 'locked' in patch || 'linkGroup' in patch || 'categoryId' in patch;
 
   // Repeating + LOCKED (or a series-level change) → edit the whole series in place.
   if (master.locked || seriesLevel) {

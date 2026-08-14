@@ -184,19 +184,66 @@
   background-color: hsl(var(--muted-foreground));
 }
 
+/* ── Motion system ────────────────────────────────────────────────────────
+   One set of curves and durations for the whole app, so nothing feels like it
+   belongs to a different program. The curve is a decelerating ease-out: it
+   leaves immediately and settles softly, which reads as "instant but fluid".
+   A symmetric `ease` (the CSS default) starts slowly, and a slow start is
+   exactly what makes an interface feel like it is thinking before it moves.
+
+   Durations are deliberately short. On a 120Hz screen a 300ms fade is 36
+   frames of waiting; at 120ms it is 14 frames and still visibly smooth. */
+:root {
+  /* Standard: everything that responds to a pointer. */
+  --ease-out-app: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Overshoots slightly — for things that pop into existence. */
+  --ease-back-app: cubic-bezier(0.34, 1.4, 0.64, 1);
+
+  --dur-instant: 90ms;   /* press feedback, checkbox ticks */
+  --dur-fast: 130ms;     /* hover, focus, colour swaps */
+  --dur-base: 180ms;     /* popovers, panels appearing */
+  --dur-slow: 300ms;     /* chart bars growing, theme swap */
+}
+
+/* Replaces Tailwind's `transition-all`, which is a genuine cost and not just a
+   style preference: `all` makes the compositor re-check every animatable
+   property on the element for every style recalculation, and it happily
+   animates layout properties (padding, font-size, grid tracks) that force a
+   reflow mid-animation. This list covers everything the app actually animates.
+
+   In `@layer components` on purpose: Tailwind's `duration-*` and `ease-*`
+   utilities live in the utilities layer and must still be able to override the
+   defaults set here. */
+@layer components {
+  .transition-smooth {
+    transition-property:
+      color, background-color, border-color, border-radius, outline-color,
+      text-decoration-color, fill, stroke, opacity, box-shadow, filter,
+      transform, translate, scale, rotate,
+      width, height, top, right, bottom, left;
+    transition-timing-function: var(--ease-out-app);
+    transition-duration: var(--dur-fast);
+  }
+}
+
 /* ── Interface polish ─────────────────────────────────────────────────────
    Smooth, consistent micro-interactions on interactive controls. Scoped to
    buttons/inputs (never framer-motion-driven divs) so animations can't fight.
    Many buttons swap their background on hover via JS — easing that here makes
    the whole UI feel softer without touching each call site. */
 button, [role="button"], label[for] {
-  transition: background-color 160ms ease, border-color 160ms ease,
-              color 160ms ease, box-shadow 160ms ease, transform 120ms ease,
-              opacity 160ms ease;
+  transition: background-color var(--dur-fast) var(--ease-out-app),
+              border-color var(--dur-fast) var(--ease-out-app),
+              color var(--dur-fast) var(--ease-out-app),
+              box-shadow var(--dur-fast) var(--ease-out-app),
+              transform var(--dur-instant) var(--ease-out-app),
+              opacity var(--dur-fast) var(--ease-out-app);
 }
 input, textarea, select {
-  transition: background-color 160ms ease, border-color 160ms ease,
-              color 160ms ease, box-shadow 160ms ease;
+  transition: background-color var(--dur-fast) var(--ease-out-app),
+              border-color var(--dur-fast) var(--ease-out-app),
+              color var(--dur-fast) var(--ease-out-app),
+              box-shadow var(--dur-fast) var(--ease-out-app);
 }
 /* Gentle press feedback (utilities like active:scale-* still win where set). */
 button:not(:disabled):active {

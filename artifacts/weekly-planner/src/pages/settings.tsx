@@ -26,6 +26,20 @@ import {
   Zap,
   Compass,
   Cpu,
+  Minus,
+  Plus,
+  Smartphone,
+  Tag,
+  FolderKanban,
+  Edit2,
+  Trash2,
+  Palette,
+  ArrowUp,
+  ArrowDown,
+  Square,
+  CheckSquare,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import {
   FOCUS_CHIMES,
@@ -93,6 +107,15 @@ import {
   type SidebarStyle,
   type TaskCheckboxShape,
 } from '@/lib/settingsSync';
+import {
+  DEFAULT_CATEGORIES,
+  PRESET_CATEGORY_COLORS,
+  type EventCategory,
+} from '@/lib/categories';
+import { coerceTaskLists, type TaskList } from '@/lib/taskLists';
+import { gcalChipColors } from '@/lib/gcalColor';
+import { CanvasAmbient, CanvasAmbientPreview } from '@/components/CanvasAmbient';
+import { EventCardPreviewPair } from '@/components/EventCardPreview';
 
 type TimeFormat = '12h' | '24h';
 type IntervalMin = 5 | 15 | 30 | 60;
@@ -425,7 +448,7 @@ function BackgroundPresetGrid({ dark, value, onChange, cardBdr }: {
           <button
             key={preset.id}
             onClick={() => onChange(preset.id)}
-            className="p-3.5 rounded-2xl border text-left flex flex-col gap-2 transition-all relative overflow-hidden cursor-pointer hover:scale-[1.02]"
+            className="p-3.5 rounded-2xl border text-left flex flex-col gap-2 transition-smooth relative overflow-hidden cursor-pointer hover:scale-[1.02]"
             style={{
               background: preset.rootBg,
               borderColor: selected ? '#3b82f6' : cardBdr,
@@ -460,7 +483,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware';
+type TabCategory = 'appearance' | 'calendar' | 'categories' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware';
 
 interface Toast {
   id: number;
@@ -483,7 +506,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
@@ -512,6 +535,8 @@ export default function SettingsPage() {
   const [weekStartsOn, setWeekStartsOn] = useState<WeekStartsOn>(initialSettings.weekStartsOn);
   const [dayStartH, setDayStartH] = useState<number>(initialSettings.dayStartH);
   const [dayEndH, setDayEndH] = useState<number>(initialSettings.dayEndH);
+  const [mobileContentZoom, setMobileContentZoom] = useState<number>(1);
+  const [mobileUiZoom, setMobileUiZoom] = useState<number>(1);
   const [focusDayStartHour, setFocusDayStartHour] = useState<number>(initialSettings.focusDayStartHour);
   const [focusChime, setFocusChime] = useState<FocusChimeId>(initialSettings.focusChime);
   const [focusCues, setFocusCues] = useState<{ start: FocusCueId; pause: FocusCueId; resume: FocusCueId }>(initialSettings.focusCues);
@@ -541,6 +566,153 @@ export default function SettingsPage() {
   const [gcalMirrorGoogleDeletions, setGcalMirrorGoogleDeletions] = useState<boolean>(initialSettings.gcalMirrorGoogleDeletions ?? false);
   const [prayer, setPrayer] = useState<PrayerSettings>(initialSettings.prayer);
   const [hardware, setHardware] = useState<HardwareSettings>(initialSettings.hardware);
+  const [categories, setCategories] = useState<EventCategory[]>(initialSettings.categories ?? DEFAULT_CATEGORIES);
+  const [taskLists, setTaskLists] = useState<TaskList[]>(() => coerceTaskLists(initialSettings.taskLists));
+  const [editingCategory, setEditingCategory] = useState<EventCategory | null>(null);
+  const [isAddingCategory, setIsAddingCategory] = useState<boolean>(false);
+  const [categoryForm, setCategoryForm] = useState<{
+    name: string;
+    color: string;
+    defaultDurationMin: number;
+    defaultAllDay: boolean;
+    defaultNoCheckbox: boolean;
+    showInWidget: boolean;
+    isDefault: boolean;
+    description: string;
+  }>({
+    name: '',
+    color: '#22c55e',
+    defaultDurationMin: 30,
+    defaultAllDay: false,
+    defaultNoCheckbox: false,
+    showInWidget: true,
+    isDefault: false,
+    description: '',
+  });
+  const [deleteConfirmCatId, setDeleteConfirmCatId] = useState<string | null>(null);
+
+  const openCreateCategory = () => {
+    setEditingCategory(null);
+    setCategoryForm({
+      name: '',
+      color: PRESET_CATEGORY_COLORS[categories.length % PRESET_CATEGORY_COLORS.length].hex,
+      defaultDurationMin: 30,
+      defaultAllDay: false,
+      defaultNoCheckbox: false,
+      showInWidget: true,
+      isDefault: false,
+      description: '',
+    });
+    setIsAddingCategory(true);
+  };
+
+  const openEditCategory = (cat: EventCategory) => {
+    setIsAddingCategory(false);
+    setEditingCategory(cat);
+    setCategoryForm({
+      name: cat.name,
+      color: cat.color,
+      defaultDurationMin: cat.defaultDurationMin ?? 30,
+      defaultAllDay: cat.defaultAllDay ?? false,
+      defaultNoCheckbox: cat.defaultNoCheckbox ?? false,
+      showInWidget: cat.showInWidget ?? true,
+      isDefault: cat.isDefault ?? false,
+      description: cat.description ?? '',
+    });
+  };
+
+  const closeCategoryModal = () => {
+    setEditingCategory(null);
+    setIsAddingCategory(false);
+  };
+
+  const handleSaveCategory = () => {
+    const trimmedName = categoryForm.name.trim();
+    if (!trimmedName) {
+      showToast('Category name cannot be empty.', 'error');
+      return;
+    }
+
+    let color = categoryForm.color.trim();
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
+      color = '#22c55e';
+    }
+
+    if (isAddingCategory) {
+      const newCat: EventCategory = {
+        id: `cat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        name: trimmedName,
+        color,
+        defaultDurationMin: categoryForm.defaultDurationMin,
+        defaultAllDay: categoryForm.defaultAllDay,
+        defaultNoCheckbox: categoryForm.defaultNoCheckbox,
+        showInWidget: categoryForm.showInWidget,
+        isDefault: categoryForm.isDefault,
+        description: categoryForm.description.trim(),
+      };
+
+      setCategories(prev => {
+        const list = categoryForm.isDefault ? prev.map(c => ({ ...c, isDefault: false })) : [...prev];
+        return [...list, newCat];
+      });
+      showToast(`Category “${trimmedName}” created.`, 'success');
+    } else if (editingCategory) {
+      setCategories(prev => {
+        return prev.map(c => {
+          if (c.id === editingCategory.id) {
+            return {
+              ...c,
+              name: trimmedName,
+              color,
+              defaultDurationMin: categoryForm.defaultDurationMin,
+              defaultAllDay: categoryForm.defaultAllDay,
+              defaultNoCheckbox: categoryForm.defaultNoCheckbox,
+              showInWidget: categoryForm.showInWidget,
+              isDefault: categoryForm.isDefault,
+              description: categoryForm.description.trim(),
+            };
+          }
+          if (categoryForm.isDefault) {
+            return { ...c, isDefault: false };
+          }
+          return c;
+        });
+      });
+      showToast(`Category “${trimmedName}” updated.`, 'success');
+    }
+    closeCategoryModal();
+  };
+
+  const handleDeleteCategory = (id: string) => {
+    if (categories.length <= 1) {
+      showToast('You must keep at least one category.', 'error');
+      setDeleteConfirmCatId(null);
+      return;
+    }
+    const cat = categories.find(c => c.id === id);
+    setCategories(prev => prev.filter(c => c.id !== id));
+    setDeleteConfirmCatId(null);
+    showToast(`Category “${cat?.name || 'Item'}” deleted.`, 'info');
+  };
+
+  const handleToggleDefaultCategory = (id: string) => {
+    setCategories(prev => prev.map(c => ({
+      ...c,
+      isDefault: c.id === id ? !c.isDefault : false,
+    })));
+  };
+
+  const handleMoveCategory = (id: string, dir: 'up' | 'down') => {
+    const idx = categories.findIndex(c => c.id === id);
+    if (idx < 0) return;
+    const targetIdx = dir === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= categories.length) return;
+    const updated = [...categories];
+    const [moved] = updated.splice(idx, 1);
+    updated.splice(targetIdx, 0, moved);
+    setCategories(updated);
+  };
+
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
   const patchPrayer = useCallback((patch: Partial<PrayerSettings>) => {
     setPrayer(prev => ({ ...prev, ...patch }));
@@ -614,15 +786,25 @@ export default function SettingsPage() {
     setCustomDaysAfter(d.customDaysAfter);
     setDayStartH(d.dayStartH);
     setDayEndH(d.dayEndH);
+    setMobileContentZoom(d.mobileContentZoom ?? 1);
+    setMobileUiZoom(d.mobileUiZoom ?? 1);
     setTasksPanelOpen(d.tasksPanelOpen);
     setTasksPanelWidth(d.tasksPanelWidth);
     setShowTaskRow(d.showTaskRow);
     setStickyAllDayMain(d.stickyAllDayMain);
     setStickyTasksMain(d.stickyTasksMain);
-    deviceExtrasRef.current = { appZoom: d.appZoom, analysisTab: d.analysisTab, mobileTab: d.mobileTab };
+    deviceExtrasRef.current = {
+      appZoom: d.appZoom, analysisTab: d.analysisTab, mobileTab: d.mobileTab,
+      hiddenCategoryIds: d.hiddenCategoryIds ?? [],
+    };
   }, []);
   /** Device-only values this page has no control for, carried through untouched. */
-  const deviceExtrasRef = useRef({ appZoom: 1, analysisTab: 'week' as const as 'week' | 'month' | 'year', mobileTab: 'calendar' as const as 'calendar' | 'tasks' | 'focus' });
+  const deviceExtrasRef = useRef({
+    appZoom: 1,
+    analysisTab: 'week' as const as 'week' | 'month' | 'year',
+    mobileTab: 'calendar' as const as 'calendar' | 'tasks' | 'focus',
+    hiddenCategoryIds: [] as string[],
+  });
   const deviceReady = useRef(false);
 
   // Load this device's stored layout: localStorage first (instant), then the
@@ -652,11 +834,14 @@ export default function SettingsPage() {
       darkMode, darkPreset, lightPreset,
       eventColorStyle, sidebarStyle,
       dayStartH, dayEndH,
+      mobileContentZoom,
+      mobileUiZoom,
       ...deviceExtrasRef.current,
     });
   }, [calendarView, customDaysBefore, customDaysAfter, interval, tasksPanelOpen,
       tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
-      darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH]);
+      darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
+      mobileContentZoom, mobileUiZoom]);
 
   // Apply dark mode CSS class whenever darkMode changes
   useEffect(() => {
@@ -699,6 +884,8 @@ export default function SettingsPage() {
       if (typeof s.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(s.gcalMirrorGoogleDeletions);
       setPrayer(s.prayer);
       setHardware(s.hardware);
+      if (s.categories) setCategories(s.categories);
+      if (s.taskLists) setTaskLists(coerceTaskLists(s.taskLists));
     });
   }, []);
 
@@ -793,9 +980,11 @@ export default function SettingsPage() {
       gcalMirrorGoogleDeletions,
       prayer,
       hardware,
+      categories,
+    taskLists,
     }), 150);
     return () => window.clearTimeout(broadcastId);
-  }, [hardware, prayer, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+  }, [hardware, prayer, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -890,6 +1079,8 @@ export default function SettingsPage() {
     gcalMirrorGoogleDeletions,
     prayer,
     hardware,
+    categories,
+    taskLists,
   });
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
@@ -918,6 +1109,8 @@ export default function SettingsPage() {
     setFocusChime(restored.focusChime);
     setFocusCues(restored.focusCues);
     setShortcuts(restored.shortcuts);
+    if (restored.categories) setCategories(restored.categories);
+    if (restored.taskLists) setTaskLists(coerceTaskLists(restored.taskLists));
     setAutoBackup(restored.autoBackup);
     setTasksPanelOpen(restored.tasksPanelOpen);
     setTasksPanelWidth(restored.tasksPanelWidth);
@@ -1082,6 +1275,7 @@ export default function SettingsPage() {
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
     { id: 'calendar', label: 'Calendar Grid', icon: <Calendar size={17} /> },
+    { id: 'categories', label: 'Categories', icon: <Tag size={17} />, badge: `${categories.length}` },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
@@ -1097,36 +1291,8 @@ export default function SettingsPage() {
       }`}
       style={{ backgroundColor: pageBg }}
     >
-      {/* ── Outer Side Ambient Glow Layer ── */}
-      <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
-        <div
-          className={`absolute -top-32 -left-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-all duration-500 ${
-            sidebarStyle === 'minimal-flat' ? 'opacity-0' : sidebarStyle === 'accent-aura' ? 'opacity-90' : sidebarStyle === 'glass-translucent' ? 'opacity-35' : 'opacity-50'
-          }`}
-          style={{
-            background: darkMode
-              ? 'radial-gradient(circle, rgba(59,130,246,0.18) 0%, rgba(99,102,241,0.06) 65%, transparent 100%)'
-              : 'radial-gradient(circle, rgba(99,102,241,0.10) 0%, rgba(192,132,252,0.04) 65%, transparent 100%)',
-          }}
-        />
-        <div
-          className={`absolute top-1/3 -right-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-all duration-500 ${
-            sidebarStyle === 'minimal-flat' ? 'opacity-0' : sidebarStyle === 'accent-aura' ? 'opacity-80' : sidebarStyle === 'glass-translucent' ? 'opacity-25' : 'opacity-40'
-          }`}
-          style={{
-            background: darkMode
-              ? 'radial-gradient(circle, rgba(16,185,129,0.14) 0%, rgba(59,130,246,0.04) 65%, transparent 100%)'
-              : 'radial-gradient(circle, rgba(16,185,129,0.08) 0%, rgba(59,130,246,0.03) 65%, transparent 100%)',
-          }}
-        />
-        <div
-          className="absolute inset-0 opacity-[0.035] dark:opacity-[0.06] pointer-events-none"
-          style={{
-            backgroundImage: `radial-gradient(${darkMode ? 'rgba(255,255,255,0.8)' : 'rgba(15,23,42,0.8)'} 1px, transparent 1px)`,
-            backgroundSize: '28px 28px',
-          }}
-        />
-      </div>
+      {/* Outer side ambient canvas — see components/CanvasAmbient.tsx */}
+      <CanvasAmbient style={sidebarStyle} dark={darkMode} />
       {/* ── Top Header Navigation Bar ────────────────────────────────────────── */}
       <header
         className={`sticky top-0 z-50 flex items-center justify-between border-b transition-colors ${isPhone ? 'px-3 py-2.5' : 'backdrop-blur-md px-6 py-4'}`}
@@ -1139,7 +1305,7 @@ export default function SettingsPage() {
         <div className={`flex items-center min-w-0 ${isPhone ? 'gap-2' : 'gap-4'}`}>
           <button
             onClick={() => setLocation('/')}
-            className={`flex items-center gap-2 rounded-xl text-xs font-semibold transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] flex-shrink-0 ${isPhone ? 'w-10 h-10 justify-center' : 'px-3.5 py-2'}`}
+            className={`flex items-center gap-2 rounded-xl text-xs font-semibold transition-smooth duration-200 hover:scale-[1.02] active:scale-[0.98] flex-shrink-0 ${isPhone ? 'w-10 h-10 justify-center' : 'px-3.5 py-2'}`}
             style={{
               background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
               border: `1px solid ${cardBdr}`,
@@ -1180,7 +1346,7 @@ export default function SettingsPage() {
           {/* Dark Mode Quick Toggle */}
           <button
             onClick={() => setDarkMode(d => !d)}
-            className={`flex items-center gap-2 rounded-xl text-xs font-medium transition-all ${isPhone ? 'w-10 h-10 justify-center' : 'px-3 py-1.5'}`}
+            className={`flex items-center gap-2 rounded-xl text-xs font-medium transition-smooth ${isPhone ? 'w-10 h-10 justify-center' : 'px-3 py-1.5'}`}
             style={{
               background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
               border: `1px solid ${cardBdr}`,
@@ -1247,7 +1413,7 @@ export default function SettingsPage() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className="flex items-center justify-between px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all duration-200 text-left"
+                  className="flex items-center justify-between px-3.5 py-3 rounded-2xl text-xs font-semibold transition-smooth duration-200 text-left"
                   style={{
                     background: active ? accentLight : 'transparent',
                     color: active ? accentColor : textSecondary,
@@ -1282,6 +1448,171 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
+                {/* 📱 Mobile Page Sizing & Scale (Mobile view only) */}
+                {isPhone && (
+                  <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Smartphone size={18} style={{ color: accentColor }} />
+                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                          Mobile Page Sizing & Scale
+                        </h2>
+                      </div>
+                      <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                        Customize the scale of inner app content and outer UI elements separately for this phone.
+                      </p>
+                    </div>
+
+                    {/* Option 1: Inner App Content Scale */}
+                    <div className="p-3.5 sm:p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>
+                            1. Inner Content Size (Items & Fonts)
+                          </span>
+                          <span className="text-[11px] block leading-snug" style={{ color: textSecondary }}>
+                            Scales everything inside the app: event cards, times between items, fonts, timeline grids, and task lists.
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Stepper + Reset */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setMobileContentZoom(z => Math.max(0.5, Math.min(2.0, Math.round((z - 0.05) / 0.05) * 0.05)))}
+                          disabled={mobileContentZoom <= 0.5 + 1e-9}
+                          className="w-10 h-10 rounded-xl flex items-center justify-center border disabled:opacity-30 active:scale-95 transition-transform"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          title="Decrease content size"
+                        >
+                          <Minus size={16} />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setMobileContentZoom(1)}
+                          className="flex-1 h-10 rounded-xl text-xs font-bold tabular-nums border flex items-center justify-center gap-1 active:scale-[0.98] transition-transform"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          title="Reset to 100%"
+                        >
+                          <span>{Math.round(mobileContentZoom * 100)}%</span>
+                          {Math.abs(mobileContentZoom - 1) > 1e-6 && (
+                            <span className="text-[10px] font-normal" style={{ color: textSecondary }}>(Reset)</span>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setMobileContentZoom(z => Math.max(0.5, Math.min(2.0, Math.round((z + 0.05) / 0.05) * 0.05)))}
+                          disabled={mobileContentZoom >= 2.0 - 1e-9}
+                          className="w-10 h-10 rounded-xl flex items-center justify-center border disabled:opacity-30 active:scale-95 transition-transform"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          title="Increase content size"
+                        >
+                          <Plus size={16} />
+                        </button>
+                      </div>
+
+                      {/* Preset pills */}
+                      <div className="grid grid-cols-4 gap-1.5 pt-1">
+                        {[0.8, 0.9, 1.0, 1.15].map(preset => {
+                          const active = Math.abs(mobileContentZoom - preset) < 0.02;
+                          return (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setMobileContentZoom(preset)}
+                              className="py-1.5 rounded-lg text-[11px] font-semibold border transition-smooth text-center"
+                              style={{
+                                background: active ? accentLight : cardBg,
+                                borderColor: active ? accentColor : cardBdr,
+                                color: active ? accentColor : textSecondary,
+                              }}
+                            >
+                              {Math.round(preset * 100)}%
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Option 2: UI Wrapper Scale */}
+                    <div className="p-3.5 sm:p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>
+                            2. UI Wrapper Size (Headers & Bottom Menu)
+                          </span>
+                          <span className="text-[11px] block leading-snug" style={{ color: textSecondary }}>
+                            Scales the outer navigation wrapper: top headers, navigation buttons, and the bottom tab menu bar.
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Stepper + Reset */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setMobileUiZoom(z => Math.max(0.5, Math.min(2.0, Math.round((z - 0.05) / 0.05) * 0.05)))}
+                          disabled={mobileUiZoom <= 0.5 + 1e-9}
+                          className="w-10 h-10 rounded-xl flex items-center justify-center border disabled:opacity-30 active:scale-95 transition-transform"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          title="Decrease UI wrapper size"
+                        >
+                          <Minus size={16} />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setMobileUiZoom(1)}
+                          className="flex-1 h-10 rounded-xl text-xs font-bold tabular-nums border flex items-center justify-center gap-1 active:scale-[0.98] transition-transform"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          title="Reset to 100%"
+                        >
+                          <span>{Math.round(mobileUiZoom * 100)}%</span>
+                          {Math.abs(mobileUiZoom - 1) > 1e-6 && (
+                            <span className="text-[10px] font-normal" style={{ color: textSecondary }}>(Reset)</span>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setMobileUiZoom(z => Math.max(0.5, Math.min(2.0, Math.round((z + 0.05) / 0.05) * 0.05)))}
+                          disabled={mobileUiZoom >= 2.0 - 1e-9}
+                          className="w-10 h-10 rounded-xl flex items-center justify-center border disabled:opacity-30 active:scale-95 transition-transform"
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          title="Increase UI wrapper size"
+                        >
+                          <Plus size={16} />
+                        </button>
+                      </div>
+
+                      {/* Preset pills */}
+                      <div className="grid grid-cols-4 gap-1.5 pt-1">
+                        {[0.8, 0.9, 1.0, 1.15].map(preset => {
+                          const active = Math.abs(mobileUiZoom - preset) < 0.02;
+                          return (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setMobileUiZoom(preset)}
+                              className="py-1.5 rounded-lg text-[11px] font-semibold border transition-smooth text-center"
+                              style={{
+                                background: active ? accentLight : cardBg,
+                                borderColor: active ? accentColor : cardBdr,
+                                color: active ? accentColor : textSecondary,
+                              }}
+                            >
+                              {Math.round(preset * 100)}%
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
@@ -1368,27 +1699,29 @@ export default function SettingsPage() {
                     </p>
                   </div>
 
-                  {/* Universal Event Card Style Picker */}
+                  {/* Universal Event Card Style Picker — each option renders a
+                      real card through the same colour function the grid uses. */}
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>
                       Event Card Style (Applies to All Items & Google Calendar)
                     </span>
                     <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                      Unified card layout and border styling for every item on your planner.
+                      How every item on the grid is painted. The samples below are live — drawn
+                      exactly the way the planner draws your events, in your current theme.
                     </span>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {[
-                        { id: 'tinted', label: 'Glass & Border Accent', desc: 'Soft translucent fill with a vivid border stroke (Default)' },
-                        { id: 'solid', label: 'Solid Smooth Fill', desc: 'Bold, sleek solid color fill with high-contrast text' },
-                        { id: 'minimal', label: 'Minimal Left Accent', desc: 'Clean surface card with a vivid left vertical accent strip' },
-                        { id: 'glowing', label: 'Luminous Neon Glow', desc: 'Glowing neon border stroke with soft ambient backlight shadow' },
+                        { id: 'tinted',  label: 'Glass & Border Accent', desc: 'Muted fill in the event colour with a vivid border in the same hue. Default.' },
+                        { id: 'solid',   label: 'Solid Smooth Fill',     desc: 'Filled block in the event colour; text flips to white or near-black for contrast.' },
+                        { id: 'minimal', label: 'Minimal Left Accent',   desc: 'Plain white / dark-grey card. The colour appears only as a strip down the left edge.' },
+                        { id: 'glowing', label: 'Luminous Neon Glow',    desc: 'Deep dim fill, bright border in the event colour, plus a soft glow cast around the card.' },
                       ].map(style => {
                         const selected = eventColorStyle === style.id;
                         return (
                           <button
                             key={style.id}
                             onClick={() => setEventColorStyle(style.id as any)}
-                            className="p-3.5 rounded-2xl border text-left flex flex-col gap-1.5 transition-all cursor-pointer hover:scale-[1.01]"
+                            className="p-3 rounded-2xl border text-left flex flex-col gap-2 transition-smooth cursor-pointer hover:scale-[1.01]"
                             style={{
                               background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
                               borderColor: selected ? accentColor : cardBdr,
@@ -1398,6 +1731,11 @@ export default function SettingsPage() {
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-bold" style={{ color: textPrimary }}>{style.label}</span>
                               {selected && <Check size={14} style={{ color: accentColor }} />}
+                            </div>
+                            {/* Live sample, on the real page background so the
+                                contrast you see is the contrast you get. */}
+                            <div className="rounded-xl p-2" style={{ background: pageBg }}>
+                              <EventCardPreviewPair style={style.id as EventCardStyle} dark={darkMode} pageBg={pageBg} />
                             </div>
                             <span className="text-[10px] leading-snug" style={{ color: textSecondary }}>{style.desc}</span>
                           </button>
@@ -1406,27 +1744,31 @@ export default function SettingsPage() {
                       </div>
                     </div>
 
-                  {/* Canvas Ambient Background Aura Style Picker */}
+                  {/* Canvas Ambient Background Picker — thumbnails render the same
+                      ambient layers the real pages do (components/CanvasAmbient.tsx). */}
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>
                       Canvas Ambient Background Style
                     </span>
                     <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                      Controls ambient side glow effects and background aura styling across all pages.
+                      The atmosphere behind the planner: a blue glow from the top-left, a green one
+                      from the right, and a faint dot texture. It never touches your events — only
+                      the empty space around the grid. Thumbnails are live, and boosted slightly so
+                      the difference is visible at this size.
                     </span>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {[
-                        { id: 'subtle-glow', label: 'Subtle Ambient Glow', desc: 'Soft side aura glow smoothly fading into canvas (Default)' },
-                        { id: 'accent-aura', label: 'Vivid Luminous Aura', desc: 'Richer, vibrant indigo & emerald side gradients' },
-                        { id: 'minimal-flat', label: 'Minimal Flat Canvas', desc: 'Clean, flat border-aligned surface without ambient side glow' },
-                        { id: 'glass-translucent', label: 'Frosted Glass Surface', desc: 'Translucent frosted glass panels with subtle backdrop blur' },
+                        { id: 'subtle-glow',       label: 'Subtle Ambient Glow',   desc: 'Soft corner glows plus the dot texture. Default.' },
+                        { id: 'accent-aura',       label: 'Vivid Luminous Aura',   desc: 'The same two glows at roughly double strength — clearly coloured corners.' },
+                        { id: 'minimal-flat',      label: 'Minimal Flat Canvas',   desc: 'Glows off, dots off. A completely flat, single-colour background.' },
+                        { id: 'glass-translucent', label: 'Frosted Glass Surface', desc: 'Dimmed glows under a diagonal frost sheen, with a finer dot grain.' },
                       ].map(style => {
                         const selected = sidebarStyle === style.id;
                         return (
                           <button
                             key={style.id}
-                            onClick={() => setSidebarStyle(style.id as any)}
-                            className="p-3.5 rounded-2xl border text-left flex flex-col gap-1.5 transition-all cursor-pointer hover:scale-[1.01]"
+                            onClick={() => setSidebarStyle(style.id as SidebarStyle)}
+                            className="p-3 rounded-2xl border text-left flex flex-col gap-2 transition-smooth cursor-pointer hover:scale-[1.01]"
                             style={{
                               background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
                               borderColor: selected ? accentColor : cardBdr,
@@ -1437,6 +1779,7 @@ export default function SettingsPage() {
                               <span className="text-xs font-bold" style={{ color: textPrimary }}>{style.label}</span>
                               {selected && <Check size={14} style={{ color: accentColor }} />}
                             </div>
+                            <CanvasAmbientPreview style={style.id as SidebarStyle} dark={darkMode} pageBg={pageBg} />
                             <span className="text-[10px] leading-snug" style={{ color: textSecondary }}>{style.desc}</span>
                           </button>
                         );
@@ -1468,7 +1811,7 @@ export default function SettingsPage() {
                           <button
                             key={fmt}
                             onClick={() => setTimeFormat(fmt)}
-                            className="flex items-center justify-between p-4 rounded-2xl border text-left transition-all"
+                            className="flex items-center justify-between p-4 rounded-2xl border text-left transition-smooth"
                             style={{
                               background: selected ? accentLight : 'transparent',
                               borderColor: selected ? accentColor : cardBdr,
@@ -1530,7 +1873,7 @@ export default function SettingsPage() {
                           <button
                             key={dayVal}
                             onClick={() => setWeekStartsOn(dayVal as WeekStartsOn)}
-                            className="py-3 rounded-xl text-xs font-semibold transition-all text-center"
+                            className="py-3 rounded-xl text-xs font-semibold transition-smooth text-center"
                             style={{
                               background: active ? accentColor : (darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)'),
                               color: active ? '#ffffff' : textPrimary,
@@ -1554,7 +1897,7 @@ export default function SettingsPage() {
                           <button
                             key={v}
                             onClick={() => setIntervalOpt(v)}
-                            className="p-3.5 rounded-2xl border text-center transition-all"
+                            className="p-3.5 rounded-2xl border text-center transition-smooth"
                             style={{
                               background: active ? accentLight : 'transparent',
                               borderColor: active ? accentColor : cardBdr,
@@ -1653,7 +1996,7 @@ export default function SettingsPage() {
                         aria-pressed={stickyAllDayMain}
                       >
                         <span
-                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
                           style={{ left: stickyAllDayMain ? 22 : 2 }}
                         />
                       </button>
@@ -1674,7 +2017,7 @@ export default function SettingsPage() {
                         aria-pressed={stickyTasksMain}
                       >
                         <span
-                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
                           style={{ left: stickyTasksMain ? 22 : 2 }}
                         />
                       </button>
@@ -1699,7 +2042,7 @@ export default function SettingsPage() {
                         aria-pressed={stickyAllDayWidget}
                       >
                         <span
-                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
                           style={{ left: stickyAllDayWidget ? 22 : 2 }}
                         />
                       </button>
@@ -1720,7 +2063,7 @@ export default function SettingsPage() {
                         aria-pressed={stickyTasksWidget}
                       >
                         <span
-                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
                           style={{ left: stickyTasksWidget ? 22 : 2 }}
                         />
                       </button>
@@ -1752,7 +2095,7 @@ export default function SettingsPage() {
                       aria-pressed={showTaskRow}
                     >
                       <span
-                        className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all"
+                        className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
                         style={{ left: showTaskRow ? 22 : 2 }}
                       />
                     </button>
@@ -1769,7 +2112,7 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         onClick={() => setTaskCheckboxShape('circle')}
-                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-all"
+                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
                         style={{
                           background: taskCheckboxShape === 'circle' ? taskColor : 'transparent',
                           color: taskCheckboxShape === 'circle' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
@@ -1780,7 +2123,7 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         onClick={() => setTaskCheckboxShape('square')}
-                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-all"
+                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
                         style={{
                           background: taskCheckboxShape === 'square' ? taskColor : 'transparent',
                           color: taskCheckboxShape === 'square' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
@@ -1827,6 +2170,505 @@ export default function SettingsPage() {
               </motion.div>
             )}
 
+            {/* 🏷️ ITEM CATEGORIES TAB */}
+            {activeTab === 'categories' && (
+              <motion.div
+                key="categories"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+                className="flex flex-col gap-6"
+              >
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Tag size={18} style={{ color: accentColor }} />
+                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Item Categories</h2>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          {categories.length} configured
+                        </span>
+                      </div>
+                      <p className="text-xs mt-1" style={{ color: textSecondary }}>
+                        Assign timed items and all-day events to specific categories with dedicated colors, default duration presets, and behavior settings.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={openCreateCategory}
+                      className="px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
+                      style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                    >
+                      <Plus size={15} />
+                      Add Category
+                    </button>
+                  </div>
+
+                  {/* Categories Cards List */}
+                  <div className="flex flex-col gap-3">
+                    {categories.map((cat, idx) => {
+                      const isFirst = idx === 0;
+                      const isLast = idx === categories.length - 1;
+                      const previewStyle = gcalChipColors(cat.color, { dark: darkMode, style: eventColorStyle, pageBg: activeTheme.rootBg });
+
+                      return (
+                        <div
+                          key={cat.id}
+                          className="p-4 rounded-2xl border transition-smooth duration-200 flex flex-col gap-3 group"
+                          style={{
+                            background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
+                            borderColor: cardBdr,
+                          }}
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            {/* Left: Color dot + Name + Default Badge */}
+                            <div className="flex items-center gap-3">
+                              <div
+                                className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
+                                style={{
+                                  backgroundColor: cat.color,
+                                  borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)',
+                                }}
+                              />
+                              <div className="flex flex-col">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-sm font-bold" style={{ color: textPrimary }}>
+                                    {cat.name}
+                                  </span>
+                                  {cat.isDefault && (
+                                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 flex items-center gap-1">
+                                      <Check size={10} /> Default
+                                    </span>
+                                  )}
+                                  <span className="text-[10.5px] font-mono opacity-60" style={{ color: textSecondary }}>
+                                    {cat.color}
+                                  </span>
+                                </div>
+                                {cat.description && (
+                                  <span className="text-[11.5px] mt-0.5" style={{ color: textSecondary }}>
+                                    {cat.description}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Right: Actions */}
+                            <div className="flex items-center gap-1.5 self-end sm:self-center">
+                              {/* Reorder Buttons */}
+                              <div className="flex items-center rounded-lg border overflow-hidden mr-1" style={{ borderColor: cardBdr }}>
+                                <button
+                                  type="button"
+                                  disabled={isFirst}
+                                  onClick={() => handleMoveCategory(cat.id, 'up')}
+                                  className="w-7 h-7 flex items-center justify-center text-xs transition-colors disabled:opacity-20 disabled:cursor-not-allowed hover:bg-white/5"
+                                  style={{ color: textSecondary }}
+                                  title="Move up"
+                                >
+                                  <ArrowUp size={12} />
+                                </button>
+                                <div className="w-[1px] h-4 bg-border/40" />
+                                <button
+                                  type="button"
+                                  disabled={isLast}
+                                  onClick={() => handleMoveCategory(cat.id, 'down')}
+                                  className="w-7 h-7 flex items-center justify-center text-xs transition-colors disabled:opacity-20 disabled:cursor-not-allowed hover:bg-white/5"
+                                  style={{ color: textSecondary }}
+                                  title="Move down"
+                                >
+                                  <ArrowDown size={12} />
+                                </button>
+                              </div>
+
+                              {/* Toggle Default */}
+                              <button
+                                type="button"
+                                onClick={() => handleToggleDefaultCategory(cat.id)}
+                                className={`px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth ${
+                                  cat.isDefault ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'hover:bg-white/5 text-muted-foreground'
+                                }`}
+                                style={{ borderColor: cat.isDefault ? undefined : cardBdr, color: cat.isDefault ? undefined : textSecondary }}
+                                title={cat.isDefault ? 'Currently default category' : 'Set as default category for new items'}
+                              >
+                                <Check size={11} className={cat.isDefault ? 'opacity-100' : 'opacity-40'} />
+                                {cat.isDefault ? 'Default' : 'Make Default'}
+                              </button>
+
+                              {/* Edit Button */}
+                              <button
+                                type="button"
+                                onClick={() => openEditCategory(cat)}
+                                className="px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
+                                style={{ borderColor: cardBdr, color: textPrimary }}
+                              >
+                                <Edit2 size={11} />
+                                Edit
+                              </button>
+
+                              {/* Delete Button */}
+                              {deleteConfirmCatId === cat.id ? (
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteCategory(cat.id)}
+                                    className="px-2 h-7 rounded-lg text-[10.5px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30 transition-smooth"
+                                  >
+                                    Confirm
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeleteConfirmCatId(null)}
+                                    className="px-1.5 h-7 rounded-lg text-[10.5px] border transition-smooth"
+                                    style={{ borderColor: cardBdr, color: textSecondary }}
+                                  >
+                                    <X size={12} />
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteConfirmCatId(cat.id)}
+                                  disabled={categories.length <= 1}
+                                  className="w-7 h-7 rounded-lg border flex items-center justify-center text-xs transition-smooth hover:bg-rose-500/10 hover:text-rose-400 hover:border-rose-500/30 disabled:opacity-20 disabled:cursor-not-allowed"
+                                  style={{ borderColor: cardBdr, color: textSecondary }}
+                                  title="Delete category"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Category Settings Badges Row & Live Sample Preview */}
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-2 border-t border-dashed" style={{ borderColor: cardBdr }}>
+                            <div className="flex items-center gap-2 flex-wrap text-[11px]" style={{ color: textSecondary }}>
+                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+                                <Clock size={11} /> Default: {cat.defaultDurationMin ?? 30}m
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+                                <Calendar size={11} /> {cat.defaultAllDay ? 'Defaults to All-Day' : 'Defaults to Timed'}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+                                {cat.defaultNoCheckbox ? <Square size={11} /> : <CheckSquare size={11} />}
+                                {cat.defaultNoCheckbox ? 'Checkbox hidden' : 'Checkbox enabled'}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+                                {cat.showInWidget !== false ? <Eye size={11} /> : <EyeOff size={11} />}
+                                {cat.showInWidget !== false ? 'Shown in Widget' : 'Hidden in Widget'}
+                              </span>
+                            </div>
+
+                            {/* Mini Card Preview Chip */}
+                            {previewStyle && (
+                              <div
+                                className="px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-2 self-start sm:self-auto border transition-smooth"
+                                style={{
+                                  backgroundColor: previewStyle.bg,
+                                  borderColor: previewStyle.border,
+                                  color: previewStyle.text,
+                                  boxShadow: previewStyle.boxShadow,
+                                }}
+                              >
+                                {previewStyle.accentBar && (
+                                  <span className="w-1.5 h-3 rounded-full" style={{ backgroundColor: previewStyle.accentBar }} />
+                                )}
+                                <span>Preview: {cat.name}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Create / Edit Category Modal */}
+                <AnimatePresence>
+                  {(isAddingCategory || !!editingCategory) && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                        transition={{ duration: 0.18 }}
+                        className="w-full max-w-lg rounded-3xl border shadow-2xl p-5 sm:p-6 flex flex-col gap-5 overflow-y-auto max-h-[90vh]"
+                        style={{ background: activeTheme.cardBg, borderColor: cardBdr }}
+                      >
+                        {/* Modal Header */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 rounded-xl flex items-center justify-center shadow-sm" style={{ backgroundColor: `${categoryForm.color}25`, color: categoryForm.color }}>
+                              <Tag size={16} />
+                            </div>
+                            <div>
+                              <h3 className="text-base font-bold" style={{ color: textPrimary }}>
+                                {isAddingCategory ? 'New Category' : `Edit Category: ${editingCategory?.name}`}
+                              </h3>
+                              <p className="text-[11px]" style={{ color: textSecondary }}>
+                                Configure category name, color, and default behavior
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={closeCategoryModal}
+                            className="w-7 h-7 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                            style={{ color: textSecondary }}
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+
+                        {/* Name Input */}
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-xs font-semibold" style={{ color: textPrimary }}>Category Name *</label>
+                          <input
+                            type="text"
+                            value={categoryForm.name}
+                            onChange={e => setCategoryForm(prev => ({ ...prev, name: e.target.value }))}
+                            placeholder="e.g. Personal, University Calender, Work, Fitness..."
+                            className="w-full px-3.5 py-2.5 rounded-xl border text-xs outline-none transition-smooth"
+                            style={{
+                              background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff',
+                              borderColor: cardBdr,
+                              color: textPrimary,
+                            }}
+                            autoFocus
+                          />
+                        </div>
+
+                        {/* Description Input */}
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-xs font-semibold" style={{ color: textPrimary }}>Description (Optional)</label>
+                          <input
+                            type="text"
+                            value={categoryForm.description}
+                            onChange={e => setCategoryForm(prev => ({ ...prev, description: e.target.value }))}
+                            placeholder="Short description or notes for this category"
+                            className="w-full px-3.5 py-2 rounded-xl border text-xs outline-none transition-smooth"
+                            style={{
+                              background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff',
+                              borderColor: cardBdr,
+                              color: textPrimary,
+                            }}
+                          />
+                        </div>
+
+                        {/* Color Picker Section */}
+                        <div className="flex flex-col gap-2.5">
+                          <label className="text-xs font-semibold" style={{ color: textPrimary }}>Category Color</label>
+                          
+                          {/* 12 Presets Grid */}
+                          <div className="grid grid-cols-6 gap-2">
+                            {PRESET_CATEGORY_COLORS.map(pc => {
+                              const isSelected = categoryForm.color.toLowerCase() === pc.hex.toLowerCase();
+                              return (
+                                <button
+                                  key={pc.hex}
+                                  type="button"
+                                  title={pc.label}
+                                  onClick={() => setCategoryForm(prev => ({ ...prev, color: pc.hex }))}
+                                  className="h-8 rounded-xl border flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
+                                  style={{
+                                    backgroundColor: pc.hex,
+                                    borderColor: isSelected ? '#ffffff' : 'transparent',
+                                    outline: isSelected ? `2px solid ${pc.hex}` : 'none',
+                                    outlineOffset: 2,
+                                  }}
+                                >
+                                  {isSelected && <Check size={14} className="text-white drop-shadow" />}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* Custom Hex input */}
+                          <div className="flex items-center gap-2 pt-1.5">
+                            <input
+                              type="color"
+                              value={categoryForm.color}
+                              onChange={e => setCategoryForm(prev => ({ ...prev, color: e.target.value }))}
+                              className="w-8 h-8 rounded-lg cursor-pointer border-0 bg-transparent p-0 flex-shrink-0"
+                              title="Pick custom RGB color"
+                            />
+                            <div className="flex items-center gap-1 flex-1 px-3 py-1.5 rounded-xl border" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff' }}>
+                              <span className="text-xs font-mono opacity-50" style={{ color: textSecondary }}>#</span>
+                              <input
+                                type="text"
+                                value={categoryForm.color.replace(/^#/, '')}
+                                onChange={e => {
+                                  const val = e.target.value.trim().replace(/^#/, '');
+                                  if (/^[0-9a-fA-F]{0,6}$/.test(val)) {
+                                    setCategoryForm(prev => ({ ...prev, color: `#${val}` }));
+                                  }
+                                }}
+                                placeholder="22c55e"
+                                className="bg-transparent text-xs font-mono outline-none flex-1"
+                                style={{ color: textPrimary }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Category Behavior Settings */}
+                        <div className="flex flex-col gap-3.5 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                          <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: textSecondary }}>
+                            Default Item Settings
+                          </span>
+
+                          {/* Default Duration */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Default Duration</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>Pre-set duration when creating timed items in this category</span>
+                            </div>
+                            <div className="flex items-center gap-1 bg-muted/20 p-1 rounded-xl border" style={{ borderColor: cardBdr }}>
+                              {[15, 30, 45, 60, 90, 120].map(dur => (
+                                <button
+                                  key={dur}
+                                  type="button"
+                                  onClick={() => setCategoryForm(prev => ({ ...prev, defaultDurationMin: dur }))}
+                                  className={`px-2 py-1 rounded-lg text-[11px] font-bold tabular-nums transition-smooth ${
+                                    categoryForm.defaultDurationMin === dur ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                  }`}
+                                >
+                                  {dur}m
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Default All-Day */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Default All-Day Event</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>Create items in this category as all-day events by default</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setCategoryForm(prev => ({ ...prev, defaultAllDay: !prev.defaultAllDay }))}
+                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              style={{ background: categoryForm.defaultAllDay ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.defaultAllDay ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {/* Default No-Checkbox */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Completion Checkbox</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>Hide the completion tick box on items in this category</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setCategoryForm(prev => ({ ...prev, defaultNoCheckbox: !prev.defaultNoCheckbox }))}
+                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              style={{ background: categoryForm.defaultNoCheckbox ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.defaultNoCheckbox ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {/* Show in Widget */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Show in Side Widget</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>Display events of this category in the desktop side widget</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setCategoryForm(prev => ({ ...prev, showInWidget: !prev.showInWidget }))}
+                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              style={{ background: categoryForm.showInWidget ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.showInWidget ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {/* Set as Default Category for new items */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Set as Default Category</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>Automatically assign new items to this category</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setCategoryForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
+                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              style={{ background: categoryForm.isDefault ? '#10b981' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.isDefault ? 22 : 2 }} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Live Card Preview in Current Theme & Style */}
+                        {(() => {
+                          const previewChip = gcalChipColors(categoryForm.color, { dark: darkMode, style: eventColorStyle, pageBg: activeTheme.rootBg });
+                          return (
+                            <div className="p-3 rounded-2xl border flex flex-col gap-2" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                              <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: textSecondary }}>
+                                Live Preview ({eventColorStyle} style)
+                              </span>
+                              {previewChip && (
+                                <div
+                                  className="p-3 rounded-xl border relative flex flex-col gap-1 transition-smooth"
+                                  style={{
+                                    backgroundColor: previewChip.bg,
+                                    borderColor: previewChip.border,
+                                    color: previewChip.text,
+                                    boxShadow: previewChip.boxShadow,
+                                  }}
+                                >
+                                  {previewChip.accentBar && (
+                                    <div className="absolute left-0 top-0 bottom-0 w-1.5 rounded-l-xl" style={{ backgroundColor: previewChip.accentBar }} />
+                                  )}
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-bold truncate">
+                                      {categoryForm.name.trim() || 'Category Preview'}
+                                    </span>
+                                    <span className="text-[10px] font-semibold tabular-nums" style={{ color: previewChip.textMuted }}>
+                                      {categoryForm.defaultAllDay ? 'All Day' : `09:00 AM (${categoryForm.defaultDurationMin}m)`}
+                                    </span>
+                                  </div>
+                                  <span className="text-[10.5px] truncate" style={{ color: previewChip.textMuted }}>
+                                    {categoryForm.description || 'Sample event card in this category'}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        {/* Modal Footer Buttons */}
+                        <div className="flex items-center justify-end gap-2.5 pt-3 border-t" style={{ borderColor: cardBdr }}>
+                          <button
+                            type="button"
+                            onClick={closeCategoryModal}
+                            className="px-4 py-2 rounded-xl text-xs font-semibold border transition-colors hover:bg-white/5"
+                            style={{ borderColor: cardBdr, color: textSecondary }}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSaveCategory}
+                            className="px-5 py-2 rounded-xl text-xs font-bold text-white shadow-md transition-smooth active:scale-95 flex items-center gap-1.5"
+                            style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                          >
+                            <Check size={14} />
+                            {isAddingCategory ? 'Create Category' : 'Save Changes'}
+                          </button>
+                        </div>
+                      </motion.div>
+                    </div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            )}
+
             {/* 🕌 PRAYER TIMES TAB */}
             {activeTab === 'prayer' && (
               <motion.div
@@ -1854,7 +2696,7 @@ export default function SettingsPage() {
                       aria-pressed={prayer.enabled}
                       title={prayer.enabled ? 'Prayer times are shown' : 'Prayer times are hidden'}
                     >
-                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: prayer.enabled ? 22 : 2 }} />
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: prayer.enabled ? 22 : 2 }} />
                     </button>
                   </div>
 
@@ -1923,7 +2765,7 @@ export default function SettingsPage() {
                               key={label}
                               type="button"
                               onClick={() => patchPrayer({ school: val })}
-                              className="px-3 py-1 rounded-lg text-xs font-semibold transition-all"
+                              className="px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
                               style={{
                                 background: prayer.school === val ? prayer.color : 'transparent',
                                 color: prayer.school === val ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
@@ -1956,7 +2798,7 @@ export default function SettingsPage() {
                                       : [...prayer.hidden, k],
                                   });
                                 }}
-                                className="px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all"
+                                className="px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth"
                                 style={{
                                   background: on ? prayer.color : 'transparent',
                                   borderColor: on ? prayer.color : cardBdr,
@@ -1983,7 +2825,7 @@ export default function SettingsPage() {
                               key={id}
                               type="button"
                               onClick={() => patchPrayer({ style: id })}
-                              className="p-3 rounded-2xl border text-left flex flex-col gap-1 transition-all"
+                              className="p-3 rounded-2xl border text-left flex flex-col gap-1 transition-smooth"
                               style={{
                                 background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
                                 borderColor: prayer.style === id ? prayer.color : cardBdr,
@@ -2059,7 +2901,7 @@ export default function SettingsPage() {
                           style={{ background: prayer.showInWidget ? prayer.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                           aria-pressed={prayer.showInWidget}
                         >
-                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: prayer.showInWidget ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: prayer.showInWidget ? 22 : 2 }} />
                         </button>
                       </label>
 
@@ -2127,7 +2969,7 @@ export default function SettingsPage() {
                         return (
                           <div
                             key={c.id}
-                            className="flex items-center justify-between p-3.5 rounded-2xl border transition-all"
+                            className="flex items-center justify-between p-3.5 rounded-2xl border transition-smooth"
                             style={{
                               background: active ? accentLight : 'transparent',
                               borderColor: active ? accentColor : cardBdr,
@@ -2136,7 +2978,7 @@ export default function SettingsPage() {
                             <div className="flex items-center gap-3">
                               <button
                                 onClick={() => playFocusChime(c.id)}
-                                className="p-2.5 rounded-xl border transition-all hover:scale-105"
+                                className="p-2.5 rounded-xl border transition-smooth hover:scale-105"
                                 style={{ background: cardBg, borderColor: cardBdr, color: accentColor }}
                                 title="Click to preview chime"
                               >
@@ -2157,7 +2999,7 @@ export default function SettingsPage() {
                                 setFocusChime(c.id);
                                 playFocusChime(c.id);
                               }}
-                              className="px-4 py-2 rounded-xl text-xs font-semibold transition-all"
+                              className="px-4 py-2 rounded-xl text-xs font-semibold transition-smooth"
                               style={{
                                 background: active ? accentColor : (darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'),
                                 color: active ? '#ffffff' : textPrimary,
@@ -2191,7 +3033,7 @@ export default function SettingsPage() {
                                   setFocusCues(prev => ({ ...prev, [slot]: c.id }));
                                   playFocusCue(c.id);
                                 }}
-                                className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-all"
+                                className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-smooth"
                                 style={{
                                   background: active ? accentColor : cardBg,
                                   border: `1px solid ${active ? accentColor : cardBdr}`,
@@ -2233,7 +3075,7 @@ export default function SettingsPage() {
 
                     <button
                       onClick={() => setShortcuts({ ...DEFAULT_SHORTCUTS })}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth"
                       style={{ background: cardBg, borderColor: cardBdr, color: textSecondary }}
                     >
                       <RotateCcw size={14} />
@@ -2257,7 +3099,7 @@ export default function SettingsPage() {
                                 if (e.detail === 0) return;
                                 setRecordingAction(recording ? null : def.action);
                               }}
-                              className="flex items-center justify-between p-3.5 rounded-2xl border text-left transition-all"
+                              className="flex items-center justify-between p-3.5 rounded-2xl border text-left transition-smooth"
                               style={{
                                 background: recording ? accentLight : cardBg,
                                 borderColor: recording ? accentColor : cardBdr,
@@ -2373,7 +3215,7 @@ export default function SettingsPage() {
                       </span>
                       <button
                         onClick={runBackupNow}
-                        className="px-4 py-2 rounded-xl text-xs font-semibold transition-all hover:scale-105"
+                        className="px-4 py-2 rounded-xl text-xs font-semibold transition-smooth hover:scale-105"
                         style={{ background: accentColor, color: '#ffffff' }}
                       >
                         Back Up Now
@@ -2385,7 +3227,7 @@ export default function SettingsPage() {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <button
                       onClick={exportBackup}
-                      className="flex items-center justify-center gap-2.5 p-4 rounded-2xl border text-xs font-bold transition-all hover:scale-[1.01]"
+                      className="flex items-center justify-center gap-2.5 p-4 rounded-2xl border text-xs font-bold transition-smooth hover:scale-[1.01]"
                       style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                     >
                       <Download size={17} className="text-blue-500" />
@@ -2393,7 +3235,7 @@ export default function SettingsPage() {
                     </button>
 
                     <label
-                      className="flex items-center justify-center gap-2.5 p-4 rounded-2xl border text-xs font-bold transition-all cursor-pointer hover:scale-[1.01]"
+                      className="flex items-center justify-center gap-2.5 p-4 rounded-2xl border text-xs font-bold transition-smooth cursor-pointer hover:scale-[1.01]"
                       style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                     >
                       <Upload size={17} className="text-emerald-500" />
@@ -2433,7 +3275,7 @@ export default function SettingsPage() {
                       aria-pressed={hardware.enabled}
                       title={hardware.enabled ? 'The desk controller is active' : 'The desk controller is ignored'}
                     >
-                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.enabled ? 22 : 2 }} />
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.enabled ? 22 : 2 }} />
                     </button>
                   </div>
 
@@ -2455,7 +3297,7 @@ export default function SettingsPage() {
                           style={{ background: hardware.buttonsEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                           aria-pressed={hardware.buttonsEnabled}
                         >
-                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.buttonsEnabled ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.buttonsEnabled ? 22 : 2 }} />
                         </button>
                       </div>
 
@@ -2474,7 +3316,7 @@ export default function SettingsPage() {
                           style={{ background: hardware.sensorEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                           aria-pressed={hardware.sensorEnabled}
                         >
-                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.sensorEnabled ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.sensorEnabled ? 22 : 2 }} />
                         </button>
                       </div>
 
@@ -2517,7 +3359,7 @@ export default function SettingsPage() {
                               style={{ background: hardware.awayPauseEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                               aria-pressed={hardware.awayPauseEnabled}
                             >
-                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.awayPauseEnabled ? 22 : 2 }} />
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.awayPauseEnabled ? 22 : 2 }} />
                             </button>
                           </div>
 
@@ -2539,7 +3381,7 @@ export default function SettingsPage() {
                               style={{ background: hardware.autoRestartEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                               aria-pressed={hardware.autoRestartEnabled}
                             >
-                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.autoRestartEnabled ? 22 : 2 }} />
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.autoRestartEnabled ? 22 : 2 }} />
                             </button>
                           </div>
 
@@ -2561,7 +3403,7 @@ export default function SettingsPage() {
                               style={{ background: hardware.announceOnConnect ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                               aria-pressed={hardware.announceOnConnect}
                             >
-                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: hardware.announceOnConnect ? 22 : 2 }} />
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.announceOnConnect ? 22 : 2 }} />
                             </button>
                           </div>
 
@@ -2855,7 +3697,7 @@ export default function SettingsPage() {
                               });
                           }}
                           disabled={!clientIdInput || !clientSecretInput}
-                          className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-all text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+                          className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
                         >
                           Save OAuth Credentials
                         </button>
@@ -2885,7 +3727,7 @@ export default function SettingsPage() {
                                   })
                                   .catch(() => showToast("Couldn't reach the server to start sign-in.", 'error'));
                               }}
-                              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-all text-white bg-blue-600 hover:bg-blue-700"
+                              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700"
                             >
                               Link Google Account
                             </button>
@@ -2895,7 +3737,7 @@ export default function SettingsPage() {
                             <button
                               onClick={triggerGCalSync}
                               disabled={gCalSyncing}
-                              className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-all text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                              className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
                             >
                               <RefreshCw size={14} className={gCalSyncing ? 'animate-spin' : ''} />
                               <span>{gCalSyncing ? 'Syncing...' : 'Sync Now'}</span>
@@ -2912,7 +3754,7 @@ export default function SettingsPage() {
                                     }
                                   });
                               }}
-                              className="px-4 py-2.5 rounded-xl text-xs font-bold transition-all border text-red-400 border-red-500/20 hover:bg-red-500/10"
+                              className="px-4 py-2.5 rounded-xl text-xs font-bold transition-smooth border text-red-400 border-red-500/20 hover:bg-red-500/10"
                             >
                               Disconnect
                             </button>
@@ -2953,7 +3795,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalPushEnabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPushEnabled ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPushEnabled ? 22 : 2 }} />
                         </button>
                       </div>
 
@@ -2986,7 +3828,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalPushOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
                         </button>
                       </div>
                     </div>
@@ -3010,7 +3852,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalPullDailyEdits ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
                         </button>
                       </div>
 
@@ -3027,7 +3869,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalPullDailyNew ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
                         </button>
                       </div>
 
@@ -3044,7 +3886,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalPullOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
                         </button>
                       </div>
                     </div>
@@ -3066,7 +3908,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalMirrorLocalDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
                         </button>
                       </div>
 
@@ -3085,7 +3927,7 @@ export default function SettingsPage() {
                           className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
                           style={{ background: gcalMirrorGoogleDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
                         </button>
                       </div>
                     </div>
@@ -3124,7 +3966,7 @@ export default function SettingsPage() {
                               .then(r => r.json())
                               .then(res => { if (res.url) window.location.href = res.url; });
                           }}
-                          className="self-start py-2 px-4 rounded-xl text-xs font-bold transition-all text-white bg-amber-600 hover:bg-amber-700"
+                          className="self-start py-2 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-amber-600 hover:bg-amber-700"
                         >
                           Reconnect Google
                         </button>
@@ -3147,7 +3989,7 @@ export default function SettingsPage() {
                       style={{ background: googleTasksSync ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                       aria-pressed={googleTasksSync}
                     >
-                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all" style={{ left: googleTasksSync ? 22 : 2 }} />
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: googleTasksSync ? 22 : 2 }} />
                     </button>
                   </label>
                 </div>

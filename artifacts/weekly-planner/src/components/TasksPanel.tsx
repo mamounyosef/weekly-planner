@@ -77,6 +77,8 @@ interface TasksPanelProps {
    * but drops the scrim, the slide-up and the grab handle.
    */
   page?: boolean;
+  /** Optional content scale / zoom factor. */
+  zoom?: number;
 }
 
 const COMPLETED_COLLAPSED_KEY = 'planner-tasks-completed-collapsed';
@@ -132,6 +134,7 @@ function TasksPanel({
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
   sheet = false,
   page = false,
+  zoom,
 }: TasksPanelProps) {
   const today = todayYmd();
   const tomorrow = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd'), [today]);
@@ -388,53 +391,56 @@ function TasksPanel({
         : sheet
         ? 'fixed inset-x-0 bottom-0 z-[81] overflow-hidden shadow-2xl'
         : 'flex-shrink-0 overflow-hidden relative shadow-lg'}
-      style={page ? {
-        // Its own screen, not a sheet over the calendar: no scrim to composite,
-        // no slide to animate and nothing rendered underneath. Switching tabs is
-        // a plain show/hide, which is the only version of this that can't drop
-        // frames on a phone.
-        bottom: 'var(--bottom-nav-h)',
-        paddingTop: 'var(--safe-top)',
-        background: theme.menuBg,
-        display: open ? undefined : 'none',
-      } : sheet ? {
-        // Stops at the tab bar rather than sliding under it: the bar stays
-        // usable (tap Calendar to get straight back) and the composer at the
-        // foot of the list is never hidden behind it.
-        bottom: 'var(--bottom-nav-h)',
-        // Not full height — leaving the top of the calendar peeking through is
-        // what makes a sheet read as "on top of" rather than "instead of", and
-        // it gives the eye somewhere to tap to dismiss.
-        height: 'calc(86dvh - var(--bottom-nav-h))',
-        borderTopLeftRadius: 18,
-        borderTopRightRadius: 18,
-        borderTop: `1px solid ${theme.surfaceBdr}`,
-        background: theme.menuBg,
-        transform: open ? `translateY(${sheetDragY}px)` : 'translateY(110%)',
-        // No transition while a finger is on the handle — the sheet has to
-        // track the drag exactly, or it feels like it's on elastic.
-        transition: sheetDragging ? 'none' : 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)',
-        visibility: open ? 'visible' : 'hidden',
-        // Keep the sheet on its own compositor layer and stop its contents from
-        // participating in the page's layout/paint while it slides.
-        willChange: 'transform',
-        contain: 'paint',
-      } : {
-        // Plain CSS transition rather than a JS-driven one. Width is a layout
-        // property either way, but framer-motion also ran a per-frame rAF that
-        // wrote inline styles from JS — on top of the reflow the calendar next
-        // door already owes, that extra main-thread work is what made the
-        // show/hide stutter. The browser drives this one on its own.
-        // No will-change: width is not a compositable property, so declaring it
-        // buys nothing and keeps the panel permanently promoted to its own
-        // layer that has to be re-rastered every time its contents change.
-        width: open ? width : 0,
-        // 130ms, not 200ms: each frame of this animation costs the calendar next
-        // door a full re-layout, so the cheapest thing we can do is ask for fewer
-        // of them. The easing keeps most of the travel in the first third, so it
-        // still reads as a slide rather than a jump.
-        transition: 'width 130ms cubic-bezier(0.16, 1, 0.3, 1)',
-        borderLeft: open ? `1px solid ${theme.surfaceBdr}` : 'none',
+      style={{
+        ...(page ? {
+          // Its own screen, not a sheet over the calendar: no scrim to composite,
+          // no slide to animate and nothing rendered underneath. Switching tabs is
+          // a plain show/hide, which is the only version of this that can't drop
+          // frames on a phone.
+          bottom: 'var(--bottom-nav-h)',
+          paddingTop: 'var(--safe-top)',
+          background: theme.menuBg,
+          display: open ? undefined : 'none',
+        } : sheet ? {
+          // Stops at the tab bar rather than sliding under it: the bar stays
+          // usable (tap Calendar to get straight back) and the composer at the
+          // foot of the list is never hidden behind it.
+          bottom: 'var(--bottom-nav-h)',
+          // Not full height — leaving the top of the calendar peeking through is
+          // what makes a sheet read as "on top of" rather than "instead of", and
+          // it gives the eye somewhere to tap to dismiss.
+          height: 'calc(86dvh - var(--bottom-nav-h))',
+          borderTopLeftRadius: 18,
+          borderTopRightRadius: 18,
+          borderTop: `1px solid ${theme.surfaceBdr}`,
+          background: theme.menuBg,
+          transform: open ? `translateY(${sheetDragY}px)` : 'translateY(110%)',
+          // No transition while a finger is on the handle — the sheet has to
+          // track the drag exactly, or it feels like it's on elastic.
+          transition: sheetDragging ? 'none' : 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)',
+          visibility: open ? 'visible' : 'hidden',
+          // Keep the sheet on its own compositor layer and stop its contents from
+          // participating in the page's layout/paint while it slides.
+          willChange: 'transform',
+          contain: 'paint',
+        } : {
+          // Plain CSS transition rather than a JS-driven one. Width is a layout
+          // property either way, but framer-motion also ran a per-frame rAF that
+          // wrote inline styles from JS — on top of the reflow the calendar next
+          // door already owes, that extra main-thread work is what made the
+          // show/hide stutter. The browser drives this one on its own.
+          // No will-change: width is not a compositable property, so declaring it
+          // buys nothing and keeps the panel permanently promoted to its own
+          // layer that has to be re-rastered every time its contents change.
+          width: open ? width : 0,
+          // 130ms, not 200ms: each frame of this animation costs the calendar next
+          // door a full re-layout, so the cheapest thing we can do is ask for fewer
+          // of them. The easing keeps most of the travel in the first third, so it
+          // still reads as a slide rather than a jump.
+          transition: 'width 130ms cubic-bezier(0.16, 1, 0.3, 1)',
+          borderLeft: open ? `1px solid ${theme.surfaceBdr}` : 'none',
+        }),
+        ...(zoom ? { zoom } : {}),
       }}
       aria-hidden={!open}
     >
@@ -511,7 +517,7 @@ function TasksPanel({
             <div className="relative">
               <button
                 onClick={() => setShowSortMenu(v => !v)}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold transition-all hover:scale-[1.02] active:scale-95"
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
                 style={{
                   background: theme.surfaceBg,
                   border: `1px solid ${theme.surfaceBdr}`,
@@ -555,7 +561,7 @@ function TasksPanel({
 
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg transition-all hover:scale-105 active:scale-95"
+              className="p-1.5 rounded-lg transition-smooth hover:scale-105 active:scale-95"
               style={{ color: theme.menuSub }}
               onMouseEnter={e => (e.currentTarget.style.background = theme.hoverBg)}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -593,7 +599,7 @@ function TasksPanel({
         {/* Task Composer */}
         <div className="flex-shrink-0 px-3 py-3 border-b" style={{ borderColor: theme.surfaceBdr }}>
           <div
-            className="flex items-center gap-2 px-3 py-2.5 rounded-xl transition-all shadow-sm"
+            className="flex items-center gap-2 px-3 py-2.5 rounded-xl transition-smooth shadow-sm"
             style={{
               background: theme.surfaceBg,
               border: `1.5px solid ${composerFocused ? theme.accent : theme.surfaceBdr}`,
@@ -626,7 +632,7 @@ function TasksPanel({
                   transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
                   onMouseDown={e => e.preventDefault()}
                   onClick={submitComposer}
-                  className="px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all hover:scale-[1.02] active:scale-95"
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-smooth hover:scale-[1.02] active:scale-95"
                   style={{ background: theme.accent, color: theme.darkMode ? '#0b1220' : '#ffffff' }}
                 >
                   Add
@@ -682,7 +688,7 @@ function TasksPanel({
 
                   {/* Custom Date Input Picker Button */}
                   <label
-                    className="relative flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition-all hover:opacity-90 active:scale-95"
+                    className="relative flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:opacity-90 active:scale-95"
                     style={{
                       background: (composerDate && composerDate !== today && composerDate !== tomorrow && composerDate !== nextWeek)
                         ? `${theme.accent}22` : theme.surfaceBg,
@@ -725,7 +731,7 @@ function TasksPanel({
                         if (!composerDate) setComposerDate(today);
                         setShowTimePicker(v => !v);
                       }}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-all hover:scale-[1.02] active:scale-95"
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:scale-[1.02] active:scale-95"
                       style={{
                         background: composerTime ? chip.bg : theme.surfaceBg,
                         border: `1px solid ${composerTime ? chip.border : theme.surfaceBdr}`,
@@ -903,7 +909,7 @@ function TimePickerPopover({ value, timeFormat, theme, taskColor, onChange, onCl
               key={t}
               type="button"
               onClick={() => { onChange(t); onClose(); }}
-              className="px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-all hover:scale-[1.02] active:scale-95"
+              className="px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
               style={{
                 background: active ? `${taskColor}22` : theme.surfaceBg,
                 border: `1px solid ${active ? taskColor : theme.surfaceBdr}`,
@@ -967,7 +973,7 @@ function FilterChip({ label, count, active, danger, theme, onClick }: {
   return (
     <button
       onClick={onClick}
-      className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold transition-all hover:scale-[1.02] active:scale-95"
+      className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
       style={{
         background: active ? `${tone}22` : theme.surfaceBg,
         border: `1px solid ${active ? tone : theme.surfaceBdr}`,
@@ -998,7 +1004,7 @@ function QuickPill({ icon, label, active, disabled, theme, onClick }: {
       onMouseDown={e => e.preventDefault()}
       onClick={onClick}
       disabled={disabled}
-      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
+      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-smooth hover:scale-[1.02] active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
       style={{
         background: active ? `${theme.accent}22` : theme.surfaceBg,
         border: `1px solid ${active ? theme.accent : theme.surfaceBdr}`,
@@ -1136,9 +1142,172 @@ function TaskList({
 
   const activeGap = getActiveGap(roots);
 
+  // ── Touch reordering ──────────────────────────────────────────────────────
+  // HTML5 drag-and-drop simply does not exist on a touch screen: `draggable`,
+  // dragstart and dataTransfer are mouse-only, so on a phone the list could not
+  // be reordered at all. This is the phone equivalent, and it follows the
+  // gesture people already expect from every mobile list: press and HOLD to
+  // pick a row up, keep the finger down to move it, and hold near the top or
+  // bottom edge to scroll the list while still holding it.
+  const HOLD_MS = 380;
+  const HOLD_SLOP = 10;
+  const EDGE_ZONE = 64;
+  const holdRef = useRef<{
+    occId: string;
+    x: number;
+    y: number;
+    timer: number;
+    dragging: boolean;
+  } | null>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
+  // The move/up listeners must be removable even though this component
+  // re-renders mid-gesture (every hover target change is a state update, which
+  // hands the next render brand-new handler identities). One AbortController
+  // per gesture detaches all of them regardless of which render created them.
+  const gestureRef = useRef<AbortController | null>(null);
+  const autoScrollRef = useRef(0);
+  const pointerYRef = useRef(0);
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current) {
+      cancelAnimationFrame(autoScrollRef.current);
+      autoScrollRef.current = 0;
+    }
+  }, []);
+
+  const runAutoScroll = useCallback(() => {
+    autoScrollRef.current = requestAnimationFrame(function step() {
+      const scroller = scrollerRef.current;
+      if (!scroller || !holdRef.current?.dragging) { autoScrollRef.current = 0; return; }
+      const rect = scroller === document.scrollingElement
+        ? { top: 0, bottom: window.innerHeight }
+        : scroller.getBoundingClientRect();
+      const y = pointerYRef.current;
+      let dy = 0;
+      // Speed ramps with how deep into the edge the finger is, so easing into
+      // the zone creeps and pushing right to the edge moves fast.
+      if (y < rect.top + EDGE_ZONE) {
+        dy = -Math.ceil(14 * Math.min(1, (rect.top + EDGE_ZONE - y) / EDGE_ZONE));
+      } else if (y > rect.bottom - EDGE_ZONE) {
+        dy = Math.ceil(14 * Math.min(1, (y - (rect.bottom - EDGE_ZONE)) / EDGE_ZONE));
+      }
+      if (dy) scroller.scrollTop += dy;
+      autoScrollRef.current = requestAnimationFrame(step);
+    });
+  }, []);
+
+  /** Nearest scrollable ancestor — the tasks list, whatever it is wrapped in. */
+  const findScroller = (from: HTMLElement): HTMLElement => {
+    let node: HTMLElement | null = from;
+    while (node) {
+      const overflow = getComputedStyle(node).overflowY;
+      if ((overflow === 'auto' || overflow === 'scroll') && node.scrollHeight > node.clientHeight + 1) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return (document.scrollingElement as HTMLElement) || document.documentElement;
+  };
+
+  /** Which row the finger is over, and which side of its middle. */
+  const rowUnder = (x: number, y: number): { occId: string; edge: InsertEdge } | null => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    const rowEl = el?.closest<HTMLElement>('[data-drop-row="1"]');
+    const occId = rowEl?.dataset.occId;
+    if (!rowEl || !occId) return null;
+    const rect = rowEl.getBoundingClientRect();
+    return { occId, edge: y < rect.top + rect.height / 2 ? 'before' : 'after' };
+  };
+
+  const endTouchDrag = useCallback((commit: boolean) => {
+    const hold = holdRef.current;
+    holdRef.current = null;
+    stopAutoScroll();
+    gestureRef.current?.abort();
+    gestureRef.current = null;
+    if (!hold) return;
+    window.clearTimeout(hold.timer);
+    if (hold.dragging) {
+      if (commit) {
+        const target = rowUnder(hold.x, pointerYRef.current);
+        if (target && target.occId !== hold.occId) {
+          onDrop(hold.occId, target.occId, target.edge);
+        }
+      }
+      onDragStart(null);
+      onDragOver(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onDrop, onDragStart, onDragOver, stopAutoScroll]);
+
+  // A non-passive touchmove that swallows the scroll. `touch-action` is only
+  // read when the gesture starts, and the drag begins mid-gesture — after the
+  // browser has already decided this is a scroll — so preventDefault is the
+  // only thing that can stop the list sliding under the finger.
+  function blockScroll(e: TouchEvent) {
+    if (holdRef.current?.dragging && e.cancelable) e.preventDefault();
+  }
+
+  function onTouchMove(e: PointerEvent) {
+    const hold = holdRef.current;
+    if (!hold) return;
+    pointerYRef.current = e.clientY;
+    if (!hold.dragging) {
+      // Still waiting out the hold: any real movement means the user meant to
+      // scroll the list, so the pick-up is abandoned rather than fought with.
+      if (Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > HOLD_SLOP) {
+        window.clearTimeout(hold.timer);
+        endTouchDrag(false);
+      }
+      return;
+    }
+    hold.x = e.clientX;
+    const target = rowUnder(e.clientX, e.clientY);
+    if (target && target.occId !== hold.occId) {
+      onDragOver(insertTarget(target.occId, target.edge));
+    }
+    if (!autoScrollRef.current) runAutoScroll();
+  }
+
+  function onTouchUp() { endTouchDrag(true); }
+  function onTouchCancel() { endTouchDrag(false); }
+
+  const onTouchPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.pointerType === 'mouse' || e.button !== 0) return;
+    const targetEl = e.target as HTMLElement;
+    // Checkboxes, the overflow menu and the composer keep their plain taps.
+    if (targetEl.closest('button, input, textarea, select, a, [contenteditable]')) return;
+    const rowEl = targetEl.closest<HTMLElement>('[data-drop-row="1"]');
+    const occId = rowEl?.dataset.occId;
+    if (!rowEl || !occId) return;
+
+    scrollerRef.current = findScroller(rowEl);
+    pointerYRef.current = e.clientY;
+    const timer = window.setTimeout(() => {
+      const hold = holdRef.current;
+      if (!hold) return;
+      hold.dragging = true;
+      try { navigator.vibrate?.(12); } catch { /* unsupported */ }
+      onDragStart(occId);
+    }, HOLD_MS);
+    holdRef.current = { occId, x: e.clientX, y: e.clientY, timer, dragging: false };
+
+    gestureRef.current?.abort();
+    const gesture = new AbortController();
+    gestureRef.current = gesture;
+    const { signal } = gesture;
+    window.addEventListener('pointermove', onTouchMove, { signal });
+    window.addEventListener('pointerup', onTouchUp, { signal });
+    window.addEventListener('pointercancel', onTouchCancel, { signal });
+    document.addEventListener('touchmove', blockScroll, { passive: false, signal });
+  };
+
+  useEffect(() => () => { endTouchDrag(false); }, [endTouchDrag]);
+
   return (
     <div
       className="flex flex-col gap-0.5 min-h-[24px]"
+      onPointerDown={onTouchPointerDown}
       onDragOver={e => updateNearestTarget(e, roots)}
       onDrop={e => dropAtNearestTarget(e, roots)}
       onDragLeave={e => {
@@ -1241,7 +1410,7 @@ function InsertLine({ active, theme }: { active: boolean; theme: TaskTheme }) {
   return (
     <div className="h-1.5 flex items-center px-2 pointer-events-none">
       <div
-        className="h-0.5 w-full rounded-full transition-all duration-100"
+        className="h-0.5 w-full rounded-full transition-smooth duration-100"
         style={{
           background: active ? theme.accent : 'transparent',
           boxShadow: active ? `0 0 10px ${theme.accent}80` : 'none',
@@ -1313,7 +1482,7 @@ function TaskRow({
         e.stopPropagation?.();
         onDrop?.(edgeFromEvent(e));
       }}
-      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-all cursor-grab active:cursor-grabbing border overflow-hidden ${
+      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-smooth cursor-grab active:cursor-grabbing border overflow-hidden ${
         isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:shadow-md hover:-translate-y-px'
       }`}
       style={{
@@ -1350,7 +1519,7 @@ function TaskRow({
       {/* Checkbox with generous hit target and compact spring animation */}
       <button
         onClick={e => { e.stopPropagation(); onToggleDone(row.occId, done); }}
-        className="relative p-1.5 -m-1.5 rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer group/chk transition-all"
+        className="relative p-1.5 -m-1.5 rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer group/chk transition-smooth"
         title={done ? 'Mark as incomplete' : 'Mark as completed'}
       >
         <AnimatePresence>
@@ -1375,7 +1544,7 @@ function TaskRow({
           whileTap={{ scale: 0.8 }}
           animate={visualDone ? { scale: [1, 1.22, 1] } : { scale: 1 }}
           transition={{ type: 'spring', stiffness: 450, damping: 20 }}
-          className={`relative z-10 w-4 h-4 ${isCircle ? 'rounded-full' : 'rounded'} flex items-center justify-center transition-all ${
+          className={`relative z-10 w-4 h-4 ${isCircle ? 'rounded-full' : 'rounded'} flex items-center justify-center transition-smooth ${
             visualDone ? 'shadow-sm' : 'group-hover/chk:scale-110'
           }`}
           style={{

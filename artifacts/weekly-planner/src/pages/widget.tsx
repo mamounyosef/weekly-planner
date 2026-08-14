@@ -66,6 +66,8 @@ import {
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, parseDate, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
+import { ACCENT_BAR_W } from '@/components/EventCardPreview';
+import { DEFAULT_CATEGORIES, resolveEventColor, coerceCategories, type EventCategory } from '@/lib/categories';
 import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
 import { fetchDeviceSettings, loadDeviceSettingsLocal, subscribeDeviceSettings } from '@/lib/deviceSettings';
 import { matchesCombo, formatCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
@@ -97,6 +99,7 @@ interface PlannerEvent {
   endTime: string;
   content: string;
   color: EventColor;
+  categoryId?: string;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
   allDay?: boolean;     // when true, this is an all-day event
@@ -313,6 +316,7 @@ export default function Widget() {
   const [focusMinutesDraft, setFocusMinutesDraft] = useState('60');
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(DEFAULT_SHORTCUTS);
   const [prayer, setPrayer] = useState<PrayerSettings>(DEFAULT_PRAYER_SETTINGS);
+  const [categories, setCategories] = useState<EventCategory[]>(DEFAULT_CATEGORIES);
   const [focusCollapsed, setFocusCollapsed] = useState(false);
   const focusCompleteRef = useRef(false);
   const [focusCelebrate, setFocusCelebrate] = useState(false);
@@ -367,6 +371,7 @@ export default function Widget() {
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
         setHardware(coerceHardwareSettings(s.hardware));
+        if (s.categories) setCategories(coerceCategories(s.categories));
         if (s.focusChime != null) focusChimeRef.current = coerceFocusChime(s.focusChime);
         if (s.focusCues && typeof s.focusCues === 'object') {
           const c = s.focusCues as Record<string, unknown>;
@@ -559,7 +564,17 @@ export default function Widget() {
   // Resolve raw storage into the items visible in the current (real) week, so the
   // widget honours single-week items, recurring versions and per-week overrides.
   const viewedWeekKey = weekKeyOf(today, weekStartsOn);
-  const weekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+  const rawWeekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+  const weekEvents = useMemo(() => {
+    const hiddenCatIds = new Set(categories.filter(c => c.showInWidget === false).map(c => c.id));
+    if (hiddenCatIds.size === 0) return rawWeekEvents;
+    const filtered: Record<string, PlannerEvent> = {};
+    for (const [k, ev] of Object.entries(rawWeekEvents)) {
+      if (ev.categoryId && hiddenCatIds.has(ev.categoryId)) continue;
+      filtered[k] = ev;
+    }
+    return filtered;
+  }, [rawWeekEvents, categories]);
 
   const slots = generateSlots(interval, dayStartH, dayEndH);
   const sh = SLOT_H[interval];
@@ -567,7 +582,7 @@ export default function Widget() {
   // Identical resolution to the main window, so a card looks the same in both.
   const widgetTheme = themePalette(darkMode, widgetDarkPreset, widgetLightPreset);
   const chipColors = (ev: PlannerEvent) =>
-    gcalChipColors(resolveEventHex(ev), { dark: darkMode, style: eventColorStyle, pageBg: widgetTheme.rootBg })
+    gcalChipColors(resolveEventColor(ev, categories), { dark: darkMode, style: eventColorStyle, pageBg: widgetTheme.rootBg })
       ?? { bg: '#dcfce7', border: '#86efac', text: '#14532d', textMuted: '#2f6b45' };
 
   const normNowMin = normalizeMin(nowMin, dayStartH);
@@ -1430,7 +1445,7 @@ export default function Widget() {
         </div>
       </header>
 
-      <section className={`flex-shrink-0 px-3 ${focusCollapsed ? 'py-2' : 'py-3'} border-b border-border/50 transition-all duration-200`} style={{ background: darkMode ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.38)' }}>
+      <section className={`flex-shrink-0 px-3 ${focusCollapsed ? 'py-2' : 'py-3'} border-b border-border/50 transition-smooth duration-200`} style={{ background: darkMode ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.38)' }}>
         <div className="rounded-lg overflow-hidden" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
           <div className={`${focusCollapsed ? 'px-3 py-2' : 'px-3 pt-3 pb-2'} flex items-center justify-between gap-2`}>
             <div className="flex items-center gap-2 min-w-0">
@@ -1446,7 +1461,7 @@ export default function Widget() {
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
               <motion.div
-                className={`${focusCollapsed ? 'text-[18px]' : 'text-[28px]'} leading-none font-semibold tabular-nums tracking-normal transition-all duration-200`}
+                className={`${focusCollapsed ? 'text-[18px]' : 'text-[28px]'} leading-none font-semibold tabular-nums tracking-normal transition-smooth duration-200`}
                 style={{ color: focusCelebrate ? '#4ade80' : menuText }}
                 animate={focusCelebrate
                   ? { scale: [1, 1.16, 1, 1.08, 1], textShadow: ['0 0 0px rgba(74,222,128,0)', '0 0 18px rgba(74,222,128,0.75)', '0 0 0px rgba(74,222,128,0)'] }
@@ -1459,7 +1474,7 @@ export default function Widget() {
               </motion.div>
               <button
                 onClick={() => setFocusCollapsed(v => !v)}
-                className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
+                className="w-7 h-7 rounded-md flex items-center justify-center transition-smooth active:scale-[0.96]"
                 title={focusCollapsed ? 'Expand focus session' : 'Minimize focus session'}
                 style={{
                   background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
@@ -1476,7 +1491,7 @@ export default function Widget() {
           <>
           <div className="h-1 mx-3 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
             <div
-              className="h-full rounded-full transition-all duration-300"
+              className="h-full rounded-full transition-smooth duration-300"
               style={{
                 width: `${focusProgressPct}%`,
                 background: focusTimer.isRunning ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)',
@@ -1487,7 +1502,7 @@ export default function Widget() {
           <div className="px-3 py-2 flex items-center gap-2">
             <button
               onClick={() => adjustFocusMinutes(-5)}
-              className="w-8 h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
+              className="w-8 h-8 rounded-md flex items-center justify-center transition-smooth active:scale-[0.96]"
               title="Decrease focus duration by 5 minutes (A)"
               style={{
                 background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
@@ -1533,7 +1548,7 @@ export default function Widget() {
             </div>
             <button
               onClick={() => adjustFocusMinutes(5)}
-              className="w-8 h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.96]"
+              className="w-8 h-8 rounded-md flex items-center justify-center transition-smooth active:scale-[0.96]"
               title="Increase focus duration by 5 minutes (D)"
               style={{
                 background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
@@ -1547,7 +1562,7 @@ export default function Widget() {
           <div className="px-3 pb-3 grid grid-cols-4 gap-1.5">
             <button
               onClick={toggleFocus}
-              className="col-span-2 h-8 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
+              className="col-span-2 h-8 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-smooth active:scale-[0.98]"
               style={{
                 background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
                 border: `1px solid ${focusTimer.isRunning ? 'rgba(245,158,11,0.35)' : '#2563eb'}`,
@@ -1562,7 +1577,7 @@ export default function Widget() {
             <button
               onClick={resetFocus}
               disabled={focusElapsedSeconds <= 0}
-              className="h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+              className="h-8 rounded-md flex items-center justify-center transition-smooth active:scale-[0.98]"
               title="Reset focus timer"
               style={{
                 background: 'transparent',
@@ -1576,7 +1591,7 @@ export default function Widget() {
             <button
               onClick={stopFocusByHand}
               disabled={focusElapsedSeconds <= 0}
-              className="h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+              className="h-8 rounded-md flex items-center justify-center transition-smooth active:scale-[0.98]"
               title="Stop and log focus time"
               style={{
                 background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
@@ -1643,13 +1658,13 @@ export default function Widget() {
                   {/* Events list */}
                   <div className="flex-1 p-2 flex flex-col gap-1">
                     {visibleAllDay.map(ev => {
-                      const { bg, border, text } = chipColors(ev);
+                      const { bg, border, text, accentBar } = chipColors(ev);
                       const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(todayYmd) ?? false);
                       return (
                         <div
                           key={ev.id}
                           className="px-2 py-1 rounded-md border text-[11px] font-semibold flex items-center gap-1.5 shadow-xs"
-                          style={{ backgroundColor: bg, borderColor: border, color: text }}
+                          style={{ backgroundColor: bg, borderColor: border, borderLeft: accentBar ? `3px solid ${accentBar}` : undefined, color: text }}
                         >
                           {!ev.noCheckbox && (
                             <button
@@ -1683,7 +1698,7 @@ export default function Widget() {
                           title: 'All-Day Events',
                           items: todayAllDay
                         })}
-                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-2xs"
+                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-smooth active:scale-[0.98] shadow-2xs"
                         style={{
                           background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
                           borderColor: surfaceBdr,
@@ -1757,7 +1772,7 @@ export default function Widget() {
                           title: "Today's Tasks",
                           items: todayTasks
                         })}
-                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-2xs"
+                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-smooth active:scale-[0.98] shadow-2xs"
                         style={{
                           background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
                           borderColor: surfaceBdr,
@@ -1947,7 +1962,7 @@ export default function Widget() {
             const { ev, key: itemKey, segKind } = item;
             const top = minToY(item.startMin, interval, dayStartH);
             const height = Math.max(18, minToY(item.endMin, interval, dayStartH) - top);
-            const { bg, border, text, textMuted } = chipColors(ev);
+            const { bg, border, text, textMuted, boxShadow, accentBar } = chipColors(ev);
             // Live/duration status always reflects the event's true full start–end, not just this segment.
             const fullStartMin = timeToMin(ev.startTime);
             const fullEndMin   = timeToMin(ev.endTime);
@@ -1992,8 +2007,16 @@ export default function Widget() {
                   borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
                   borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
                   color: text,
+                  boxShadow,
                 }}
               >
+                {/* Left colour strip — the 'Minimal Left Accent' card style. */}
+                {accentBar && (
+                  <div
+                    className="absolute left-0 top-0 bottom-0 pointer-events-none z-[1]"
+                    style={{ width: ACCENT_BAR_W, background: accentBar }}
+                  />
+                )}
                 {(() => {
                   const isMicroCard   = height < 26;
                   const isShortCard   = height >= 26 && height < 44;
@@ -2006,6 +2029,7 @@ export default function Widget() {
                       style={{
                         top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4,
                         bottom: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4,
+                        paddingLeft: accentBar ? ACCENT_BAR_W + 5 : undefined,
                       }}
                     >
                       {(() => {
@@ -2019,7 +2043,7 @@ export default function Widget() {
                                     e.stopPropagation();
                                     toggleEventCompleted(ev.id);
                                   }}
-                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-smooth duration-150 flex items-center justify-center cursor-pointer"
                                   style={{
                                     borderColor: isCompleted ? text : `${text}50`,
                                     backgroundColor: isCompleted ? text : 'transparent',
@@ -2047,7 +2071,7 @@ export default function Widget() {
                                     e.stopPropagation();
                                     toggleEventCompleted(ev.id);
                                   }}
-                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-smooth duration-150 flex items-center justify-center cursor-pointer"
                                   style={{
                                     borderColor: isCompleted ? text : `${text}50`,
                                     backgroundColor: isCompleted ? text : 'transparent',
@@ -2079,7 +2103,7 @@ export default function Widget() {
                                       e.stopPropagation();
                                       toggleEventCompleted(ev.id);
                                     }}
-                                    className="flex-shrink-0 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                    className="flex-shrink-0 w-3.5 h-3.5 rounded-full border transition-smooth duration-150 flex items-center justify-center cursor-pointer"
                                     style={{
                                       borderColor: isCompleted ? text : `${text}50`,
                                       backgroundColor: isCompleted ? text : 'transparent',
@@ -2132,7 +2156,7 @@ export default function Widget() {
                                     e.stopPropagation();
                                     toggleEventCompleted(ev.id);
                                   }}
-                                  className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-all duration-150 flex items-center justify-center cursor-pointer"
+                                  className="flex-shrink-0 mt-0.5 w-3.5 h-3.5 rounded-full border transition-smooth duration-150 flex items-center justify-center cursor-pointer"
                                   style={{
                                     borderColor: isCompleted ? text : `${text}50`,
                                     backgroundColor: isCompleted ? text : 'transparent',
@@ -2194,7 +2218,7 @@ export default function Widget() {
       {showLiveBtn && (
         <button
           onClick={scrollToLive}
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg backdrop-blur-md transition-all duration-300 active:scale-95 animate-in fade-in slide-in-from-bottom-2"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg backdrop-blur-md transition-smooth duration-300 active:scale-95 animate-in fade-in slide-in-from-bottom-2"
           style={{
             background: darkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.70)',
             border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.20)' : 'rgba(0, 0, 0, 0.10)'}`,
@@ -2243,14 +2267,14 @@ export default function Widget() {
 
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 pr-0.5 custom-scrollbar max-h-[60vh]">
                 {overflowModal.type === 'all-day' && overflowModal.items.map((ev: PlannerEvent) => {
-                  const { bg, border, text } = chipColors(ev);
+                  const { bg, border, text, accentBar } = chipColors(ev);
                   const dateStr = format(today, 'yyyy-MM-dd');
                   const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
                   return (
                     <div
                       key={ev.id}
                       className="px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-2 shadow-xs"
-                      style={{ backgroundColor: bg, borderColor: border, color: text }}
+                      style={{ backgroundColor: bg, borderColor: border, borderLeft: accentBar ? `3px solid ${accentBar}` : undefined, color: text }}
                     >
                       {!ev.noCheckbox && (
                         <button

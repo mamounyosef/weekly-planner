@@ -34,6 +34,7 @@ export interface Task extends RecurFields {
   title: string;
   notes?: string;            // the user's text ONLY — the ⏰ marker never lives here
   parentId?: string;         // subtask → parent task id (one level deep)
+  listId?: string;           // which task list it lives on; unset = General
   order?: number;            // manual sort key within its section / siblings
 
   completed?: boolean;       // non-repeating tasks

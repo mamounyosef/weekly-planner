@@ -126,10 +126,20 @@ export const APP_ZOOM_STEP = 0.05;
 export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
   /** App zoom (not browser zoom). Has no shared counterpart — always per device. */
   appZoom: number;
+  /** Scale for inner app content on mobile (items, times, tasks, fonts). */
+  mobileContentZoom: number;
+  /** Scale for outer UI wrapper on mobile (top header and bottom nav bar). */
+  mobileUiZoom: number;
   /** Range tab on the focus-analysis screen. */
   analysisTab: 'week' | 'month' | 'year';
   /** Which mobile tab was last open (phone shell only). */
   mobileTab: 'calendar' | 'tasks' | 'focus';
+  /**
+   * Categories hidden from the calendar on THIS device. Per device on purpose:
+   * hiding the university calendar on a phone at home should not blank it out
+   * on the desk PC. `null` inside the list means the "no category" items.
+   */
+  hiddenCategoryIds: string[];
 }
 
 const clampNum = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -158,14 +168,17 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
       interval: 30,
       tasksPanelOpen: false,
       appZoom: 1,
+      mobileContentZoom: 1,
+      mobileUiZoom: 1,
       analysisTab: 'week',
       mobileTab: 'calendar',
+      hiddenCategoryIds: [],
     };
   }
   if (kind === 'tablet') {
-    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, analysisTab: 'week', mobileTab: 'calendar' };
+    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [] };
   }
-  return { ...shared, appZoom: 1, analysisTab: 'week', mobileTab: 'calendar' };
+  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [] };
 }
 
 /** Validate a stored/served blob, filling anything missing from `base`. */
@@ -201,8 +214,17 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   if (typeof r.appZoom === 'number' && Number.isFinite(r.appZoom)) {
     s.appZoom = clampNum(Math.round(r.appZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
   }
+  if (typeof r.mobileContentZoom === 'number' && Number.isFinite(r.mobileContentZoom)) {
+    s.mobileContentZoom = clampNum(Math.round(r.mobileContentZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
+  }
+  if (typeof r.mobileUiZoom === 'number' && Number.isFinite(r.mobileUiZoom)) {
+    s.mobileUiZoom = clampNum(Math.round(r.mobileUiZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
+  }
   if (r.analysisTab === 'week' || r.analysisTab === 'month' || r.analysisTab === 'year') s.analysisTab = r.analysisTab;
   if (r.mobileTab === 'calendar' || r.mobileTab === 'tasks' || r.mobileTab === 'focus') s.mobileTab = r.mobileTab;
+  if (Array.isArray(r.hiddenCategoryIds)) {
+    s.hiddenCategoryIds = r.hiddenCategoryIds.filter((v): v is string => typeof v === 'string');
+  }
   return s;
 }
 

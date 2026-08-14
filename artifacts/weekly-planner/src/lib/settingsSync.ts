@@ -2,6 +2,8 @@ import { coerceFocusChime, coerceFocusCue, DEFAULT_FOCUS_CUES, type FocusChimeId
 import { coerceShortcuts, DEFAULT_SHORTCUTS, type ShortcutMap } from './shortcuts';
 import { coerceHardwareSettings, DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from './hardwareController';
 import { coercePrayerSettings, DEFAULT_PRAYER_SETTINGS, type PrayerSettings } from './prayerTimes';
+import { coerceCategories, DEFAULT_CATEGORIES, type EventCategory } from './categories';
+import { coerceTaskLists, DEFAULT_TASK_LISTS, type TaskList } from './taskLists';
 
 export type TimeFormat = '12h' | '24h';
 export type IntervalMin = 5 | 15 | 30 | 60;
@@ -209,6 +211,10 @@ export interface AppSettings {
   prayer: PrayerSettings;
   // ── ESP32 desk controller ──────────────────────────────────────────────────
   hardware: HardwareSettings;
+  // ── Categories ─────────────────────────────────────────────────────────────
+  categories: EventCategory[];
+  /** Sections of the Tasks page. Always contains General. */
+  taskLists: TaskList[];
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -254,6 +260,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gcalMirrorGoogleDeletions: false,
   prayer: DEFAULT_PRAYER_SETTINGS,
   hardware: DEFAULT_HARDWARE_SETTINGS,
+  categories: DEFAULT_CATEGORIES,
+  taskLists: DEFAULT_TASK_LISTS,
 };
 
 export const TASK_PANEL_MIN_W = 260;
@@ -356,6 +364,8 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.gcalMirrorGoogleDeletions === 'boolean') s.gcalMirrorGoogleDeletions = r.gcalMirrorGoogleDeletions;
   s.prayer = coercePrayerSettings(r.prayer);
   s.hardware = coerceHardwareSettings(r.hardware);
+  s.categories = coerceCategories(r.categories);
+  s.taskLists = coerceTaskLists(r.taskLists);
   return s;
 }
 
