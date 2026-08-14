@@ -1582,7 +1582,7 @@ export default function SettingsPage() {
                           value={dayStartH}
                           onChange={e => {
                             const newStart = parseInt(e.target.value);
-                            const duration = dayEndH - dayStartH;
+                            const duration = Math.max(1, dayEndH - dayStartH);
                             setDayStartH(newStart);
                             setDayEndH(newStart + duration);
                           }}
@@ -1598,17 +1598,29 @@ export default function SettingsPage() {
                       <div className="flex flex-col gap-1.5">
                         <label className="text-[11px] font-medium" style={{ color: textSecondary }}>Span Duration</label>
                         <select
-                          value={dayEndH - dayStartH}
+                          value={Math.max(1, dayEndH - dayStartH)}
                           onChange={e => setDayEndH(dayStartH + parseInt(e.target.value))}
                           className="w-full py-2 px-3 text-xs font-semibold rounded-xl border outline-none transition-colors"
                           style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                         >
                           {Array.from({ length: 24 }, (_, i) => i + 1).map(d => (
-                            <option key={d} value={d}>{d} {d === 1 ? 'Hour' : 'Hours'}</option>
+                            <option key={d} value={d}>{d} {d === 1 ? 'Hour' : 'Hours'}{d === 24 ? ' (Full Day)' : ''}</option>
                           ))}
                         </select>
                       </div>
                     </div>
+                    <p className="text-[11px] px-1" style={{ color: textSecondary }}>
+                      {(() => {
+                        const formatH = (h: number) => {
+                          const dh = h % 24;
+                          if (dh === 0) return '12:00 AM';
+                          if (dh === 12) return '12:00 PM';
+                          return dh < 12 ? `${dh}:00 AM` : `${dh - 12}:00 PM`;
+                        };
+                        const span = Math.max(1, dayEndH - dayStartH);
+                        return `Timeline: ${formatH(dayStartH)} – ${formatH(dayEndH)} (${span} hour${span === 1 ? '' : 's'} visible per day)`;
+                      })()}
+                    </p>
                   </div>
                 </div>
 

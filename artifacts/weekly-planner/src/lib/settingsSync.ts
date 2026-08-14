@@ -222,8 +222,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sidebarStyle: 'subtle-glow',
   timeFormat: '12h',
   weekStartsOn: 1,
-  dayStartH: 8,
-  dayEndH: 18,
+  dayStartH: 0,
+  dayEndH: 24,
   calendarView: 'week',
   customDaysBefore: 0,
   customDaysAfter: 0,
@@ -301,8 +301,8 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.weekStartsOn === 'number' && r.weekStartsOn >= 0 && r.weekStartsOn <= 6) {
     s.weekStartsOn = r.weekStartsOn as WeekStartsOn;
   }
-  if (typeof r.dayStartH === 'number') s.dayStartH = r.dayStartH;
-  if (typeof r.dayEndH === 'number') s.dayEndH = r.dayEndH;
+  if (typeof r.dayStartH === 'number') s.dayStartH = Math.max(0, Math.min(23, Math.round(r.dayStartH)));
+  if (typeof r.dayEndH === 'number') s.dayEndH = Math.max(1, Math.min(48, Math.round(r.dayEndH)));
   if (typeof r.calendarView === 'string') s.calendarView = r.calendarView;
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(-14, Math.min(14, Math.round(r.customDaysBefore)));
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(-14, Math.min(14, Math.round(r.customDaysAfter)));

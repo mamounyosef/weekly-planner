@@ -197,7 +197,7 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
     s.sidebarStyle = r.sidebarStyle as SidebarStyle;
   }
   if (typeof r.dayStartH === 'number') s.dayStartH = clampNum(Math.round(r.dayStartH), 0, 23);
-  if (typeof r.dayEndH === 'number') s.dayEndH = clampNum(Math.round(r.dayEndH), 1, 24);
+  if (typeof r.dayEndH === 'number') s.dayEndH = clampNum(Math.round(r.dayEndH), 1, 48);
   if (typeof r.appZoom === 'number' && Number.isFinite(r.appZoom)) {
     s.appZoom = clampNum(Math.round(r.appZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
   }

@@ -8904,7 +8904,7 @@ export default function WeeklyPlanner() {
                       value={dayStartH}
                       onChange={e => {
                         const newStart = parseInt(e.target.value);
-                        const duration = dayEndH - dayStartH;
+                        const duration = Math.max(1, dayEndH - dayStartH);
                         setDayStartH(newStart);
                         setDayEndH(newStart + duration);
                       }}
@@ -8919,7 +8919,7 @@ export default function WeeklyPlanner() {
                   <div className="flex flex-col gap-0.5 flex-1">
                     <span className="text-[9px] font-medium" style={{ color: menuSub }}>Duration</span>
                     <select
-                      value={dayEndH - dayStartH}
+                      value={Math.max(1, dayEndH - dayStartH)}
                       onChange={e => setDayEndH(dayStartH + parseInt(e.target.value))}
                       className="w-full py-1.5 px-2 text-xs font-medium rounded-md transition-all duration-200"
                       style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText, outline: 'none' }}
