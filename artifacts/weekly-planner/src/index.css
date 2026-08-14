@@ -304,6 +304,28 @@ body {
   overscroll-behavior: contain;
 }
 
+@media (pointer: coarse), (max-width: 768px) {
+  /* Compositor layer promotion for silky 60/120 FPS scrolling */
+  .touch-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+    transform: translateZ(0);
+    will-change: scroll-position;
+  }
+
+  /* GPU layer isolation for event cards and chips */
+  [data-event="1"], [data-task="1"] {
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+
+  /* Eliminate expensive full-screen rasterization blur on lower-end mobile GPUs */
+  .backdrop-blur-md, .backdrop-blur-sm, .backdrop-blur-lg, .backdrop-blur-xl {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
 /* Applied to the grid while a touch drag is armed: without it the browser
    keeps scrolling the column out from under the finger that is moving an
    event, and the drag "slips". */
