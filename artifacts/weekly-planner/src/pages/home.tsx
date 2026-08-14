@@ -1649,7 +1649,15 @@ export default function WeeklyPlanner() {
   const timeAxisRows = useMemo(() => slots.map((time, i) => {
     const isHour = time.endsWith(':00');
     return (
-      <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i * sh, height: sh, transform: 'translateY(-50%)' }}>
+      <div
+        key={time}
+        className="absolute w-full flex justify-center items-start"
+        style={{
+          top: i * sh,
+          height: sh,
+          transform: i === 0 ? 'translateY(2px)' : 'translateY(-50%)',
+        }}
+      >
         <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-bold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/40'}`}>
           {formatSlotLabel(time, timeFormat)}
         </span>
