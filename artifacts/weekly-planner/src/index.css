@@ -309,14 +309,6 @@ body {
   .touch-scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
-    transform: translateZ(0);
-    will-change: scroll-position;
-  }
-
-  /* GPU layer isolation for event cards and chips */
-  [data-event="1"], [data-task="1"] {
-    transform: translateZ(0);
-    backface-visibility: hidden;
   }
 
   /* Eliminate expensive full-screen rasterization blur on lower-end mobile GPUs */

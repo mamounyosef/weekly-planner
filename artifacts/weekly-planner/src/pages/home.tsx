@@ -1633,6 +1633,7 @@ export default function WeeklyPlanner() {
   visibleColsRef.current = visibleCols;
   const slots       = useMemo(() => generateSlots(interval, dayStartH, dayEndH), [interval, dayStartH, dayEndH]);
   const sh          = SLOT_H[interval];
+  const totalH      = slots.length * sh;
   // Hardware-accelerated CSS repeating background for horizontal grid lines:
   // replaces 2,000+ absolute <div> elements across day columns with 1 GPU-composited
   // background layer, dramatically increasing mobile scrolling FPS and eliminating DOM reflows.
