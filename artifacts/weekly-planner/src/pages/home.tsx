@@ -21,7 +21,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -201,11 +201,24 @@ import {
   buildPrayerDay,
   coercePrayerSettings,
   prayerDateKey,
+  PRAYER_METHODS,
   type PrayerOccurrence,
   type PrayerSettings,
 } from '@/lib/prayerTimes';
 import { usePrayerTimes } from '@/lib/usePrayerTimes';
 import { useHardwareController, type HardwareSettings } from '@/lib/hardwareController';
+import { useViewport, haptic } from '@/hooks/use-mobile';
+import {
+  DEVICE_SCOPED_KEYS,
+  coerceDeviceSettings,
+  fetchDeviceSettings,
+  getDeviceKind,
+  loadDeviceSettingsLocal,
+  saveDeviceSettings,
+  seedDeviceSettings,
+  subscribeDeviceSettings,
+  type DeviceSettings,
+} from '@/lib/deviceSettings';
 
 /** Per-service sync health as reported by /api/google-auth/status. */
 interface SyncLeg {
@@ -287,7 +300,6 @@ const CUSTOM_AFTER_MAX  = 14;
 const ZOOM_MIN  = 0.5;
 const ZOOM_MAX  = 2.0;
 const ZOOM_STEP = 0.05;
-const ZOOM_KEY  = 'planner-app-zoom';
 const clampZoom = (z: number) =>
   Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z / ZOOM_STEP) * ZOOM_STEP));
 
@@ -809,6 +821,26 @@ export default function WeeklyPlanner() {
   const [zoomDraft, setZoomDraft] = useState('100');
   const [editingZoom, setEditingZoom] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // ── Mobile shell ──────────────────────────────────────────────────────────
+  // A phone can't show the calendar, the tasks panel and the focus timer side
+  // by side, so on a narrow screen they become tabs behind a bottom bar. On a
+  // desktop this state exists but nothing reads it.
+  const vp = useViewport();
+  const isPhone = vp.isPhone;
+  const isTouch = vp.isTouch;
+  const isShort = vp.isPhone && vp.isShort;
+  const isCompact = vp.isPhone || vp.isTablet;
+  const [mobileTab, setMobileTab] = useState<'calendar' | 'tasks' | 'focus'>('calendar');
+  useEffect(() => { isPhoneRef.current = isPhone; }, [isPhone]);
+  // The overflow ("⋯") sheet on the phone header, holding everything that
+  // doesn't fit: interval, undo/redo, zoom, theme, widget, backup.
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  // The view picker sheet (Day / Week / Month / Year / Custom) on the phone.
+  const [mobileViewPickerOpen, setMobileViewPickerOpen] = useState(false);
+  // The prayer times sheet on the phone.
+  const [mobilePrayerOpen, setMobilePrayerOpen] = useState(false);
+  // Whether the focus banner is unfolded on a phone (desktop always shows it).
+  const [focusBannerOpen, setFocusBannerOpen] = useState(false);
   // â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const [tasksPanelOpen, setTasksPanelOpen]   = useState<boolean>(initialSettings.tasksPanelOpen);
   const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
@@ -834,6 +866,8 @@ export default function WeeklyPlanner() {
   const [dayStartH, setDayStartH]       = useState(initialSettings.dayStartH);
   const [dayEndH, setDayEndH]           = useState(initialSettings.dayEndH);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  /** True once the sessions have been read from the server at least once. */
+  const [focusSessionsHydrated, setFocusSessionsHydrated] = useState(false);
   // Hour (0–23, local) at which a new "focus day" begins. Sessions before this hour
   // count toward the previous day. Purely a bucketing setting — all analysis derives
   // from it live, so changing it re-buckets past sessions on the fly.
@@ -1043,14 +1077,55 @@ export default function WeeklyPlanner() {
   const autoScrollTimerRef = useRef<number | null>(null);
   const autoScrollLastPosRef = useRef<{ clientX: number; clientY: number } | null>(null);
 
+  // ── Touch gestures ────────────────────────────────────────────────────────
+  // A finger has to do two incompatible jobs on the same pixels: scroll the day,
+  // and move the block under it. A mouse doesn't — it has a separate wheel — so
+  // the desktop can start dragging on the first 5px of movement. On touch the
+  // gesture is instead ARMED by holding still for a moment: hold and the block
+  // comes with you, swipe and the day scrolls as normal. Nothing is committed
+  // until the hold succeeds, so an aborted press leaves the plan untouched.
+  const LONG_PRESS_MS = 250;
+  const LONG_PRESS_SLOP = 20; // px of movement tolerance for thumb contact on mobile
+  /** Pending hold: filled on touch-down, cleared when it arms, moves or lifts. */
+  const pendingTouchRef = useRef<{
+    timer: number; x: number; y: number;
+    /** What to arm. 'event'/'batch' finish a grab already staged in dragRef. */
+    kind: 'event' | 'batch' | 'create';
+    col?: number; startY?: number;
+  } | null>(null);
+  /** True from the moment a touch drag arms until the finger lifts. */
+  const touchDragArmedRef = useRef(false);
+  const [touchDragging, setTouchDragging] = useState(false);
+  const [touchHoldingId, setTouchHoldingId] = useState<string | null>(null);
+
+  const cancelPendingTouch = useCallback(() => {
+    const p = pendingTouchRef.current;
+    if (p) { clearTimeout(p.timer); pendingTouchRef.current = null; }
+    setTouchHoldingId(null);
+  }, []);
+
+  const endTouchDrag = useCallback(() => {
+    cancelPendingTouch();
+    setTouchHoldingId(null);
+    if (touchDragArmedRef.current) {
+      touchDragArmedRef.current = false;
+      setTouchDragging(false);
+    }
+  }, [cancelPendingTouch]);
+
   // Keep the popup glued to its event: recompute its position from the live
   // element rect on scroll/resize/content-change (instead of letting it drift or
   // closing it). Clamps into the viewport so the whole (comprehensive) popup
   // stays reachable; the popup itself scrolls if it's taller than the screen.
+  const isPhoneRef = useRef(false);
   const repositionMenu = useCallback(() => {
     const menuEl = menuRef.current;
     const id = menuIdRef.current;
     if (!menuEl || !id) return;
+    // On a phone the editor is a bottom sheet pinned to the bottom edge — it has
+    // no anchor to follow, and writing left/top here would tear it off the edge
+    // on the first scroll.
+    if (isPhoneRef.current) return;
     const margin = 8;
     const mw = menuEl.offsetWidth || 200;
     const mh = menuEl.offsetHeight || 300;
@@ -1400,7 +1475,10 @@ export default function WeeklyPlanner() {
       // adopt was immediately pushed back over the change that had just been
       // made (calendarView, the custom-view day counts and the task checkbox
       // shape all reverted this way).
-      applySettingsSnapshotRef.current(s);
+      // 'shared' only. This device's own view/zoom/theme arrive through the
+      // device channel instead — adopting them from here would let a value the
+      // settings file is only ECHOING (another device's) land on this screen.
+      applySettingsSnapshotRef.current(s, 'shared');
     });
   }, []);
 
@@ -1518,6 +1596,21 @@ export default function WeeklyPlanner() {
       ? Array.from({ length: customTo - customFrom }, (_, i) => customFrom + i)
       : [0, 1, 2, 3, 4, 5, 6];
   const colCount      = visibleCols.length;
+  /**
+   * How wide the hour gutter is. 64px is comfortable on a desktop and simply
+   * expensive on a phone — it's a sixth of the screen, taken from the columns
+   * that hold the actual plan. 44 still fits "12:30 AM" at the phone's type size.
+   */
+  const timeAxisW = isPhone ? 44 : 64;
+  /**
+   * Below this a column stops being a column and becomes a stripe: text can't
+   * wrap, chips overlap, and nothing is tappable. When the visible days won't
+   * fit above it, the grid scrolls sideways instead of squeezing — the day you
+   * are looking at stays readable, and the rest is one swipe away.
+   */
+  const MIN_TOUCH_COL_W = 96;
+  const scrollsSideways = isPhone && colCount > 1
+    && (vp.width - timeAxisW - 16) / colCount < MIN_TOUCH_COL_W;
   // Which week of its month the viewed week is — counted by week starts, so the
   // week containing the 1st is week 1 even when it begins in the previous month.
   const weekOfMonth = differenceInCalendarWeeks(weekStart, startOfMonth(weekStart), { weekStartsOn }) + 1;
@@ -1864,7 +1957,48 @@ export default function WeeklyPlanner() {
    * than a mystery: adding a field to AppSettings fails the typecheck until it is
    * listed here, and listing it without wiring it up is immediately visible.
    */
-  const applySettingsSnapshot = useCallback((s: AppSettings) => {
+  /**
+   * The last value the SHARED settings file held for each device-scoped key.
+   *
+   * Those keys (view, zoom, interval, theme, panel width…) belong to this screen,
+   * not to the plan — but settings.json still carries a value for every one of
+   * them, and this page re-broadcasts the whole file on every change. Echoing our
+   * own local value would shove the phone's Day view onto the desktop. Echoing
+   * what the server already had leaves the shared file untouched, so each device
+   * keeps its own layout and the sync contract stays "always broadcast in full".
+   */
+  const sharedScopedRef = useRef<Pick<AppSettings, typeof DEVICE_SCOPED_KEYS[number]>>({
+    calendarView: initialSettings.calendarView,
+    customDaysBefore: initialSettings.customDaysBefore,
+    customDaysAfter: initialSettings.customDaysAfter,
+    interval: initialSettings.interval,
+    tasksPanelOpen: initialSettings.tasksPanelOpen,
+    tasksPanelWidth: initialSettings.tasksPanelWidth,
+    showTaskRow: initialSettings.showTaskRow,
+    stickyAllDayMain: initialSettings.stickyAllDayMain,
+    stickyTasksMain: initialSettings.stickyTasksMain,
+    darkMode: initialSettings.darkMode,
+    darkPreset: initialSettings.darkPreset,
+    lightPreset: initialSettings.lightPreset,
+    eventColorStyle: initialSettings.eventColorStyle,
+    sidebarStyle: initialSettings.sidebarStyle,
+    dayStartH: initialSettings.dayStartH,
+    dayEndH: initialSettings.dayEndH,
+  });
+
+  /**
+   * @param scope 'all' for a change made ON THIS DEVICE (the Settings page, a
+   *   restored backup) — adopt everything. 'shared' for the settings file, which
+   *   another device may have written: adopt the plan-wide rules but leave this
+   *   screen's own view/zoom/theme to the device store.
+   */
+  const applySettingsSnapshot = useCallback((s: AppSettings, scope: 'all' | 'shared' = 'all') => {
+    // Whatever the source, this is the newest value the shared file holds for
+    // the device-scoped keys — remember it so our echo stays faithful.
+    for (const k of DEVICE_SCOPED_KEYS) {
+      (sharedScopedRef.current as unknown as Record<string, unknown>)[k] =
+        (s as unknown as Record<string, unknown>)[k];
+    }
     const handled: Record<keyof AppSettings, true> = {
       interval: true, darkMode: true, darkPreset: true, lightPreset: true,
       widgetDarkPreset: true, widgetLightPreset: true, eventColorStyle: true,
@@ -1882,68 +2016,60 @@ export default function WeeklyPlanner() {
     };
     void handled;
 
-    setIntervalOpt(s.interval);
-    setDarkMode(s.darkMode);
-    setDarkPreset(s.darkPreset);
-    setLightPreset(s.lightPreset);
+    // ── Plan-wide: identical on every device, always adopted ──────────────
     setWidgetDarkPreset(s.widgetDarkPreset);
     setWidgetLightPreset(s.widgetLightPreset);
-    setEventColorStyle(s.eventColorStyle);
-    setSidebarStyle(s.sidebarStyle);
     setTimeFormat(s.timeFormat);
     setWeekStartsOn(s.weekStartsOn);
-    setDayStartH(s.dayStartH);
-    setDayEndH(s.dayEndH);
-    if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
-    setCustomDaysBefore(clamp(s.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
-    setCustomDaysAfter(clamp(s.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
     setFocusDayStartHour(s.focusDayStartHour);
     setFocusChime(s.focusChime);
     setFocusCues(s.focusCues);
     setShortcuts(s.shortcuts);
     setAutoBackup(s.autoBackup);
-    setTasksPanelOpen(s.tasksPanelOpen);
-    setTasksPanelWidth(clampPanelWidth(s.tasksPanelWidth));
-    setShowTaskRow(s.showTaskRow);
-    if (typeof s.stickyAllDayMain === 'boolean') setStickyAllDayMain(s.stickyAllDayMain);
-    if (typeof s.stickyTasksMain === 'boolean') setStickyTasksMain(s.stickyTasksMain);
     setTaskColor(s.taskColor);
     setTaskCheckboxShape(s.taskCheckboxShape);
     setTaskFilters(canonicalFilters(s.taskFilters));
     setGoogleTasksSync(s.googleTasksSync);
     setPrayer(s.prayer);
     setHardware(s.hardware);
+
+    // ── This screen's own: only when the change came from this device ─────
+    if (scope === 'shared') return;
+    setIntervalOpt(s.interval);
+    setDarkMode(s.darkMode);
+    setDarkPreset(s.darkPreset);
+    setLightPreset(s.lightPreset);
+    setEventColorStyle(s.eventColorStyle);
+    setSidebarStyle(s.sidebarStyle);
+    setDayStartH(s.dayStartH);
+    setDayEndH(s.dayEndH);
+    if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
+    setCustomDaysBefore(clamp(s.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
+    setCustomDaysAfter(clamp(s.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
+    setTasksPanelOpen(s.tasksPanelOpen);
+    setTasksPanelWidth(clampPanelWidth(s.tasksPanelWidth));
+    setShowTaskRow(s.showTaskRow);
+    if (typeof s.stickyAllDayMain === 'boolean') setStickyAllDayMain(s.stickyAllDayMain);
+    if (typeof s.stickyTasksMain === 'boolean') setStickyTasksMain(s.stickyTasksMain);
   }, []);
   const applySettingsSnapshotRef = useRef(applySettingsSnapshot);
   useEffect(() => { applySettingsSnapshotRef.current = applySettingsSnapshot; }, [applySettingsSnapshot]);
 
   const currentSettingsSnapshot = useCallback((): AppSettings => {
     return coerceSettings({
-      interval,
-      darkMode,
-      darkPreset,
-      lightPreset,
+      // Device-scoped keys are echoed back exactly as the shared file had them.
+      // Sending our own would push this screen's view/zoom/theme onto every
+      // other device the moment anything else here changed.
+      ...sharedScopedRef.current,
       widgetDarkPreset,
       widgetLightPreset,
-      eventColorStyle,
-      sidebarStyle,
       timeFormat,
       weekStartsOn,
-      dayStartH,
-      dayEndH,
-      calendarView,
-      customDaysBefore,
-      customDaysAfter,
       focusDayStartHour,
       focusChime,
       focusCues,
       shortcuts,
       autoBackup,
-      tasksPanelOpen,
-      tasksPanelWidth,
-      showTaskRow,
-      stickyAllDayMain,
-      stickyTasksMain,
       stickyAllDayWidget: initialSettings.stickyAllDayWidget,
       stickyTasksWidget: initialSettings.stickyTasksWidget,
       taskColor,
@@ -1962,7 +2088,79 @@ export default function WeeklyPlanner() {
       prayer,
       hardware,
     });
-  }, [interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, calendarView, customDaysBefore, customDaysAfter, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer, hardware, initialSettings]);
+  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer, hardware, initialSettings]);
+
+  // ── This device's own settings ───────────────────────────────────────────
+  // Everything the shared file no longer speaks for: which view fits this
+  // screen, how far it's zoomed, how wide the tasks panel is, whether it's dark.
+  const deviceSettings: DeviceSettings = useMemo(() => ({
+    calendarView,
+    customDaysBefore,
+    customDaysAfter,
+    interval,
+    tasksPanelOpen,
+    tasksPanelWidth,
+    showTaskRow,
+    stickyAllDayMain,
+    stickyTasksMain,
+    darkMode,
+    darkPreset,
+    lightPreset,
+    eventColorStyle,
+    sidebarStyle,
+    dayStartH,
+    dayEndH,
+    appZoom,
+    analysisTab,
+    mobileTab,
+  }), [calendarView, customDaysBefore, customDaysAfter, interval, tasksPanelOpen,
+       tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
+       darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
+       appZoom, analysisTab, mobileTab]);
+
+  /** Adopt a stored device snapshot into the live state. */
+  const applyDeviceSettings = useCallback((d: DeviceSettings) => {
+    if (isCalendarView(d.calendarView)) setCalendarView(d.calendarView);
+    setCustomDaysBefore(clamp(d.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
+    setCustomDaysAfter(clamp(d.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
+    setIntervalOpt(d.interval);
+    setTasksPanelOpen(d.tasksPanelOpen);
+    setTasksPanelWidth(clampPanelWidth(d.tasksPanelWidth));
+    setShowTaskRow(d.showTaskRow);
+    setStickyAllDayMain(d.stickyAllDayMain);
+    setStickyTasksMain(d.stickyTasksMain);
+    setDarkMode(d.darkMode);
+    setDarkPreset(d.darkPreset);
+    setLightPreset(d.lightPreset);
+    setEventColorStyle(d.eventColorStyle);
+    setSidebarStyle(d.sidebarStyle);
+    setDayStartH(d.dayStartH);
+    setDayEndH(d.dayEndH);
+    setAppZoom(clampZoom(d.appZoom));
+    setAnalysisTab(d.analysisTab);
+    // `mobileTab` is deliberately NOT restored. It is where you happened to be,
+    // not a preference — and opening the planner into a modal Tasks sheet
+    // covering the calendar is a strange way to start the day. The calendar is
+    // always the landing tab; everything else is one tap away.
+  }, []);
+  const applyDeviceSettingsRef = useRef(applyDeviceSettings);
+  useEffect(() => { applyDeviceSettingsRef.current = applyDeviceSettings; }, [applyDeviceSettings]);
+  const currentSettingsSnapshotRef = useRef(currentSettingsSnapshot);
+  useEffect(() => { currentSettingsSnapshotRef.current = currentSettingsSnapshot; }, [currentSettingsSnapshot]);
+
+  // Write back on every change, once the boot sequence has settled. Debounced
+  // inside saveDeviceSettings, so a zoom drag costs one POST rather than sixty.
+  const deviceSettingsLoaded = useRef(false);
+  useEffect(() => {
+    if (!deviceSettingsLoaded.current) return;
+    saveDeviceSettings(deviceSettings);
+  }, [deviceSettings]);
+
+  // The Settings page owns the same values while it is open. It publishes them
+  // here rather than through /api/settings, which every other device reads.
+  useEffect(() => subscribeDeviceSettings(raw => {
+    applyDeviceSettingsRef.current(coerceDeviceSettings(raw, currentSettingsSnapshotRef.current()));
+  }), []);
 
   // Patch the occurrence shown as `id`, routed to its stored master (an edit is to
   // the whole item). Remaps UI references if the occurrence id shifted (e.g. a
@@ -2185,6 +2383,23 @@ export default function WeeklyPlanner() {
   }, [writeTasks]);
 
   // Stable identities so the memoised tasks panel isn't invalidated every render.
+  /**
+   * What the phone's Tasks tab badges: things actually waiting on you today —
+   * due today or already overdue, and not ticked off. Deliberately not "all
+   * tasks": a badge that reads 84 because of next month's list is noise, and a
+   * badge you learn to ignore is worse than no badge.
+   */
+  const openTaskCount = useMemo(() => {
+    const today = todayYmd();
+    let n = 0;
+    for (const t of Object.values(tasks)) {
+      if (t.parentId) continue; // counted through their parent
+      const due = dueDateOf(t);
+      if (due && due <= today && !isTaskDone(t, due)) n++;
+    }
+    return n;
+  }, [tasks]);
+
   const handleTasksPanelResize = useCallback((w: number) => setTasksPanelWidth(clampPanelWidth(w)), []);
   const closeTasksPanel = useCallback(() => setTasksPanelOpen(false), []);
 
@@ -2545,9 +2760,15 @@ export default function WeeklyPlanner() {
         .then(data => {
           const sessions = safeFocusSessions(data);
           setFocusSessions(sessions);
+          setFocusSessionsHydrated(true);
           localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
         })
-        .catch(err => console.error('Failed to load focus sessions:', err));
+        .catch(err => {
+          console.error('Failed to load focus sessions:', err);
+          // The cached copy is all we are going to get; better the LCD mirrors
+          // it than sits on "waiting" forever.
+          setFocusSessionsHydrated(true);
+        });
     };
 
     loadFocusSessions();
@@ -2668,16 +2889,27 @@ export default function WeeklyPlanner() {
     // Live push: a start/pause from the widget or the system-wide hotkey lands
     // here the instant the shared file changes, with no tick to wait for.
     let stream: EventSource | null = null;
+    // While the live stream is connected the poll is pure waste, so it drops to
+    // once a minute; it only speeds back up if the stream actually dies. Over a
+    // phone connection a request every 1.5s kept the radio and the main thread
+    // busy permanently, which is felt everywhere else in the app.
+    let pollId = 0 as unknown as ReturnType<typeof setInterval>;
+    const setPoll = (ms: number) => {
+      clearInterval(pollId);
+      pollId = setInterval(pullTimer, ms);
+    };
     try {
       stream = new EventSource('/api/focus-timer/stream');
       stream.onmessage = (evt) => {
         try { applyTimerFromServer(JSON.parse(evt.data), true); } catch (_) { /* ignore */ }
       };
+      stream.onopen = () => setPoll(60_000);
+      stream.onerror = () => setPoll(1500);
     } catch (_) { /* fall back to the poll below */ }
 
     // Safety net if the stream drops (server restart, HMR); the stream is what
     // makes it feel instant, so this can stay slow.
-    const pollId = setInterval(pullTimer, 1500);
+    setPoll(1500);
     // Checkpoint a running session's elapsed time into durable state every few seconds
     // so closing the app mid-session never loses progress (previously it was only
     // committed when the session ended). Folds elapsed into accumulatedSeconds and
@@ -3020,6 +3252,9 @@ export default function WeeklyPlanner() {
       remainingSeconds: focusRemainingSeconds,
       todaySeconds: hwTodaySeconds,
       sessionsToday: hwSessionsToday,
+      // The timer is the last thing to arrive from the server; until it has,
+      // this window's totals are a guess and must not reach the LCD.
+      ready: timerHydratedRef.current && focusSessionsHydrated,
     },
     // Button A cycles start/pause/resume; startFocus already resumes an
     // existing session rather than beginning a new one.
@@ -3030,6 +3265,23 @@ export default function WeeklyPlanner() {
     onTerminate: stopFocus,
   });
   const hardwareArmSeconds = hardwareController.armSeconds;
+
+  // The countdown is started by the desk sensor, so nothing on screen owns it.
+  // Any deliberate "start / pause" or "stop" during those seconds therefore
+  // means "call it off" rather than "hurry it up" — otherwise the only way out
+  // of a session you did not want was to get up and walk away.
+  const { reportManualStop } = hardwareController;
+  const toggleFocus = () => {
+    if (hardwareArmSeconds > 0) { reportManualStop(); return; }
+    if (focusTimer.isRunning) pauseFocus(); else startFocus();
+  };
+  // Stopping by hand also tells the controller you are done, so sitting at the
+  // desk does not just arm the next session a moment later.
+  const stopFocusByHand = () => {
+    reportManualStop();
+    if (hardwareArmSeconds > 0) return;
+    stopFocus();
+  };
 
   const setFocusMinutes = (minutes: number) => {
     const safeMinutes = Math.max(1, Math.floor(minutes));
@@ -3087,26 +3339,49 @@ export default function WeeklyPlanner() {
       .catch(err => console.error('Failed to load tasks from backend database:', err))
       .finally(() => { tasksLoadedRef.current = true; });
 
-    applySettingsSnapshotRef.current(loadSettingsLocal());
-    const savedZoom = parseFloat(localStorage.getItem(ZOOM_KEY) || '');
-    if (Number.isFinite(savedZoom)) setAppZoom(clampZoom(savedZoom));
+    const bootSettings = loadSettingsLocal();
+    applySettingsSnapshotRef.current(bootSettings);
+    // This screen's own layout, straight from localStorage so the very first
+    // paint is already the right view at the right zoom — no flash of the
+    // desktop's week grid before the phone's day view swaps in.
+    const localDevice = loadDeviceSettingsLocal();
+    if (localDevice) applyDeviceSettingsRef.current(coerceDeviceSettings(localDevice, bootSettings));
 
     // Backend is the source of truth for settings so both windows stay in sync.
     fetch('/api/settings')
       .then(r => r.json())
       .then((s) => {
         if (s && typeof s === 'object') {
-          // Coerce once and apply EVERYTHING. The old hand-written field list
-          // silently omitted the two side-window presets, so this page loaded
-          // them from its own localStorage, ignored the newer values on the
-          // server, and then pushed its stale copy straight back over them —
-          // which is why that one setting kept reverting on every reload.
-          applySettingsSnapshotRef.current(coerceSettings(s));
+          // Coerce once and apply EVERYTHING plan-wide. The old hand-written
+          // field list silently omitted the two side-window presets, so this
+          // page loaded them from its own localStorage, ignored the newer
+          // values on the server, and then pushed its stale copy straight back
+          // over them — which is why that one setting kept reverting on every
+          // reload. 'shared' scope leaves this device's view/zoom/theme alone;
+          // those come from the device store below.
+          applySettingsSnapshotRef.current(coerceSettings(s), 'shared');
+          return coerceSettings(s);
         }
+        return bootSettings;
       })
-      .catch(err => console.error('Failed to load settings from backend:', err))
+      .catch(err => { console.error('Failed to load settings from backend:', err); return bootSettings; })
+      // Then the per-device layer, which always wins for the keys it owns. Fired
+      // after the shared fetch so a slow server can't land on top of it.
+      .then(async (base: AppSettings) => {
+        const remote = await fetchDeviceSettings();
+        const source = remote ?? loadDeviceSettingsLocal();
+        applyDeviceSettingsRef.current(
+          source
+            ? coerceDeviceSettings(source, base)
+            // Genuinely new device: seed from the shared settings, except on a
+            // phone, which opens on the day view at a readable interval.
+            : seedDeviceSettings(base, getDeviceKind()),
+        );
+      })
+      .catch(() => {})
       .finally(() => {
         settingsLoaded.current = true;
+        deviceSettingsLoaded.current = true;
 
         fetch('/api/google-auth/status')
           .then(r => r.json())
@@ -3130,7 +3405,10 @@ export default function WeeklyPlanner() {
       fetch('/api/settings')
         .then(r => r.json())
         .then((s) => {
-          if (s && typeof s === 'object') applySettingsSnapshotRef.current(coerceSettings(s));
+          // 'shared' only: the Settings page already pushed this device's own
+          // choices through the live broadcast below, and re-reading them from
+          // the file would clobber them with another device's values.
+          if (s && typeof s === 'object') applySettingsSnapshotRef.current(coerceSettings(s), 'shared');
         })
         .catch(() => {});
     }
@@ -3144,7 +3422,10 @@ export default function WeeklyPlanner() {
       // adopt was immediately pushed back over the change that had just been
       // made (calendarView, the custom-view day counts and the task checkbox
       // shape all reverted this way).
-      applySettingsSnapshotRef.current(s);
+      // 'shared' only. This device's own view/zoom/theme arrive through the
+      // device channel instead — adopting them from here would let a value the
+      // settings file is only ECHOING (another device's) land on this screen.
+      applySettingsSnapshotRef.current(s, 'shared');
     });
   }, []);
 
@@ -3155,8 +3436,31 @@ export default function WeeklyPlanner() {
       const bg = themePalette(darkMode, darkPreset, lightPreset).rootBg;
       document.body.style.background = bg;
       document.documentElement.style.background = bg;
+      // Chrome on Android tints the address bar and the gesture area with this,
+      // and iOS uses it behind a translucent status bar. Without it the phone
+      // frames a pure-black planner in a bright white chrome, which is the
+      // single most "unfinished web page" thing a mobile app can look like.
+      let meta = document.querySelector('meta[name="theme-color"]') as HTMLMetaElement | null;
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.name = 'theme-color';
+        document.head.appendChild(meta);
+      }
+      meta.content = bg;
+      document.documentElement.style.colorScheme = darkMode ? 'dark' : 'light';
     }
   }, [darkMode, darkPreset, lightPreset]);
+
+  // Expose the phone tab bar's height to CSS so scroll containers can reserve
+  // room for it (and for the home bar underneath) without hard-coding numbers.
+  const BOTTOM_NAV_H = 58;
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.style.setProperty(
+      '--bottom-nav-h',
+      isPhone ? `calc(${BOTTOM_NAV_H}px + var(--safe-bottom))` : '0px',
+    );
+  }, [isPhone]);
 
   // Persist settings to the shared backend whenever any of them change (after initial load).
   // Coalesced on a short trailing timer: a continuous gesture (dragging the tasks
@@ -3340,6 +3644,14 @@ export default function WeeklyPlanner() {
     setTaskFilters(canonicalFilters(restored.taskFilters));
     setGoogleTasksSync(restored.googleTasksSync);
     setPrayer(restored.prayer);
+    // A restore is the one case that legitimately rewrites the device-scoped
+    // keys in the SHARED file too — the backup is a snapshot of everything, and
+    // the user asked for it back. Adopt them as the new echo baseline so the
+    // next broadcast doesn't immediately undo half of what was just restored.
+    for (const k of DEVICE_SCOPED_KEYS) {
+      (sharedScopedRef.current as unknown as Record<string, unknown>)[k] =
+        (restored as unknown as Record<string, unknown>)[k];
+    }
     broadcastSettingsChange(restored);
   };
 
@@ -3770,7 +4082,7 @@ export default function WeeklyPlanner() {
           (mainRef.current && mainRef.current.scrollHeight > mainRef.current.clientHeight + 1)
             ? mainRef.current
             : ((document.scrollingElement as HTMLElement) || document.documentElement);
-        const EDGE = 110;
+        const EDGE = isPhoneRef.current ? 72 : 110;
         const vh = window.innerHeight;
         const nearTop = e.clientY < EDGE;
         const nearBottom = e.clientY > vh - EDGE;
@@ -3986,7 +4298,21 @@ export default function WeeklyPlanner() {
       if (moveFrame) { cancelAnimationFrame(moveFrame); moveFrame = 0; }
       pendingMove = null;
     };
-    const onMove = (e: MouseEvent) => {
+    const onMove = (e: PointerEvent) => {
+      // A touch that hasn't armed yet is still just a scroll: swallow the move,
+      // and if the finger has travelled past the slop, give up on the hold so
+      // the day scrolls cleanly instead of stuttering into a half-drag.
+      const pending = pendingTouchRef.current;
+      if (pending) {
+        if (Math.hypot(e.clientX - pending.x, e.clientY - pending.y) > LONG_PRESS_SLOP) {
+          clearTimeout(pending.timer);
+          pendingTouchRef.current = null;
+          dragRef.current = null;
+          batchDragRef.current = null;
+          createDragRef.current = null;
+        }
+        return;
+      }
       // preventDefault only counts on the real event, so it can't be deferred:
       // without it the rubber-band and drag-to-create gestures select page text.
       if (selDragRef.current || createDragRef.current) e.preventDefault();
@@ -3994,7 +4320,62 @@ export default function WeeklyPlanner() {
       if (!moveFrame) moveFrame = requestAnimationFrame(flushMove);
     };
 
-    const onUp = (e: MouseEvent) => {
+    /**
+     * While a touch drag is armed the browser must stop scrolling the grid out
+     * from under the finger. Feed touch coordinates directly to pendingMove so
+     * tracking is silky smooth even when pointermove is throttled by mobile OS.
+     */
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchDragArmedRef.current) {
+        if (e.cancelable) e.preventDefault();
+        if (e.touches.length > 0) {
+          const t = e.touches[0];
+          pendingMove = {
+            clientX: t.clientX,
+            clientY: t.clientY,
+            preventDefault: () => { if (e.cancelable) e.preventDefault(); },
+          } as unknown as MouseEvent;
+          if (!moveFrame) moveFrame = requestAnimationFrame(flushMove);
+        }
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (pendingTouchRef.current) {
+        cancelPendingTouch();
+        dragRef.current = null;
+        batchDragRef.current = null;
+        createDragRef.current = null;
+        return;
+      }
+      if (touchDragArmedRef.current) {
+        const lastTouch = e.changedTouches[0];
+        const wasTouch = true;
+        endTouchDrag();
+        if (lastTouch) {
+          return onUpInner({ clientX: lastTouch.clientX, clientY: lastTouch.clientY } as MouseEvent, wasTouch);
+        } else {
+          return onUpInner({ clientX: 0, clientY: 0 } as MouseEvent, wasTouch);
+        }
+      }
+    };
+
+    const onUp = (e: PointerEvent) => {
+      // A hold that never armed: no drag was ever staged, so drop the gesture
+      // and let the click handler treat it as the plain tap it was.
+      if (pendingTouchRef.current) {
+        cancelPendingTouch();
+        dragRef.current = null;
+        batchDragRef.current = null;
+        createDragRef.current = null;
+        return;
+      }
+      const wasTouch = touchDragArmedRef.current;
+      endTouchDrag();
+      return onUpInner(e, wasTouch);
+    };
+
+    const onUpInner = (e: MouseEvent, wasTouchDrag = false) => {
       // Land on the newest position before committing, then drop anything queued
       // so a stale frame can't fire after the gesture's refs are torn down.
       if (pendingMove) { const last = pendingMove; cancelPendingMove(); processMove(last); }
@@ -4033,6 +4414,22 @@ export default function WeeklyPlanner() {
               { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
             );
           }
+          setTimeout(() => { didDragRef.current = false; }, 80);
+        } else if (wasTouchDrag) {
+          // Held to create, then lifted without dragging a length: give it the
+          // default duration rather than nothing, so a plain press-and-release
+          // still produces the block the buzz promised.
+          const startMin = clamp(
+            yToMin(Math.max(0, cr.startY), interval, dayStartH),
+            dayStartMin, dayEndMin - DEFAULT_EVENT_MIN,
+          );
+          const dur = Math.min(DEFAULT_EVENT_MIN, dayEndMin - startMin);
+          const start24 = startMin >= 1440 ? startMin - 1440 : startMin;
+          const id = uid();
+          createStampedRef.current(
+            { id, dayIndex: cr.col, startTime: minToTime(start24), endTime: minToTime((start24 + dur) % 1440), content: '', color: 'sage' },
+            { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
+          );
           setTimeout(() => { didDragRef.current = false; }, 80);
         }
         return;
@@ -4151,14 +4548,29 @@ export default function WeeklyPlanner() {
         setTimeout(() => { didDragRef.current = false; }, 80);
       }
     };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    // Pointer events rather than mouse events: one code path that a mouse, a
+    // finger and a stylus all drive, so touch dragging is the same drag the
+    // desktop already had rather than a second implementation to keep in step.
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    // The OS stealing the gesture (a call, the app switcher, a palm) fires
+    // pointercancel and never pointerup — without this the grid would be left
+    // believing a drag was still in flight.
+    document.addEventListener('pointercancel', onUp);
+    document.addEventListener('touchmove', onTouchMove, { passive: false });
+    document.addEventListener('touchend', onTouchEnd);
+    document.addEventListener('touchcancel', onTouchEnd);
     return () => {
       cancelPendingMove();
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+      endTouchDrag();
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onTouchEnd);
+      document.removeEventListener('touchcancel', onTouchEnd);
     };
-  }, [getGridCoords, interval, dayStartMin, dayEndMin]);
+  }, [getGridCoords, interval, dayStartMin, dayEndMin, cancelPendingTouch, endTouchDrag]);
 
   // Clear multi-selection when clicking/pressing on empty space anywhere
   useEffect(() => {
@@ -4196,6 +4608,11 @@ export default function WeeklyPlanner() {
     if (didDragRef.current) return;
     if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
     if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
+    // A finger tap must not create anything. Scrolling a day means dragging
+    // across empty grid constantly, and a stray tap that spawns a 30-minute
+    // block is the single most annoying thing a touch calendar can do. Touch
+    // creates on a deliberate hold (see the column's pointer-down) or the + button.
+    if ((e.nativeEvent as PointerEvent).pointerType === 'touch') return;
     setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
     const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
@@ -4209,10 +4626,60 @@ export default function WeeklyPlanner() {
     );
   };
 
-  const handleEventMouseDown = (e: React.MouseEvent, ev: PlannerEvent, segKind?: 'normal' | 'tail' | 'head') => {
+  /**
+   * Arm a touch gesture: stage it now, commit to it only if the finger stays
+   * put for LONG_PRESS_MS. `onArmed` runs at that moment, with a short buzz so
+   * the drag has a physical "it's mine now" beat before anything moves.
+   */
+  const armTouchHold = (
+    e: React.PointerEvent,
+    kind: 'event' | 'batch' | 'create',
+    onArmed: () => void,
+    extra?: { col?: number; startY?: number },
+  ) => {
+    cancelPendingTouch();
+    const x = e.clientX, y = e.clientY;
+    const timer = window.setTimeout(() => {
+      pendingTouchRef.current = null;
+      touchDragArmedRef.current = true;
+      setTouchDragging(true);
+      setTouchHoldingId(null);
+      didDragRef.current = true;
+      haptic(16);
+      onArmed();
+    }, LONG_PRESS_MS);
+    pendingTouchRef.current = { timer, x, y, kind, ...extra };
+  };
+
+  const handleEventMouseDown = (e: React.MouseEvent | React.PointerEvent, ev: PlannerEvent, segKind?: 'normal' | 'tail' | 'head') => {
     if (editingId === ev.id) return;
-    e.preventDefault(); e.stopPropagation();
+    const pointerType = (e as React.PointerEvent).pointerType;
+    const isTouchPointer = pointerType === 'touch' || pointerType === 'pen';
+    // Never preventDefault a touch-down: it kills the scroll before we know
+    // whether this gesture is a drag or the user swiping past the block.
+    if (!isTouchPointer) e.preventDefault();
+    e.stopPropagation();
     if (e.ctrlKey || e.metaKey) return; // toggle selection in onClick, don't drag
+
+    // Touch: stage the same grab the mouse would, but behind a hold. The
+    // recursive call runs the real logic below with the hold already resolved.
+    if (isTouchPointer) {
+      const synthetic = {
+        clientX: e.clientX, clientY: e.clientY,
+        ctrlKey: false, metaKey: false, button: 0,
+        preventDefault: () => {}, stopPropagation: () => {},
+      } as unknown as React.MouseEvent;
+      setTouchHoldingId(ev.id);
+      armTouchHold(e as React.PointerEvent, 'event', () => {
+        setTouchHoldingId(null);
+        handleEventMouseDown(synthetic, ev, segKind);
+        // Skip the 5px threshold — the hold WAS the intent signal, and a finger
+        // that has to travel 5px first makes the block feel stuck to the glass.
+        if (dragRef.current) dragRef.current.active = true;
+        if (batchDragRef.current) batchDragRef.current.active = true;
+      });
+      return;
+    }
 
     // Batch drag: mousedown on a selected event while others are selected — or on
     // a LINKED item, whose whole train moves as one whether it's selected or not.
@@ -4275,8 +4742,19 @@ export default function WeeklyPlanner() {
     };
   };
 
-  const handleResizeMouseDown = (e: React.MouseEvent, ev: PlannerEvent, edge: 'top' | 'bottom', segKind?: 'normal' | 'tail' | 'head') => {
-    e.preventDefault(); e.stopPropagation();
+  const handleResizeMouseDown = (e: React.MouseEvent | React.PointerEvent, ev: PlannerEvent, edge: 'top' | 'bottom', segKind?: 'normal' | 'tail' | 'head') => {
+    const pointerType = (e as React.PointerEvent).pointerType;
+    // A resize grip is a deliberate target you have to aim at, so unlike the
+    // body of the block it arms immediately — no hold required. The grips are
+    // grown to a finger's width on touch (see the segment renderer).
+    if (pointerType === 'touch' || pointerType === 'pen') {
+      touchDragArmedRef.current = true;
+      setTouchDragging(true);
+      haptic(10);
+    } else {
+      e.preventDefault();
+    }
+    e.stopPropagation();
     const startMin = normalizeMin(timeToMin(ev.startTime), dayStartH);
     let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
     if (endMin <= startMin) endMin += 1440;
@@ -4437,7 +4915,7 @@ export default function WeeklyPlanner() {
     toggleSettings: () => navigateToSettings(),
     openWidget: () => openWidget(),
     newEvent: () => { setShowFocusAnalysis(false); handleHeaderCreateClick(); },
-    toggleTimer: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
+    toggleTimer: toggleFocus,
     toggleHelp: () => setShowShortcutHelp(v => !v),
   };
 
@@ -4483,9 +4961,77 @@ export default function WeeklyPlanner() {
     };
   }, []);
 
-  // Persist zoom, and keep the editable field in sync when it changes elsewhere.
+  // When the week is wider than the phone, open it on the day that matters
+  // rather than on Monday — otherwise "today" is off-screen every afternoon.
   useEffect(() => {
-    localStorage.setItem(ZOOM_KEY, String(appZoom));
+    if (!scrollsSideways) return;
+    const card = gridCardRef.current;
+    if (!card) return;
+    const target = card.querySelector<HTMLElement>(`[data-col-index="${nowColIdx}"]`);
+    if (!target) return;
+    const id = requestAnimationFrame(() => {
+      card.scrollTo({
+        // Half a column of lead-in, so the day reads as part of a week rather
+        // than as the left wall of the screen.
+        left: Math.max(0, target.offsetLeft - MIN_TOUCH_COL_W * 0.4),
+        behavior: 'smooth',
+      });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [scrollsSideways, nowColIdx, calendarView, weekStart.getTime()]);
+
+  // ── Pinch to zoom ─────────────────────────────────────────────────────────
+  // The phone's answer to Ctrl+wheel. The browser's own pinch is switched off
+  // (see the viewport meta) because it zooms a *picture* of the page — text
+  // stays the same size and you scroll around a giant canvas. This drives the
+  // app's own zoom instead, so the layout genuinely reflows and everything
+  // stays sharp. Two fingers spread = bigger, pinch = smaller, live.
+  const pinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
+  useEffect(() => {
+    if (!isTouch) return;
+    const dist = (t: TouchList) =>
+      Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      // A second finger arriving mid-drag means "zoom", not "drag": abandon the
+      // grab so the block doesn't fly across the grid as the fingers spread.
+      cancelPendingTouch();
+      dragRef.current = null;
+      batchDragRef.current = null;
+      createDragRef.current = null;
+      setCreateDisp(null);
+      pinchRef.current = { startDist: dist(e.touches), startZoom: appZoomRef.current };
+    };
+    const onMove = (e: TouchEvent) => {
+      const p = pinchRef.current;
+      if (!p || e.touches.length !== 2) return;
+      if (e.cancelable) e.preventDefault();
+      const ratio = dist(e.touches) / (p.startDist || 1);
+      setAppZoom(clampZoom(p.startZoom * ratio));
+    };
+    const onEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) pinchRef.current = null;
+    };
+
+    window.addEventListener('touchstart', onStart, { passive: true });
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onEnd);
+    window.addEventListener('touchcancel', onEnd);
+    return () => {
+      window.removeEventListener('touchstart', onStart);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('touchcancel', onEnd);
+    };
+  }, [isTouch, cancelPendingTouch]);
+
+  // Keep the editable field in sync when zoom changes elsewhere. Zoom itself is
+  // persisted per device (see deviceSettings) — the phone and the desktop each
+  // keep their own, which is the whole point of a zoom control.
+  const appZoomRef = useRef(appZoom);
+  useEffect(() => {
+    appZoomRef.current = appZoom;
     if (!editingZoom) setZoomDraft(String(Math.round(appZoom * 100)));
   }, [appZoom, editingZoom]);
 
@@ -4591,12 +5137,19 @@ export default function WeeklyPlanner() {
     <div
       className={`flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
         darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
-      }`}
+      } ${touchDragging ? 'dragging-touch' : ''}`}
       style={{
         cursor: globalCursor,
         zoom: appZoom,
-        height: `${100 / appZoom}vh`,
-        minHeight: `${100 / appZoom}vh`,
+        // dvh, not vh: on a phone `100vh` is the height the window WOULD have
+        // with the URL bar hidden, so the last ~60px of the planner sits under
+        // the browser chrome until you scroll. dvh tracks the real viewport.
+        height: `${100 / appZoom}dvh`,
+        minHeight: `${100 / appZoom}dvh`,
+        // Landscape notches eat into the sides; the ambient glow can still bleed
+        // under them, but nothing interactive is allowed to.
+        paddingLeft: 'var(--safe-left)',
+        paddingRight: 'var(--safe-right)',
         background: darkMode ? currentDarkTheme.rootBg : currentLightTheme.rootBg,
       }}
     >
@@ -4641,16 +5194,173 @@ export default function WeeklyPlanner() {
           `zoom: appZoom` — a `position: fixed` panel would be laid out in scaled
           coordinates and drift away from the edge at anything but 100%. */}
       <div className="flex-1 min-h-0 flex relative z-10">
-        <div className="flex-1 min-w-0 flex flex-col relative">
+        {/* On the phone the Tasks tab is a separate screen, so the calendar is
+            taken out of the render entirely while it is showing. Leaving it
+            mounted underneath meant every frame of the tasks list still had to
+            composite a full-height grid behind it. */}
+        <div
+          className="flex-1 min-w-0 flex flex-col relative"
+          style={isPhone && mobileTab === 'tasks' ? { display: 'none' } : undefined}
+        >
       {/* â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {/* No backdrop-blur here. It spans the full window width, so every frame of
           the tasks-panel animation (and anything else that changes this column's
           width) had to re-blur the whole strip. At 95% opacity there is almost
           nothing showing through to blur in the first place. */}
-      <header className="sticky top-0 z-30 bg-background/95 border-b border-border/50">
-        {/* The toolbar spans the full content width (the grid below stays capped at
+      <header
+        className="sticky top-0 z-30 bg-background/95 border-b border-border/50"
+        style={{ paddingTop: 'var(--safe-top)' }}
+      >
+        {/* ── Phone toolbar ──────────────────────────────────────────────────
+            Two short rows instead of one long one. The desktop toolbar carries
+            eighteen controls; a 390px screen fits about five, so everything
+            that isn't navigation moves into the "⋯" sheet, and the view switch
+            becomes a chip that opens a picker rather than five buttons in a row. */}
+        {isPhone ? (
+          /* Sideways, there are only ~410px of height to spend — so the two
+             rows become one and the date shrinks to fit alongside them. */
+          <div className={isShort ? 'px-2.5 py-1.5 flex items-center gap-2' : 'px-2.5 py-1.5 flex flex-col gap-1.5'}>
+            {/* Row 1 — where you are, and the way out of it */}
+            <div className={`flex items-center gap-2 ${isShort ? 'min-w-0 flex-shrink' : 'min-h-[36px]'}`}>
+              {showFocusAnalysis ? (
+                <button
+                  onClick={() => setShowFocusAnalysis(false)}
+                  className="flex items-center gap-1.5 pl-2 pr-3 h-9 rounded-xl text-[13px] font-semibold active:scale-95 transition-transform"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                >
+                  <ChevronLeft size={16} />
+                  Calendar
+                </button>
+              ) : (
+                <button
+                  onClick={goToday}
+                  className="flex-1 min-w-0 text-left active:opacity-60 transition-opacity"
+                  title="Jump to today"
+                >
+                  <div className="text-[15px] font-bold tracking-tight truncate leading-tight">
+                    {calendarView === 'day'
+                      ? format(currentDate, 'EEE, MMM d')
+                      : calendarView === 'year'
+                        ? format(currentDate, 'yyyy')
+                        : calendarView === 'custom'
+                          ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d')}`
+                          : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
+                  </div>
+                  <div className="text-[10px] font-medium leading-tight" style={{ color: headerInactive }}>
+                    {calendarView === 'day'
+                      ? format(currentDate, 'yyyy')
+                      : calendarView === 'week'
+                        ? `Week ${weekOfMonth}`
+                        : ''}
+                  </div>
+                </button>
+              )}
+
+              <div className="flex items-center gap-1.5 ml-auto flex-shrink-0">
+                {/* Sync state stays visible on the phone: over Wi-Fi from
+                    another room, "did that save?" is the first question. */}
+                {gCalStatus.needsReconnect ? (
+                  <button
+                    onClick={() => navigateToSettings('integrations')}
+                    className="w-9 h-9 rounded-xl flex items-center justify-center active:scale-95 transition-transform"
+                    style={{ background: 'rgba(239,68,68,0.14)', border: '1px solid rgba(239,68,68,0.5)', color: '#f87171' }}
+                    title="Google disconnected — tap to reconnect"
+                  >
+                    <AlertTriangle size={16} />
+                  </button>
+                ) : gCalSyncing ? (
+                  <span
+                    className="w-9 h-9 rounded-xl flex items-center justify-center"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
+                    title="Syncing with Google Calendar"
+                  >
+                    <span
+                      className="inline-block rounded-full animate-spin"
+                      style={{ width: 12, height: 12, border: '1.5px solid #60a5fa', borderTopColor: 'transparent' }}
+                    />
+                  </span>
+                ) : null}
+
+                {prayer.enabled && (nextPrayer || todayPrayerList.length > 0) && (
+                  <button
+                    onClick={() => { haptic(6); setMobilePrayerOpen(true); }}
+                    className="flex items-center gap-1.5 h-9 px-2.5 rounded-xl text-[12px] font-bold tabular-nums active:scale-95 transition-transform"
+                    style={{ background: `${prayer.color}1f`, border: `1px solid ${prayer.color}55`, color: prayer.color }}
+                    title={nextPrayer ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)} — tap for today's prayer times` : "Today's prayer times"}
+                  >
+                    <Moon size={13} style={{ color: prayer.color }} />
+                    <span>{nextPrayer ? formatTimeLabel(nextPrayer.minutes, timeFormat) : 'Prayers'}</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => setMobileMenuOpen(true)}
+                  className="w-9 h-9 rounded-xl flex items-center justify-center active:scale-95 transition-transform"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                  title="More"
+                >
+                  <MoreHorizontal size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Row 2 — move through time, and choose how much of it to see */}
+            <div className={`flex items-center gap-2 ${isShort ? 'ml-auto flex-shrink-0' : ''}`}>
+              <div
+                className="flex items-center rounded-xl overflow-hidden flex-shrink-0"
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
+              >
+                <button
+                  onClick={navPrev}
+                  className="w-10 h-9 flex items-center justify-center active:opacity-50 transition-opacity"
+                  style={{ color: headerInactive }}
+                  title="Previous"
+                >
+                  <ChevronLeft size={17} />
+                </button>
+                <button
+                  onClick={showFocusAnalysis ? () => { setAnalysisWeekCursor(new Date()); setAnalysisMonthCursor(new Date()); setAnalysisYearCursor(new Date().getFullYear()); } : goToday}
+                  className="px-3 h-9 text-[12px] font-bold active:opacity-50 transition-opacity border-x"
+                  style={{ color: menuText, borderColor: surfaceBdr }}
+                >
+                  Today
+                </button>
+                <button
+                  onClick={navNext}
+                  className="w-10 h-9 flex items-center justify-center active:opacity-50 transition-opacity"
+                  style={{ color: headerInactive }}
+                  title="Next"
+                >
+                  <ChevronRight size={17} />
+                </button>
+              </div>
+
+              <button
+                onClick={() => setMobileViewPickerOpen(true)}
+                className={`flex items-center justify-center gap-1.5 h-9 rounded-xl text-[12.5px] font-bold capitalize active:scale-[0.97] transition-transform ${isShort ? 'px-3 flex-shrink-0' : 'flex-1 min-w-0'}`}
+                style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                title="Change view"
+              >
+                {showFocusAnalysis ? analysisTab : calendarView}
+                <ChevronDown size={14} style={{ color: headerInactive }} />
+              </button>
+
+              {!showFocusAnalysis && isTimelineView && (
+                <button
+                  onClick={scrollToLive}
+                  className="w-10 h-9 rounded-xl flex items-center justify-center active:scale-95 transition-transform flex-shrink-0"
+                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: headerInactive }}
+                  title="Scroll to now"
+                >
+                  <Clock size={16} />
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+        /* The toolbar spans the full content width (the grid below stays capped at
             1400 and centred) — capping it too wasted the side margins and forced the
-            controls onto a second line. It still wraps if the window gets narrow. */}
+            controls onto a second line. It still wraps if the window gets narrow. */
         <div className="w-full px-6 min-h-14 py-1.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
           <div className="flex items-center gap-3.5 flex-shrink-0">
             {showFocusAnalysis ? (
@@ -5014,12 +5724,16 @@ export default function WeeklyPlanner() {
             </button>
           </div>
         </div>
+        )}
       </header>
 
       {/* â”€â”€ Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <main
         ref={mainRef}
-        className={`flex-1 min-h-0 ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'}`}
+        className={`flex-1 min-h-0 touch-scroll ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'}`}
+        // Room for the phone's tab bar and the home indicator beneath it, so the
+        // last event of the day isn't permanently hidden behind the Tasks button.
+        style={{ paddingBottom: 'var(--bottom-nav-h)' }}
         onScroll={handleMainScroll}
       >
         <AnimatePresence mode="wait">
@@ -5030,33 +5744,95 @@ export default function WeeklyPlanner() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.08, ease: 'easeOut' }}
-              className="min-w-[900px] max-w-[1400px] mx-auto p-4"
+              // The 900px floor is a desktop guard against the toolbar wrapping
+              // into a mess; on a phone it would simply force a sideways scroll
+              // of the entire page, so a narrow screen drops it and tightens the
+              // padding — every pixel of width is a pixel of the day.
+              className={isCompact ? 'w-full max-w-full px-1.5 py-2' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
             >
-          {isTimelineView && (
+          {/* ── Focus banner ────────────────────────────────────────────────
+              Expanded it is ~200px — a quarter of a phone screen spent before
+              the calendar even starts. So on a phone it collapses to a single
+              row: the countdown, one transport button, the week's total. Tap it
+              to unfold the full banner; the choice sticks for the session. */}
+          {isTimelineView && isPhone && !focusBannerOpen && (
+            <button
+              onClick={() => setFocusBannerOpen(true)}
+              className="w-full mb-2 rounded-xl border flex items-center gap-2.5 px-3 h-12 active:scale-[0.99] transition-transform"
+              style={{
+                background: darkMode ? 'linear-gradient(135deg, rgba(96,165,250,0.10), rgba(34,197,94,0.06))' : 'linear-gradient(135deg, rgba(59,130,246,0.08), rgba(34,197,94,0.06))',
+                borderColor: surfaceBdr,
+              }}
+            >
+              <span
+                className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+                style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}
+              >
+                <Target size={14} />
+              </span>
+              <span className="text-[16px] font-semibold tabular-nums leading-none" style={{ color: focusTimer.isRunning ? '#60a5fa' : menuText }}>
+                {hardwareArmSeconds > 0 ? `${hardwareArmSeconds}s` : formatCountdown(focusRemainingSeconds)}
+              </span>
+              <span
+                role="button"
+                onClick={(e) => { e.stopPropagation(); haptic(8); toggleFocus(); }}
+                className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 active:scale-90 transition-transform"
+                style={{
+                  background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
+                  color: focusTimer.isRunning ? '#fbbf24' : '#ffffff',
+                }}
+                title={focusTimer.isRunning ? 'Pause' : 'Start'}
+              >
+                {focusTimer.isRunning ? <Pause size={15} /> : <Play size={15} />}
+              </span>
+              <span className="ml-auto text-right leading-tight">
+                <span className="block text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>This week</span>
+                <span className="block text-[12.5px] font-bold tabular-nums" style={{ color: menuText }}>
+                  {formatFocusDuration(focusStats.weekSeconds)}
+                </span>
+              </span>
+              <ChevronDown size={16} style={{ color: menuSub, flexShrink: 0 }} />
+            </button>
+          )}
+          {isTimelineView && (!isPhone || focusBannerOpen) && (
           <section
-            className="mb-4 rounded-xl border overflow-hidden"
+            className={`rounded-xl border overflow-hidden ${isPhone ? 'mb-2' : 'mb-4'}`}
             style={{
               background: darkMode ? 'linear-gradient(135deg, rgba(96,165,250,0.10), rgba(34,197,94,0.06))' : 'linear-gradient(135deg, rgba(59,130,246,0.08), rgba(34,197,94,0.06))',
               borderColor: surfaceBdr,
             }}
           >
-            <div className="px-4 py-3 flex items-center gap-5">
-              <div className="flex items-center gap-3 min-w-[240px]">
-                <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
+            {isPhone && (
+              <button
+                onClick={() => setFocusBannerOpen(false)}
+                className="w-full flex items-center justify-center py-1 active:opacity-60 transition-opacity"
+                style={{ color: menuSub }}
+                title="Collapse"
+              >
+                <ChevronUp size={15} />
+              </button>
+            )}
+            <div className={`flex items-center ${isCompact ? 'px-3 py-2.5 gap-3' : 'px-4 py-3 gap-5'}`}>
+              <div className={`flex items-center gap-3 ${isCompact ? 'flex-shrink-0' : 'min-w-[240px]'}`}>
+                <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
                   <Target size={17} />
                 </div>
                 <div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Focus This Week</div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest whitespace-nowrap" style={{ color: menuSub }}>
+                    {isPhone ? 'This week' : 'Focus This Week'}
+                  </div>
                   <div className="text-xl font-semibold tabular-nums leading-tight" style={{ color: menuText }}>{formatFocusDuration(focusStats.weekSeconds)}</div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3 min-w-[300px]">
+              {/* Today / Sessions / Daily-avg. On a phone only "Today" earns its
+                  place; the other two are a tap away on the analysis screen. */}
+              <div className={isPhone ? 'grid grid-cols-1 gap-1 min-w-0 flex-1' : 'grid grid-cols-3 gap-3 min-w-[300px]'}>
                 {[
                   ['Today', formatFocusDuration(focusStats.todaySeconds), true],
                   ['Sessions', `${focusStats.sessionCount}`, false],
                   ['Daily Avg', formatFocusDuration(focusStats.averageSeconds), false],
-                ].map(([label, value, editable]) => (
+                ].filter((_, i) => !isPhone || i === 0).map(([label, value, editable]) => (
                   <div key={label as string} className="min-w-0">
                     <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
                     <div
@@ -5076,7 +5852,11 @@ export default function WeeklyPlanner() {
                 ))}
               </div>
 
-              <div className="flex-1 min-w-0 flex items-end gap-2 h-20">
+              {/* The week's bar chart. Seven bars, each with a hover menu and a
+                  double-click editor — none of which a phone can express — and
+                  at 390px they'd be 30px wide. The analysis screen shows the
+                  same data properly, so the phone links there instead. */}
+              <div className={`flex-1 min-w-0 items-end gap-2 h-20 ${isPhone ? 'hidden' : 'flex'}`}>
                 {focusStats.perDay.map(day => {
                   const pct = day.seconds > 0 ? Math.max(5, (day.seconds / focusStats.maxSeconds) * 100) : 0;
                   const active = isSameDay(day.day, nowOwnerDate);
@@ -5204,22 +5984,26 @@ export default function WeeklyPlanner() {
 
               <button
                 onClick={() => setShowFocusAnalysis(true)}
-                className="hidden xl:flex items-center gap-2 min-w-[160px] justify-end rounded-md px-2 py-1 transition-colors"
+                className={`items-center gap-2 justify-end rounded-md px-2 py-1 transition-colors ${isPhone ? 'flex flex-shrink-0' : 'hidden xl:flex min-w-[160px]'}`}
                 style={{ color: menuSub }}
                 onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 title="Open detailed focus analysis"
               >
                 <BarChart3 size={15} />
-                <span className="text-[11px] font-medium truncate">
-                  Best {format(focusStats.bestDay.day, 'EEE')} - {formatFocusDuration(focusStats.bestDay.seconds)}
-                </span>
+                {!isPhone && (
+                  <span className="text-[11px] font-medium truncate">
+                    Best {format(focusStats.bestDay.day, 'EEE')} - {formatFocusDuration(focusStats.bestDay.seconds)}
+                  </span>
+                )}
               </button>
             </div>
 
-            {/* Focus timer controls */}
-            <div className="px-4 pb-3 flex items-center gap-3 border-t" style={{ borderColor: surfaceBdr }}>
-              <div className="pt-3 flex items-center gap-3 flex-1 min-w-0">
+            {/* Focus timer controls. On a phone the row wraps: the clock and its
+                duration stepper take the first line, the transport buttons the
+                second, each at a size a thumb can actually hit. */}
+            <div className={`pb-3 flex items-center border-t ${isCompact ? 'px-3 gap-2 flex-wrap' : 'px-4 gap-3'}`} style={{ borderColor: surfaceBdr }}>
+              <div className={`pt-3 flex items-center gap-3 min-w-0 ${isPhone ? 'w-full' : 'flex-1'}`}>
                 <motion.div
                   className="relative text-2xl font-semibold tabular-nums leading-none flex-shrink-0"
                   style={{ color: focusCelebrate ? '#4ade80' : menuText }}
@@ -5306,32 +6090,34 @@ export default function WeeklyPlanner() {
                   <Plus size={12} />
                 </button>
               </div>
-              <div className="pt-3 flex items-center gap-1.5 flex-shrink-0">
+              <div className={`flex items-center gap-1.5 ${isPhone ? 'w-full pt-2 pb-0.5' : 'pt-3 flex-shrink-0'}`}>
                 <button
-                  onClick={focusTimer.isRunning ? pauseFocus : startFocus}
-                  className="h-7 px-3 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
+                  onClick={toggleFocus}
+                  className={`rounded-md flex items-center justify-center gap-1.5 font-semibold transition-all active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
                   style={{
                     background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
                     border: `1px solid ${focusTimer.isRunning ? 'rgba(245,158,11,0.35)' : '#2563eb'}`,
                     color: focusTimer.isRunning ? '#fbbf24' : '#ffffff',
                   }}
                 >
-                  {focusTimer.isRunning ? <Pause size={12} /> : <Play size={12} />}
-                  {focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
+                  {/* During the desk countdown this is the way out of a session
+                      you did not ask for, so it says so rather than "Start". */}
+                  {hardwareArmSeconds > 0 ? <X size={12} /> : focusTimer.isRunning ? <Pause size={12} /> : <Play size={12} />}
+                  {hardwareArmSeconds > 0 ? 'Cancel' : focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
                 </button>
                 <button
                   onClick={resetFocus}
                   disabled={focusElapsedSeconds <= 0}
-                  className="w-7 h-7 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
+                  className={`rounded-md flex items-center justify-center transition-all active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
                   title="Reset focus timer"
                   style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub, opacity: focusElapsedSeconds <= 0 ? 0.4 : 1 }}
                 >
                   <RotateCcw size={12} />
                 </button>
                 <button
-                  onClick={stopFocus}
+                  onClick={stopFocusByHand}
                   disabled={focusElapsedSeconds <= 0}
-                  className="h-7 px-3 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
+                  className={`rounded-md flex items-center justify-center gap-1.5 font-semibold transition-all active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
                   title="Stop and log focus time"
                   style={{
                     background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
@@ -5422,8 +6208,15 @@ export default function WeeklyPlanner() {
               // Snappy: holding the week keys should feel instant, not springy.
               transition={{ x: { type: 'spring', stiffness: 2200, damping: 65, mass: 0.2 }, opacity: { duration: 0.04 } }}
               ref={gridCardRef}
-              className="flex border border-border/60 rounded-xl overflow-clip shadow-md relative z-10"
-              style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
+              className={`flex border border-border/60 rounded-xl shadow-md relative z-10 ${
+                scrollsSideways ? 'overflow-x-auto overflow-y-visible no-scrollbar touch-scroll' : 'overflow-clip'
+              }`}
+              style={{
+                background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+                // Snap each day column under the finger when the week scrolls
+                // sideways, so a swipe lands on a day rather than between two.
+                scrollSnapType: scrollsSideways ? 'x proximity' : undefined,
+              }}
             >
               {/* Loading skeleton — a few shimmering placeholder blocks so the first
                   paint reads as "loading" rather than "your week is empty". */}
@@ -5434,7 +6227,10 @@ export default function WeeklyPlanner() {
                     initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                     transition={{ duration: 0.25 }}
                     className="absolute inset-0 z-[60] pointer-events-none"
-                    style={{ background: darkMode ? 'rgba(20,22,24,0.72)' : 'rgba(250,250,249,0.78)', backdropFilter: 'blur(1px)' }}
+                    // No backdrop blur: at 1px it is invisible, but it still
+                    // puts the whole grid on the expensive filter path for the
+                    // entire load.
+                    style={{ background: darkMode ? 'rgba(20,22,24,0.86)' : 'rgba(250,250,249,0.9)' }}
                   >
                     {[
                       { l: '10%', t: 140, h: 70 }, { l: '25%', t: 220, h: 110 },
@@ -5453,8 +6249,20 @@ export default function WeeklyPlanner() {
                 )}
               </AnimatePresence>
 
-              {/* Time axis */}
-              <div className="flex-shrink-0 border-r border-border/50" style={{ width: 64, background: darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)' }}>
+              {/* Time axis. Pinned to the left edge while the days scroll past
+                  it — a column of events with no hours beside it is unreadable. */}
+              <div
+                className="flex-shrink-0 border-r border-border/50"
+                style={{
+                  width: timeAxisW,
+                  position: scrollsSideways ? 'sticky' : undefined,
+                  left: scrollsSideways ? 0 : undefined,
+                  zIndex: scrollsSideways ? 45 : undefined,
+                  background: scrollsSideways
+                    ? (darkMode ? currentDarkTheme.cardBg : '#ffffff')
+                    : (darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)'),
+                }}
+              >
                 <div
                   style={{ height: stickyHeaderH, background: darkMode ? currentDarkTheme.cardBg : '#ffffff', transition: 'height 0.15s ease' }}
                   className="border-b border-border/50 sticky top-0 z-40"
@@ -5507,9 +6315,15 @@ export default function WeeklyPlanner() {
               <div
                 ref={daysGridRef}
                 className="flex-1 grid relative"
-                style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}
+                style={{
+                  gridTemplateColumns: `repeat(${colCount}, minmax(${scrollsSideways ? `${MIN_TOUCH_COL_W}px` : '0'}, 1fr))`,
+                  // Without a width the flex child collapses to its content when
+                  // the columns declare a minimum — the grid has to be allowed
+                  // to grow past the card and let the card scroll.
+                  minWidth: scrollsSideways ? colCount * MIN_TOUCH_COL_W : undefined,
+                }}
               >
-                {visibleCols.map((colIdx) => {
+                {visibleCols.map((colIdx, slotIdx) => {
                   const day       = dayAt(colIdx);
                   const today     = isSameDay(day, nowOwnerDate);
                   // The column that actually contains "now" (see nowColIdx: before the
@@ -5655,8 +6469,19 @@ export default function WeeklyPlanner() {
                   const layout = layoutParallel(layoutInput);
 
                   return (
-                    <div key={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0 relative"
+                    <div key={colIdx} data-col-index={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0 relative"
                       style={{
+                        // Placed explicitly, and that is load-bearing. The
+                        // all-day banner overlay below claims `1 / -1` of row 1,
+                        // so an AUTO-placed column finds row 1 full and drops to
+                        // row 2 — which left every day column sitting 92px below
+                        // the hour gutter beside it, so nothing lined up with
+                        // its own time. Explicitly placed items are allowed to
+                        // overlap in grid, so naming the cell puts the columns
+                        // back in row 1 with the banner floating over them.
+                        gridColumn: slotIdx + 1,
+                        gridRow: 1,
+                        scrollSnapAlign: scrollsSideways ? 'start' : undefined,
                         // Today gets a clearly stronger wash plus edge rails, so the column
                         // reads as "the current day" at a glance instead of a faint tint.
                         background: today
@@ -5955,14 +6780,29 @@ export default function WeeklyPlanner() {
                           spill over the neighbouring column. */}
                       <div className="relative" style={{ height: totalH, contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style', cursor: isDraggingAnything ? 'grabbing' : 'crosshair' }}
                         onClick={(e) => handleColClick(e, colIdx)}
-                        onMouseDown={(e) => {
+                        onPointerDown={(e) => {
                           if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
                           if (e.button !== 0) return;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const y = e.clientY - rect.top;
+                          // Touch: a tap on empty grid must stay a tap (the day
+                          // has to be scrollable and nothing should appear by
+                          // accident). Holding still for a moment is what asks
+                          // for a new block, and dragging from there sets its
+                          // length — the same drag-to-create the mouse has.
+                          if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+                            const colY = y;
+                            armTouchHold(e, 'create', () => {
+                              setSelectedIds(new Set());
+                              createDragRef.current = { col: colIdx, startY: colY, moved: false };
+                              const s = clamp(yToMin(Math.max(0, colY), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
+                              setCreateDisp({ startMin: s, endMin: Math.min(s + DEFAULT_EVENT_MIN, dayEndMin) });
+                            });
+                            return;
+                          }
                           if (!e.ctrlKey && !e.metaKey) {
                             setSelectedIds(new Set());
                           }
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          const y = e.clientY - rect.top;
                           if (e.ctrlKey || e.metaKey) {
                             const gr = daysGridRef.current?.getBoundingClientRect();
                             if (gr) {
@@ -6208,11 +7048,13 @@ export default function WeeklyPlanner() {
                             );
                           }
 
-                          // Hovering lifts the block a hair; it settles back on release.
-                          const lift = !isMoving && (isHov || isMenu || isEdit) ? -1.5 : 0;
+                          // Touch hold feedback: subtle press scale while holding; lift & elevation when moving/dragging
+                          const isTouchHolding = touchHoldingId === ev.id;
+                          const lift = isDrag ? 0 : isTouchHolding ? -1 : (!isMoving && (isHov || isMenu || isEdit) ? -1.5 : 0);
+                          const scale = isDrag ? (isTouch ? 1.04 : 1.02) : isTouchHolding ? 0.96 : 1;
                           const transform = (isMoving && dragDelta)
-                            ? `translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0)`
-                            : `translate3d(0, ${lift}px, 0)`;
+                            ? `translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0) scale(${scale})`
+                            : `translate3d(0, ${lift}px, 0) scale(${scale})`;
 
                           return (
                             <div
@@ -6220,11 +7062,11 @@ export default function WeeklyPlanner() {
                               data-event="1"
                               data-event-id={ev.id}
                               title={ev.content}
-                              className={`absolute border overflow-visible ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-lg z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
+                              className={`absolute border overflow-visible ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
                                 transition: blockTransition,
-                                willChange: isMoving ? 'transform, top, height' : undefined,
+                                willChange: isMoving || isTouchHolding ? 'transform, top, height' : undefined,
                                 transform,
                                 transformOrigin: 'center center',
                                 left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
@@ -6234,16 +7076,18 @@ export default function WeeklyPlanner() {
                                 borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
                                 borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
                                 color: text,
-                                boxShadow: boxShadow || (lift ? '0 4px 14px rgba(0,0,0,0.18)' : undefined),
+                                zIndex: isDrag ? 60 : isTouchHolding ? 55 : isEdit||isMenu ? 40 : isSelected ? 30 : 10,
+                                boxShadow: isDrag ? '0 14px 36px rgba(0,0,0,0.38)' : isTouchHolding ? '0 4px 16px rgba(0,0,0,0.24)' : (boxShadow || (lift ? '0 4px 14px rgba(0,0,0,0.18)' : undefined)),
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
-                                opacity: isDrag ? 0.95 : 1,
+                                opacity: isDrag ? 0.95 : isTouchHolding ? 0.88 : 1,
+                                touchAction: isTouch ? 'manipulation' : undefined,
                                 // A touch more saturation on hover so the block "wakes up".
                                 filter: lift ? 'saturate(1.12) brightness(1.03)' : undefined,
                                 outline: isMenu ? `2px solid ${text}` : isSelected ? `2px solid ${darkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.45)'}` : 'none',
                                 outlineOffset: 1,
-                                pointerEvents: (isMoving && !isResize) ? 'none' : undefined,
+                                pointerEvents: isMoving ? (isTouch ? 'auto' : 'none') : undefined,
                               }}
-                              onMouseDown={(e) => handleEventMouseDown(e, ev, segKind)}
+                              onPointerDown={(e) => handleEventMouseDown(e, ev, segKind)}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 if (e.ctrlKey || e.metaKey) {
@@ -6292,7 +7136,7 @@ export default function WeeklyPlanner() {
 
                               {/* Top resize handle */}
                               {segKind !== 'head' && (
-                                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ height: height < 34 ? 6 : 10, cursor: 'n-resize', marginTop: height < 34 ? 0 : -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'top', segKind)}>
+                                <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ top: isTouch ? -4 : 0, height: isTouch ? 22 : (height < 34 ? 6 : 10), cursor: 'n-resize', marginTop: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'top', segKind)}>
                                   <div className="rounded-full transition-opacity duration-150" style={{ width: height < 34 ? 20 : 28, height: height < 34 ? 2 : 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.6 : (height < 34 ? 0 : 0.25), pointerEvents: 'none' }} />
                                 </div>
                               )}
@@ -6525,7 +7369,7 @@ export default function WeeklyPlanner() {
 
                               {/* Bottom resize handle */}
                               {segKind !== 'tail' && (
-                                <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ height: height < 34 ? 6 : 10, cursor: 's-resize', marginBottom: height < 34 ? 0 : -2 }} onMouseDown={(e) => handleResizeMouseDown(e, ev, 'bottom', segKind)}>
+                                <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ bottom: isTouch ? -4 : 0, height: isTouch ? 22 : (height < 34 ? 6 : 10), cursor: 's-resize', marginBottom: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'bottom', segKind)}>
                                   <div className="rounded-full transition-opacity duration-150" style={{ width: height < 34 ? 20 : 28, height: height < 34 ? 2 : 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.6 : (height < 34 ? 0 : 0.25), pointerEvents: 'none' }} />
                                 </div>
                               )}
@@ -6549,8 +7393,29 @@ export default function WeeklyPlanner() {
                               {/* Move handle */}
                               <div
                                 className="absolute z-40 transition-all duration-150"
-                                style={{ width: 18, height: 18, bottom: -9, right: -9, borderRadius: 3, backgroundColor: bg, border: `1.5px solid ${border}`, boxShadow: '0 1px 4px rgba(0,0,0,0.18)', cursor: 'grab', opacity: isHov||isEdit||isMenu ? 1 : 0, pointerEvents: isHov||isEdit||isMenu ? 'auto' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                onMouseDown={(e) => { e.stopPropagation(); didDragRef.current = true; handleEventMouseDown(e as unknown as React.MouseEvent, ev); }}
+                                // There is no hover on a touchscreen, so the handle
+                                // instead appears once the block is the one being
+                                // edited — and at a size a fingertip can actually
+                                // land on. It grabs instantly (no hold needed),
+                                // which is the quick way to nudge a block.
+                                style={{ width: isTouch ? 26 : 18, height: isTouch ? 26 : 18, bottom: isTouch ? -13 : -9, right: isTouch ? -13 : -9, borderRadius: isTouch ? 13 : 3, backgroundColor: bg, border: `1.5px solid ${border}`, boxShadow: '0 1px 4px rgba(0,0,0,0.18)', cursor: 'grab', touchAction: 'none', opacity: isHov||isEdit||isMenu ? 1 : 0, pointerEvents: isHov||isEdit||isMenu ? 'auto' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                onPointerDown={(e) => {
+                                  e.stopPropagation();
+                                  didDragRef.current = true;
+                                  if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+                                    touchDragArmedRef.current = true;
+                                    setTouchDragging(true);
+                                    haptic(10);
+                                    handleEventMouseDown({
+                                      clientX: e.clientX, clientY: e.clientY,
+                                      ctrlKey: false, metaKey: false, button: 0,
+                                      preventDefault: () => {}, stopPropagation: () => {},
+                                    } as unknown as React.MouseEvent, ev);
+                                    if (dragRef.current) dragRef.current.active = true;
+                                    return;
+                                  }
+                                  handleEventMouseDown(e as unknown as React.MouseEvent, ev);
+                                }}
                                 onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}
                               >
                                 <svg width="6" height="6" viewBox="0 0 6 6" fill={text} style={{ opacity: 0.5 }}>
@@ -7113,10 +7978,12 @@ export default function WeeklyPlanner() {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -15 }}
           transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
-          className="min-w-[900px] max-w-[1400px] mx-auto p-4"
+          className={isCompact ? 'w-full max-w-full px-2 py-3' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
         >
-            {/* All-time summary strip */}
-            <div className="grid grid-cols-5 gap-3 mb-5">
+            {/* All-time summary strip. Five tiles across is unreadable at 390px
+                — two columns keeps each number and its label legible, and the
+                strip just runs three rows deep instead. */}
+            <div className={`grid gap-2.5 mb-4 ${isPhone ? 'grid-cols-2' : 'grid-cols-5 gap-3 mb-5'}`}>
               {[
                 ['All-time', formatFocusDuration(focusAnalysis.allTimeSeconds), <Target size={13} key="i" />],
                 ['Sessions Done', `${focusAnalysis.allTimeSessions}`, <CheckSquare size={13} key="i" />],
@@ -7136,20 +8003,20 @@ export default function WeeklyPlanner() {
 
             <div className="rounded-xl overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)', border: `1px solid ${surfaceBdr}` }}>
               {/* Panel header: tab switcher */}
-              <div className="flex items-center justify-between px-5 py-3" style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
-                <div className="flex items-center gap-2.5">
+              <div className={`flex items-center justify-between ${isCompact ? 'px-3 py-2.5 gap-2 flex-wrap' : 'px-5 py-3'}`} style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
+                <div className="flex items-center gap-2.5 min-w-0">
                   <div className="w-7 h-7 rounded-md flex items-center justify-center" style={{ background: darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)', color: '#60a5fa' }}>
                     <BarChart3 size={14} />
                   </div>
-                  <span className="text-sm font-semibold" style={{ color: menuText }}>
+                  <span className="text-sm font-semibold truncate" style={{ color: menuText }}>
                     {analysisTab === 'week'
-                      ? `${format(focusAnalysis.aWeekStart, 'MMM d')} – ${format(focusAnalysis.aWeekEnd, 'MMM d, yyyy')}`
+                      ? `${format(focusAnalysis.aWeekStart, 'MMM d')} – ${format(focusAnalysis.aWeekEnd, isPhone ? 'MMM d' : 'MMM d, yyyy')}`
                       : analysisTab === 'month'
                         ? format(analysisMonthCursor, 'MMMM yyyy')
                         : analysisYearCursor}
                   </span>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className={`flex items-center ${isCompact ? 'gap-2 w-full justify-between' : 'gap-3'}`}>
                   {/* Day-start-hour setting — re-buckets all analysis live */}
                   <div className="flex items-center gap-2" title="The hour a new day begins for focus stats. Sessions before it count toward the previous day.">
                     <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Day starts</span>
@@ -7198,7 +8065,7 @@ export default function WeeklyPlanner() {
                 </div>
               </div>
 
-              <div className="px-5 py-4">
+              <div className={isCompact ? 'px-3 py-3' : 'px-5 py-4'}>
                 {analysisTab === 'week' ? (
                   <div>
                     {/* Week nav */}
@@ -7222,7 +8089,7 @@ export default function WeeklyPlanner() {
                     </div>
 
                     {/* Week stats */}
-                    <div className="grid grid-cols-4 gap-3 mb-4">
+                    <div className={`grid gap-2.5 mb-4 ${isPhone ? 'grid-cols-2' : 'grid-cols-4 gap-3'}`}>
                       {[
                         ['Total', formatFocusDuration(weekAnalysisLive.seconds)],
                         ['Sessions', `${focusAnalysis.wkSessions}`],
@@ -7414,7 +8281,7 @@ export default function WeeklyPlanner() {
                     </div>
 
                     {/* Month stats */}
-                    <div className="grid grid-cols-4 gap-3 mb-4">
+                    <div className={`grid gap-2.5 mb-4 ${isPhone ? "grid-cols-2" : "grid-cols-4 gap-3"}`}>
                       {[
                         ['Total', formatFocusDuration(focusAnalysis.monthSeconds + monthLiveExtraSeconds)],
                         ['Sessions', `${focusAnalysis.monthSessions}`],
@@ -7588,7 +8455,7 @@ export default function WeeklyPlanner() {
                     </div>
 
                     {/* Year stats */}
-                    <div className="grid grid-cols-4 gap-3 mb-5">
+                    <div className={`grid gap-2.5 mb-5 ${isPhone ? "grid-cols-2" : "grid-cols-4 gap-3"}`}>
                       {[
                         ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
                         ['Sessions', `${focusAnalysis.yearSessions}`],
@@ -7662,7 +8529,7 @@ export default function WeeklyPlanner() {
           <AnimatePresence>
             {showLiveBtn && isTimelineView && !settingsRouteOpen && (
               <div className="absolute bottom-6 left-0 right-0 z-[120] pointer-events-none flex justify-center">
-                <div className="min-w-[900px] max-w-[1400px] w-full mx-auto px-4 flex justify-center pointer-events-none">
+                <div className={`w-full mx-auto px-4 flex justify-center pointer-events-none ${isCompact ? '' : 'min-w-[900px] max-w-[1400px]'}`}>
                   <motion.button
                     key="go-to-live"
                     onClick={scrollToLive}
@@ -7690,7 +8557,12 @@ export default function WeeklyPlanner() {
         </div>
 
         <TasksPanel
-          open={tasksPanelOpen && !showFocusAnalysis}
+          sheet={isPhone}
+          page={isPhone}
+          // On the phone the panel is a sheet driven by the bottom tab bar, so
+          // it opens on the Tasks tab regardless of the docked-panel preference
+          // (which is about a side-by-side layout this screen doesn't have).
+          open={isPhone ? mobileTab === 'tasks' : (tasksPanelOpen && !showFocusAnalysis)}
           width={tasksPanelWidth}
           tasks={tasks}
           filters={taskFilters}
@@ -7706,7 +8578,7 @@ export default function WeeklyPlanner() {
           onDelete={deleteTask}
           onOpenMenu={openTaskMenu}
           onResize={handleTasksPanelResize}
-          onClose={closeTasksPanel}
+          onClose={isPhone ? () => setMobileTab('calendar') : closeTasksPanel}
         />
       </div>
 
@@ -7714,7 +8586,7 @@ export default function WeeklyPlanner() {
       {confirmFocusModal && createPortal(
         <div
           className="fixed inset-0 z-[99999] flex items-center justify-center p-4"
-          style={{ backgroundColor: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)' }}
+          style={{ backgroundColor: 'rgba(0,0,0,0.7)' }}
           onClick={() => setConfirmFocusModal(null)}
         >
           <div
@@ -7790,8 +8662,8 @@ export default function WeeklyPlanner() {
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
               onClick={() => setShowShortcutHelp(false)}
-              className="fixed inset-0 z-[280] backdrop-blur-[6px]"
-              style={{ background: darkMode ? 'rgba(0,0,0,0.55)' : 'rgba(0,0,0,0.25)' }}
+              className={`fixed inset-0 z-[280] ${isPhone ? '' : 'backdrop-blur-[6px]'}`}
+              style={{ background: darkMode ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.32)' }}
             />
             {/* Flex-centred wrapper: framer-motion drives `transform` on the panel
                 itself, so centring must not rely on a transform of our own. */}
@@ -7895,9 +8767,9 @@ export default function WeeklyPlanner() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
               onClick={() => setSettingsOpen(false)}
-              className="fixed inset-0 top-14 z-[140] backdrop-blur-[6px]"
+              className={`fixed inset-0 top-14 z-[140] ${isPhone ? '' : 'backdrop-blur-[6px]'}`}
               style={{
-                background: darkMode ? 'rgba(0, 0, 0, 0.45)' : 'rgba(0, 0, 0, 0.15)',
+                background: darkMode ? 'rgba(0, 0, 0, 0.52)' : 'rgba(0, 0, 0, 0.22)',
               }}
             />
 
@@ -8548,15 +9420,40 @@ export default function WeeklyPlanner() {
           A parallel to the event popover rather than a fork of it: that one is
           370 lines of event-specific fields. The recurrence editor is shared. */}
       <AnimatePresence>
+      {menuTask && taskMenuPos && isPhone && (
+        <motion.div
+          key="task-menu-scrim"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
+          className="fixed inset-0 z-[199]"
+          style={{ background: 'rgba(0,0,0,0.58)', willChange: 'opacity' }}
+          onClick={() => setTaskMenuId(null)}
+        />
+      )}
       {menuTask && taskMenuPos && (
         <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.96 }}
-          transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+          initial={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.95 }}
+          animate={isPhone ? { y: 0 } : { opacity: 1, scale: 1 }}
+          exit={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.96 }}
+          transition={isPhone
+            ? { type: 'spring', stiffness: 460, damping: 42 }
+            : { duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
           data-menu="1"
-          className="fixed z-[200] rounded-xl shadow-xl overflow-y-auto overflow-x-hidden"
-          style={{
+          className={`fixed z-[200] overflow-y-auto overflow-x-hidden touch-scroll ${isPhone ? '' : 'rounded-xl shadow-xl'}`}
+          style={isPhone ? {
+            left: 0, right: 0, bottom: 0, top: 'auto',
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            maxHeight: '86dvh',
+            paddingBottom: 'var(--safe-bottom)',
+            background: menuBg,
+            borderTop: `1px solid ${menuBdr}`,
+            // Tight shadow + own layer: a wide-blur shadow on a sheet that
+            // springs up from the bottom is re-rastered every frame.
+            boxShadow: '0 -6px 18px rgba(0,0,0,0.34)',
+            willChange: 'transform',
+            contain: 'paint',
+          } : {
             left: Math.min(taskMenuPos.x, Math.max(8, window.innerWidth - 300)),
             top:  Math.min(taskMenuPos.y, Math.max(8, window.innerHeight - 420)),
             transformOrigin: 'top left',
@@ -8570,7 +9467,16 @@ export default function WeeklyPlanner() {
           }}
           onMouseDown={e => e.stopPropagation()}
         >
-          <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+          <div
+            className={`flex items-center justify-between px-3 ${isPhone ? 'sticky top-0 z-10 pt-3 pb-2 relative' : 'py-2'}`}
+            style={{ borderBottom: `1px solid ${menuBdr}`, background: isPhone ? menuBg : undefined }}
+          >
+            {isPhone && (
+              <span
+                className="absolute left-1/2 -translate-x-1/2 top-1.5 w-10 h-1 rounded-full"
+                style={{ background: menuBdr }}
+              />
+            )}
             <div className="flex items-center gap-1.5">
               <ListTodo size={13} style={{ color: taskColor }} />
               <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Task</span>
@@ -8696,15 +9602,44 @@ export default function WeeklyPlanner() {
 
       {/* â”€â”€ Context menu (portal-style fixed popover) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <AnimatePresence>
+      {/* On a phone the editor is a bottom sheet, not a floating popup: a 260px
+          card anchored beside a 50px column would hang off the screen edge, and
+          "drag the popup somewhere it fits" is not a thing to ask of a thumb.
+          The scrim also gives an obvious way out — tap anywhere above it. */}
+      {menuEvent && menuPos && isPhone && (
+        <motion.div
+          key="event-menu-scrim"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          transition={{ duration: 0.18 }}
+          className="fixed inset-0 z-[199]"
+          style={{ background: 'rgba(0,0,0,0.58)', willChange: 'opacity' }}
+          onClick={() => { if (isDraft) commitDraft(); setMenuId(null); setMenuPos(null); }}
+        />
+      )}
       {menuEvent && menuPos && (
         <motion.div
           ref={menuRef}
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.96 }}
-          transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-          className="fixed z-[200] rounded-xl shadow-xl overflow-y-auto overflow-x-hidden"
-          style={{
+          initial={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.95 }}
+          animate={isPhone ? { y: 0 } : { opacity: 1, scale: 1 }}
+          exit={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.96 }}
+          transition={isPhone
+            ? { type: 'spring', stiffness: 460, damping: 42 }
+            : { duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+          className={`fixed z-[200] overflow-y-auto overflow-x-hidden touch-scroll ${isPhone ? '' : 'rounded-xl shadow-xl'}`}
+          style={isPhone ? {
+            left: 0, right: 0, bottom: 0, top: 'auto',
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            maxHeight: '86dvh',
+            paddingBottom: 'var(--safe-bottom)',
+            background: menuBg,
+            borderTop: `1px solid ${menuBdr}`,
+            // Tight shadow + own layer: a wide-blur shadow on a sheet that
+            // springs up from the bottom is re-rastered every frame.
+            boxShadow: '0 -6px 18px rgba(0,0,0,0.34)',
+            willChange: 'transform',
+            contain: 'paint',
+          } : {
             left: menuPos.x,
             top:  menuPos.y,
             transformOrigin: 'top left',
@@ -8718,15 +9653,35 @@ export default function WeeklyPlanner() {
           }}
           onMouseDown={e => e.stopPropagation()}
         >
-          {/* Drag handle — move the popup anywhere */}
-          <div
-            onMouseDown={startMenuDrag}
-            className="flex items-center justify-center gap-1 py-1 select-none"
-            style={{ cursor: 'grab', color: menuSub, borderBottom: `1px solid ${menuBdr}` }}
-            title="Drag to move"
-          >
-            <GripHorizontal size={14} style={{ opacity: 0.6 }} />
-          </div>
+          {/* Desktop: a grip that moves the popup anywhere. Phone: the sheet's
+              handle, and a Done button — the sheet has nowhere to move to. */}
+          {isPhone ? (
+            <div
+              className="sticky top-0 z-10 flex items-center justify-end px-3 pt-3 pb-2 relative"
+              style={{ background: menuBg, borderBottom: `1px solid ${menuBdr}` }}
+            >
+              <span
+                className="absolute left-1/2 -translate-x-1/2 top-1.5 w-10 h-1 rounded-full"
+                style={{ background: menuBdr }}
+              />
+              <button
+                onClick={() => { if (isDraft) commitDraft(); setMenuId(null); setMenuPos(null); }}
+                className="text-[13px] font-bold px-3 h-8 rounded-lg active:scale-95 transition-transform"
+                style={{ background: 'rgba(59,130,246,0.14)', color: '#3b82f6' }}
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <div
+              onMouseDown={startMenuDrag}
+              className="flex items-center justify-center gap-1 py-1 select-none"
+              style={{ cursor: 'grab', color: menuSub, borderBottom: `1px solid ${menuBdr}` }}
+              title="Drag to move"
+            >
+              <GripHorizontal size={14} style={{ opacity: 0.6 }} />
+            </div>
+          )}
 
           {/* Title field (works for drafts, which have no grid block, and live items) */}
           <div className="px-3 pt-2 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
@@ -9218,7 +10173,7 @@ export default function WeeklyPlanner() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs"
+            className={`fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/60 ${isPhone ? '' : 'backdrop-blur-xs'}`}
             onClick={() => setTaskOverflowModal(null)}
           >
             <motion.div
@@ -9275,6 +10230,547 @@ export default function WeeklyPlanner() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* ══ Phone shell ═══════════════════════════════════════════════════════
+          The bottom bar, the create button and the two sheets the compact
+          header hands off to. All of it is gated on `isPhone`, so a desktop
+          renders none of it and nothing about that layout changes. */}
+      {isPhone && (
+        <>
+          {/* ── Create button ────────────────────────────────────────────────
+              Sits above the tab bar rather than in it: creating is the one
+              action you do far more than navigating, and a thumb resting at
+              the bottom-right corner is exactly where it lands. */}
+          <AnimatePresence>
+            {mobileTab === 'calendar' && !showFocusAnalysis && !mobileMenuOpen && !mobileViewPickerOpen && !mobilePrayerOpen && (
+              <motion.button
+                key="fab"
+                initial={{ opacity: 0, scale: 0.6, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.6, y: 12 }}
+                transition={{ type: 'spring', stiffness: 520, damping: 30 }}
+                onClick={() => { haptic(8); handleHeaderCreateClick(); }}
+                className="fixed z-[70] w-14 h-14 rounded-full flex items-center justify-center text-white active:scale-90 transition-transform"
+                style={{
+                  right: 'calc(16px + var(--safe-right))',
+                  bottom: `calc(${BOTTOM_NAV_H + 16}px + var(--safe-bottom))`,
+                  background: 'linear-gradient(140deg, #3b82f6, #2563eb)',
+                  boxShadow: '0 8px 26px rgba(37,99,235,0.45)',
+                }}
+                title="New event"
+              >
+                <Plus size={26} strokeWidth={2.4} />
+              </motion.button>
+            )}
+          </AnimatePresence>
+
+          {/* ── Bottom tab bar ───────────────────────────────────────────────*/}
+          <nav
+            className="fixed inset-x-0 bottom-0 z-[85] flex items-stretch border-t"
+            style={{
+              height: `calc(${BOTTOM_NAV_H}px + var(--safe-bottom))`,
+              paddingBottom: 'var(--safe-bottom)',
+              paddingLeft: 'var(--safe-left)',
+              paddingRight: 'var(--safe-right)',
+              // Fully opaque, no backdrop blur. The bar sits over the calendar,
+              // so a translucent blur made Chrome re-blur that strip on every
+              // frame of every scroll — the single most expensive thing on the
+              // phone shell, and invisible at 58px tall anyway.
+              background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+              borderColor: surfaceBdr,
+            }}
+          >
+            {([
+              { id: 'calendar' as const, label: 'Calendar', icon: CalendarIcon, badge: 0 },
+              { id: 'tasks' as const, label: 'Tasks', icon: ListTodo, badge: openTaskCount },
+              { id: 'focus' as const, label: 'Focus', icon: BarChart3, badge: 0 },
+              { id: 'settings' as const, label: 'Settings', icon: Settings, badge: 0 },
+            ]).map(item => {
+              const active =
+                item.id === 'settings' ? false
+                : item.id === 'focus' ? (mobileTab === 'focus' || showFocusAnalysis)
+                : mobileTab === item.id && !showFocusAnalysis;
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => {
+                    haptic(6);
+                    if (item.id === 'settings') { navigateToSettings(); return; }
+                    if (item.id === 'focus') { setMobileTab('calendar'); setShowFocusAnalysis(true); return; }
+                    setShowFocusAnalysis(false);
+                    setMobileTab(item.id);
+                  }}
+                  className="flex-1 flex flex-col items-center justify-center gap-0.5 relative active:opacity-60 transition-opacity"
+                  style={{ color: active ? '#3b82f6' : headerInactive }}
+                >
+                  {/* The active pill, not just a colour change: on a small bar
+                      colour alone is easy to miss at a glance. */}
+                  {active && (
+                    <motion.span
+                      // Deliberately NOT a shared `layoutId` pill. That makes
+                      // framer measure both tabs with getBoundingClientRect on
+                      // the frame you tap — a forced synchronous layout of the
+                      // whole calendar, on top of the re-render the tap already
+                      // triggered. A local fade/scale looks nearly identical and
+                      // never touches layout.
+                      initial={{ opacity: 0, scale: 0.86 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="absolute inset-x-3 top-1 bottom-1 rounded-xl -z-10"
+                      style={{ background: darkMode ? 'rgba(59,130,246,0.16)' : 'rgba(37,99,235,0.10)' }}
+                      transition={{ duration: 0.16, ease: 'easeOut' }}
+                    />
+                  )}
+                  <span className="relative">
+                    <Icon size={19} strokeWidth={active ? 2.5 : 2} />
+                    {item.badge > 0 && (
+                      <span
+                        className="absolute -top-1.5 -right-2 min-w-[15px] h-[15px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center tabular-nums"
+                        style={{ background: taskColor, color: darkMode ? '#0b0b0c' : '#ffffff' }}
+                      >
+                        {item.badge > 99 ? '99+' : item.badge}
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-[9.5px] font-semibold tracking-tight">{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* ── View picker sheet ────────────────────────────────────────────*/}
+          <MobileSheet
+            open={mobileViewPickerOpen}
+            onClose={() => setMobileViewPickerOpen(false)}
+            title={showFocusAnalysis ? 'Analysis range' : 'Calendar view'}
+            subtitle="Remembered on this device only"
+            theme={{ darkMode, menuBg, menuText, menuSub, surfaceBg, surfaceBdr }}
+          >
+            <div className="flex flex-col gap-1.5">
+              {(showFocusAnalysis
+                ? ([
+                    { id: 'week', label: 'Week', hint: 'Seven days of focus time' },
+                    { id: 'month', label: 'Month', hint: 'A calendar month at a glance' },
+                    { id: 'year', label: 'Year', hint: 'Twelve months of totals' },
+                  ] as const)
+                : ([
+                    { id: 'day', label: 'Day', hint: 'One day, full width — best on a phone' },
+                    { id: 'week', label: 'Week', hint: 'Seven columns, swipe sideways' },
+                    { id: 'month', label: 'Month', hint: 'The whole month as a grid' },
+                    { id: 'year', label: 'Year', hint: 'Twelve months at once' },
+                    { id: 'custom', label: 'Custom', hint: 'Your own window of days' },
+                  ] as const)
+              ).map(opt => {
+                const active = showFocusAnalysis ? analysisTab === opt.id : calendarView === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => {
+                      haptic(8);
+                      setDirection(0);
+                      if (showFocusAnalysis) setAnalysisTab(opt.id as 'week' | 'month' | 'year');
+                      else setCalendarView(opt.id as CalendarView);
+                      setMobileViewPickerOpen(false);
+                    }}
+                    className="flex items-center gap-3 px-3.5 py-3 rounded-xl text-left active:scale-[0.98] transition-transform"
+                    style={{
+                      background: active ? (darkMode ? 'rgba(59,130,246,0.16)' : 'rgba(37,99,235,0.09)') : surfaceBg,
+                      border: `1px solid ${active ? 'rgba(59,130,246,0.5)' : surfaceBdr}`,
+                    }}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[14px] font-bold" style={{ color: active ? '#3b82f6' : menuText }}>{opt.label}</div>
+                      <div className="text-[11px] mt-0.5" style={{ color: menuSub }}>{opt.hint}</div>
+                    </div>
+                    {active && <Check size={18} style={{ color: '#3b82f6' }} />}
+                  </button>
+                );
+              })}
+
+              {/* Custom view's day counts, inline so the picker is the one place
+                  the shape of the view is decided. */}
+              {!showFocusAnalysis && calendarView === 'custom' && (
+                <div className="mt-1 rounded-xl p-3" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  {([
+                    { label: 'Days before', value: customDaysBefore, min: CUSTOM_BEFORE_MIN, max: CUSTOM_BEFORE_MAX, set: setCustomDaysBefore },
+                    { label: 'Days after', value: customDaysAfter, min: CUSTOM_AFTER_MIN, max: CUSTOM_AFTER_MAX, set: setCustomDaysAfter },
+                  ] as const).map(row => (
+                    <div key={row.label} className="flex items-center justify-between py-1.5">
+                      <span className="text-[12.5px] font-semibold" style={{ color: menuText }}>{row.label}</span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => row.set(v => Math.max(row.min, v - 1))}
+                          disabled={row.value <= row.min}
+                          className="w-9 h-9 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                          style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                        ><Minus size={15} /></button>
+                        <span className="w-9 text-center text-[13px] font-bold tabular-nums" style={{ color: menuText }}>
+                          {row.value > 0 ? `+${row.value}` : row.value}
+                        </span>
+                        <button
+                          onClick={() => row.set(v => Math.min(row.max, v + 1))}
+                          disabled={row.value >= row.max}
+                          className="w-9 h-9 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                          style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                        ><Plus size={15} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </MobileSheet>
+
+          {/* ── Prayer times sheet ───────────────────────────────────────────*/}
+          <MobileSheet
+            open={mobilePrayerOpen}
+            onClose={() => setMobilePrayerOpen(false)}
+            title={`Prayer Times · ${prayer.city}`}
+            subtitle={format(new Date(nowTick), 'EEEE, d MMMM yyyy')}
+            theme={{ darkMode, menuBg, menuText, menuSub, surfaceBg, surfaceBdr }}
+          >
+            <div className="flex flex-col gap-3">
+              {todayPrayerList.length === 0 ? (
+                <div className="py-8 text-center text-xs" style={{ color: menuSub }}>
+                  Loading prayer times...
+                </div>
+              ) : (
+                <div className="rounded-2xl overflow-hidden shadow-sm" style={{ border: `1px solid ${surfaceBdr}` }}>
+                  {todayPrayerList.map((p, i) => {
+                    const done = isPrayerDone(p.dateStr, p.key);
+                    const isNext = nextPrayer?.key === p.key;
+                    const passed = !done && !isNext && nextPrayer !== null && p.minutes < nextPrayer.minutes;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => { haptic(6); togglePrayerDone(p.dateStr, p.key); }}
+                        className="w-full px-3.5 h-12 flex items-center gap-3 text-left active:opacity-60 transition-all cursor-pointer"
+                        style={{
+                          background: isNext ? `${prayer.color}1c` : surfaceBg,
+                          borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
+                        }}
+                      >
+                        <span
+                          className="w-6 h-6 rounded-lg flex items-center justify-center transition-transform active:scale-90 flex-shrink-0"
+                          style={{
+                            color: prayer.color,
+                          }}
+                        >
+                          {done ? (
+                            <CheckCircle2 size={19} style={{ color: prayer.color }} />
+                          ) : (
+                            <Circle size={19} style={{ color: prayer.color, opacity: 0.55 }} />
+                          )}
+                        </span>
+                        <div className="flex-1 min-w-0 flex items-center gap-2">
+                          <span
+                            className="text-[13.5px] font-semibold truncate"
+                            style={{
+                              color: isNext ? prayer.color : menuText,
+                              textDecoration: done ? 'line-through' : 'none',
+                              opacity: done ? 0.5 : (passed ? 0.65 : 1),
+                            }}
+                          >
+                            {p.label}
+                          </span>
+                          {isNext && (
+                            <span
+                              className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md"
+                              style={{ background: `${prayer.color}26`, color: prayer.color }}
+                            >
+                              Next
+                            </span>
+                          )}
+                        </div>
+                        <span
+                          className="text-[13.5px] font-bold tabular-nums flex-shrink-0"
+                          style={{
+                            color: isNext ? prayer.color : menuText,
+                            opacity: done ? 0.5 : (passed ? 0.65 : 1),
+                          }}
+                        >
+                          {formatTimeLabel(p.minutes, timeFormat)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Footer with Method info and Quick link to settings */}
+              <div className="flex items-center justify-between px-1 pt-1">
+                <span className="text-[11px]" style={{ color: menuSub }}>
+                  Method: {PRAYER_METHODS.find(m => m.id === prayer.method)?.label.split('(')[0].trim() || 'Standard'} ({prayer.school === 'hanafi' ? 'Hanafi' : 'Shafi/Standard'})
+                </span>
+                <button
+                  onClick={() => {
+                    setMobilePrayerOpen(false);
+                    navigateToSettings('prayer');
+                  }}
+                  className="text-[11.5px] font-semibold underline-offset-2 hover:underline flex items-center gap-1 cursor-pointer"
+                  style={{ color: prayer.color }}
+                >
+                  Configure
+                </button>
+              </div>
+            </div>
+          </MobileSheet>
+
+          {/* ── Overflow sheet ───────────────────────────────────────────────*/}
+          <MobileSheet
+            open={mobileMenuOpen}
+            onClose={() => setMobileMenuOpen(false)}
+            title="Planner"
+            subtitle={format(new Date(nowTick), 'EEEE, d MMMM yyyy')}
+            theme={{ darkMode, menuBg, menuText, menuSub, surfaceBg, surfaceBdr }}
+          >
+            <div className="flex flex-col gap-4">
+              {/* Zoom — per device, and the phone's most useful dial: it trades
+                  legibility against how much of the day fits on screen. */}
+              <div>
+                <div className="flex items-baseline justify-between mb-1.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Zoom</span>
+                  <span className="text-[10px]" style={{ color: menuSub }}>this device only</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setAppZoom(z => clampZoom(z - ZOOM_STEP))}
+                    disabled={appZoom <= ZOOM_MIN + 1e-9}
+                    className="w-11 h-11 rounded-xl flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                  ><Minus size={17} /></button>
+                  <button
+                    onClick={() => setAppZoom(1)}
+                    className="flex-1 h-11 rounded-xl text-[14px] font-bold tabular-nums active:scale-[0.97] transition-transform"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                    title="Tap to reset to 100%"
+                  >
+                    {Math.round(appZoom * 100)}%
+                  </button>
+                  <button
+                    onClick={() => setAppZoom(z => clampZoom(z + ZOOM_STEP))}
+                    disabled={appZoom >= ZOOM_MAX - 1e-9}
+                    className="w-11 h-11 rounded-xl flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                  ><Plus size={17} /></button>
+                </div>
+                <p className="text-[10.5px] mt-1.5" style={{ color: menuSub }}>Or pinch anywhere on the calendar.</p>
+              </div>
+
+              {/* Grid interval */}
+              {isTimelineView && (
+                <div>
+                  <div className="text-[11px] font-bold uppercase tracking-wider mb-1.5" style={{ color: menuSub }}>Grid interval</div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {([5, 15, 30, 60] as IntervalMin[]).map(v => (
+                      <button
+                        key={v}
+                        onClick={() => { haptic(6); setIntervalOpt(v); }}
+                        className="h-11 rounded-xl text-[13px] font-bold active:scale-95 transition-transform"
+                        style={{
+                          background: interval === v ? (darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(37,99,235,0.10)') : surfaceBg,
+                          border: `1px solid ${interval === v ? 'rgba(59,130,246,0.5)' : surfaceBdr}`,
+                          color: interval === v ? '#3b82f6' : menuText,
+                        }}
+                      >{v}m</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="grid grid-cols-2 gap-1.5">
+                {([
+                  { label: darkMode ? 'Light mode' : 'Dark mode', icon: darkMode ? Sun : Moon, run: () => setDarkMode(d => !d), keep: true },
+                  { label: 'Undo', icon: Undo2, run: undo, disabled: undoStack.current.length === 0, keep: true },
+                  { label: 'Redo', icon: Redo2, run: redo, disabled: redoStack.current.length === 0, keep: true },
+                  { label: showTaskRow ? 'Hide task row' : 'Show task row', icon: ListTodo, run: () => setShowTaskRow(v => !v), keep: true },
+                  { label: 'Focus analysis', icon: BarChart3, run: () => { setShowFocusAnalysis(true); setMobileTab('calendar'); } },
+                  { label: 'Settings', icon: Settings, run: () => navigateToSettings() },
+                ] as const).map(a => {
+                  const Icon = a.icon;
+                  const disabled = 'disabled' in a ? a.disabled : false;
+                  return (
+                    <button
+                      key={a.label}
+                      disabled={disabled}
+                      onClick={() => {
+                        haptic(6);
+                        a.run();
+                        if (!('keep' in a && a.keep)) setMobileMenuOpen(false);
+                      }}
+                      className="flex items-center gap-2.5 px-3 h-12 rounded-xl text-[12.5px] font-semibold text-left disabled:opacity-35 active:scale-[0.97] transition-transform"
+                      style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                    >
+                      <Icon size={16} style={{ color: headerInactive, flexShrink: 0 }} />
+                      <span className="truncate">{a.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Prayer times, full day — the header only has room for the next one. */}
+              {prayer.enabled && todayPrayerList.length > 0 && (
+                <div>
+                  <div className="text-[11px] font-bold uppercase tracking-wider mb-1.5" style={{ color: menuSub }}>
+                    Prayer times · {prayer.city}
+                  </div>
+                  <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
+                    {todayPrayerList.map((p, i) => {
+                      const done = isPrayerDone(p.dateStr, p.key);
+                      const isNext = nextPrayer?.key === p.key;
+                      return (
+                        <button
+                          key={p.id}
+                          onClick={() => { haptic(6); togglePrayerDone(p.dateStr, p.key); }}
+                          className="w-full px-3 h-11 flex items-center gap-2.5 text-left active:opacity-60 transition-opacity"
+                          style={{
+                            background: isNext ? `${prayer.color}1f` : surfaceBg,
+                            borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
+                          }}
+                        >
+                          <span style={{ color: prayer.color }}>
+                            {done ? <CheckCircle2 size={15} /> : <Circle size={15} />}
+                          </span>
+                          <span
+                            className="flex-1 text-[13px] font-semibold"
+                            style={{ color: isNext ? prayer.color : menuText, textDecoration: done ? 'line-through' : 'none', opacity: done ? 0.55 : 1 }}
+                          >{p.label}</span>
+                          <span className="text-[13px] font-bold tabular-nums" style={{ color: isNext ? prayer.color : menuText }}>
+                            {formatTimeLabel(p.minutes, timeFormat)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </MobileSheet>
+        </>
+      )}
     </div>
+  );
+}
+
+/**
+ * A bottom sheet: the phone's stand-in for a dropdown, a popover and a dialog
+ * all at once. Slides up from the bottom edge (where the thumb is), dims what
+ * it covers, and closes on the backdrop, the Escape key or a swipe of its
+ * handle. Rendered through a portal so it escapes the root's `zoom` and the
+ * grid's overflow clipping and can genuinely cover the screen.
+ */
+function MobileSheet({
+  open, onClose, title, subtitle, children, theme,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  theme: { darkMode: boolean; menuBg: string; menuText: string; menuSub: string; surfaceBg: string; surfaceBdr: string };
+}) {
+  const [dragY, setDragY] = useState(0);
+  const startRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!open) { setDragY(0); startRef.current = null; return; }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  return createPortal(
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            key="scrim"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onClick={onClose}
+            className="fixed inset-0 z-[90]"
+            // No backdrop-filter. Blurring a full-screen scrim means re-blurring
+            // the entire calendar behind it on EVERY frame of the sheet's slide,
+            // which is what made this feel like 20fps on a phone. A slightly
+            // darker flat scrim reads the same and costs one composited layer.
+            style={{ background: 'rgba(0,0,0,0.58)', willChange: 'opacity' }}
+          />
+          <motion.div
+            key="sheet"
+            initial={{ y: '100%' }}
+            animate={{ y: dragY }}
+            exit={{ y: '100%' }}
+            transition={startRef.current !== null
+              ? { duration: 0 }
+              : { type: 'spring', stiffness: 460, damping: 42 }}
+            className="fixed inset-x-0 bottom-0 z-[91] flex flex-col overflow-hidden"
+            style={{
+              maxHeight: '85dvh',
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              background: theme.menuBg,
+              borderTop: `1px solid ${theme.surfaceBdr}`,
+              // A 50px-blur shadow on a moving element is re-rastered every
+              // frame; a tighter one looks the same at this size and is cheap.
+              boxShadow: '0 -6px 18px rgba(0,0,0,0.30)',
+              // Own compositor layer for the slide, and a promise that nothing
+              // inside can affect layout outside — so the sheet animates without
+              // dragging the calendar's layout along with it.
+              willChange: 'transform',
+              contain: 'paint',
+            }}
+          >
+            <div
+              className="flex-shrink-0 pt-2.5 pb-1 flex items-center justify-center cursor-grab"
+              style={{ touchAction: 'none' }}
+              onPointerDown={e => {
+                (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                startRef.current = e.clientY;
+              }}
+              onPointerMove={e => {
+                if (startRef.current === null) return;
+                setDragY(Math.max(0, e.clientY - startRef.current));
+              }}
+              onPointerUp={e => {
+                if (startRef.current === null) return;
+                const travelled = e.clientY - startRef.current;
+                startRef.current = null;
+                setDragY(0);
+                if (travelled > 90) onClose();
+              }}
+              onPointerCancel={() => { startRef.current = null; setDragY(0); }}
+            >
+              <div className="w-10 h-1 rounded-full" style={{ background: theme.surfaceBdr }} />
+            </div>
+
+            <div className="px-4 pb-2 flex items-center justify-between gap-3 flex-shrink-0">
+              <div className="min-w-0">
+                <div className="text-[16px] font-bold tracking-tight truncate" style={{ color: theme.menuText }}>{title}</div>
+                {subtitle && <div className="text-[11px] truncate" style={{ color: theme.menuSub }}>{subtitle}</div>}
+              </div>
+              <button
+                onClick={onClose}
+                className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 active:scale-90 transition-transform"
+                style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}`, color: theme.menuSub }}
+                title="Close"
+              >
+                <X size={17} />
+              </button>
+            </div>
+
+            <div
+              className="px-4 pt-1 overflow-y-auto touch-scroll"
+              style={{ paddingBottom: 'calc(var(--safe-bottom) + 18px)' }}
+            >
+              {children}
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>,
+    document.body,
   );
 }

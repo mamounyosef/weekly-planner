@@ -30,6 +30,22 @@ SERVER_FLAGS = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
 
 SERVER_LOG = os.path.join(os.environ.get("TEMP", "."), "planner-server.log")
 
+# Chrome puts a window nobody is looking at to sleep: timers in a minimised or
+# fully-covered page are throttled to roughly once a minute. This is not a
+# background tab in a normal browser — it is the planner itself, and being asleep
+# means the clock stops, the desk controller stops publishing to the LCD, and a
+# pending countdown or away-timeout freezes until the window is clicked. These
+# flags only take effect because the app runs from its own --user-data-dir, and
+# so is a fresh Chrome instance rather than a window joining an existing one.
+AWAKE_FLAGS = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    # The above three predate "intensive throttling", which is the one that
+    # imposes the once-a-minute ceiling after five minutes hidden.
+    "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion",
+]
+
 BROWSERS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -101,7 +117,7 @@ def main():
 
     for exe in BROWSERS:
         if os.path.exists(exe):
-            spawn([exe, "--app=" + APP_URL, "--user-data-dir=" + PROFILE])
+            spawn([exe, "--app=" + APP_URL, "--user-data-dir=" + PROFILE] + AWAKE_FLAGS)
             break
     else:
         os.startfile(APP_URL)

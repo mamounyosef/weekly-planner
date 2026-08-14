@@ -487,6 +487,17 @@ static void renderLcd(bool linkUp) {
     return;
   }
 
+  // The server answers "offline" when it is up but no app window is driving the
+  // controller -- which is the normal state for the first several seconds after
+  // the PC boots, since the board is already running by then. This used to fall
+  // through to the branch below and draw "Ready / 0m 0 done": not a delay but a
+  // flat lie, indistinguishable from a real day with no sessions in it.
+  if (ui.mode == "offline") {
+    lcdShow(0, "Waiting for app");
+    lcdShow(1, "Planner not open");
+    return;
+  }
+
   if (ui.mode == "arming") {
     lcdShow(0, "Starting in " + String(ui.armSeconds) + "s");
   } else if (ui.mode == "running") {
@@ -863,7 +874,10 @@ void loop() {
   externalLeds(linkUp && ui.mode == "running");
 
   LedState led;
-  if (!linkUp) led = LED_OFFLINE;
+  // An app that is not there yet is as good as no link as far as the status
+  // light is concerned -- it must not sit on the calm idle colour as though
+  // everything were up and simply quiet.
+  if (!linkUp || ui.mode == "offline") led = LED_OFFLINE;
   else if (ui.mode == "arming") led = LED_ARMING;
   else if (ui.mode == "running") led = LED_RUNNING;
   else led = LED_IDLE;

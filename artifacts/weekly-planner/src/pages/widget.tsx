@@ -67,6 +67,7 @@ import {
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, parseDate, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
 import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
+import { fetchDeviceSettings, loadDeviceSettingsLocal, subscribeDeviceSettings } from '@/lib/deviceSettings';
 import { matchesCombo, formatCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
 import {
   coercePrayerSettings,
@@ -290,6 +291,8 @@ export default function Widget() {
   const [nowTick, setNowTick]           = useState(Date.now());
   const [isPinned, setIsPinned]         = useState(true);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  /** True once the sessions have been read from the server at least once. */
+  const [focusSessionsHydrated, setFocusSessionsHydrated] = useState(false);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
   const [hardware, setHardware] = useState<HardwareSettings>(DEFAULT_HARDWARE_SETTINGS);
@@ -346,20 +349,19 @@ export default function Widget() {
     loadTasks();
 
     // Settings come from the shared backend so the widget always matches the main window.
+    // EXCEPT the keys that belong to this screen rather than to the plan —
+    // dark mode, the grid interval, the visible hour window. The side window
+    // lives on the same machine as the main window, so it takes those from the
+    // per-device store instead; reading them from the shared file would make it
+    // wear whatever theme the phone last chose.
     const applySettings = (s: any) => {
       if (s && typeof s === 'object') {
-        if (s.interval != null) setIntervalOpt(s.interval as IntervalMin);
-        if (typeof s.darkMode === 'boolean') setDarkMode(s.darkMode);
-        if (s.eventColorStyle) setEventColorStyle(s.eventColorStyle as EventCardStyle);
         if (s.widgetDarkPreset) setWidgetDarkPreset(s.widgetDarkPreset as DarkPreset);
         if (s.widgetLightPreset) setWidgetLightPreset(s.widgetLightPreset as LightPreset);
         if (s.timeFormat) setTimeFormat(s.timeFormat as TimeFormat);
         if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
-        if (s.dayStartH != null) setDayStartH(s.dayStartH);
-        if (s.dayEndH != null) setDayEndH(s.dayEndH);
         if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
         if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
-        if (typeof s.showTaskRow === 'boolean') setShowTaskRow(s.showTaskRow);
         if (s.taskColor) setTaskColor(s.taskColor);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
@@ -377,12 +379,27 @@ export default function Widget() {
       }
     };
 
+    // This machine's own look and grid, shared with the main planner window.
+    const applyDevice = (raw: any) => {
+      if (!raw || typeof raw !== 'object') return;
+      if (typeof raw.darkMode === 'boolean') setDarkMode(raw.darkMode);
+      if (raw.eventColorStyle) setEventColorStyle(raw.eventColorStyle as EventCardStyle);
+      if (raw.interval != null) setIntervalOpt(raw.interval as IntervalMin);
+      if (raw.dayStartH != null) setDayStartH(raw.dayStartH);
+      if (raw.dayEndH != null) setDayEndH(raw.dayEndH);
+      if (typeof raw.showTaskRow === 'boolean') setShowTaskRow(raw.showTaskRow);
+    };
+    applyDevice(loadDeviceSettingsLocal());
+    fetchDeviceSettings().then(applyDevice).catch(() => {});
+    const unsubDevice = subscribeDeviceSettings(applyDevice);
+
     const unsubSettings = subscribeSettingsChange(applySettings);
     const loadSettings = () => {
       fetch('/api/settings')
         .then(r => r.json())
         .then(applySettings)
         .catch(err => console.error('Failed to sync widget settings:', err));
+      fetchDeviceSettings().then(applyDevice).catch(() => {});
     };
 
     const applyEvents = (data: any) => {
@@ -400,13 +417,19 @@ export default function Widget() {
     const applyFocusSessions = (data: unknown) => {
       const sessions = safeFocusSessions(data);
       setFocusSessions(sessions);
+      setFocusSessionsHydrated(true);
       localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
     };
     const loadFocusSessions = () => {
       fetch('/api/focus-sessions')
         .then(r => r.json())
         .then(applyFocusSessions)
-        .catch(err => console.error('Failed to sync focus sessions:', err));
+        .catch(err => {
+          console.error('Failed to sync focus sessions:', err);
+          // The cached copy is all we are going to get; better the LCD mirrors
+          // it than sits on "waiting" forever.
+          setFocusSessionsHydrated(true);
+        });
     };
 
     const handleStorage = (event: StorageEvent) => {
@@ -514,6 +537,8 @@ export default function Widget() {
       clearInterval(checkpointId);
       if (timerStream) timerStream.close();
       if (dbStream) dbStream.close();
+      unsubSettings();
+      unsubDevice();
       window.removeEventListener('pointerdown', unlockAudio);
       window.removeEventListener('keydown', unlockAudio);
       window.removeEventListener('focus', unlockAudio);
@@ -1114,6 +1139,9 @@ export default function Widget() {
       remainingSeconds: focusRemainingSeconds,
       todaySeconds: todayFocusSeconds,
       sessionsToday: todayFocusSessions,
+      // Until both have arrived from the server this window's totals are a
+      // guess, and a guess on the LCD reads exactly like a fact.
+      ready: timerHydratedRef.current && focusSessionsHydrated,
     },
     onToggle: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
     onStart: startFocus,
@@ -1122,6 +1150,19 @@ export default function Widget() {
     onTerminate: stopFocus,
   });
   const hardwareArmSeconds = hardwareController.armSeconds;
+
+  // Nothing on screen owns the desk countdown, so a deliberate start/pause or
+  // stop during it means "call it off" rather than "start it now".
+  const { reportManualStop } = hardwareController;
+  const toggleFocus = () => {
+    if (hardwareArmSeconds > 0) { reportManualStop(); return; }
+    if (focusTimer.isRunning) pauseFocus(); else startFocus();
+  };
+  const stopFocusByHand = () => {
+    reportManualStop();
+    if (hardwareArmSeconds > 0) return;
+    stopFocus();
+  };
 
   const setFocusMinutes = (minutes: number) => {
     const safeMinutes = Math.max(1, Math.floor(minutes));
@@ -1161,16 +1202,12 @@ export default function Widget() {
         scrollToLive();
       } else if (matchesCombo(shortcuts.widgetStart, e)) {
         e.preventDefault();
-        if (focusTimer.isRunning) {
-          pauseFocus();
-        } else {
-          startFocus();
-        }
+        toggleFocus();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [adjustFocusMinutes, shortcuts, scrollToLive, focusTimer.isRunning, pauseFocus, startFocus]);
+  }, [adjustFocusMinutes, shortcuts, scrollToLive, toggleFocus]);
 
   const commitFocusMinutesDraft = () => {
     const parsed = Number(focusMinutesDraft);
@@ -1509,7 +1546,7 @@ export default function Widget() {
           </div>
           <div className="px-3 pb-3 grid grid-cols-4 gap-1.5">
             <button
-              onClick={focusTimer.isRunning ? pauseFocus : startFocus}
+              onClick={toggleFocus}
               className="col-span-2 h-8 rounded-md flex items-center justify-center gap-1.5 text-xs font-semibold transition-all active:scale-[0.98]"
               style={{
                 background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
@@ -1517,8 +1554,10 @@ export default function Widget() {
                 color: focusTimer.isRunning ? '#fbbf24' : '#ffffff',
               }}
             >
-              {focusTimer.isRunning ? <Pause size={13} /> : <Play size={13} />}
-              {focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
+              {/* While the desk countdown runs this is the way out of a session
+                  you did not ask for, so it says so rather than "Start". */}
+              {hardwareArmSeconds > 0 ? <X size={13} /> : focusTimer.isRunning ? <Pause size={13} /> : <Play size={13} />}
+              {hardwareArmSeconds > 0 ? 'Cancel' : focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
             </button>
             <button
               onClick={resetFocus}
@@ -1535,7 +1574,7 @@ export default function Widget() {
               <RotateCcw size={13} />
             </button>
             <button
-              onClick={stopFocus}
+              onClick={stopFocusByHand}
               disabled={focusElapsedSeconds <= 0}
               className="h-8 rounded-md flex items-center justify-center transition-all active:scale-[0.98]"
               title="Stop and log focus time"

@@ -64,6 +64,19 @@ interface TasksPanelProps {
   onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
   onResize: (w: number) => void;
   onClose: () => void;
+  /**
+   * Phone mode. A 340px column docked beside the calendar is most of a phone
+   * screen, so on a narrow layout the panel becomes a bottom sheet instead:
+   * it slides up over the grid, dims what's behind it, and is dismissed by
+   * swiping the grab handle back down.
+   */
+  sheet?: boolean;
+  /**
+   * Phone: render as a full screen of its own — the Tasks tab is a page beside
+   * the calendar, not a layer on top of it. Implies `sheet`'s width behaviour
+   * but drops the scrim, the slide-up and the grab handle.
+   */
+  page?: boolean;
 }
 
 const COMPLETED_COLLAPSED_KEY = 'planner-tasks-completed-collapsed';
@@ -117,6 +130,8 @@ function useTaskRows(tasks: TaskData, today: string): Row[] {
 function TasksPanel({
   open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle', theme,
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
+  sheet = false,
+  page = false,
 }: TasksPanelProps) {
   const today = todayYmd();
   const tomorrow = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd'), [today]);
@@ -275,6 +290,14 @@ function TasksPanel({
     applyManualOrder(reordered);
   }, [applyManualOrder]);
 
+  // Phone sheet: how far the grab handle has been pulled down, so the sheet can
+  // follow the finger and spring back if the pull wasn't far enough to dismiss.
+  const [sheetDragY, setSheetDragY] = useState(0);
+  const [sheetDragging, setSheetDragging] = useState(false);
+  const sheetStartRef = useRef<number | null>(null);
+  // A sheet reopened after being dragged must start flush, never mid-pull.
+  useEffect(() => { if (!open) { setSheetDragY(0); setSheetDragging(false); sheetStartRef.current = null; } }, [open]);
+
   // Resize drag handle
   const dragRef = useRef<{ startX: number; startW: number } | null>(null);
   const onHandleDown = (e: React.MouseEvent) => {
@@ -339,9 +362,64 @@ function TasksPanel({
   }, [onToggleDone]);
 
   return (
+    <>
+      {/* Phone: the dimmed backdrop. Tapping it is the fastest way out, which
+          matters because the sheet covers the calendar you were just reading. */}
+      {sheet && !page && (
+        <div
+          onClick={onClose}
+          aria-hidden
+          className="fixed inset-0 z-[80]"
+          style={{
+            // Flat, not blurred: a backdrop-filter here forces the whole
+            // calendar underneath to be re-blurred on every frame the sheet
+            // slides, which is exactly the stutter this panel used to have.
+            background: 'rgba(0,0,0,0.55)',
+            willChange: 'opacity',
+            opacity: open ? 1 : 0,
+            pointerEvents: open ? 'auto' : 'none',
+            transition: 'opacity 220ms ease',
+          }}
+        />
+      )}
     <aside
-      className="flex-shrink-0 overflow-hidden relative shadow-lg"
-      style={{
+      className={page
+        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden'
+        : sheet
+        ? 'fixed inset-x-0 bottom-0 z-[81] overflow-hidden shadow-2xl'
+        : 'flex-shrink-0 overflow-hidden relative shadow-lg'}
+      style={page ? {
+        // Its own screen, not a sheet over the calendar: no scrim to composite,
+        // no slide to animate and nothing rendered underneath. Switching tabs is
+        // a plain show/hide, which is the only version of this that can't drop
+        // frames on a phone.
+        bottom: 'var(--bottom-nav-h)',
+        paddingTop: 'var(--safe-top)',
+        background: theme.menuBg,
+        display: open ? undefined : 'none',
+      } : sheet ? {
+        // Stops at the tab bar rather than sliding under it: the bar stays
+        // usable (tap Calendar to get straight back) and the composer at the
+        // foot of the list is never hidden behind it.
+        bottom: 'var(--bottom-nav-h)',
+        // Not full height — leaving the top of the calendar peeking through is
+        // what makes a sheet read as "on top of" rather than "instead of", and
+        // it gives the eye somewhere to tap to dismiss.
+        height: 'calc(86dvh - var(--bottom-nav-h))',
+        borderTopLeftRadius: 18,
+        borderTopRightRadius: 18,
+        borderTop: `1px solid ${theme.surfaceBdr}`,
+        background: theme.menuBg,
+        transform: open ? `translateY(${sheetDragY}px)` : 'translateY(110%)',
+        // No transition while a finger is on the handle — the sheet has to
+        // track the drag exactly, or it feels like it's on elastic.
+        transition: sheetDragging ? 'none' : 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)',
+        visibility: open ? 'visible' : 'hidden',
+        // Keep the sheet on its own compositor layer and stop its contents from
+        // participating in the page's layout/paint while it slides.
+        willChange: 'transform',
+        contain: 'paint',
+      } : {
         // Plain CSS transition rather than a JS-driven one. Width is a layout
         // property either way, but framer-motion also ran a per-frame rAF that
         // wrote inline styles from JS — on top of the reflow the calendar next
@@ -362,15 +440,44 @@ function TasksPanel({
     >
       {/* Fixed inner width so the panel's own contents never re-layout while the
           shell animates — only the shell's clip rectangle moves. */}
-      <div className="h-full flex flex-col select-none" style={{ width, background: theme.menuBg }}>
-        {/* Resize handle */}
-        <div
-          onMouseDown={onHandleDown}
-          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-30 transition-colors"
-          onMouseEnter={e => (e.currentTarget.style.background = `${theme.accent}55`)}
-          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-          title="Drag to resize tasks panel"
-        />
+      <div className="h-full flex flex-col select-none" style={{ width: sheet ? '100%' : width, background: theme.menuBg }}>
+        {page ? null : sheet ? (
+          /* Grab handle. Swiping it down past a third of the sheet dismisses;
+             anything less springs back, so a hesitant drag never loses the list. */
+          <div
+            className="flex-shrink-0 flex items-center justify-center py-2.5 cursor-grab"
+            style={{ touchAction: 'none' }}
+            onPointerDown={e => {
+              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+              sheetStartRef.current = e.clientY;
+              setSheetDragging(true);
+            }}
+            onPointerMove={e => {
+              if (sheetStartRef.current === null) return;
+              setSheetDragY(Math.max(0, e.clientY - sheetStartRef.current));
+            }}
+            onPointerUp={e => {
+              if (sheetStartRef.current === null) return;
+              const travelled = e.clientY - sheetStartRef.current;
+              sheetStartRef.current = null;
+              setSheetDragging(false);
+              setSheetDragY(0);
+              if (travelled > (e.currentTarget as HTMLElement).ownerDocument.defaultView!.innerHeight * 0.18) onClose();
+            }}
+            onPointerCancel={() => { sheetStartRef.current = null; setSheetDragging(false); setSheetDragY(0); }}
+          >
+            <div className="w-10 h-1 rounded-full" style={{ background: theme.surfaceBdr, opacity: 0.9 }} />
+          </div>
+        ) : (
+          /* Resize handle */
+          <div
+            onMouseDown={onHandleDown}
+            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-30 transition-colors"
+            onMouseEnter={e => (e.currentTarget.style.background = `${theme.accent}55`)}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            title="Drag to resize tasks panel"
+          />
+        )}
 
         {/* Header */}
         <div
@@ -749,6 +856,7 @@ function TasksPanel({
         </div>
       </div>
     </aside>
+    </>
   );
 }
 

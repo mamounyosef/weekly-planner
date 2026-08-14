@@ -2,7 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <!-- viewport-fit=cover lets the app paint under the notch and the home bar;
+         the layout pays that back with env(safe-area-inset-*) padding. Browser
+         pinch-zoom stays off because the app has its own zoom (per device) and
+         a double-tap zoom on a calendar grid fights every drag gesture. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>Weekly Planner</title>
     <meta name="description" content="Weekly Planner — built on Replit. Update this description to reflect the app." />
     <meta name="robots" content="index, follow" />
@@ -12,14 +16,36 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Weekly Planner" />
     <meta name="twitter:description" content="Weekly Planner — built on Replit. Update this description to reflect the app." />
+    <!-- Chrome paints the address bar with this. Kept in sync with the live theme
+         at runtime (see home.tsx) so the bar matches the chosen preset exactly. -->
+    <meta name="theme-color" content="#050506" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Planner" />
+    <meta name="format-detection" content="telephone=no" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="shortcut icon" href="/favicon-v4.ico" />
     <link rel="icon" type="image/png" href="/app-icon-v4.png" />
+    <link rel="apple-touch-icon" href="/app-icon-v4.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   </head>
   <body>
     <div id="root"></div>
+    <!-- Registering a (deliberately pass-through) service worker is what makes
+         Chrome offer a real "Install app" instead of a shortcut that reopens in
+         a browser tab with the address bar. Secure contexts only, which covers
+         localhost and the public https address. -->
+    <script>
+      if ('serviceWorker' in navigator && window.isSecureContext) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function () {});
+        });
+      }
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -233,3 +233,127 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
   }
 }
 
+/* ══ Mobile / touch foundation ════════════════════════════════════════════
+   Everything below exists because a phone browser is not a small desktop: it
+   has a moving viewport, a notch, a home bar, a 300ms tap delay, a rubber-band
+   overscroll that reloads the page, and fingers instead of a 1px cursor. */
+
+:root {
+  /* Safe areas, resolved once so layout code can just read the variable.
+     Zero on every desktop browser, so the same rules are harmless there. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  /* Height of the phone tab bar, including the home-bar inset beneath it.
+     0 on desktop; the mobile shell sets the real value on <html>. */
+  --bottom-nav-h: 0px;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  /* Chrome's pull-to-refresh would reload the whole planner mid-scroll, and
+     the horizontal chain would bounce the page while swiping between weeks. */
+  overscroll-behavior: none;
+  /* The grey flash Android draws over every tapped element; the app has its
+     own press states and the flash just makes them look broken. */
+  -webkit-tap-highlight-color: transparent;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* A tapped control should never be left showing a text-selection caret or a
+   half-selected label. Inputs obviously keep both. */
+@media (pointer: coarse) {
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    /* Removes the legacy 300ms wait for a possible double-tap. */
+    touch-action: manipulation;
+  }
+  input, textarea, [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  /* iOS Safari zooms the whole page in when a font smaller than 16px gets
+     focus, and never zooms back out. 16px on every text input prevents it. */
+  input[type="text"], input[type="number"], input[type="search"],
+  input[type="email"], input[type="url"], input[type="time"],
+  input[type="date"], input[type="password"], input:not([type]), textarea, select {
+    font-size: max(16px, 1em);
+  }
+  /* Scrollbars are overlays on touch platforms; a 6px track just eats width. */
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+  /* Hover styling latches on touch (it "sticks" until you tap elsewhere), so
+     the press feedback is what carries the interaction instead. */
+  button:not(:disabled):active,
+  [role="button"]:active {
+    transform: scale(0.96);
+  }
+}
+
+/* Momentum scrolling + a scroll container that doesn't chain to the page. */
+.touch-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* Applied to the grid while a touch drag is armed: without it the browser
+   keeps scrolling the column out from under the finger that is moving an
+   event, and the drag "slips". */
+.dragging-touch,
+.dragging-touch * {
+  touch-action: none !important;
+}
+
+/* Hide the scrollbar but keep the scrolling — used by the horizontally
+   snapping week strip, where a visible bar would sit on top of Sunday. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Bottom sheets: the tasks drawer, the event editor and every modal on a
+   phone. Rounded top, safe-area padding, and a grab handle. */
+.sheet-safe-bottom {
+  padding-bottom: calc(var(--safe-bottom) + 12px);
+}
+
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-sheet-up {
+  animation: sheet-up 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* The finger-sized minimum. Applied to icon buttons on touch devices so a
+   14px icon still has a 44px target around it without changing the visuals. */
+@media (pointer: coarse) {
+  .touch-target {
+    position: relative;
+  }
+  .touch-target::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 100%;
+    height: 100%;
+    min-width: 44px;
+    min-height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}
+

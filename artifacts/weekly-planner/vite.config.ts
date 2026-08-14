@@ -249,6 +249,79 @@ export default defineConfig({
           const fs = await import('fs/promises');
           const path = await import('path');
 
+          // ── Password gate for the public (Tailscale Funnel) address ──────
+          // Funnel puts this server on the open internet and the app has no
+          // login of its own, so anyone with the link would get full read/write
+          // on the calendar. Traffic that arrives through the funnel is proxied
+          // by tailscaled, which stamps `x-forwarded-for`; direct traffic from
+          // this PC or the home LAN carries no such header and is left alone, so
+          // the desktop window, the widget and the phone at home never see a
+          // prompt. Credentials live in database/public-access.json.
+          const accessPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'public-access.json');
+          let access: { enabled?: boolean; user?: string; password?: string } | null = null;
+          try {
+            access = JSON.parse(await fs.readFile(accessPath, 'utf8'));
+          } catch {
+            access = null;
+          }
+          const isLocalAddr = (raw: string) => {
+            const ip = raw.replace(/^::ffff:/, '');
+            return (
+              ip === '127.0.0.1' || ip === '::1' || ip.startsWith('10.') ||
+              ip.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+            );
+          };
+          // A browser only remembers Basic credentials for as long as the tab
+          // lives, so a phone would be asked again every time Chrome restarts.
+          // On the first successful sign-in the response drops a year-long
+          // cookie carrying a hash of the credentials, and every later request
+          // is let through on that cookie alone — one prompt per device, ever.
+          // Changing the password changes the hash, which logs every device out.
+          const { createHash } = await import('crypto');
+          const accessToken = access?.password
+            ? createHash('sha256')
+                .update(`${access.user || 'planner'}:${access.password}`)
+                .digest('hex')
+            : '';
+          const COOKIE = 'planner_access';
+          // Chrome does not build the installable app on the phone: it sends the
+          // manifest and icon URLs to Google's WebAPK service, which fetches them
+          // ANONYMOUSLY. Behind the password gate those fetches got a 401, the
+          // build failed, and "Install" silently degraded to a plain shortcut
+          // that reopens in a tab with the address bar — which is exactly the
+          // "still not fullscreen" symptom. These files hold no personal data,
+          // so they are served to anyone; everything else stays gated.
+          const publicPaths = new Set([
+            '/manifest.webmanifest', '/sw.js', '/favicon.ico', '/favicon-v4.ico',
+            '/favicon.svg', '/app-icon-192.png', '/app-icon-512.png',
+            '/app-icon-v4.png', '/app-icon.png',
+          ]);
+          server.middlewares.use((req, res, next) => {
+            if (!access?.enabled || !access.password) return next();
+            if (publicPaths.has((req.url || '').split('?')[0])) return next();
+            const remote = req.socket?.remoteAddress || '';
+            const proxied = Boolean(req.headers['x-forwarded-for']);
+            if (!proxied && isLocalAddr(remote)) return next();
+            if (String(req.headers.cookie || '').split(';').some(
+              (c) => c.trim() === `${COOKIE}=${accessToken}`,
+            )) return next();
+            const header = String(req.headers.authorization || '');
+            if (header.startsWith('Basic ')) {
+              const [user, ...rest] = Buffer.from(header.slice(6), 'base64')
+                .toString('utf8').split(':');
+              if (user === (access.user || 'planner') && rest.join(':') === access.password) {
+                res.setHeader(
+                  'Set-Cookie',
+                  `${COOKIE}=${accessToken}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`,
+                );
+                return next();
+              }
+            }
+            res.statusCode = 401;
+            res.setHeader('WWW-Authenticate', 'Basic realm="Weekly Planner", charset="UTF-8"');
+            res.end('Authentication required');
+          });
+
           // ── Crash-proof "open in editor" ─────────────────────────────────
           // Vite 7's launchEditor calls onErrorCallback() on its Windows UNC-path
           // guard, but Vite registers /__open-in-editor without that callback, so
@@ -2205,6 +2278,77 @@ export default defineConfig({
           }
         });
 
+        // ── Per-device settings ──────────────────────────────────────────────
+        // Which view, how far zoomed, how wide the tasks panel: preferences that
+        // belong to a SCREEN rather than to the plan. Keyed by a device id the
+        // browser mints once, so the phone and the desktop each remember their
+        // own layout instead of overwriting each other through settings.json.
+        server.middlewares.use('/api/device-settings', async (req, res, next) => {
+          const devicePath = path.resolve(import.meta.dirname, '..', '..', 'database', 'device-settings.json');
+          const readAll = async (): Promise<Record<string, any>> => {
+            const raw = await readJsonSafe(devicePath, {});
+            return raw && typeof raw === 'object' ? raw as Record<string, any> : {};
+          };
+
+          if (req.method === 'GET') {
+            const params = new URL(req.url || '', 'http://localhost').searchParams;
+            const device = params.get('device') || '';
+            const kind = params.get('kind') || '';
+            const all = await readAll();
+            let entry = device ? all[device] : null;
+            // Unknown id (cleared site data, new browser profile): fall back to the
+            // most recently used device of the same kind, so a phone lands on the
+            // phone's layout rather than inheriting the desktop's.
+            if (!entry && kind) {
+              const sameKind = Object.values(all)
+                .filter((e: any) => e && e.kind === kind)
+                .sort((a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0));
+              if (sameKind.length) entry = { ...sameKind[0], inherited: true };
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(entry || {}));
+            return;
+          }
+
+          if (req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => { body += chunk; });
+            req.on('end', async () => {
+              res.setHeader('Content-Type', 'application/json');
+              try {
+                const parsed = JSON.parse(body || '{}');
+                const device = String(parsed.device || '').trim();
+                if (!device || !parsed.settings || typeof parsed.settings !== 'object') {
+                  res.statusCode = 400;
+                  res.end(JSON.stringify({ error: 'device and settings are required' }));
+                  return;
+                }
+                const all = await readAll();
+                all[device] = {
+                  kind: typeof parsed.kind === 'string' ? parsed.kind : 'desktop',
+                  label: typeof parsed.label === 'string' ? parsed.label : 'Device',
+                  updatedAt: Date.now(),
+                  settings: parsed.settings,
+                };
+                // Cap the file: one entry per browser profile adds up over years of
+                // private windows and reinstalls, and none of it is worth keeping.
+                const entries = Object.entries(all)
+                  .sort((a: any, b: any) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0))
+                  .slice(0, 24);
+                await fsp.mkdir(path.dirname(devicePath), { recursive: true });
+                await fsp.writeFile(devicePath, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf-8');
+                res.end(JSON.stringify({ success: true }));
+              } catch (err) {
+                res.statusCode = 500;
+                res.end(JSON.stringify({ error: 'Failed to write device settings' }));
+              }
+            });
+            return;
+          }
+
+          next();
+        });
+
         // ── Automated backups ────────────────────────────────────────────────
         {
           const rootDir = path.resolve(import.meta.dirname, '..', '..');
@@ -2570,6 +2714,28 @@ export default defineConfig({
         // away, so the session would neither terminate nor resume.
         let hwController: Record<string, unknown> = { present: false, armingUntil: null, awaySince: null, stoppedByHand: false };
 
+        // --- app <- server: a heartbeat to drive the controller's poll loop ---
+        //
+        // setInterval is not a reliable clock in a window nobody is looking at.
+        // Chrome throttles timers in a hidden, minimised or fully-covered page
+        // to roughly once a minute, so the controller simply stopped: the LCD
+        // went to "waiting for app", and worse, a pending countdown or away
+        // timeout sat frozen until the window was clicked. Delivery of a network
+        // message is not throttled that way, so the beat comes from here
+        // instead and the page merely reacts to it.
+        server.middlewares.use('/api/hardware/tick', (req, res, next) => {
+          if (req.method !== 'GET') return next();
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+          });
+          const beat = setInterval(() => {
+            try { res.write(`data: ${Date.now()}\n\n`); } catch (_) { /* closing */ }
+          }, 500);
+          req.on('close', () => clearInterval(beat));
+        });
+
         server.middlewares.use('/api/hardware', async (req, res, next) => {
           const url = new URL(req.url ?? '', 'http://x');
           const route = url.pathname.replace(/\/+$/, '');
@@ -2797,6 +2963,22 @@ export default defineConfig({
             return;
           }
           lastToggleAt = nowMs;
+
+          // A countdown the sensor started has to be callable off from the
+          // system-wide hotkey. Pressed during those seconds it means "not this
+          // one" -- previously it started the session immediately instead, and
+          // since the countdown belongs to no window there was no other way to
+          // stop it short of standing up and walking away.
+          const armingUntil = hwController.armingUntil;
+          if (typeof armingUntil === 'number' && Number.isFinite(armingUntil) && armingUntil > nowMs) {
+            hwController = { ...hwController, armingUntil: null, stoppedByHand: true };
+            hwEvents.push({ id: ++hwEventSeq, type: 'manual_stop', at: nowMs });
+            while (hwEvents.length > 50) hwEvents.shift();
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: true, cancelledArm: true }));
+            return;
+          }
+
           const fs = await import('fs/promises');
           const path = await import('path');
           const timerPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-timer.json');
@@ -2938,6 +3120,104 @@ export default defineConfig({
             next();
           }
         });
+
+        // ── Serve the optimised production bundle ──────────────────────────
+        // Registered last, so every /api route above still wins. Everything
+        // else is answered from dist/ instead of Vite's dev pipeline.
+        //
+        // This is the single biggest thing for phone performance. In dev mode
+        // the browser fetches ~700 unbundled ES modules one at a time (brutal
+        // over a tunnel) and runs React's development build, whose reconciler
+        // is several times slower than the production one and which re-renders
+        // components twice under StrictMode. A mid-range phone feels every bit
+        // of that. The built bundle is minified, tree-shaken, served as a
+        // handful of files and cached forever by hash.
+        //
+        // The API middlewares above stay exactly as they are — this is still
+        // one process, so the Google sync engine's ssrLoadModule still works.
+        // Set PLANNER_DEV=1 to get the normal HMR dev experience back.
+        if (process.env.PLANNER_DEV !== '1') {
+          const distDir = path.resolve(import.meta.dirname, 'dist', 'public');
+          const distIndex = path.resolve(distDir, 'index.html');
+
+          /** Newest mtime under a directory, so an edit anywhere triggers a rebuild. */
+          const newestUnder = async (dir: string): Promise<number> => {
+            let newest = 0;
+            const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+            for (const entry of entries) {
+              const full = path.join(dir, entry.name);
+              const at = entry.isDirectory()
+                ? await newestUnder(full)
+                : await fs.stat(full).then(s => s.mtimeMs).catch(() => 0);
+              if (at > newest) newest = at;
+            }
+            return newest;
+          };
+
+          const builtAt = await fs.stat(distIndex).then(s => s.mtimeMs).catch(() => 0);
+          const sourceAt = Math.max(
+            await newestUnder(path.resolve(import.meta.dirname, 'src')),
+            await newestUnder(path.resolve(import.meta.dirname, 'public')),
+            await fs.stat(path.resolve(import.meta.dirname, 'index.html')).then(s => s.mtimeMs).catch(() => 0),
+          );
+          // Rebuilding only when a source file is actually newer keeps a normal
+          // start instant; the ~5s build is paid once, after a code change.
+          if (sourceAt > builtAt) {
+            console.log('[planner] app changed — rebuilding the optimised bundle…');
+            const { build } = await import('vite');
+            await build({ logLevel: 'warn' });
+            console.log('[planner] bundle ready.');
+          }
+
+          const MIME: Record<string, string> = {
+            '.html': 'text/html; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.json': 'application/json; charset=utf-8',
+            '.webmanifest': 'application/manifest+json',
+            '.svg': 'image/svg+xml',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp',
+            '.ico': 'image/x-icon',
+            '.woff': 'font/woff',
+            '.woff2': 'font/woff2',
+            '.txt': 'text/plain; charset=utf-8',
+          };
+
+          server.middlewares.use(async (req, res, next) => {
+            if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+            const urlPath = (req.url || '/').split('?')[0];
+            // Dev-only endpoints keep their own handlers.
+            if (urlPath.startsWith('/api/') || urlPath.startsWith('/@') || urlPath.startsWith('/__')) {
+              return next();
+            }
+            let file = path.join(distDir, decodeURIComponent(urlPath));
+            if (!file.startsWith(distDir)) return next();
+            let stat = await fs.stat(file).catch(() => null);
+            // Client-side routes (/settings, /widget) have no file of their own
+            // and must be answered with the shell.
+            if (!stat?.isFile()) {
+              file = distIndex;
+              stat = await fs.stat(file).catch(() => null);
+            }
+            if (!stat?.isFile()) return next();
+            res.setHeader('Content-Type', MIME[path.extname(file).toLowerCase()] || 'application/octet-stream');
+            // Asset filenames carry a content hash, so they can be cached
+            // permanently — that is what stops the phone re-downloading the
+            // whole app over the tunnel on every single open. index.html must
+            // never be cached, or a new build would never be picked up.
+            res.setHeader(
+              'Cache-Control',
+              file.includes(`${path.sep}assets${path.sep}`)
+                ? 'public, max-age=31536000, immutable'
+                : 'no-cache',
+            );
+            if (req.method === 'HEAD') { res.end(); return; }
+            res.end(await fs.readFile(file));
+          });
+        }
       }
     },
     ...(process.env.NODE_ENV !== 'production' &&

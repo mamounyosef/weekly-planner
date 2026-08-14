@@ -52,7 +52,7 @@ class Desk {
     }
   }
 
-  private run(kind: 'presence' | 'button_a' | 'button_b' | 'tick', present?: boolean) {
+  private run(kind: 'presence' | 'button_a' | 'button_b' | 'manual_stop' | 'tick', present?: boolean) {
     const r = reduceHardware(
       this.state,
       { kind, present },
@@ -65,7 +65,7 @@ class Desk {
     this.apply(r.actions);
   }
 
-  event(kind: 'presence' | 'button_a' | 'button_b', present?: boolean) { this.run(kind, present); }
+  event(kind: 'presence' | 'button_a' | 'button_b' | 'manual_stop', present?: boolean) { this.run(kind, present); }
 
   /** Advances time in poll-sized steps. */
   advance(seconds: number) {
@@ -470,6 +470,74 @@ section('Button crosstalk rejection');
   }
   check('pressing A pauses, and does NOT terminate', d.hasSession && !d.isRunning,
     `hasSession=${d.hasSession} running=${d.isRunning}`);
+}
+
+// --- calling off a countdown from the app ---------------------------------
+// The countdown belongs to no window, so before this there was no way to stop
+// one you did not want short of standing up and walking away.
+{
+  const d = new Desk();
+  d.event('presence', true);
+  d.advance(10);
+  check('countdown is pending', armingSecondsLeft(d.state, d.t) > 0, String(armingSecondsLeft(d.state, d.t)));
+  d.event('manual_stop');
+  check('manual stop cancels the countdown', d.state.armingUntil === null, String(d.state.armingUntil));
+  d.advance(120);
+  check('and no session ever starts', !d.hasSession && d.actions.length === 0, d.actions.join(','));
+}
+{
+  // Auto-restart must not simply re-arm the countdown you just called off.
+  const d = new Desk({ autoRestartEnabled: true });
+  d.event('presence', true);
+  d.advance(10);
+  d.event('manual_stop');
+  d.advance(300);
+  check('cancelled countdown is not re-armed while still seated',
+    !d.hasSession && armingSecondsLeft(d.state, d.t) === 0, d.actions.join(','));
+}
+{
+  // ...but leaving and coming back is a fresh intent to work.
+  const d = new Desk({ autoRestartEnabled: true });
+  d.event('presence', true);
+  d.advance(10);
+  d.event('manual_stop');
+  d.advance(10);
+  d.event('presence', false);
+  d.advance(5);
+  d.event('presence', true);
+  d.advance(35);
+  check('returning to the desk arms again', d.hasSession && d.isRunning, d.actions.join(','));
+}
+{
+  // Stopping a live session from the app, not the desk button.
+  const d = new Desk({ autoRestartEnabled: true });
+  d.event('presence', true);
+  d.advance(35);
+  check('session running before the stop', d.isRunning, d.actions.join(','));
+  d.isRunning = false; d.hasSession = false;   // the app performed the stop itself
+  d.event('manual_stop');
+  d.advance(300);
+  check('an app-side stop does not restart the session while seated',
+    !d.hasSession && armingSecondsLeft(d.state, d.t) === 0, d.actions.join(','));
+}
+{
+  // The physical buttons being switched off must not disable the app's own
+  // stop button -- that would leave the countdown uncancellable again.
+  const d = new Desk({ buttonsEnabled: false });
+  d.event('presence', true);
+  d.advance(10);
+  d.event('manual_stop');
+  check('manual stop works with hardware buttons disabled', d.state.armingUntil === null, String(d.state.armingUntil));
+}
+{
+  // A cancel must survive the lease moving to the other window.
+  const d = new Desk({ autoRestartEnabled: true });
+  d.event('presence', true);
+  d.advance(10);
+  d.event('manual_stop');
+  d.handOff();
+  d.advance(120);
+  check('cancel survives a reload / lease hand-off', !d.hasSession, d.actions.join(','));
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);

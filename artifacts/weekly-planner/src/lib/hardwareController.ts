@@ -183,7 +183,13 @@ export interface SessionSnapshot {
 }
 
 export interface HardwareInput {
-  kind: 'presence' | 'button_a' | 'button_b' | 'tick';
+  /**
+   * `manual_stop` is you calling the session off from the app itself -- the
+   * stop button, or the system-wide hotkey pressed during the countdown. The
+   * app has already done whatever needed doing; this only tells the controller
+   * that the decision was yours.
+   */
+  kind: 'presence' | 'button_a' | 'button_b' | 'manual_stop' | 'tick';
   present?: boolean;
 }
 
@@ -227,6 +233,19 @@ export function reduceHardware(
     // this, still being sat at the desk would arm a fresh session moments later.
     next.stoppedByHand = true;
     if (session.hasSession) actions.push('terminate');
+    return { state: next, actions };
+  }
+
+  if (input.kind === 'manual_stop') {
+    // Deliberately not gated on buttonsEnabled: this comes from the app, not
+    // the desk, so turning the physical buttons off must not make the on-screen
+    // stop button unable to call off a countdown.
+    next.armingUntil = null;
+    next.awaySince = null;
+    // Same reasoning as the terminate button: you ended it, so sitting here
+    // should not immediately arm another one. Cleared by leaving and returning.
+    next.stoppedByHand = true;
+    // No actions -- the app performed the stop itself before telling us.
     return { state: next, actions };
   }
 
@@ -339,7 +358,14 @@ export interface HardwareControllerOptions {
   settings: HardwareSettings;
   session: SessionSnapshot;
   /** Numbers the LCD should mirror -- taken from what the app itself displays. */
-  display: Omit<HardwareDisplay, 'armSeconds'>;
+  display: Omit<HardwareDisplay, 'armSeconds'> & {
+    /**
+     * False until this window has actually loaded the session data. Publishing
+     * before that puts a confident "0m, 0 done" on the LCD, which is a lie
+     * rather than a delay -- so nothing is published until the numbers are real.
+     */
+    ready: boolean;
+  };
   onToggle: () => void;
   onStart: () => void;
   onResume: () => void;
@@ -402,7 +428,12 @@ const controllerKey = `hw-${Math.random().toString(36).slice(2)}-${Date.now()}`;
  * Drives the ESP32 bridge. Returns the arming countdown so the main window and
  * the widget can render the same "starting in Ns" the LCD shows.
  */
-export function useHardwareController(opts: HardwareControllerOptions): { armSeconds: number; present: boolean; online: boolean } {
+export function useHardwareController(opts: HardwareControllerOptions): {
+  armSeconds: number;
+  present: boolean;
+  online: boolean;
+  reportManualStop: () => void;
+} {
   const [armSeconds, setArmSeconds] = useState(0);
   const [present, setPresent] = useState(false);
   const [online, setOnline] = useState(false);
@@ -433,6 +464,20 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
     setOnline(v);
   }, []);
 
+  /**
+   * Tell the controller you stopped the session, or called off a pending
+   * countdown, from the app. Routed through the server's event queue rather
+   * than applied locally because the window you clicked in is often not the one
+   * holding the lease -- and only the lease holder's state is authoritative.
+   */
+  const reportManualStop = useCallback(() => {
+    void fetch('/api/hardware/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'manual_stop' }),
+    }).catch(() => {});
+  }, []);
+
   const stateRef = useRef<HardwareControllerState>(INITIAL_CONTROLLER_STATE);
   const lastEventIdRef = useRef(0);
   const isOwnerRef = useRef(false);
@@ -458,6 +503,10 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       else if (action === 'terminate') o.onTerminate();
     }
   }, []);
+
+  // Read here rather than from the ref so switching the feature on opens the
+  // heartbeat immediately instead of on the next unrelated remount.
+  const enabled = opts.settings.enabled;
 
   useEffect(() => {
     let cancelled = false;
@@ -553,6 +602,7 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
             if (e.type === 'presence') inputs.push({ kind: 'presence', present: e.present });
             else if (e.type === 'button_a') inputs.push({ kind: 'button_a' });
             else if (e.type === 'button_b') inputs.push({ kind: 'button_b' });
+            else if (e.type === 'manual_stop') inputs.push({ kind: 'manual_stop' });
           }
           if (!cancelled) publishOnline(true);
         } else if (!cancelled) {
@@ -659,7 +709,10 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       }
 
       // --- publish what the LCD should show ---
-      if (isOwnerRef.current) {
+      // Withheld until the numbers are loaded: the server treats "nobody
+      // published recently" as offline, and a display that admits it is waiting
+      // beats one that confidently shows a zero total you know is wrong.
+      if (isOwnerRef.current && o.display.ready) {
         const mode: HardwareDisplay['mode'] = arming > 0 ? 'arming' : o.display.mode;
         try {
           await fetch('/api/hardware/state', {
@@ -677,13 +730,44 @@ export function useHardwareController(opts: HardwareControllerOptions): { armSec
       }
     };
 
-    void tick();
-    const id = window.setInterval(() => { void tick(); }, POLL_MS);
+    // One cycle at a time, and never two in the same instant. Two wake sources
+    // feed this (see below) and a cycle makes several sequential requests, so
+    // without the gate they would overlap and act on each other's half-written
+    // state.
+    let inFlight = false;
+    let lastRunAt = 0;
+    const runOnce = async () => {
+      const now = Date.now();
+      if (inFlight || now - lastRunAt < POLL_MS * 0.8) return;
+      inFlight = true;
+      lastRunAt = now;
+      try { await tick(); } finally { inFlight = false; }
+    };
+
+    void runOnce();
+
+    // The timer is the fallback, not the primary beat: Chrome throttles it to
+    // about once a minute whenever this window is hidden, minimised or fully
+    // covered by another one, which froze the whole controller until the window
+    // was clicked. The server's heartbeat below arrives as a network message,
+    // which is not throttled, and keeps the desk working while you are looking
+    // at something else. The timer still covers the case where the stream drops.
+    const id = window.setInterval(() => { void runOnce(); }, POLL_MS);
+
+    let beat: EventSource | null = null;
+    if (enabled) {
+      try {
+        beat = new EventSource('/api/hardware/tick');
+        beat.onmessage = () => { void runOnce(); };
+      } catch (_) { /* the interval above still drives it */ }
+    }
+
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      beat?.close();
     };
-  }, [runActions, publishArmSeconds, publishPresent, publishOnline]);
+  }, [enabled, runActions, publishArmSeconds, publishPresent, publishOnline]);
 
-  return { armSeconds, present, online };
+  return { armSeconds, present, online, reportManualStop };
 }

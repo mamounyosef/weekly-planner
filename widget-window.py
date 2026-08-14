@@ -1,3 +1,17 @@
+import os
+
+# Must be set before webview (and therefore WebView2) starts. WebView2 is Chromium
+# and throttles timers in a window it thinks nobody is looking at, down to about
+# once a minute -- which stops the widget's clock and stalls the desk controller
+# whenever the widget is covered by something else. The same flags are passed to
+# the main window in planner-launcher.pyw.
+os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = " ".join([
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion",
+])
+
 import webview
 import ctypes
 import ctypes.wintypes

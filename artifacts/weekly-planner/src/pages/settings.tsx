@@ -67,6 +67,15 @@ import {
 } from '@/lib/prayerTimes';
 import { DEFAULT_HARDWARE_SETTINGS, MEDIAN_WINDOW_MAX, type HardwareSettings } from '@/lib/hardwareController';
 import { NumberField } from '@/components/NumberField';
+import { useViewport } from '@/hooks/use-mobile';
+import {
+  DEVICE_SCOPED_KEYS,
+  coerceDeviceSettings,
+  fetchDeviceSettings,
+  loadDeviceSettingsLocal,
+  saveDeviceSettings,
+  subscribeDeviceSettings,
+} from '@/lib/deviceSettings';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -75,6 +84,7 @@ import {
   coerceSettings,
   themePalette,
   DARK_PRESETS,
+  DEFAULT_SETTINGS,
   LIGHT_PRESETS,
   type AppSettings,
   type DarkPreset,
@@ -408,7 +418,7 @@ function BackgroundPresetGrid({ dark, value, onChange, cardBdr }: {
 }) {
   const presets = dark ? DARK_PRESETS : LIGHT_PRESETS;
   return (
-    <div className="grid grid-cols-3 gap-3">
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
       {presets.map(preset => {
         const selected = value === preset.id;
         return (
@@ -460,6 +470,11 @@ interface Toast {
 
 export default function SettingsPage() {
   const [, setLocation] = useLocation();
+  // Settings is a two-column layout with a 256px sidebar — on a phone that
+  // leaves ~130px for the controls themselves, so the sidebar becomes a
+  // horizontally scrolling strip of chips above the content instead.
+  const vp = useViewport();
+  const isPhone = vp.isPhone;
 
   // Active Sidebar Tab
   // `?tab=integrations` deep-links a section — the header's "Google disconnected"
@@ -563,6 +578,86 @@ export default function SettingsPage() {
 
   const settingsLoaded = useRef(true);
 
+  // ── This device's own settings ───────────────────────────────────────────
+  // Mirrors home.tsx: the keys that describe THIS screen are read from and
+  // written to the per-device store, never to the shared settings file.
+  const sharedScopedRef = useRef<Pick<AppSettings, typeof DEVICE_SCOPED_KEYS[number]>>({
+    calendarView: initialSettings.calendarView,
+    customDaysBefore: initialSettings.customDaysBefore,
+    customDaysAfter: initialSettings.customDaysAfter,
+    interval: initialSettings.interval,
+    tasksPanelOpen: initialSettings.tasksPanelOpen,
+    tasksPanelWidth: initialSettings.tasksPanelWidth,
+    showTaskRow: initialSettings.showTaskRow,
+    stickyAllDayMain: initialSettings.stickyAllDayMain,
+    stickyTasksMain: initialSettings.stickyTasksMain,
+    darkMode: initialSettings.darkMode,
+    darkPreset: initialSettings.darkPreset,
+    lightPreset: initialSettings.lightPreset,
+    eventColorStyle: initialSettings.eventColorStyle,
+    sidebarStyle: initialSettings.sidebarStyle,
+    dayStartH: initialSettings.dayStartH,
+    dayEndH: initialSettings.dayEndH,
+  });
+
+  /** Adopt a device snapshot into the live controls. */
+  const applyDevice = useCallback((raw: unknown) => {
+    const d = coerceDeviceSettings(raw, { ...DEFAULT_SETTINGS, ...sharedScopedRef.current });
+    setIntervalOpt(d.interval);
+    setDarkMode(d.darkMode);
+    setDarkPreset(d.darkPreset);
+    setLightPreset(d.lightPreset);
+    setEventColorStyle(d.eventColorStyle);
+    setSidebarStyle(d.sidebarStyle);
+    setCalendarView(d.calendarView);
+    setCustomDaysBefore(d.customDaysBefore);
+    setCustomDaysAfter(d.customDaysAfter);
+    setDayStartH(d.dayStartH);
+    setDayEndH(d.dayEndH);
+    setTasksPanelOpen(d.tasksPanelOpen);
+    setTasksPanelWidth(d.tasksPanelWidth);
+    setShowTaskRow(d.showTaskRow);
+    setStickyAllDayMain(d.stickyAllDayMain);
+    setStickyTasksMain(d.stickyTasksMain);
+    deviceExtrasRef.current = { appZoom: d.appZoom, analysisTab: d.analysisTab, mobileTab: d.mobileTab };
+  }, []);
+  /** Device-only values this page has no control for, carried through untouched. */
+  const deviceExtrasRef = useRef({ appZoom: 1, analysisTab: 'week' as const as 'week' | 'month' | 'year', mobileTab: 'calendar' as const as 'calendar' | 'tasks' | 'focus' });
+  const deviceReady = useRef(false);
+
+  // Load this device's stored layout: localStorage first (instant), then the
+  // server, which is authoritative and survives a cleared cache.
+  useEffect(() => {
+    applyDevice(loadDeviceSettingsLocal());
+    let cancelled = false;
+    fetchDeviceSettings().then(remote => {
+      if (!cancelled && remote) applyDevice(remote);
+    }).finally(() => { deviceReady.current = true; });
+    return () => { cancelled = true; };
+  }, [applyDevice]);
+
+  // Adopt changes made on the planner page (it owns the same values).
+  useEffect(() => subscribeDeviceSettings(raw => applyDevice(raw)), [applyDevice]);
+
+  // Publish this page's changes back. Debounced inside saveDeviceSettings, and
+  // a write identical to the last one is dropped — so this and the planner
+  // page settle instead of answering each other.
+  useEffect(() => {
+    if (!deviceReady.current) return;
+    saveDeviceSettings({
+      calendarView: calendarView ?? 'week',
+      customDaysBefore, customDaysAfter, interval,
+      tasksPanelOpen, tasksPanelWidth, showTaskRow,
+      stickyAllDayMain, stickyTasksMain,
+      darkMode, darkPreset, lightPreset,
+      eventColorStyle, sidebarStyle,
+      dayStartH, dayEndH,
+      ...deviceExtrasRef.current,
+    });
+  }, [calendarView, customDaysBefore, customDaysAfter, interval, tasksPanelOpen,
+      tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
+      darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH]);
+
   // Apply dark mode CSS class whenever darkMode changes
   useEffect(() => {
     applyDarkModeClass(darkMode);
@@ -571,36 +666,27 @@ export default function SettingsPage() {
   // Subscribe to live settings changes (e.g. from main page toggle)
   useEffect(() => {
     return subscribeSettingsChange(s => {
-      setIntervalOpt(s.interval);
-      setDarkMode(s.darkMode);
-      setDarkPreset(s.darkPreset);
-      setLightPreset(s.lightPreset);
+      // Remember what the shared file holds for the device-scoped keys so this
+      // page can echo them back untouched — but do NOT adopt them; those come
+      // from the device store above.
+      for (const k of DEVICE_SCOPED_KEYS) {
+        (sharedScopedRef.current as unknown as Record<string, unknown>)[k] =
+          (s as unknown as Record<string, unknown>)[k];
+      }
       setWidgetDarkPreset(s.widgetDarkPreset);
       setWidgetLightPreset(s.widgetLightPreset);
-      setCalendarView(s.calendarView);
-      setCustomDaysBefore(s.customDaysBefore);
-      setCustomDaysAfter(s.customDaysAfter);
-      setEventColorStyle(s.eventColorStyle);
-      setSidebarStyle(s.sidebarStyle);
       setTimeFormat(s.timeFormat);
       setWeekStartsOn(s.weekStartsOn);
-      setDayStartH(s.dayStartH);
-      setDayEndH(s.dayEndH);
       setFocusDayStartHour(s.focusDayStartHour);
       setFocusChime(s.focusChime);
       setFocusCues(s.focusCues);
       setShortcuts(s.shortcuts);
       setAutoBackup(s.autoBackup);
-      setTasksPanelOpen(s.tasksPanelOpen);
-      setTasksPanelWidth(s.tasksPanelWidth);
       setTaskFilters(s.taskFilters);
-      setShowTaskRow(s.showTaskRow);
       setTaskColor(s.taskColor);
       if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
       if (typeof s.googleSyncEnabled === 'boolean') setGoogleSyncEnabled(s.googleSyncEnabled);
       setGoogleTasksSync(s.googleTasksSync);
-      if (typeof s.stickyAllDayMain === 'boolean') setStickyAllDayMain(s.stickyAllDayMain);
-      if (typeof s.stickyTasksMain === 'boolean') setStickyTasksMain(s.stickyTasksMain);
       if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
       if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
       if (typeof s.gcalPushEnabled === 'boolean') setGcalPushEnabled(s.gcalPushEnabled);
@@ -623,35 +709,27 @@ export default function SettingsPage() {
       .then((s) => {
         if (s && typeof s === 'object') {
           const coerced = coerceSettings(s);
-          setIntervalOpt(coerced.interval);
-          setDarkMode(coerced.darkMode);
-          setDarkPreset(coerced.darkPreset);
-          setLightPreset(coerced.lightPreset);
+          // Plan-wide only. The device-scoped keys in this file may have been
+          // written by a different device, so they are recorded as the echo
+          // baseline and otherwise ignored — this screen's copies live in the
+          // device store.
+          for (const k of DEVICE_SCOPED_KEYS) {
+            (sharedScopedRef.current as unknown as Record<string, unknown>)[k] =
+              (coerced as unknown as Record<string, unknown>)[k];
+          }
           setWidgetDarkPreset(coerced.widgetDarkPreset);
           setWidgetLightPreset(coerced.widgetLightPreset);
-          setCalendarView(coerced.calendarView);
-          setCustomDaysBefore(coerced.customDaysBefore);
-          setCustomDaysAfter(coerced.customDaysAfter);
-          setEventColorStyle(coerced.eventColorStyle);
-          setSidebarStyle(coerced.sidebarStyle);
           setTimeFormat(coerced.timeFormat);
           setWeekStartsOn(coerced.weekStartsOn);
-          setDayStartH(coerced.dayStartH);
-          setDayEndH(coerced.dayEndH);
           setFocusDayStartHour(coerced.focusDayStartHour);
           setFocusChime(coerced.focusChime);
           setFocusCues(coerced.focusCues);
           setShortcuts(coerced.shortcuts);
           setAutoBackup(coerced.autoBackup);
-          setTasksPanelOpen(coerced.tasksPanelOpen);
-          setTasksPanelWidth(coerced.tasksPanelWidth);
           setTaskFilters(coerced.taskFilters);
-          setShowTaskRow(coerced.showTaskRow);
           setTaskColor(coerced.taskColor);
           setTaskCheckboxShape(coerced.taskCheckboxShape);
           setGoogleTasksSync(coerced.googleTasksSync);
-          setStickyAllDayMain(coerced.stickyAllDayMain);
-          setStickyTasksMain(coerced.stickyTasksMain);
           setStickyAllDayWidget(coerced.stickyAllDayWidget);
           setStickyTasksWidget(coerced.stickyTasksWidget);
           setPrayer(coerced.prayer);
@@ -684,36 +762,25 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!settingsLoaded.current) return;
     const broadcastId = window.setTimeout(() => broadcastSettingsChange({
-      interval,
-      darkMode,
-      darkPreset,
-      lightPreset,
+      // Device-scoped keys (view, interval, theme, panel, day window) are echoed
+      // back exactly as the shared file had them. They belong to THIS screen and
+      // travel to the planner through the device channel below — putting them in
+      // here would push the phone's dark mode onto the desktop.
+      ...sharedScopedRef.current,
       widgetDarkPreset,
       widgetLightPreset,
-      calendarView,
-      customDaysBefore,
-      customDaysAfter,
-      eventColorStyle,
-      sidebarStyle,
       timeFormat,
       weekStartsOn,
-      dayStartH,
-      dayEndH,
       focusDayStartHour,
       focusChime,
       focusCues,
       shortcuts,
       autoBackup,
-      tasksPanelOpen,
-      tasksPanelWidth,
       taskFilters,
-      showTaskRow,
       taskColor,
       taskCheckboxShape,
       googleSyncEnabled,
       googleTasksSync,
-      stickyAllDayMain,
-      stickyTasksMain,
       stickyAllDayWidget,
       stickyTasksWidget,
       gcalPushEnabled,
@@ -1001,7 +1068,11 @@ export default function SettingsPage() {
   const cardBg = activeTheme.cardBg;
   // The sticky header sits over scrolling content, so it takes the card colour at
   // ~85% and lets the blur behind it do the rest.
-  const headerBg = `${activeTheme.cardBg}d9`;
+  // Opaque on a phone. Both sticky bars sit over the scrolling settings body,
+  // so a translucent one has to re-run its backdrop blur on every scroll frame —
+  // the single most expensive thing on this page, and the reason scrolling it
+  // felt like it was dropping frames on a mid-range phone.
+  const headerBg = isPhone ? activeTheme.cardBg : `${activeTheme.cardBg}d9`;
   const cardBdr = activeTheme.surfaceBdr;
   const textPrimary = darkMode ? '#f1f5f9' : '#0f172a';
   const textSecondary = darkMode ? '#94a3b8' : '#64748b';
@@ -1058,52 +1129,58 @@ export default function SettingsPage() {
       </div>
       {/* ── Top Header Navigation Bar ────────────────────────────────────────── */}
       <header
-        className="sticky top-0 z-50 flex items-center justify-between px-6 py-4 border-b backdrop-blur-md transition-colors"
+        className={`sticky top-0 z-50 flex items-center justify-between border-b transition-colors ${isPhone ? 'px-3 py-2.5' : 'backdrop-blur-md px-6 py-4'}`}
         style={{
           background: headerBg,
           borderColor: cardBdr,
+          paddingTop: isPhone ? 'calc(10px + var(--safe-top))' : undefined,
         }}
       >
-        <div className="flex items-center gap-4">
+        <div className={`flex items-center min-w-0 ${isPhone ? 'gap-2' : 'gap-4'}`}>
           <button
             onClick={() => setLocation('/')}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
+            className={`flex items-center gap-2 rounded-xl text-xs font-semibold transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] flex-shrink-0 ${isPhone ? 'w-10 h-10 justify-center' : 'px-3.5 py-2'}`}
             style={{
               background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
               border: `1px solid ${cardBdr}`,
               color: textPrimary,
             }}
+            title="Back to Planner"
           >
             <ArrowLeft size={16} />
-            <span>Back to Planner</span>
+            {!isPhone && <span>Back to Planner</span>}
           </button>
 
-          <div className="h-5 w-[1px]" style={{ background: cardBdr }} />
+          {!isPhone && <div className="h-5 w-[1px]" style={{ background: cardBdr }} />}
 
-          <div className="flex items-center gap-2.5">
-            <div
-              className="p-2 rounded-xl flex items-center justify-center shadow-sm"
-              style={{ background: accentLight, color: accentColor }}
-            >
-              <Sliders size={18} />
-            </div>
-            <div>
-              <h1 className="text-base font-bold tracking-tight" style={{ color: textPrimary }}>
-                Settings & Preferences
+          <div className="flex items-center gap-2.5 min-w-0">
+            {!isPhone && (
+              <div
+                className="p-2 rounded-xl flex items-center justify-center shadow-sm"
+                style={{ background: accentLight, color: accentColor }}
+              >
+                <Sliders size={18} />
+              </div>
+            )}
+            <div className="min-w-0">
+              <h1 className={`font-bold tracking-tight truncate ${isPhone ? 'text-[15px]' : 'text-base'}`} style={{ color: textPrimary }}>
+                {isPhone ? 'Settings' : 'Settings & Preferences'}
               </h1>
-              <p className="text-[11px] font-medium" style={{ color: textSecondary }}>
-                Customize your workspace, layout, and shortcuts
-              </p>
+              {!isPhone && (
+                <p className="text-[11px] font-medium" style={{ color: textSecondary }}>
+                  Customize your workspace, layout, and shortcuts
+                </p>
+              )}
             </div>
           </div>
         </div>
 
         {/* Header Right Controls */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-shrink-0">
           {/* Dark Mode Quick Toggle */}
           <button
             onClick={() => setDarkMode(d => !d)}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium transition-all"
+            className={`flex items-center gap-2 rounded-xl text-xs font-medium transition-all ${isPhone ? 'w-10 h-10 justify-center' : 'px-3 py-1.5'}`}
             style={{
               background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
               border: `1px solid ${cardBdr}`,
@@ -1112,52 +1189,88 @@ export default function SettingsPage() {
             title="Toggle Dark / Light Mode"
           >
             {darkMode ? <Moon size={15} className="text-indigo-400" /> : <Sun size={15} className="text-amber-500" />}
-            <span className="capitalize">{darkMode ? 'Dark' : 'Light'}</span>
+            {!isPhone && <span className="capitalize">{darkMode ? 'Dark' : 'Light'}</span>}
           </button>
 
-          <span className="text-[11px] font-mono px-2 py-1 rounded-md" style={{ background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)', color: textSecondary }}>
-            Esc to exit
-          </span>
+          {/* There is no Esc key on a phone — and no room for the hint either. */}
+          {!isPhone && (
+            <span className="text-[11px] font-mono px-2 py-1 rounded-md" style={{ background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)', color: textSecondary }}>
+              Esc to exit
+            </span>
+          )}
         </div>
       </header>
 
       {/* ── Main Layout Body ────────────────────────────────────────────────── */}
-      <div className="flex-1 flex max-w-7xl w-full mx-auto px-6 py-8 gap-8">
-        {/* Sidebar Navigation */}
-        <aside className="w-64 flex-shrink-0 flex flex-col gap-1.5">
-          <span className="text-[10px] font-bold uppercase tracking-wider px-3 mb-1" style={{ color: textSecondary }}>
-            Categories
-          </span>
+      <div className={`flex-1 max-w-7xl w-full mx-auto ${isPhone ? 'flex flex-col px-3 pt-3 pb-8 gap-4' : 'flex px-6 py-8 gap-8'}`}>
+        {/* Category navigation. A vertical rail on a desktop; on a phone the
+            same list turned on its side into a sticky, swipeable chip strip —
+            no accordion, no hamburger, and the current section always visible. */}
+        {isPhone ? (
+          <div
+            className="sticky z-40 -mx-3 px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar touch-scroll"
+            style={{ top: 'calc(56px + var(--safe-top))', background: headerBg }}
+          >
+            {tabs.map(tab => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className="flex items-center gap-1.5 px-3 h-9 rounded-xl text-[12px] font-bold whitespace-nowrap flex-shrink-0 active:scale-95 transition-transform"
+                  style={{
+                    background: active ? accentLight : (darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'),
+                    color: active ? accentColor : textSecondary,
+                    border: `1px solid ${active ? (darkMode ? 'rgba(59,130,246,0.35)' : 'rgba(59,130,246,0.25)') : cardBdr}`,
+                  }}
+                >
+                  <span style={{ color: active ? accentColor : textSecondary, display: 'flex' }}>{tab.icon}</span>
+                  {tab.label}
+                  {tab.badge && (
+                    <span className="text-[8.5px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                      {tab.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <aside className="w-64 flex-shrink-0 flex flex-col gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider px-3 mb-1" style={{ color: textSecondary }}>
+              Categories
+            </span>
 
-          {tabs.map(tab => {
-            const active = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className="flex items-center justify-between px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all duration-200 text-left"
-                style={{
-                  background: active ? accentLight : 'transparent',
-                  color: active ? accentColor : textSecondary,
-                  border: active ? `1px solid ${darkMode ? 'rgba(59,130,246,0.3)' : 'rgba(59,130,246,0.2)'}` : '1px solid transparent',
-                }}
-              >
-                <div className="flex items-center gap-3">
-                  <span style={{ color: active ? accentColor : textSecondary }}>{tab.icon}</span>
-                  <span>{tab.label}</span>
-                </div>
-                {tab.badge && (
-                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
-                    {tab.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </aside>
+            {tabs.map(tab => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className="flex items-center justify-between px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all duration-200 text-left"
+                  style={{
+                    background: active ? accentLight : 'transparent',
+                    color: active ? accentColor : textSecondary,
+                    border: active ? `1px solid ${darkMode ? 'rgba(59,130,246,0.3)' : 'rgba(59,130,246,0.2)'}` : '1px solid transparent',
+                  }}
+                >
+                  <div className="flex items-center gap-3">
+                    <span style={{ color: active ? accentColor : textSecondary }}>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                  </div>
+                  {tab.badge && (
+                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                      {tab.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </aside>
+        )}
 
         {/* Content Container */}
-        <main className="flex-1 flex flex-col gap-6">
+        <main className={`flex-1 min-w-0 flex flex-col ${isPhone ? 'gap-4' : 'gap-6'}`}>
           <AnimatePresence mode="wait">
             {/* 🎨 APPEARANCE TAB */}
             {activeTab === 'appearance' && (
@@ -1169,7 +1282,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Theme & Background
@@ -1180,28 +1293,32 @@ export default function SettingsPage() {
                   </div>
 
                   {/* Dark Mode Card */}
-                  <div className="flex items-center justify-between p-4 rounded-2xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
-                    <div className="flex items-center gap-3">
-                      <div className="p-2.5 rounded-xl" style={{ background: darkMode ? 'rgba(129, 140, 248, 0.15)' : 'rgba(245, 158, 11, 0.15)', color: darkMode ? '#818cf8' : '#f59e0b' }}>
+                  <div className="flex items-center justify-between p-4 rounded-2xl border gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div className="p-2.5 rounded-xl flex-shrink-0" style={{ background: darkMode ? 'rgba(129, 140, 248, 0.15)' : 'rgba(245, 158, 11, 0.15)', color: darkMode ? '#818cf8' : '#f59e0b' }}>
                         {darkMode ? <Moon size={20} /> : <Sun size={20} />}
                       </div>
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Dark Mode</span>
-                        <span className="text-[11px] block" style={{ color: textSecondary }}>Sleek, high-contrast dark palette tailored for night focus</span>
+                        <span className="text-[11px] block leading-snug" style={{ color: textSecondary }}>Sleek, high-contrast dark palette tailored for night focus</span>
                       </div>
                     </div>
 
                     <button
+                      type="button"
+                      role="switch"
+                      aria-checked={darkMode}
                       onClick={() => setDarkMode(d => !d)}
-                      className="relative w-12 h-6.5 rounded-full transition-colors duration-200"
+                      className="relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
                       style={{
-                        background: darkMode ? '#3b82f6' : 'rgba(0,0,0,0.15)',
+                        background: darkMode ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'),
                       }}
+                      title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
                     >
                       <span
-                        className="absolute top-1 left-1 w-4.5 h-4.5 rounded-full bg-white transition-transform duration-200 shadow-md"
+                        className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform duration-200 shadow-md"
                         style={{
-                          transform: darkMode ? 'translateX(22px)' : 'translateX(0px)',
+                          transform: darkMode ? 'translateX(20px)' : 'translateX(0px)',
                         }}
                       />
                     </button>
@@ -1241,7 +1358,7 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Cards & Canvas
@@ -1259,7 +1376,7 @@ export default function SettingsPage() {
                     <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
                       Unified card layout and border styling for every item on your planner.
                     </span>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {[
                         { id: 'tinted', label: 'Glass & Border Accent', desc: 'Soft translucent fill with a vivid border stroke (Default)' },
                         { id: 'solid', label: 'Solid Smooth Fill', desc: 'Bold, sleek solid color fill with high-contrast text' },
@@ -1297,7 +1414,7 @@ export default function SettingsPage() {
                     <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
                       Controls ambient side glow effects and background aura styling across all pages.
                     </span>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {[
                         { id: 'subtle-glow', label: 'Subtle Ambient Glow', desc: 'Soft side aura glow smoothly fading into canvas (Default)' },
                         { id: 'accent-aura', label: 'Vivid Luminous Aura', desc: 'Richer, vibrant indigo & emerald side gradients' },
@@ -1329,7 +1446,7 @@ export default function SettingsPage() {
 
                 </div>
 
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Display
@@ -1344,7 +1461,7 @@ export default function SettingsPage() {
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>
                       Time Display Format
                     </span>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {(['12h', '24h'] as TimeFormat[]).map(fmt => {
                         const selected = timeFormat === fmt;
                         return (
@@ -1385,7 +1502,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Calendar & Grid View
@@ -1430,7 +1547,7 @@ export default function SettingsPage() {
                   {/* Grid Interval */}
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>Time Slot Snap Interval</span>
-                    <div className="grid grid-cols-4 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       {([5, 15, 30, 60] as IntervalMin[]).map(v => {
                         const active = interval === v;
                         return (
@@ -1458,7 +1575,7 @@ export default function SettingsPage() {
                   {/* Visible Hours */}
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>Visible Schedule Hours</span>
-                    <div className="grid grid-cols-2 gap-4 p-4 rounded-2xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-2xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
                       <div className="flex flex-col gap-1.5">
                         <label className="text-[11px] font-medium" style={{ color: textSecondary }}>Start Hour</label>
                         <select
@@ -1496,7 +1613,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Sticky Header Bands (Scroll View) */}
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Sticky Bands on Scroll
@@ -1600,7 +1717,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Tasks */}
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Tasks</h2>
                     <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
@@ -1708,7 +1825,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Prayer Times</h2>
@@ -1844,7 +1961,7 @@ export default function SettingsPage() {
                       {/* Display style */}
                       <div className="flex flex-col gap-3">
                         <span className="text-xs font-semibold" style={{ color: textPrimary }}>How they're drawn</span>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                           {([
                             ['marker', 'Marker line', 'A hairline at the exact time. Never collides with events.'],
                             ['pill', 'Small pill', 'A compact chip on the timeline. More visible, can overlap.'],
@@ -1940,7 +2057,7 @@ export default function SettingsPage() {
                         <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
                           Only if your mosque differs from the calculated time. Applied on top of the API result, ±60 max.
                         </p>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                           {PRAYER_KEYS.map(k => (
                             <label key={k} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl border" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
                               <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>{PRAYER_LABELS[k]}</span>
@@ -1979,7 +2096,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Focus Audio & Chimes
@@ -2091,7 +2208,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex items-center justify-between">
                     <div>
                       <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
@@ -2117,7 +2234,7 @@ export default function SettingsPage() {
                       <span className="text-[11px] font-bold uppercase tracking-wider text-blue-500">
                         {group} Shortcuts
                       </span>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {SHORTCUT_DEFS.filter(d => d.group === group).map(def => {
                           const recording = recordingAction === def.action;
                           const conflicts = findConflicts(shortcuts, def.action);
@@ -2173,7 +2290,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Data & Backup Management
@@ -2185,25 +2302,28 @@ export default function SettingsPage() {
 
                   {/* Auto backup */}
                   <div className="p-4 rounded-2xl border flex flex-col gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
-                    <div className="flex items-center justify-between">
-                      <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0 flex-1">
                         <span className="text-xs font-bold block" style={{ color: textPrimary }}>Automatic Local Backups</span>
-                        <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Automatically save snapshots into your local project directory</span>
+                        <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Automatically save snapshots into your local project directory</span>
                       </div>
 
                       <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoBackup.enabled}
                         onClick={() => setAutoBackup(c => ({ ...c, enabled: !c.enabled }))}
-                        className="relative w-12 h-6.5 rounded-full transition-colors duration-200"
-                        style={{ background: autoBackup.enabled ? '#10b981' : 'rgba(0,0,0,0.15)' }}
+                        className="relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
+                        style={{ background: autoBackup.enabled ? '#10b981' : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)') }}
                       >
                         <span
-                          className="absolute top-1 left-1 w-4.5 h-4.5 rounded-full bg-white transition-transform duration-200 shadow-md"
-                          style={{ transform: autoBackup.enabled ? 'translateX(22px)' : 'translateX(0px)' }}
+                          className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform duration-200 shadow-md"
+                          style={{ transform: autoBackup.enabled ? 'translateX(20px)' : 'translateX(0px)' }}
                         />
                       </button>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4 pt-3 border-t" style={{ borderColor: cardBdr }}>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t" style={{ borderColor: cardBdr }}>
                       <div className="flex flex-col gap-1.5">
                         <label className="text-[11px] font-medium" style={{ color: textSecondary }}>Backup Interval</label>
                         <select
@@ -2250,7 +2370,7 @@ export default function SettingsPage() {
                   </div>
 
                   {/* Manual Export & Import */}
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <button
                       onClick={exportBackup}
                       className="flex items-center justify-center gap-2.5 p-4 rounded-2xl border text-xs font-bold transition-all hover:scale-[1.01]"
@@ -2283,7 +2403,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Desk Controller</h2>
@@ -2479,7 +2599,7 @@ export default function SettingsPage() {
                           textSecondary={textSecondary}
                         />
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>At desk below (cm)</span>
                             <NumberField
@@ -2510,7 +2630,7 @@ export default function SettingsPage() {
                           otherwise flip the state back and forth every sample.
                         </p>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Median window size</span>
                             <NumberField
@@ -2543,7 +2663,7 @@ export default function SettingsPage() {
                           </label>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Confirm arrival after (ms)</span>
                             <NumberField
@@ -2572,7 +2692,7 @@ export default function SettingsPage() {
                           fuse, so briefly leaning out of the beam does not read as walking away.
                         </p>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
                             <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Ignore readings beyond (cm)</span>
                             <NumberField
@@ -2633,7 +2753,7 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                       Google Calendar Integration
@@ -2645,22 +2765,25 @@ export default function SettingsPage() {
 
                   {/* Master Enable/Disable Toggle */}
                   <div className="p-4 rounded-2xl border flex items-center justify-between gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <span className="text-xs font-bold block" style={{ color: textPrimary }}>
                         Master Google Synchronization
                       </span>
-                      <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                      <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
                         {googleSyncEnabled
                           ? 'Google sync is enabled. The app will sync with Google Calendar & Tasks when connected.'
                           : 'Google sync is completely DISABLED. The app runs offline without contacting Google or showing warnings.'}
                       </span>
                     </div>
                     <button
+                      type="button"
+                      role="switch"
+                      aria-checked={googleSyncEnabled}
                       onClick={() => setGoogleSyncEnabled(v => !v)}
-                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
-                      style={{ background: googleSyncEnabled ? accentColor : cardBdr }}
+                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                      style={{ background: googleSyncEnabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)') }}
                     >
-                      <span className="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: googleSyncEnabled ? 22 : 4 }} />
+                      <span className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-200" style={{ transform: googleSyncEnabled ? 'translateX(20px)' : 'translateX(0px)' }} />
                     </button>
                   </div>
 
@@ -2789,7 +2912,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Google Sync Policy & Modification Rules */}
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
                       <ShieldCheck size={16} className="text-blue-500" />
@@ -2805,29 +2928,32 @@ export default function SettingsPage() {
                     <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
                       <span className="text-[11px] font-bold uppercase tracking-wider text-blue-500">App → Google (Push Controls)</span>
                       
-                      <div className="flex items-center justify-between">
-                        <div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Push local events to Google Calendar</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Create and update events on Google when authored in the planner</span>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Create and update events on Google when authored in the planner</span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalPushEnabled}
                           onClick={() => setGcalPushEnabled(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalPushEnabled ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalPushEnabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPushEnabled ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPushEnabled ? 22 : 2 }} />
                         </button>
                       </div>
 
-                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div>
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Google Calendar Destination</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Where newly created app events land on Google Calendar</span>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Where newly created app events land on Google Calendar</span>
                         </div>
                         <select
                           value={gcalPushTarget}
                           onChange={e => setGcalPushTarget(e.target.value as 'daily' | 'primary')}
-                          className="py-1.5 px-3 text-xs font-semibold rounded-xl border outline-none cursor-pointer"
+                          className="py-1.5 px-3 text-xs font-semibold rounded-xl border outline-none cursor-pointer flex-shrink-0"
                           style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                         >
                           <option value="daily">Daily Calendar (Isolated & Recommended)</option>
@@ -2835,17 +2961,20 @@ export default function SettingsPage() {
                         </select>
                       </div>
 
-                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div>
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow updating external Google Calendar events</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Local edits to external Google Calendar cards will push back to their original calendar</span>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Local edits to external Google Calendar cards will push back to their original calendar</span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalPushOtherCalendars}
                           onClick={() => setGcalPushOtherCalendars(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalPushOtherCalendars ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalPushOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
                         </button>
                       </div>
                     </div>
@@ -2854,47 +2983,56 @@ export default function SettingsPage() {
                     <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
                       <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-500">Google → App (Pull & Protection Rules)</span>
                       
-                      <div className="flex items-center justify-between">
-                        <div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow Google edits to modify Daily Calendar app items</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
                             {gcalPullDailyEdits ? 'Google Calendar changes will overwrite local app items' : 'OFF (Recommended): App is sole source of truth; Google edits cannot touch local items'}
                           </span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalPullDailyEdits}
                           onClick={() => setGcalPullDailyEdits(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalPullDailyEdits ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalPullDailyEdits ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
                         </button>
                       </div>
 
-                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div>
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import raw new events from Google Daily Calendar</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Import new items created directly on Google Calendar into the planner</span>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Import new items created directly on Google Calendar into the planner</span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalPullDailyNew}
                           onClick={() => setGcalPullDailyNew(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalPullDailyNew ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalPullDailyNew ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
                         </button>
                       </div>
 
-                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div>
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import events from other Google Calendars</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Display items from Primary, Work, and Personal Google Calendars as read-only cards</span>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Display items from Primary, Work, and Personal Google Calendars as read-only cards</span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalPullOtherCalendars}
                           onClick={() => setGcalPullOtherCalendars(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalPullOtherCalendars ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalPullOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
                         </button>
                       </div>
                     </div>
@@ -2903,33 +3041,39 @@ export default function SettingsPage() {
                     <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
                       <span className="text-[11px] font-bold uppercase tracking-wider text-purple-500">Deletion Mirroring Rules</span>
                       
-                      <div className="flex items-center justify-between">
-                        <div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting in app deletes on Google Calendar</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>Removing an event in the planner issues a DELETE call to Google Calendar</span>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Removing an event in the planner issues a DELETE call to Google Calendar</span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalMirrorLocalDeletions}
                           onClick={() => setGcalMirrorLocalDeletions(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalMirrorLocalDeletions ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalMirrorLocalDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
                         </button>
                       </div>
 
-                      <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div>
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                        <div className="min-w-0 flex-1">
                           <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting on Google Calendar deletes in app</span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
                             {gcalMirrorGoogleDeletions ? 'Deleting an item on Google Calendar wipes it locally' : 'OFF (Protected): Items deleted on Google Calendar will stay safe in your local planner'}
                           </span>
                         </div>
                         <button
+                          type="button"
+                          role="switch"
+                          aria-checked={gcalMirrorGoogleDeletions}
                           onClick={() => setGcalMirrorGoogleDeletions(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors"
-                          style={{ background: gcalMirrorGoogleDeletions ? accentColor : cardBdr }}
+                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ background: gcalMirrorGoogleDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
                         >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
+                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow-sm" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
                         </button>
                       </div>
                     </div>
@@ -2937,7 +3081,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Google Tasks */}
-                <div className="p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
                     <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Google Tasks Integration</h2>
                     <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
