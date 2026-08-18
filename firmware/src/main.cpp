@@ -164,6 +164,7 @@ struct SensorConfig {
   bool announceOnConnect = true;
   float maxValidCm = GLITCH_MAX_CM;
   long glitchHoldMs = GLITCH_HOLD_MS;
+  bool glitchIgnoreAlways = false;
 };
 static SensorConfig cfg;
 
@@ -363,6 +364,7 @@ static void pollConfig() {
     if (jsonNumber(body, "glitchHoldMs", n)) cfg.glitchHoldMs = constrain(n, 0L, 60000L);
     cfg.calibrating = body.indexOf("\"calibrating\":true") >= 0;
     cfg.announceOnConnect = body.indexOf("\"announceOnConnect\":true") >= 0;
+    cfg.glitchIgnoreAlways = body.indexOf("\"glitchIgnoreAlways\":true") >= 0;
 
     if (jsonNumber(body, "medianWindow", n)) {
       const int w = constrain((int)n, 1, MEDIAN_WINDOW_MAX);
@@ -785,7 +787,7 @@ void loop() {
 
     if (reading > cfg.maxValidCm) {
       if (glitchRunSince == 0) glitchRunSince = now;
-      const bool believeIt = (unsigned long)(now - glitchRunSince) >= (unsigned long)cfg.glitchHoldMs;
+      const bool believeIt = !cfg.glitchIgnoreAlways && (unsigned long)(now - glitchRunSince) >= (unsigned long)cfg.glitchHoldMs;
       if (believeIt) {
         pushSample(reading);
       } else {

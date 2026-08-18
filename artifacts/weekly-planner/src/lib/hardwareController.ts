@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // ESP32 focus-timer controller.
 //
 // An ESP32 on the desk drives a 16x2 LCD, two buttons and an ultrasonic
@@ -25,21 +25,24 @@ export interface HardwareSettings {
   armSeconds: number;
   /** Leaving the desk pauses a running session. */
   awayPauseEnabled: boolean;
-  /** When a session finishes and you are still at the desk, arm the next one.
+  /** When a session finishes and you are still at the desk, start or arm the next one.
    *  Without it the day stops after the first session, since staying put
    *  produces no sensor event to react to. */
   autoRestartEnabled: boolean;
+  /** Grace period before automatically starting the next session when chaining (seconds).
+   *  0 = start immediately with no delay. */
+  autoRestartArmSeconds: number;
   /** How long you may stay away before the paused session is terminated. */
   awayTerminateSeconds: number;
 
-  // â”€â”€ Sensor tuning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Sensor tuning ──────────────────────────────────────────────────────────
   // These live here rather than in the firmware so the board never has to be
   // plugged into the PC to be re-tuned. The ESP32 fetches them periodically and
   // applies them at runtime.
 
-  /** Absent â†’ present once the median distance drops below this (cm). */
+  /** Absent → present once the median distance drops below this (cm). */
   enterCm: number;
-  /** Present â†’ absent once the median rises above this (cm). Must exceed
+  /** Present → absent once the median rises above this (cm). Must exceed
    *  enterCm: the gap between the two is the hysteresis that stops a reading
    *  sitting on the boundary from rattling the state back and forth. */
   exitCm: number;
@@ -63,6 +66,9 @@ export interface HardwareSettings {
    *  the desk genuinely being empty with nothing in the beam, and leaving would
    *  never be detected at all. */
   glitchHoldMs: number;
+  /** When true, readings beyond maxValidCm are always discarded and never passed
+   *  to the filter, regardless of how long they persist. */
+  glitchIgnoreAlways: boolean;
   /** While true the board streams live distance readings for calibration. */
   calibrating: boolean;
   /** Re-announce presence when an app window first becomes reachable. The
@@ -83,6 +89,7 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   armSeconds: 30,
   awayPauseEnabled: true,
   autoRestartEnabled: true,
+  autoRestartArmSeconds: 0,
   awayTerminateSeconds: 120,
   // Measured on this desk: seated reads 30-39 cm, empty chair 57-59 cm.
   enterCm: 48,
@@ -95,6 +102,7 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   // about a metre; anything further is the module misfiring.
   maxValidCm: 100,
   glitchHoldMs: 10000,
+  glitchIgnoreAlways: false,
   calibrating: false,
   announceOnConnect: true,
 };
@@ -112,12 +120,16 @@ export function coerceHardwareSettings(raw: unknown): HardwareSettings {
   // Clamped rather than rejected: a nonsensical value should degrade to a sane
   // one, not silently disable the feature.
   if (Number.isFinite(Number(r.armSeconds))) s.armSeconds = Math.max(0, Math.min(300, Math.round(Number(r.armSeconds))));
+  if (Number.isFinite(Number(r.autoRestartArmSeconds))) {
+    s.autoRestartArmSeconds = Math.max(0, Math.min(300, Math.round(Number(r.autoRestartArmSeconds))));
+  }
   if (Number.isFinite(Number(r.awayTerminateSeconds))) {
     s.awayTerminateSeconds = Math.max(10, Math.min(3600, Math.round(Number(r.awayTerminateSeconds))));
   }
 
   if (typeof r.calibrating === 'boolean') s.calibrating = r.calibrating;
   if (typeof r.announceOnConnect === 'boolean') s.announceOnConnect = r.announceOnConnect;
+  if (typeof r.glitchIgnoreAlways === 'boolean') s.glitchIgnoreAlways = r.glitchIgnoreAlways;
   if (Number.isFinite(Number(r.enterCm))) s.enterCm = Math.max(2, Math.min(400, Number(r.enterCm)));
   if (Number.isFinite(Number(r.exitCm))) s.exitCm = Math.max(2, Math.min(400, Number(r.exitCm)));
   if (Number.isFinite(Number(r.sampleIntervalMs))) {
@@ -163,6 +175,9 @@ export interface HardwareControllerState {
    *  new one, which would otherwise restart the session you just deliberately
    *  ended. Cleared by actually leaving and coming back. */
   stoppedByHand: boolean;
+  /** True while a session is active. Used to distinguish a finished session (which
+   *  chains with autoRestartArmSeconds) from a fresh arrival (which uses armSeconds). */
+  sessionActive?: boolean;
 }
 
 export const INITIAL_CONTROLLER_STATE: HardwareControllerState = {
@@ -170,6 +185,7 @@ export const INITIAL_CONTROLLER_STATE: HardwareControllerState = {
   armingUntil: null,
   awaySince: null,
   stoppedByHand: false,
+  sessionActive: false,
 };
 
 /** What the reducer wants done, expressed in the app's own vocabulary. */
@@ -232,6 +248,7 @@ export function reduceHardware(
     // Stopping by hand means "I am done", not "start the next one" -- without
     // this, still being sat at the desk would arm a fresh session moments later.
     next.stoppedByHand = true;
+    next.sessionActive = false;
     if (session.hasSession) actions.push('terminate');
     return { state: next, actions };
   }
@@ -245,6 +262,7 @@ export function reduceHardware(
     // Same reasoning as the terminate button: you ended it, so sitting here
     // should not immediately arm another one. Cleared by leaving and returning.
     next.stoppedByHand = true;
+    next.sessionActive = false;
     // No actions -- the app performed the stop itself before telling us.
     return { state: next, actions };
   }
@@ -272,7 +290,12 @@ export function reduceHardware(
       } else if (!session.hasSession) {
         // Fresh arrival. The countdown gives you time to settle in, and is
         // cancellable by leaving again before it fires.
-        next.armingUntil = now + settings.armSeconds * 1000;
+        if (settings.armSeconds <= 0) {
+          actions.push('start');
+          next.sessionActive = true;
+        } else {
+          next.armingUntil = now + settings.armSeconds * 1000;
+        }
       }
     } else {
       // Standing up during the countdown means you were not settling in after
@@ -288,26 +311,42 @@ export function reduceHardware(
 
   // --- tick: the time-driven half of the machine ---
 
-  // Sitting at the desk with no session running arms one. Usually that is
-  // driven by the arrival event, but a session that simply ran out while you
-  // stayed put produces no event at all -- presence never changed -- so without
-  // this the day would stop dead at the end of the first hour. Suppressed after
-  // a manual stop, and while a countdown is already pending.
-  if (settings.sensorEnabled
-      && settings.autoRestartEnabled
-      && state.present
-      && !session.hasSession
-      && state.armingUntil === null
-      && !state.stoppedByHand) {
-    next.armingUntil = now + settings.armSeconds * 1000;
+  // Keep sessionActive in sync with the live session snapshot
+  const wasSessionActive = Boolean(state.sessionActive);
+  if (session.hasSession) {
+    next.sessionActive = true;
   }
+
+  // Session chaining: a session was active and has now ended on its own
+  // while you stayed at the desk.
+  const sessionJustFinished = wasSessionActive && !session.hasSession;
+  if (sessionJustFinished) {
+    next.sessionActive = false;
+    if (settings.sensorEnabled
+        && settings.autoRestartEnabled
+        && state.present
+        && !state.stoppedByHand
+        && state.armingUntil === null) {
+      const restartDelay = settings.autoRestartArmSeconds ?? 0;
+      if (restartDelay <= 0) {
+        actions.push('start');
+        next.sessionActive = true;
+      } else {
+        next.armingUntil = now + restartDelay * 1000;
+      }
+    }
+  }
+
   // A countdown that supposedly expired more than a few minutes ago is corrupt,
   // not merely due: firing it would start a session nobody asked for.
-  if (state.armingUntil !== null && now - state.armingUntil > 300_000) {
+  if (state.armingUntil !== null && (state.armingUntil <= 0 || now - state.armingUntil > 300_000)) {
     next.armingUntil = null;
   } else if (state.armingUntil !== null && now >= state.armingUntil) {
     next.armingUntil = null;
-    if (!session.hasSession) actions.push('start');
+    if (!session.hasSession) {
+      actions.push('start');
+      next.sessionActive = true;
+    }
   }
 
   // A timestamp that is in the future, or absurdly far in the past, is
@@ -692,6 +731,7 @@ export function useHardwareController(opts: HardwareControllerOptions): {
           absentConfirmMs: o.settings.absentConfirmMs,
           maxValidCm: o.settings.maxValidCm,
           glitchHoldMs: o.settings.glitchHoldMs,
+          glitchIgnoreAlways: o.settings.glitchIgnoreAlways,
           calibrating: o.settings.calibrating,
           announceOnConnect: o.settings.announceOnConnect,
         };

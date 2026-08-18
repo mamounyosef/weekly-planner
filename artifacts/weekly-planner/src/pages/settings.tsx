@@ -34,8 +34,7 @@ import {
   Edit2,
   Trash2,
   Palette,
-  ArrowUp,
-  ArrowDown,
+  GripVertical,
   Square,
   CheckSquare,
   Eye,
@@ -112,7 +111,11 @@ import {
   PRESET_CATEGORY_COLORS,
   type EventCategory,
 } from '@/lib/categories';
-import { coerceTaskLists, type TaskList } from '@/lib/taskLists';
+import { useReorder } from '@/lib/useReorder';
+import {
+  coerceTaskLists, GENERAL_LIST_ID, TASK_LIST_COLORS, makeListId, nextListColor,
+  type TaskList,
+} from '@/lib/taskLists';
 import { gcalChipColors } from '@/lib/gcalColor';
 import { CanvasAmbient, CanvasAmbientPreview } from '@/components/CanvasAmbient';
 import { EventCardPreviewPair } from '@/components/EventCardPreview';
@@ -491,6 +494,24 @@ interface Toast {
   tone: 'info' | 'success' | 'error';
 }
 
+/**
+ * Where a dragged card would land. Collapsed to nothing while idle, so the
+ * stack doesn't jump the moment a drag starts.
+ */
+function DropGap({ active, color }: { active: boolean; color: string }) {
+  return (
+    <div
+      className="pointer-events-none rounded-full transition-all duration-100"
+      style={{
+        height: active ? 3 : 0,
+        marginTop: active ? -3 : 0,
+        background: active ? color : 'transparent',
+        boxShadow: active ? `0 0 10px ${color}` : 'none',
+      }}
+    />
+  );
+}
+
 export default function SettingsPage() {
   const [, setLocation] = useLocation();
   // Settings is a two-column layout with a 256px sidebar — on a phone that
@@ -529,6 +550,7 @@ export default function SettingsPage() {
   const [calendarView, setCalendarView] = useState<string | undefined>(initialSettings.calendarView);
   const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
   const [customDaysAfter, setCustomDaysAfter] = useState<number>(initialSettings.customDaysAfter);
+  const [customAnchor, setCustomAnchor] = useState<'day' | 'week'>(initialSettings.customAnchor ?? 'day');
   const [eventColorStyle, setEventColorStyle] = useState<EventCardStyle>(initialSettings.eventColorStyle);
   const [sidebarStyle, setSidebarStyle] = useState<SidebarStyle>(initialSettings.sidebarStyle);
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(initialSettings.timeFormat);
@@ -702,16 +724,37 @@ export default function SettingsPage() {
     })));
   };
 
-  const handleMoveCategory = (id: string, dir: 'up' | 'down') => {
-    const idx = categories.findIndex(c => c.id === id);
-    if (idx < 0) return;
-    const targetIdx = dir === 'up' ? idx - 1 : idx + 1;
-    if (targetIdx < 0 || targetIdx >= categories.length) return;
-    const updated = [...categories];
-    const [moved] = updated.splice(idx, 1);
-    updated.splice(targetIdx, 0, moved);
-    setCategories(updated);
+
+  // ── Task lists ─────────────────────────────────────────────────────────────
+  // The panel on the main window is where these are normally managed; this is
+  // the same data, for when you're already in Settings. Deleting one here can't
+  // rewrite the tasks that pointed at it (this window has no task store), so it
+  // relies on `resolveListId` treating an unknown list as General — no task is
+  // ever lost, it just comes home.
+  const [deleteConfirmListId, setDeleteConfirmListId] = useState<string | null>(null);
+
+  const handleAddTaskList = () => {
+    const name = `List ${taskLists.length + 1}`;
+    setTaskLists(prev => [...prev, { id: makeListId(name), name, color: nextListColor(prev) }]);
   };
+
+  const patchTaskList = (id: string, patch: Partial<TaskList>) => {
+    setTaskLists(prev => prev.map(l => (l.id === id ? { ...l, ...patch } : l)));
+  };
+
+  const handleDeleteTaskList = (id: string) => {
+    if (id === GENERAL_LIST_ID) return;
+    const list = taskLists.find(l => l.id === id);
+    setTaskLists(prev => prev.filter(l => l.id !== id));
+    setDeleteConfirmListId(null);
+    showToast(`List “${list?.name || 'Untitled'}” deleted — its tasks moved to General.`, 'info');
+  };
+
+  // Both cards below are reordered by dragging rather than by arrow buttons.
+  // The grip is the affordance; the whole card is draggable except its own
+  // controls (the default `ignore` selector covers inputs and buttons).
+  const catDrag = useReorder(categories, c => c.id, setCategories);
+  const listDrag = useReorder(taskLists, l => l.id, setTaskLists);
 
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
   const patchPrayer = useCallback((patch: Partial<PrayerSettings>) => {
@@ -757,6 +800,7 @@ export default function SettingsPage() {
     calendarView: initialSettings.calendarView,
     customDaysBefore: initialSettings.customDaysBefore,
     customDaysAfter: initialSettings.customDaysAfter,
+    customAnchor: initialSettings.customAnchor ?? 'day',
     interval: initialSettings.interval,
     tasksPanelOpen: initialSettings.tasksPanelOpen,
     tasksPanelWidth: initialSettings.tasksPanelWidth,
@@ -784,6 +828,7 @@ export default function SettingsPage() {
     setCalendarView(d.calendarView);
     setCustomDaysBefore(d.customDaysBefore);
     setCustomDaysAfter(d.customDaysAfter);
+    if (d.customAnchor === 'day' || d.customAnchor === 'week') setCustomAnchor(d.customAnchor);
     setDayStartH(d.dayStartH);
     setDayEndH(d.dayEndH);
     setMobileContentZoom(d.mobileContentZoom ?? 1);
@@ -828,7 +873,7 @@ export default function SettingsPage() {
     if (!deviceReady.current) return;
     saveDeviceSettings({
       calendarView: calendarView ?? 'week',
-      customDaysBefore, customDaysAfter, interval,
+      customDaysBefore, customDaysAfter, customAnchor, interval,
       tasksPanelOpen, tasksPanelWidth, showTaskRow,
       stickyAllDayMain, stickyTasksMain,
       darkMode, darkPreset, lightPreset,
@@ -838,7 +883,7 @@ export default function SettingsPage() {
       mobileUiZoom,
       ...deviceExtrasRef.current,
     });
-  }, [calendarView, customDaysBefore, customDaysAfter, interval, tasksPanelOpen,
+  }, [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, tasksPanelOpen,
       tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
       darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
       mobileContentZoom, mobileUiZoom]);
@@ -984,7 +1029,7 @@ export default function SettingsPage() {
     taskLists,
     }), 150);
     return () => window.clearTimeout(broadcastId);
-  }, [hardware, prayer, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+  }, [hardware, prayer, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -1046,6 +1091,7 @@ export default function SettingsPage() {
     calendarView,
     customDaysBefore,
     customDaysAfter,
+    customAnchor,
     eventColorStyle,
     sidebarStyle,
     timeFormat,
@@ -1099,6 +1145,7 @@ export default function SettingsPage() {
     setCalendarView(restored.calendarView);
     setCustomDaysBefore(restored.customDaysBefore);
     setCustomDaysAfter(restored.customDaysAfter);
+    if (restored.customAnchor === 'day' || restored.customAnchor === 'week') setCustomAnchor(restored.customAnchor);
     setEventColorStyle(restored.eventColorStyle);
     setSidebarStyle(restored.sidebarStyle);
     setTimeFormat(restored.timeFormat);
@@ -1275,7 +1322,7 @@ export default function SettingsPage() {
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
     { id: 'calendar', label: 'Calendar Grid', icon: <Calendar size={17} /> },
-    { id: 'categories', label: 'Categories', icon: <Tag size={17} />, badge: `${categories.length}` },
+    { id: 'categories', label: 'Categories & Lists', icon: <Tag size={17} />, badge: `${categories.length + taskLists.length}` },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
@@ -1887,6 +1934,52 @@ export default function SettingsPage() {
                     </div>
                   </div>
 
+                  {/* Custom View Basis */}
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Custom View Basis</span>
+                      <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                        Choose how the Custom calendar view calculates its before & after day ranges.
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setCustomAnchor('day')}
+                        className="p-3.5 rounded-2xl border text-left transition-smooth flex flex-col gap-1.5"
+                        style={{
+                          background: customAnchor === 'day' ? accentLight : 'transparent',
+                          borderColor: customAnchor === 'day' ? accentColor : cardBdr,
+                        }}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold" style={{ color: customAnchor === 'day' ? accentColor : textPrimary }}>
+                            Current Day (Today)
+                          </span>
+                          <span className="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded" style={{ background: accentColor, color: '#fff' }}>Default</span>
+                        </div>
+                        <span className="text-[11px] leading-relaxed" style={{ color: textSecondary }}>
+                          Before and After days are counted from today with positive increments (e.g. −2 / +2 days from Tuesday displays Sunday to Thursday).
+                        </span>
+                      </button>
+
+                      <button
+                        onClick={() => setCustomAnchor('week')}
+                        className="p-3.5 rounded-2xl border text-left transition-smooth flex flex-col gap-1.5"
+                        style={{
+                          background: customAnchor === 'week' ? accentLight : 'transparent',
+                          borderColor: customAnchor === 'week' ? accentColor : cardBdr,
+                        }}
+                      >
+                        <span className="text-xs font-bold" style={{ color: customAnchor === 'week' ? accentColor : textPrimary }}>
+                          Week Start & End
+                        </span>
+                        <span className="text-[11px] leading-relaxed" style={{ color: textSecondary }}>
+                          Before is offset from week start, and After is offset from week end (allows negative and positive day shifts).
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Grid Interval */}
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>Time Slot Snap Interval</span>
@@ -2206,25 +2299,35 @@ export default function SettingsPage() {
                     </button>
                   </div>
 
-                  {/* Categories Cards List */}
-                  <div className="flex flex-col gap-3">
+                  {/* Categories Cards List — drag a card to reorder */}
+                  <div className="flex flex-col gap-3" ref={catDrag.containerRef}>
                     {categories.map((cat, idx) => {
-                      const isFirst = idx === 0;
-                      const isLast = idx === categories.length - 1;
                       const previewStyle = gcalChipColors(cat.color, { dark: darkMode, style: eventColorStyle, pageBg: activeTheme.rootBg });
+                      const dragging = catDrag.dragId === cat.id;
 
                       return (
+                        <React.Fragment key={cat.id}>
+                        <DropGap active={catDrag.dragId !== null && catDrag.dropIndex === idx} color={accentColor} />
                         <div
-                          key={cat.id}
-                          className="p-4 rounded-2xl border transition-smooth duration-200 flex flex-col gap-3 group"
+                          data-reorder-id={cat.id}
+                          onPointerDown={e => catDrag.startDrag(e, cat.id)}
+                          className="p-4 rounded-2xl border transition-smooth duration-200 flex flex-col gap-3 group cursor-grab active:cursor-grabbing"
                           style={{
                             background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
-                            borderColor: cardBdr,
+                            borderColor: dragging ? accentColor : cardBdr,
+                            boxShadow: dragging ? `0 10px 28px rgba(0,0,0,0.32)` : undefined,
+                            opacity: dragging ? 0.85 : 1,
+                            transform: dragging ? 'scale(1.01)' : undefined,
                           }}
                         >
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                            {/* Left: Color dot + Name + Default Badge */}
+                            {/* Left: Grip + Color dot + Name + Default Badge */}
                             <div className="flex items-center gap-3">
+                              <GripVertical
+                                size={15}
+                                className="flex-shrink-0 opacity-30 group-hover:opacity-70 transition-opacity"
+                                style={{ color: textSecondary }}
+                              />
                               <div
                                 className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
                                 style={{
@@ -2256,31 +2359,6 @@ export default function SettingsPage() {
 
                             {/* Right: Actions */}
                             <div className="flex items-center gap-1.5 self-end sm:self-center">
-                              {/* Reorder Buttons */}
-                              <div className="flex items-center rounded-lg border overflow-hidden mr-1" style={{ borderColor: cardBdr }}>
-                                <button
-                                  type="button"
-                                  disabled={isFirst}
-                                  onClick={() => handleMoveCategory(cat.id, 'up')}
-                                  className="w-7 h-7 flex items-center justify-center text-xs transition-colors disabled:opacity-20 disabled:cursor-not-allowed hover:bg-white/5"
-                                  style={{ color: textSecondary }}
-                                  title="Move up"
-                                >
-                                  <ArrowUp size={12} />
-                                </button>
-                                <div className="w-[1px] h-4 bg-border/40" />
-                                <button
-                                  type="button"
-                                  disabled={isLast}
-                                  onClick={() => handleMoveCategory(cat.id, 'down')}
-                                  className="w-7 h-7 flex items-center justify-center text-xs transition-colors disabled:opacity-20 disabled:cursor-not-allowed hover:bg-white/5"
-                                  style={{ color: textSecondary }}
-                                  title="Move down"
-                                >
-                                  <ArrowDown size={12} />
-                                </button>
-                              </div>
-
                               {/* Toggle Default */}
                               <button
                                 type="button"
@@ -2378,8 +2456,157 @@ export default function SettingsPage() {
                             )}
                           </div>
                         </div>
+                        </React.Fragment>
                       );
                     })}
+                    <DropGap active={catDrag.dragId !== null && catDrag.dropIndex === categories.length} color={accentColor} />
+                  </div>
+                </div>
+
+                {/* ── Task Lists ──────────────────────────────────────────── */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <FolderKanban size={18} style={{ color: accentColor }} />
+                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Task Lists</h2>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          {taskLists.length} list{taskLists.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <p className="text-xs mt-1" style={{ color: textSecondary }}>
+                        Separate boards inside the tasks panel — Work, Study, Errands. Not the same thing as
+                        categories: a category colours a calendar item, a list decides which board a task sits on.
+                        You can also manage these straight from the tasks panel on the main window.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleAddTaskList}
+                      className="px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
+                      style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                    >
+                      <Plus size={15} />
+                      Add List
+                    </button>
+                  </div>
+
+                  <div className="flex flex-col gap-3" ref={listDrag.containerRef}>
+                    {taskLists.map((list, idx) => {
+                      const isGeneral = list.id === GENERAL_LIST_ID;
+                      const dragging = listDrag.dragId === list.id;
+                      return (
+                        <React.Fragment key={list.id}>
+                        <DropGap active={listDrag.dragId !== null && listDrag.dropIndex === idx} color={accentColor} />
+                        <div
+                          data-reorder-id={list.id}
+                          onPointerDown={e => listDrag.startDrag(e, list.id)}
+                          className="p-3.5 rounded-2xl border flex flex-col gap-3 group cursor-grab active:cursor-grabbing"
+                          style={{
+                            background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
+                            borderColor: dragging ? accentColor : cardBdr,
+                            boxShadow: dragging ? '0 10px 28px rgba(0,0,0,0.32)' : undefined,
+                            opacity: dragging ? 0.85 : 1,
+                            transform: dragging ? 'scale(1.01)' : undefined,
+                          }}
+                        >
+                          <div className="flex items-center gap-3">
+                            <GripVertical
+                              size={15}
+                              className="flex-shrink-0 opacity-30 group-hover:opacity-70 transition-opacity"
+                              style={{ color: textSecondary }}
+                            />
+                            <div
+                              className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
+                              style={{ backgroundColor: list.color, borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)' }}
+                            />
+                            <input
+                              value={list.name}
+                              onChange={e => patchTaskList(list.id, { name: e.target.value })}
+                              onBlur={e => { if (!e.target.value.trim()) patchTaskList(list.id, { name: 'Untitled list' }); }}
+                              maxLength={40}
+                              className="flex-1 min-w-0 px-3 py-2 rounded-xl border text-xs font-semibold outline-none transition-smooth"
+                              style={{
+                                background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff',
+                                borderColor: cardBdr,
+                                color: textPrimary,
+                              }}
+                            />
+                            {isGeneral && (
+                              <span
+                                className="text-[10px] font-bold px-2 py-1 rounded-full flex-shrink-0"
+                                style={{ background: `${accentColor}18`, color: accentColor }}
+                                title="Every task that isn't filed anywhere else lives here, so this list can't be removed."
+                              >
+                                Default
+                              </span>
+                            )}
+                            <div className="flex items-center gap-1 flex-shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setDeleteConfirmListId(list.id)}
+                                disabled={isGeneral}
+                                className="w-7 h-7 rounded-lg flex items-center justify-center border transition-smooth active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
+                                style={{ borderColor: cardBdr, color: '#ef4444' }}
+                                title={isGeneral ? 'The default list cannot be deleted' : 'Delete list'}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {TASK_LIST_COLORS.map(hex => {
+                              const selected = list.color.toLowerCase() === hex.toLowerCase();
+                              return (
+                                <button
+                                  key={hex}
+                                  type="button"
+                                  onClick={() => patchTaskList(list.id, { color: hex })}
+                                  className="w-6 h-6 rounded-full flex items-center justify-center transition-smooth hover:scale-110 active:scale-95"
+                                  style={{ background: hex, border: `2px solid ${selected ? textPrimary : 'transparent'}` }}
+                                  title={hex}
+                                >
+                                  {selected && <CheckCircle2 size={12} color="#ffffff" />}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {deleteConfirmListId === list.id && (
+                            <div
+                              className="rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border"
+                              style={{ background: 'rgba(239,68,68,0.08)', borderColor: 'rgba(239,68,68,0.35)' }}
+                            >
+                              <span className="text-[11px] font-medium" style={{ color: textPrimary }}>
+                                Delete “{list.name}”? Its tasks aren't deleted — they move back to General.
+                              </span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteConfirmListId(null)}
+                                  className="px-3 h-8 rounded-lg text-[11px] font-semibold border"
+                                  style={{ borderColor: cardBdr, color: textSecondary }}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteTaskList(list.id)}
+                                  className="px-3 h-8 rounded-lg text-[11px] font-bold text-white"
+                                  style={{ background: '#ef4444' }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        </React.Fragment>
+                      );
+                    })}
+                    <DropGap active={listDrag.dragId !== null && listDrag.dropIndex === taskLists.length} color={accentColor} />
                   </div>
                 </div>
 
@@ -3364,25 +3591,48 @@ export default function SettingsPage() {
                           </div>
 
                           {/* Chaining sessions back to back */}
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="flex-1">
-                              <span className="text-xs font-semibold" style={{ color: textPrimary }}>Start the next session automatically</span>
-                              <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
-                                When a session finishes and you are still sitting there, the grace period runs again
-                                and the next one begins. Staying put produces no sensor reading to react to, so
-                                without this the day stops after the first session. Stopping one yourself with the
-                                terminate button does not restart it — leaving and returning does.
-                              </p>
+                          <div className="flex flex-col gap-3">
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex-1">
+                                <span className="text-xs font-semibold" style={{ color: textPrimary }}>Start the next session automatically</span>
+                                <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                                  When a session finishes and you are still sitting there, the next one begins automatically.
+                                  Staying put produces no sensor reading to react to, so without this the day stops after the
+                                  first session. Stopping one yourself with the terminate button does not restart it — leaving
+                                  and returning does.
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => patchHardware({ autoRestartEnabled: !hardware.autoRestartEnabled })}
+                                className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                                style={{ background: hardware.autoRestartEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                                aria-pressed={hardware.autoRestartEnabled}
+                              >
+                                <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.autoRestartEnabled ? 22 : 2 }} />
+                              </button>
                             </div>
-                            <button
-                              type="button"
-                              onClick={() => patchHardware({ autoRestartEnabled: !hardware.autoRestartEnabled })}
-                              className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
-                              style={{ background: hardware.autoRestartEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
-                              aria-pressed={hardware.autoRestartEnabled}
-                            >
-                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.autoRestartEnabled ? 22 : 2 }} />
-                            </button>
+
+                            {hardware.autoRestartEnabled && (
+                              <div className="flex flex-col gap-2 pl-3 border-l-2 ml-1" style={{ borderColor: cardBdr }}>
+                                <span className="text-xs font-semibold" style={{ color: textPrimary }}>Grace period before starting next session</span>
+                                <p className="text-[11px] -mt-1" style={{ color: textSecondary }}>
+                                  Seconds to wait before starting the next session. Set to 0 to start immediately with no delay.
+                                </p>
+                                <div className="flex items-center gap-2">
+                                  <NumberField
+                                    min={0}
+                                    max={300}
+                                    value={hardware.autoRestartArmSeconds ?? 0}
+                                    onCommit={n => patchHardware({ autoRestartArmSeconds: n })}
+                                    ariaLabel="Next session grace period in seconds"
+                                    className="w-24 px-3 py-2 rounded-xl border text-xs outline-none"
+                                    style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                                  />
+                                  <span className="text-[11px]" style={{ color: textSecondary }}>seconds</span>
+                                </div>
+                              </div>
+                            )}
                           </div>
 
                           {/* What happens when the app first becomes reachable */}
@@ -3546,9 +3796,29 @@ export default function SettingsPage() {
                           fuse, so briefly leaning out of the beam does not read as walking away.
                         </p>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <label className="flex flex-col gap-1">
-                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Ignore readings beyond (cm)</span>
+                        <div className={`grid gap-3 ${hardware.glitchIgnoreAlways ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center justify-between gap-2 h-6">
+                              <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Ignore readings beyond (cm)</span>
+                              <div
+                                onClick={() => patchHardware({ glitchIgnoreAlways: !hardware.glitchIgnoreAlways })}
+                                className="flex items-center gap-1.5 cursor-pointer select-none"
+                                title="Always discard readings beyond this limit"
+                              >
+                                <span className="text-[10px]" style={{ color: textSecondary }}>Always discard</span>
+                                <button
+                                  type="button"
+                                  className="relative w-9 h-5 rounded-full transition-colors flex-shrink-0 pointer-events-none"
+                                  style={{ background: hardware.glitchIgnoreAlways ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                                  aria-pressed={hardware.glitchIgnoreAlways}
+                                >
+                                  <span
+                                    className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth"
+                                    style={{ left: hardware.glitchIgnoreAlways ? 18 : 2 }}
+                                  />
+                                </button>
+                              </div>
+                            </div>
                             <NumberField
                               min={20} max={400} step={5}
                               value={hardware.maxValidCm}
@@ -3557,24 +3827,38 @@ export default function SettingsPage() {
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
-                          </label>
-                          <label className="flex flex-col gap-1">
-                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>…unless they persist for (ms)</span>
-                            <NumberField
-                              min={0} max={60000} step={500}
-                              value={hardware.glitchHoldMs}
-                              onCommit={n => patchHardware({ glitchHoldMs: n })}
-                              ariaLabel="Persist for, ms"
-                              className="px-3 py-2 rounded-xl border text-xs outline-none"
-                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
-                            />
-                          </label>
+                          </div>
+
+                          {!hardware.glitchIgnoreAlways && (
+                            <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-2 h-6">
+                                <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>…unless they persist for (ms)</span>
+                              </div>
+                              <NumberField
+                                min={0} max={60000} step={500}
+                                value={hardware.glitchHoldMs}
+                                onCommit={n => patchHardware({ glitchHoldMs: n })}
+                                ariaLabel="Persist for, ms"
+                                className="px-3 py-2 rounded-xl border text-xs outline-none"
+                                style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                              />
+                            </div>
+                          )}
                         </div>
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
-                          Cheap ultrasonic modules sometimes spray maximum-range values for a second or two. Those are
-                          dropped outright, so a burst cannot disturb a running session. They cannot be ignored
-                          forever though — an empty desk with nothing in the beam reads exactly the same — so a run
-                          lasting longer than {(hardware.glitchHoldMs / 1000).toFixed(0)}s is taken at face value.
+                          {hardware.glitchIgnoreAlways ? (
+                            <>
+                              Cheap ultrasonic modules sometimes spray maximum-range values for a second or two. With always discard enabled,
+                              readings beyond {hardware.maxValidCm}cm are dropped outright and will never be accepted regardless of how long they persist.
+                            </>
+                          ) : (
+                            <>
+                              Cheap ultrasonic modules sometimes spray maximum-range values for a second or two. Those are
+                              dropped outright, so a burst cannot disturb a running session. They cannot be ignored
+                              forever though — an empty desk with nothing in the beam reads exactly the same — so a run
+                              lasting longer than {(hardware.glitchHoldMs / 1000).toFixed(0)}s is taken at face value.
+                            </>
+                          )}
                         </p>
                       </div>
 

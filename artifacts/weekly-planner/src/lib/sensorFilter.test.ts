@@ -14,6 +14,7 @@ import { DEFAULT_HARDWARE_SETTINGS } from './hardwareController';
 const CFG = {
   maxValidCm: DEFAULT_HARDWARE_SETTINGS.maxValidCm,
   glitchHoldMs: DEFAULT_HARDWARE_SETTINGS.glitchHoldMs,
+  glitchIgnoreAlways: DEFAULT_HARDWARE_SETTINGS.glitchIgnoreAlways,
   medianWindow: DEFAULT_HARDWARE_SETTINGS.medianWindow,
   enterCm: DEFAULT_HARDWARE_SETTINGS.enterCm,
   exitCm: DEFAULT_HARDWARE_SETTINGS.exitCm,
@@ -26,11 +27,16 @@ class Sensor {
   ring: number[] = [];
   glitchRunSince = 0;
   t = 0;
+  ignoreAlways = false;
 
   present = false;
   candidate = false;
   candidateSince = 0;
   initialised = false;
+
+  constructor(opts: { ignoreAlways?: boolean } = {}) {
+    this.ignoreAlways = opts.ignoreAlways ?? CFG.glitchIgnoreAlways;
+  }
 
   /** One ping, exactly as the firmware handles it. */
   feed(cm: number) {
@@ -38,7 +44,7 @@ class Sensor {
 
     if (cm > CFG.maxValidCm) {
       if (this.glitchRunSince === 0) this.glitchRunSince = this.t;
-      if (this.t - this.glitchRunSince >= CFG.glitchHoldMs) this.push(cm);
+      if (!this.ignoreAlways && this.t - this.glitchRunSince >= CFG.glitchHoldMs) this.push(cm);
       // else: dropped, the window keeps its last good values
     } else {
       this.glitchRunSince = 0;
@@ -150,6 +156,18 @@ console.log(`Filter: ignore >${CFG.maxValidCm}cm unless sustained ${CFG.glitchHo
   s.hold(400, 3);
   s.hold(32, 4);
   check('sitting down during a glitch burst is still detected', s.present, `present=${s.present}`);
+}
+
+// When ignoreAlways is enabled, over-range readings are NEVER believed even after long holds.
+{
+  const s = new Sensor({ ignoreAlways: true });
+  s.hold(35, 5);
+  check('seated with ignoreAlways', s.present);
+  s.hold(400, 20);
+  check('20s over-range is permanently ignored with ignoreAlways', s.present, `median=${s.median()} present=${s.present}`);
+  check('median remains at last valid reading', s.median() <= CFG.maxValidCm, `median=${s.median()}`);
+  s.hold(58, 6);
+  check('valid away reading still registers as away', !s.present, `present=${s.present}`);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);

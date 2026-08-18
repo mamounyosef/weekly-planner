@@ -4,23 +4,37 @@ import {
   Check, ChevronDown, ChevronRight, Clock, ListTodo,
   MoreHorizontal, Plus, Repeat, StickyNote, X, Calendar, AlertCircle,
   Sparkles, ArrowRight, Sun, CalendarRange, Filter,
-  ArrowUpDown
+  ArrowUpDown, ArrowLeft, Layers, Pencil, Trash2, CornerDownRight,
 } from 'lucide-react';
 import { addDays, format } from 'date-fns';
-import type { DeleteMode, WeekStartsOn } from '@/lib/recurrence';
+import {
+  formatRecurrenceLabel, parseDate,
+  type DeleteMode, type RecurFreq, type Recurrence, type Weekday, type WeekStartsOn,
+} from '@/lib/recurrence';
 import type { TimeFormat } from '@/lib/settingsSync';
 import {
   ALL_TASK_FILTERS, TASK_FILTER_LABELS, expandTaskRange, isTaskDone,
   taskBucket, todayYmd,
   type Task, type TaskData, type TaskFilter,
 } from '@/lib/tasks';
+import {
+  GENERAL_LIST_ID, TASK_LIST_COLORS, makeListId, moveList, nextListColor, resolveListId,
+  type TaskList as TaskListDef,
+} from '@/lib/taskLists';
+import { useReorder } from '@/lib/useReorder';
 
 /** What the panel's composer hands back; home.tsx turns it into a real Task. */
 export interface NewTaskInput {
   title: string;
   dueDate: string | null;   // 'yyyy-MM-dd', or null for a general task
   startTime?: string | null;
+  listId?: string;
+  recur?: Recurrence;
+  notes?: string;
 }
+
+/** How a list's tasks are dealt with when the list itself is deleted. */
+export type ListDeleteMode = 'keep' | 'purge';
 
 export interface TaskChipColors { bg: string; border: string; text: string; textMuted: string }
 
@@ -56,6 +70,15 @@ interface TasksPanelProps {
   taskColor: string;
   taskCheckboxShape?: 'circle' | 'square';
   theme: TaskTheme;
+  /** Every list, in the order they appear on the rail. Always contains General. */
+  lists: TaskListDef[];
+  /** Which list the panel is showing; `null` is the "All lists" view. */
+  activeListId: string | null;
+  onActiveListChange: (id: string | null) => void;
+  /** Create / rename / recolour / reorder — the whole array, already updated. */
+  onListsChange: (next: TaskListDef[]) => void;
+  onDeleteList: (id: string, mode: ListDeleteMode) => void;
+  onMoveTaskToList: (occId: string, listId: string) => void;
   onFiltersChange: (f: TaskFilter[]) => void;
   onCreate: (input: NewTaskInput) => string | null;
   onToggleDone: (occId: string) => void;
@@ -131,6 +154,7 @@ function useTaskRows(tasks: TaskData, today: string): Row[] {
 
 function TasksPanel({
   open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle', theme,
+  lists, activeListId, onActiveListChange, onListsChange, onDeleteList, onMoveTaskToList,
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
   sheet = false,
   page = false,
@@ -138,15 +162,77 @@ function TasksPanel({
 }: TasksPanelProps) {
   const today = todayYmd();
   const tomorrow = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd'), [today]);
-  const nextWeek = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 7), 'yyyy-MM-dd'), [today]);
 
-  const rows = useTaskRows(tasks, today);
+  const allRows = useTaskRows(tasks, today);
+
+  // ── Lists ──────────────────────────────────────────────────────────────────
+  // A list is resolved, never trusted: a task pointing at a list that has since
+  // been deleted (which can happen from the Settings window, where the task
+  // store isn't reachable) reads as General rather than vanishing.
+  const listsById = useMemo(() => {
+    const m: Record<string, TaskListDef> = {};
+    for (const l of lists) m[l.id] = l;
+    return m;
+  }, [lists]);
+
+  const activeList = activeListId ? listsById[activeListId] ?? null : null;
+  // An active list that was deleted elsewhere falls back to "All" rather than
+  // leaving the panel stuck on a tab that no longer exists.
+  const effectiveListId = activeListId && activeList ? activeListId : null;
+  useEffect(() => {
+    if (activeListId && !listsById[activeListId]) onActiveListChange(null);
+  }, [activeListId, listsById, onActiveListChange]);
+
+  /**
+   * A subtask lives wherever its parent lives. Reading it off the parent rather
+   * than copying the id onto every child means moving a task between lists
+   * takes its subtasks with it, and a child can never be stranded on a list its
+   * parent isn't on (where it would render as a rootless orphan).
+   */
+  const listOfTask = useCallback((t: Task): string => {
+    const owner = (t.parentId ? tasks[t.parentId] : null) ?? t;
+    return resolveListId(owner.listId, lists);
+  }, [tasks, lists]);
+
+  const rows = useMemo(
+    () => (effectiveListId ? allRows.filter(r => listOfTask(r.task) === effectiveListId) : allRows),
+    [allRows, effectiveListId, listOfTask],
+  );
+
+  /** Open (not done) task count per list id — what the rail's badges show. */
+  const listCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const r of allRows) {
+      if (r.done || r.task.parentId) continue;   // subtasks are counted through their parent
+      const id = listOfTask(r.task);
+      c[id] = (c[id] ?? 0) + 1;
+    }
+    return c;
+  }, [allRows, listOfTask]);
 
   const [composerTitle, setComposerTitle] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerDate, setComposerDate] = useState<string | null>(today);
   const [composerTime, setComposerTime] = useState<string | null>(null);
+  const [composerRecur, setComposerRecur] = useState<Recurrence | undefined>(undefined);
+  const [composerNotes, setComposerNotes] = useState('');
   const [showTimePicker, setShowTimePicker] = useState(false);
+  const [showRepeatPicker, setShowRepeatPicker] = useState(false);
+  const [showNotesInput, setShowNotesInput] = useState(false);
+  // Which list the composer files into. It follows the tab you're on, because
+  // that's what "add a task here" means — but it stays overridable, so you can
+  // sit on one list and throw something onto another without switching.
+  const [composerListId, setComposerListId] = useState<string>(() => effectiveListId ?? GENERAL_LIST_ID);
+  const [showListPicker, setShowListPicker] = useState(false);
+  useEffect(() => {
+    setComposerListId(effectiveListId ?? GENERAL_LIST_ID);
+    setShowListPicker(false);
+  }, [effectiveListId]);
+  // The rail's inline editor: `null` closed, `'new'` creating, otherwise the id
+  // of the list being edited.
+  const [listEditor, setListEditor] = useState<string | null>(null);
+  /** The list pill a task is currently being dragged over. */
+  const [dragOverListId, setDragOverListId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>({});
 
@@ -189,16 +275,29 @@ function TasksPanel({
     setComposerTitle('');
     setComposerDate(today);
     setComposerTime(null);
+    setComposerRecur(undefined);
+    setComposerNotes('');
     setShowTimePicker(false);
+    setShowRepeatPicker(false);
+    setShowNotesInput(false);
   }, [today]);
 
   const submitComposer = useCallback(() => {
     const title = composerTitle.trim();
     if (!title) return;
-    onCreate({ title, dueDate: composerDate, startTime: composerDate ? composerTime : null });
+    onCreate({
+      title,
+      dueDate: composerDate,
+      startTime: composerDate ? composerTime : null,
+      // General is the absence of a list, not a list id on every task: storing
+      // it would mean every pre-lists task looked different from a new one.
+      listId: composerListId === GENERAL_LIST_ID ? undefined : composerListId,
+      recur: composerDate ? composerRecur : undefined,
+      notes: composerNotes.trim() || undefined,
+    });
     resetComposer();
     inputRef.current?.focus();
-  }, [composerTitle, composerDate, composerTime, onCreate, resetComposer]);
+  }, [composerTitle, composerDate, composerTime, composerListId, composerRecur, composerNotes, onCreate, resetComposer]);
 
   // Filter counts
   const counts = useMemo(() => {
@@ -293,6 +392,54 @@ function TasksPanel({
     applyManualOrder(reordered);
   }, [applyManualOrder]);
 
+  // ── List mutations ─────────────────────────────────────────────────────────
+  const saveList = useCallback((id: string | 'new', name: string, color: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (id === 'new') {
+      const fresh = { id: makeListId(trimmed), name: trimmed, color };
+      onListsChange([...lists, fresh]);
+      onActiveListChange(fresh.id);
+    } else {
+      onListsChange(lists.map(l => (l.id === id ? { ...l, name: trimmed, color } : l)));
+    }
+    setListEditor(null);
+  }, [lists, onListsChange, onActiveListChange]);
+
+  const shiftList = useCallback((id: string, dir: -1 | 1) => {
+    onListsChange(moveList(lists, id, dir));
+  }, [lists, onListsChange]);
+
+  const removeList = useCallback((id: string, mode: ListDeleteMode) => {
+    // Leave the tab you were standing on before it disappears, or the panel
+    // spends a render pointing at a list that is already gone.
+    if (activeListId === id) onActiveListChange(null);
+    setListEditor(null);
+    onDeleteList(id, mode);
+  }, [activeListId, onActiveListChange, onDeleteList]);
+
+  // ── Reordering the rail ────────────────────────────────────────────────────
+  // Same hook the Settings lists use, just on the horizontal axis. The default
+  // ignore-selector is narrowed because a pill IS a button — only the chevron
+  // that opens the editor is off-limits.
+  const rail = useReorder<TaskListDef, HTMLDivElement>(lists, l => l.id, onListsChange, {
+    axis: 'x',
+    ignore: '[data-no-drag]',
+  });
+
+  /** Drop a dragged task onto a list pill. */
+  const dropTaskOnList = useCallback((occId: string, listId: string) => {
+    setDragOverListId(null);
+    setDraggingId(null);
+    setDragOverId(null);
+    const row = allRows.find(r => r.occId === occId);
+    if (!row) return;
+    // A subtask follows its parent, so filing one means filing the parent.
+    const targetOccId = row.task.parentId && tasks[row.task.parentId] ? row.task.parentId : occId;
+    if (listOfTask(row.task) === listId) return;
+    onMoveTaskToList(targetOccId, listId);
+  }, [allRows, tasks, listOfTask, onMoveTaskToList]);
+
   // Phone sheet: how far the grab handle has been pulled down, so the sheet can
   // follow the finger and spring back if the pull wasn't far enough to dismiss.
   const [sheetDragY, setSheetDragY] = useState(0);
@@ -332,6 +479,9 @@ function TasksPanel({
   };
 
   const chip = theme.chip(taskColor);
+  /** The panel takes on the colour of whichever list you're looking at. */
+  const headerTone = activeList?.color ?? taskColor;
+  const composerListColor = listsById[composerListId]?.color ?? taskColor;
 
   const handleToggleDoneAnimated = useCallback((occId: string, currentlyDone: boolean) => {
     if (currentlyDone) {
@@ -491,12 +641,14 @@ function TasksPanel({
           style={{ borderColor: theme.surfaceBdr, background: theme.surfaceBg + '30' }}
         >
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="p-1.5 rounded-lg flex-shrink-0" style={{ background: `${taskColor}18`, color: taskColor }}>
-              <ListTodo size={16} />
+            <div className="p-1.5 rounded-lg flex-shrink-0" style={{ background: `${headerTone}18`, color: headerTone }}>
+              {activeList ? <ListTodo size={16} /> : <Layers size={16} />}
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 min-w-0">
-                <span className="text-sm font-semibold tracking-tight truncate" style={{ color: theme.menuText }}>Tasks</span>
+                <span className="text-sm font-semibold tracking-tight truncate" style={{ color: theme.menuText }}>
+                  {activeList ? activeList.name : 'Tasks'}
+                </span>
                 {openCount > 0 && (
                   <span
                     className="text-[10.5px] font-bold px-1.5 py-0.5 rounded-full tabular-nums flex-shrink-0"
@@ -507,7 +659,9 @@ function TasksPanel({
                 )}
               </div>
               <div className="text-[10.5px] leading-tight truncate" style={{ color: theme.menuSub }}>
-                {totalCount === 0 ? 'No tasks yet' : `${visibleCount} shown`}
+                {totalCount === 0
+                  ? (activeList ? `Nothing in ${activeList.name}` : 'No tasks yet')
+                  : `${visibleCount} shown${activeList ? '' : lists.length > 1 ? ` · ${lists.length} lists` : ''}`}
               </div>
             </div>
           </div>
@@ -570,6 +724,83 @@ function TasksPanel({
               <X size={16} />
             </button>
           </div>
+        </div>
+
+        {/* ── List rail ────────────────────────────────────────────────────
+            The lists themselves live here rather than behind a Settings trip:
+            switching, creating, renaming, recolouring, reordering and deleting
+            all happen on the page you're already looking at. A task can also be
+            dropped straight onto a pill to file it. */}
+        <div className="flex-shrink-0 relative border-b" style={{ borderColor: theme.surfaceBdr }}>
+          <div
+            ref={rail.containerRef}
+            className="flex gap-1.5 px-3 py-2 overflow-x-auto overflow-y-hidden"
+            style={{ background: theme.surfaceBg + '22' }}
+          >
+            <ListPill
+              label="All"
+              icon={<Layers size={11} />}
+              tone={theme.accent}
+              active={effectiveListId === null}
+              count={lists.length > 1 ? Object.values(listCounts).reduce((a, b) => a + b, 0) : undefined}
+              theme={theme}
+              onClick={() => onActiveListChange(null)}
+            />
+            {lists.map((l, i) => (
+              <React.Fragment key={l.id}>
+                <RailInsertBar active={rail.dropIndex === i && rail.dragId !== null} theme={theme} />
+                <ListPill
+                  listId={l.id}
+                  label={l.name}
+                  tone={l.color}
+                  active={effectiveListId === l.id}
+                  count={listCounts[l.id]}
+                  theme={theme}
+                  editable
+                  reorderable={lists.length > 1}
+                  beingDragged={rail.dragId === l.id}
+                  dragActive={!!draggingId}
+                  dropActive={dragOverListId === l.id}
+                  onPointerDownPill={e => rail.startDrag(e, l.id)}
+                  onClick={() => { if (!rail.wasDragged()) onActiveListChange(l.id); }}
+                  onEdit={() => setListEditor(prev => (prev === l.id ? null : l.id))}
+                  onDragOverList={() => setDragOverListId(l.id)}
+                  onDragLeaveList={() => setDragOverListId(prev => (prev === l.id ? null : prev))}
+                  onDropTask={occId => dropTaskOnList(occId, l.id)}
+                />
+              </React.Fragment>
+            ))}
+            <RailInsertBar active={rail.dropIndex === lists.length && rail.dragId !== null} theme={theme} />
+            <button
+              onClick={() => setListEditor(prev => (prev === 'new' ? null : 'new'))}
+              className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
+              style={{
+                background: listEditor === 'new' ? `${theme.accent}22` : 'transparent',
+                border: `1px dashed ${listEditor === 'new' ? theme.accent : theme.surfaceBdr}`,
+                color: listEditor === 'new' ? theme.accent : theme.menuSub,
+              }}
+              title="New list"
+            >
+              <Plus size={11} strokeWidth={2.6} />
+              {lists.length <= 1 && <span>New list</span>}
+            </button>
+          </div>
+
+          <AnimatePresence>
+            {listEditor && (
+              <ListEditor
+                key={listEditor}
+                list={listEditor === 'new' ? null : listsById[listEditor] ?? null}
+                lists={lists}
+                taskCount={listEditor === 'new' ? 0 : listCounts[listEditor] ?? 0}
+                theme={theme}
+                onSave={(name, color) => saveList(listEditor, name, color)}
+                onMove={dir => shiftList(listEditor, dir)}
+                onDelete={mode => removeList(listEditor, mode)}
+                onClose={() => setListEditor(null)}
+              />
+            )}
+          </AnimatePresence>
         </div>
 
         {/* Filter chips */}
@@ -641,9 +872,9 @@ function TasksPanel({
             </AnimatePresence>
           </div>
 
-          {/* Composer Schedule Bar (Date & Time Picker) */}
+          {/* Composer Schedule Bar (Date & Time & Repeat & Options Picker) */}
           <AnimatePresence initial={false}>
-            {(composerFocused || composerTitle.trim() || composerDate !== today || composerTime || showTimePicker) && (
+            {(composerFocused || composerTitle.trim() || composerDate !== today || composerTime || composerRecur || composerNotes.trim() || showTimePicker || showRepeatPicker || showNotesInput) && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
@@ -651,122 +882,287 @@ function TasksPanel({
                 transition={{ duration: 0.15 }}
                 className="flex flex-col gap-2.5 pt-2.5 overflow-visible"
               >
-                {/* Date presets row */}
+                {/* Schedule Card Container */}
                 <div
-                  className="rounded-xl p-2 flex flex-col gap-2"
+                  className="rounded-xl p-2.5 flex flex-col gap-2.5"
                   style={{ background: theme.surfaceBg + '70', border: `1px solid ${theme.surfaceBdr}` }}
                 >
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <QuickPill
-                    icon={<Sun size={12} />}
-                    label="Today"
-                    active={composerDate === today}
-                    theme={theme}
-                    onClick={() => setComposerDate(today)}
-                  />
-                  <QuickPill
-                    icon={<ArrowRight size={12} />}
-                    label="Tomorrow"
-                    active={composerDate === tomorrow}
-                    theme={theme}
-                    onClick={() => setComposerDate(tomorrow)}
-                  />
-                  <QuickPill
-                    icon={<CalendarRange size={12} />}
-                    label="Next week"
-                    active={composerDate === nextWeek}
-                    theme={theme}
-                    onClick={() => setComposerDate(nextWeek)}
-                  />
-                  <QuickPill
-                    icon={<X size={12} />}
-                    label="No Date"
-                    active={composerDate === null}
-                    theme={theme}
-                    onClick={() => { setComposerDate(null); setComposerTime(null); }}
-                  />
-
-                  {/* Custom Date Input Picker Button */}
-                  <label
-                    className="relative flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:opacity-90 active:scale-95"
-                    style={{
-                      background: (composerDate && composerDate !== today && composerDate !== tomorrow && composerDate !== nextWeek)
-                        ? `${theme.accent}22` : theme.surfaceBg,
-                      border: `1px solid ${(composerDate && composerDate !== today && composerDate !== tomorrow && composerDate !== nextWeek)
-                        ? theme.accent : theme.surfaceBdr}`,
-                      color: (composerDate && composerDate !== today && composerDate !== tomorrow && composerDate !== nextWeek)
-                        ? theme.accent : theme.menuSub,
-                    }}
-                    onMouseDown={e => e.preventDefault()}
-                    onClick={() => {
-                      dateInputRef.current?.focus();
-                      try { dateInputRef.current?.showPicker?.(); } catch {}
-                    }}
-                    title="Choose custom date"
-                  >
-                    <Calendar size={12} />
-                    <span>
-                      {(composerDate && composerDate !== today && composerDate !== tomorrow && composerDate !== nextWeek)
-                        ? format(new Date(`${composerDate}T00:00:00`), 'MMM d')
-                        : 'Pick Date'}
-                    </span>
-                    <input
-                      ref={dateInputRef}
-                      type="date"
-                      value={composerDate ?? ''}
-                      onChange={e => setComposerDate(e.target.value || null)}
-                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                  {/* Date selection row */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] font-bold uppercase tracking-wider mr-0.5" style={{ color: theme.menuSub }}>Date</span>
+                    <QuickPill
+                      icon={<Sun size={12} />}
+                      label="Today"
+                      active={composerDate === today}
+                      theme={theme}
+                      onClick={() => setComposerDate(today)}
                     />
-                  </label>
-                </div>
+                    <QuickPill
+                      icon={<ArrowRight size={12} />}
+                      label="Tomorrow"
+                      active={composerDate === tomorrow}
+                      theme={theme}
+                      onClick={() => setComposerDate(tomorrow)}
+                    />
+                    <QuickPill
+                      icon={<X size={12} />}
+                      label="No Date"
+                      active={composerDate === null}
+                      theme={theme}
+                      onClick={() => {
+                        setComposerDate(null);
+                        setComposerTime(null);
+                        setComposerRecur(undefined);
+                      }}
+                    />
 
-                {/* Time row - clean time picker without cluttering presets */}
-                <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t" style={{ borderColor: theme.surfaceBdr }}>
-                  <span className="text-[10.5px] font-bold uppercase tracking-wider mr-1" style={{ color: theme.menuSub }}>Time</span>
-                  <div className="relative">
+                    {/* Custom Date Input Picker Button */}
+                    <label
+                      className="relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:opacity-90 active:scale-95"
+                      style={{
+                        background: (composerDate && composerDate !== today && composerDate !== tomorrow)
+                          ? `${theme.accent}22` : theme.surfaceBg,
+                        border: `1px solid ${(composerDate && composerDate !== today && composerDate !== tomorrow)
+                          ? theme.accent : theme.surfaceBdr}`,
+                        color: (composerDate && composerDate !== today && composerDate !== tomorrow)
+                          ? theme.accent : theme.menuSub,
+                        fontWeight: (composerDate && composerDate !== today && composerDate !== tomorrow) ? 600 : 500,
+                      }}
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => {
+                        dateInputRef.current?.focus();
+                        try { dateInputRef.current?.showPicker?.(); } catch {}
+                      }}
+                      title="Choose custom date"
+                    >
+                      <Calendar size={12} />
+                      <span>
+                        {(composerDate && composerDate !== today && composerDate !== tomorrow)
+                          ? format(new Date(`${composerDate}T00:00:00`), 'MMM d')
+                          : 'Pick Date'}
+                      </span>
+                      <input
+                        ref={dateInputRef}
+                        type="date"
+                        value={composerDate ?? ''}
+                        onChange={e => setComposerDate(e.target.value || null)}
+                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Options row: Time, Repeat, List, Notes */}
+                  <div className="flex items-center gap-2 flex-wrap pt-2 border-t" style={{ borderColor: theme.surfaceBdr }}>
+                    <span className="text-[10px] font-bold uppercase tracking-wider mr-0.5" style={{ color: theme.menuSub }}>Options</span>
+
+                    {/* Time Picker */}
+                    <div className="flex items-center gap-1">
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => {
+                            if (!composerDate) setComposerDate(today);
+                            setShowTimePicker(v => !v);
+                          }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:scale-[1.02] active:scale-95"
+                          style={{
+                            background: composerTime ? chip.bg : theme.surfaceBg,
+                            border: `1px solid ${composerTime ? chip.border : theme.surfaceBdr}`,
+                            color: composerTime ? chip.text : theme.menuSub,
+                            fontWeight: composerTime ? 600 : 500,
+                          }}
+                          title="Set task time"
+                        >
+                          <Clock size={12} />
+                          <span>{composerTime ? fmtTime(composerTime, timeFormat) : 'Time'}</span>
+                        </button>
+
+                        <AnimatePresence>
+                          {showTimePicker && (
+                            <TimePickerPopover
+                              value={composerTime}
+                              timeFormat={timeFormat}
+                              theme={theme}
+                              taskColor={taskColor}
+                              onChange={setComposerTime}
+                              onClose={() => setShowTimePicker(false)}
+                            />
+                          )}
+                        </AnimatePresence>
+                      </div>
+
+                      {composerTime && (
+                        <button
+                          onClick={() => { setComposerTime(null); setShowTimePicker(false); }}
+                          className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 transition-colors"
+                          title="Clear time"
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Repeat Picker */}
+                    <div className="flex items-center gap-1">
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => {
+                            if (!composerDate) setComposerDate(today);
+                            setShowRepeatPicker(v => !v);
+                          }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:scale-[1.02] active:scale-95"
+                          style={{
+                            background: composerRecur ? `${theme.accent}20` : theme.surfaceBg,
+                            border: `1px solid ${composerRecur ? theme.accent : theme.surfaceBdr}`,
+                            color: composerRecur ? theme.accent : theme.menuSub,
+                            fontWeight: composerRecur ? 600 : 500,
+                          }}
+                          title={composerRecur ? `Repeats: ${formatRecurrenceLabel(composerRecur, composerDate || today)}` : 'Set task repetition'}
+                        >
+                          <Repeat size={12} />
+                          <span className="truncate max-w-[130px]">
+                            {composerRecur ? formatRecurrenceLabel(composerRecur, composerDate || today) : 'Repeat'}
+                          </span>
+                        </button>
+
+                        <AnimatePresence>
+                          {showRepeatPicker && (
+                            <RepeatPickerPopover
+                              value={composerRecur}
+                              anchorDate={composerDate}
+                              today={today}
+                              theme={theme}
+                              taskColor={taskColor}
+                              onChange={r => {
+                                if (r && !composerDate) setComposerDate(today);
+                                setComposerRecur(r);
+                              }}
+                              onClose={() => setShowRepeatPicker(false)}
+                            />
+                          )}
+                        </AnimatePresence>
+                      </div>
+
+                      {composerRecur && (
+                        <button
+                          onClick={() => { setComposerRecur(undefined); setShowRepeatPicker(false); }}
+                          className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 transition-colors"
+                          title="Clear repeat"
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Which list this one goes to (if multiple lists exist) */}
+                    {lists.length > 1 && (
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => setShowListPicker(v => !v)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-smooth hover:scale-[1.02] active:scale-95"
+                          style={{
+                            background: `${composerListColor}18`,
+                            border: `1px solid ${composerListColor}66`,
+                            color: composerListColor,
+                          }}
+                          title="Choose which list this task goes to"
+                        >
+                          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: composerListColor }} />
+                          <span className="truncate max-w-[110px]">{listsById[composerListId]?.name ?? 'General'}</span>
+                          <ChevronDown size={11} />
+                        </button>
+
+                        {showListPicker && (
+                          <>
+                            <div className="fixed inset-0 z-40" onMouseDown={() => setShowListPicker(false)} />
+                            <div
+                              className="absolute left-0 top-full mt-1.5 z-50 w-48 max-h-56 overflow-y-auto rounded-xl shadow-xl py-1.5 border"
+                              style={{ background: theme.menuBg, borderColor: theme.surfaceBdr }}
+                              onMouseDown={e => e.preventDefault()}
+                            >
+                              {lists.map(l => (
+                                <button
+                                  key={l.id}
+                                  onClick={() => { setComposerListId(l.id); setShowListPicker(false); }}
+                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors hover:opacity-90"
+                                  style={{
+                                    background: composerListId === l.id ? `${l.color}18` : 'transparent',
+                                    color: composerListId === l.id ? l.color : theme.menuText,
+                                  }}
+                                >
+                                  <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: l.color }} />
+                                  <span className="flex-1 text-left truncate">{l.name}</span>
+                                  {composerListId === l.id && <Check size={12} strokeWidth={2.5} />}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Note Toggle */}
                     <button
                       type="button"
                       onMouseDown={e => e.preventDefault()}
-                      onClick={() => {
-                        if (!composerDate) setComposerDate(today);
-                        setShowTimePicker(v => !v);
-                      }}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-smooth hover:scale-[1.02] active:scale-95"
+                      onClick={() => setShowNotesInput(v => !v)}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-smooth hover:scale-[1.02] active:scale-95"
                       style={{
-                        background: composerTime ? chip.bg : theme.surfaceBg,
-                        border: `1px solid ${composerTime ? chip.border : theme.surfaceBdr}`,
-                        color: composerTime ? chip.text : theme.menuSub,
+                        background: (showNotesInput || composerNotes.trim()) ? `${theme.accent}18` : theme.surfaceBg,
+                        border: `1px solid ${(showNotesInput || composerNotes.trim()) ? theme.accent : theme.surfaceBdr}`,
+                        color: (showNotesInput || composerNotes.trim()) ? theme.accent : theme.menuSub,
+                        fontWeight: (showNotesInput || composerNotes.trim()) ? 600 : 500,
                       }}
-                      title="Set task time"
+                      title="Add description or notes to this task"
                     >
-                      <Clock size={12} />
-                      <span>{composerTime ? fmtTime(composerTime, timeFormat) : 'Set time'}</span>
+                      <StickyNote size={12} />
+                      <span>{composerNotes.trim() ? 'Note added' : '+ Note'}</span>
                     </button>
-
-                    <AnimatePresence>
-                      {showTimePicker && (
-                        <TimePickerPopover
-                          value={composerTime}
-                          timeFormat={timeFormat}
-                          theme={theme}
-                          taskColor={taskColor}
-                          onChange={setComposerTime}
-                          onClose={() => setShowTimePicker(false)}
-                        />
-                      )}
-                    </AnimatePresence>
                   </div>
 
-                  {composerTime && (
-                    <button
-                      onClick={() => { setComposerTime(null); setShowTimePicker(false); }}
-                      className="p-1 rounded-lg hover:bg-red-500/20 text-red-400 transition-colors"
-                      title="Clear time"
-                    >
-                      <X size={12} />
-                    </button>
-                  )}
-                </div>
+                  {/* Expandable Note Input */}
+                  <AnimatePresence>
+                    {(showNotesInput || composerNotes.trim().length > 0) && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.15 }}
+                        className="pt-2 border-t overflow-hidden"
+                        style={{ borderColor: theme.surfaceBdr }}
+                      >
+                        <div className="relative">
+                          <textarea
+                            value={composerNotes}
+                            onChange={e => setComposerNotes(e.target.value)}
+                            placeholder="Add task notes or details..."
+                            rows={2}
+                            className="w-full rounded-xl px-2.5 py-1.5 text-xs outline-none resize-none transition-smooth"
+                            style={{
+                              background: theme.surfaceBg,
+                              color: theme.menuText,
+                              border: `1px solid ${theme.surfaceBdr}`,
+                            }}
+                          />
+                          {composerNotes.trim() && (
+                            <button
+                              type="button"
+                              onClick={() => setComposerNotes('')}
+                              className="absolute right-2 top-2 p-0.5 rounded text-red-400 hover:bg-red-500/10 transition-colors"
+                              title="Clear notes"
+                            >
+                              <X size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               </motion.div>
             )}
@@ -785,11 +1181,15 @@ function TasksPanel({
               </div>
               <div>
                 <h4 className="text-xs font-bold tracking-tight mb-1" style={{ color: theme.menuText }}>
-                  {totalCount === 0 ? 'No tasks yet' : 'No tasks match'}
+                  {totalCount === 0
+                    ? (activeList ? `${activeList.name} is empty` : 'No tasks yet')
+                    : 'No tasks match'}
                 </h4>
                 <p className="text-[11px] leading-relaxed" style={{ color: theme.menuSub }}>
                   {totalCount === 0
-                    ? 'Add one above and choose a date when needed.'
+                    ? (activeList
+                      ? 'Add one above, or drag a task onto this list from All.'
+                      : 'Add one above and choose a date when needed.')
                     : 'Try a different filter or clear the filters.'}
                 </p>
               </div>
@@ -815,6 +1215,11 @@ function TasksPanel({
                   taskColor={taskColor}
                   taskCheckboxShape={taskCheckboxShape}
                   showDate={name === 'Upcoming' || name === 'Overdue'}
+                  listOf={listOfTask}
+                  listsById={listsById}
+                  showListBadge={effectiveListId === null && lists.length > 1}
+                  onListHover={setDragOverListId}
+                  onMoveToList={dropTaskOnList}
                   expandedParents={expandedParents}
                   draggingId={draggingId}
                   dragOverId={dragOverId}
@@ -846,6 +1251,11 @@ function TasksPanel({
                 taskColor={taskColor}
                 taskCheckboxShape={taskCheckboxShape}
                 showDate
+                listOf={listOfTask}
+                listsById={listsById}
+                showListBadge={effectiveListId === null && lists.length > 1}
+                onListHover={setDragOverListId}
+                onMoveToList={dropTaskOnList}
                 expandedParents={expandedParents}
                 draggingId={draggingId}
                 dragOverId={dragOverId}
@@ -964,6 +1374,629 @@ function TimePickerPopover({ value, timeFormat, theme, taskColor, onChange, onCl
   );
 }
 
+const SHORT_WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function RepeatPickerPopover({
+  value,
+  anchorDate,
+  today,
+  theme,
+  taskColor,
+  onChange,
+  onClose,
+}: {
+  value: Recurrence | undefined;
+  anchorDate: string | null;
+  today: string;
+  theme: TaskTheme;
+  taskColor: string;
+  onChange: (recur: Recurrence | undefined) => void;
+  onClose: () => void;
+}) {
+  const effectiveAnchor = anchorDate || today;
+  const anchorWeekday = (parseDate(effectiveAnchor).getDay()) as Weekday;
+
+  // Determine which preset matches
+  const currentPreset = useMemo((): string => {
+    if (!value) return 'none';
+    if (value.freq === 'daily' && value.interval === 1 && !value.end) return 'daily';
+    if (
+      value.freq === 'weekly' &&
+      value.interval === 1 &&
+      !value.end &&
+      value.byWeekday?.length === 5 &&
+      [1, 2, 3, 4, 5].every(d => value.byWeekday!.includes(d as Weekday))
+    ) {
+      return 'weekdays';
+    }
+    if (
+      value.freq === 'weekly' &&
+      value.interval === 1 &&
+      !value.end &&
+      (!value.byWeekday || (value.byWeekday.length === 1 && value.byWeekday[0] === anchorWeekday))
+    ) {
+      return 'weekly';
+    }
+    if (value.freq === 'monthly' && value.interval === 1 && !value.end) return 'monthly';
+    if (value.freq === 'yearly' && value.interval === 1 && !value.end) return 'yearly';
+    return 'custom';
+  }, [value, anchorWeekday]);
+
+  const [isCustom, setIsCustom] = useState(() => currentPreset === 'custom');
+  const showCustom = isCustom || currentPreset === 'custom';
+
+  const selectPreset = (p: string) => {
+    if (p === 'none') {
+      setIsCustom(false);
+      onChange(undefined);
+      return;
+    }
+    if (p === 'daily') {
+      setIsCustom(false);
+      onChange({ freq: 'daily', interval: 1 });
+      return;
+    }
+    if (p === 'weekdays') {
+      setIsCustom(false);
+      onChange({ freq: 'weekly', interval: 1, byWeekday: [1, 2, 3, 4, 5] });
+      return;
+    }
+    if (p === 'weekly') {
+      setIsCustom(false);
+      onChange({ freq: 'weekly', interval: 1, byWeekday: [anchorWeekday] });
+      return;
+    }
+    if (p === 'monthly') {
+      setIsCustom(false);
+      onChange({ freq: 'monthly', interval: 1 });
+      return;
+    }
+    if (p === 'yearly') {
+      setIsCustom(false);
+      onChange({ freq: 'yearly', interval: 1 });
+      return;
+    }
+    if (p === 'custom') {
+      setIsCustom(true);
+      if (!value) onChange({ freq: 'weekly', interval: 1, byWeekday: [anchorWeekday] });
+    }
+  };
+
+  const r: Recurrence = value ?? { freq: 'weekly', interval: 1, byWeekday: [anchorWeekday] };
+  const patch = (d: Partial<Recurrence>) => onChange({ ...r, ...d });
+  const endType: 'never' | 'until' | 'count' = !r.end ? 'never' : 'count' in r.end ? 'count' : 'until';
+
+  const WD_NAMES = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  const WD_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40" onMouseDown={onClose} />
+      <motion.div
+        initial={{ opacity: 0, y: -6, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -6, scale: 0.96 }}
+        transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
+        className="absolute left-0 top-full mt-2 z-50 w-72 max-h-[80vh] overflow-y-auto rounded-2xl border p-3 shadow-2xl space-y-3"
+        style={{
+          background: theme.menuBg,
+          borderColor: theme.surfaceBdr,
+          boxShadow: theme.darkMode ? '0 20px 48px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.06) inset' : '0 20px 48px rgba(15,23,42,0.18)',
+        }}
+        onMouseDown={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between pb-2 border-b" style={{ borderColor: theme.surfaceBdr }}>
+          <div className="flex items-center gap-1.5">
+            <Repeat size={13} style={{ color: theme.accent }} />
+            <span className="text-xs font-bold" style={{ color: theme.menuText }}>Repeat Task</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded-lg hover:opacity-75 transition-opacity"
+            style={{ color: theme.menuSub }}
+          >
+            <X size={13} />
+          </button>
+        </div>
+
+        {/* Presets Grid */}
+        <div className="grid grid-cols-2 gap-1.5">
+          {[
+            { id: 'none', label: "Doesn't repeat", icon: <X size={11} /> },
+            { id: 'daily', label: 'Daily', icon: <Sun size={11} /> },
+            { id: 'weekdays', label: 'Weekdays', icon: <CalendarRange size={11} /> },
+            { id: 'weekly', label: `Weekly (${SHORT_WD[anchorWeekday]})`, icon: <Calendar size={11} /> },
+            { id: 'monthly', label: 'Monthly', icon: <Layers size={11} /> },
+            { id: 'yearly', label: 'Yearly', icon: <Sparkles size={11} /> },
+          ].map(p => {
+            const active = (!showCustom && currentPreset === p.id) || (p.id === 'none' && !value && !showCustom);
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => selectPreset(p.id)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-medium transition-smooth hover:scale-[1.02] active:scale-95 text-left"
+                style={{
+                  background: active ? `${theme.accent}20` : theme.surfaceBg,
+                  border: `1px solid ${active ? theme.accent : theme.surfaceBdr}`,
+                  color: active ? theme.accent : theme.menuText,
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                <span className="opacity-70">{p.icon}</span>
+                <span className="truncate">{p.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Custom Button */}
+        <button
+          type="button"
+          onClick={() => selectPreset('custom')}
+          className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-smooth hover:scale-[1.01] active:scale-95"
+          style={{
+            background: showCustom ? `${theme.accent}20` : theme.surfaceBg,
+            border: `1px solid ${showCustom ? theme.accent : theme.surfaceBdr}`,
+            color: showCustom ? theme.accent : theme.menuText,
+            fontWeight: showCustom ? 600 : 500,
+          }}
+        >
+          <div className="flex items-center gap-1.5">
+            <MoreHorizontal size={12} />
+            <span>Custom recurrence…</span>
+          </div>
+          <ChevronDown size={12} className={`transition-transform duration-200 ${showCustom ? 'rotate-180' : ''}`} />
+        </button>
+
+        {/* Custom Controls Expanded */}
+        <AnimatePresence>
+          {showCustom && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.15 }}
+              className="space-y-2.5 pt-1 overflow-hidden"
+            >
+              {/* Every N Frequency */}
+              <div className="flex items-center gap-2 text-xs" style={{ color: theme.menuText }}>
+                <span className="font-medium" style={{ color: theme.menuSub }}>Every</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={99}
+                  value={r.interval}
+                  onChange={e => patch({ interval: Math.max(1, parseInt(e.target.value || '1', 10)) })}
+                  className="w-14 rounded-lg px-2 py-1.5 text-xs text-center font-semibold outline-none"
+                  style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+                />
+                <select
+                  value={r.freq}
+                  onChange={e => patch({ freq: e.target.value as RecurFreq })}
+                  className="flex-1 rounded-lg px-2 py-1.5 text-xs font-medium outline-none"
+                  style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+                >
+                  <option value="daily">day(s)</option>
+                  <option value="weekly">week(s)</option>
+                  <option value="monthly">month(s)</option>
+                  <option value="yearly">year(s)</option>
+                </select>
+              </div>
+
+              {/* Weekday Selector (Weekly) */}
+              {r.freq === 'weekly' && (
+                <div className="space-y-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: theme.menuSub }}>Repeat on</span>
+                  <div className="flex justify-between gap-1">
+                    {WD_NAMES.map((d, i) => {
+                      const days = r.byWeekday ?? [anchorWeekday];
+                      const on = days.includes(i as Weekday);
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          title={WD_FULL[i]}
+                          onClick={() => {
+                            const next = on ? days.filter(x => x !== i) : [...days, i as Weekday];
+                            patch({ byWeekday: (next.length ? next : [anchorWeekday]).sort((a, b) => a - b) });
+                          }}
+                          className="w-8 h-8 rounded-xl text-xs font-bold flex items-center justify-center transition-smooth hover:scale-105 active:scale-95"
+                          style={{
+                            background: on ? theme.accent : theme.surfaceBg,
+                            color: on ? (theme.darkMode ? '#0b1220' : '#ffffff') : theme.menuSub,
+                            border: `1px solid ${on ? theme.accent : theme.surfaceBdr}`,
+                          }}
+                        >
+                          {d}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Ends Selector */}
+              <div className="space-y-1.5 pt-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: theme.menuSub }}>Ends</span>
+                <div className="flex items-center gap-2 flex-wrap text-xs">
+                  <select
+                    value={endType}
+                    onChange={e => {
+                      const v = e.target.value;
+                      if (v === 'never') patch({ end: undefined });
+                      else if (v === 'count') patch({ end: { count: 10 } });
+                      else patch({ end: { until: format(addDays(new Date(), 30), 'yyyy-MM-dd') } });
+                    }}
+                    className="rounded-lg px-2 py-1.5 text-xs font-medium outline-none"
+                    style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+                  >
+                    <option value="never">Never</option>
+                    <option value="until">On date</option>
+                    <option value="count">After count</option>
+                  </select>
+
+                  {endType === 'until' && r.end && 'until' in r.end && (
+                    <input
+                      type="date"
+                      value={r.end.until}
+                      onChange={e => patch({ end: { until: e.target.value } })}
+                      className="flex-1 min-w-[120px] rounded-lg px-2 py-1.5 text-xs outline-none"
+                      style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+                    />
+                  )}
+
+                  {endType === 'count' && r.end && 'count' in r.end && (
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={1}
+                        max={999}
+                        value={r.end.count}
+                        onChange={e => patch({ end: { count: Math.max(1, parseInt(e.target.value || '1', 10)) } })}
+                        className="w-14 rounded-lg px-2 py-1.5 text-xs text-center font-semibold outline-none"
+                        style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+                      />
+                      <span className="text-[11px]" style={{ color: theme.menuSub }}>times</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Live Summary Preview Banner */}
+        {value && (
+          <div
+            className="flex items-center gap-2 p-2 rounded-xl text-xs font-medium border"
+            style={{
+              background: `${theme.accent}12`,
+              borderColor: `${theme.accent}33`,
+              color: theme.accent,
+            }}
+          >
+            <Repeat size={12} className="flex-shrink-0" />
+            <span className="truncate">{formatRecurrenceLabel(value, effectiveAnchor)}</span>
+          </div>
+        )}
+
+        {/* Actions Footer */}
+        <div className="flex items-center justify-between gap-2 pt-2 border-t" style={{ borderColor: theme.surfaceBdr }}>
+          <button
+            type="button"
+            onClick={() => { onChange(undefined); onClose(); }}
+            className="px-2.5 py-1.5 rounded-lg text-xs font-semibold hover:opacity-75 transition-opacity"
+            style={{ color: theme.menuSub }}
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-1.5 rounded-lg text-xs font-bold transition-smooth hover:scale-[1.02] active:scale-95"
+            style={{ background: theme.accent, color: theme.darkMode ? '#0b1220' : '#ffffff' }}
+          >
+            Done
+          </button>
+        </div>
+      </motion.div>
+    </>
+  );
+}
+
+/**
+ * One tab on the list rail.
+ *
+ * Doubles as a drop target: `data-list-drop` is what both the mouse handlers
+ * here and the touch drag in TaskList look for, so filing a task is the same
+ * gesture on a desktop and on a phone.
+ */
+function ListPill({
+  listId, label, icon, tone, active, count, theme, editable, reorderable, beingDragged,
+  dragActive, dropActive,
+  onPointerDownPill, onClick, onEdit, onDragOverList, onDragLeaveList, onDropTask,
+}: {
+  listId?: string;
+  label: string;
+  icon?: React.ReactNode;
+  tone: string;
+  active: boolean;
+  count?: number;
+  theme: TaskTheme;
+  editable?: boolean;
+  reorderable?: boolean;
+  beingDragged?: boolean;
+  dragActive?: boolean;
+  dropActive?: boolean;
+  onPointerDownPill?: (e: React.PointerEvent<HTMLElement>) => void;
+  onClick: () => void;
+  onEdit?: () => void;
+  onDragOverList?: () => void;
+  onDragLeaveList?: () => void;
+  onDropTask?: (occId: string) => void;
+}) {
+  return (
+    <div
+      data-list-drop={listId}
+      data-reorder-id={reorderable ? listId : undefined}
+      onPointerDown={onPointerDownPill}
+      className={`flex-shrink-0 flex items-center rounded-full transition-smooth ${reorderable ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      style={{
+        background: dropActive ? `${tone}30` : active ? `${tone}20` : theme.surfaceBg,
+        border: `1px ${dropActive ? 'dashed' : 'solid'} ${dropActive || active ? tone : dragActive ? `${tone}55` : theme.surfaceBdr}`,
+        boxShadow: beingDragged ? `0 6px 18px rgba(0,0,0,0.35), 0 0 0 2px ${tone}` : dropActive ? `0 0 0 3px ${tone}25` : active ? `0 0 10px ${tone}22` : 'none',
+        transform: beingDragged ? 'scale(1.06)' : dropActive ? 'scale(1.04)' : 'none',
+        opacity: beingDragged ? 0.85 : 1,
+      }}
+      onDragOver={e => {
+        if (!onDropTask) return;
+        // Only react to a task being dragged — never to a file or a text
+        // selection dropped on the window by accident.
+        if (!e.dataTransfer.types.includes('text/planner-task')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'move';
+        onDragOverList?.();
+      }}
+      onDragLeave={e => {
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        onDragLeaveList?.();
+      }}
+      onDrop={e => {
+        if (!onDropTask) return;
+        const occId = e.dataTransfer.getData('text/planner-task') || e.dataTransfer.getData('text/plain');
+        e.preventDefault();
+        e.stopPropagation();
+        if (occId) onDropTask(occId);
+        else onDragLeaveList?.();
+      }}
+    >
+      <button
+        onClick={onClick}
+        onContextMenu={onEdit ? e => { e.preventDefault(); onEdit(); } : undefined}
+        className="flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 text-[11px] font-semibold transition-smooth active:scale-95 max-w-[150px]"
+        style={{ color: active || dropActive ? tone : theme.menuSub }}
+        title={editable ? `${label} — right-click to edit` : label}
+      >
+        {icon ?? <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: tone }} />}
+        <span className="truncate">{label}</span>
+        {count != null && count > 0 && (
+          <span
+            className="tabular-nums px-1.5 rounded-full text-[10px] font-bold flex-shrink-0"
+            style={{
+              background: active ? tone : theme.surfaceBdr,
+              color: active ? (theme.darkMode ? '#0b1220' : '#ffffff') : theme.menuSub,
+            }}
+          >
+            {count}
+          </span>
+        )}
+      </button>
+      {onEdit && (
+        <button
+          data-no-drag
+          onClick={e => { e.stopPropagation(); onEdit(); }}
+          className="pr-2 pl-0.5 py-1.5 opacity-45 hover:opacity-100 transition-opacity"
+          style={{ color: active ? tone : theme.menuSub }}
+          title={`Edit “${label}”`}
+        >
+          <ChevronDown size={11} strokeWidth={2.6} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Where a dragged pill would land. Zero-width when idle so the rail's spacing
+ * doesn't shift the moment a drag starts.
+ */
+function RailInsertBar({ active, theme }: { active: boolean; theme: TaskTheme }) {
+  return (
+    <div className="flex-shrink-0 self-stretch flex items-center pointer-events-none" style={{ width: active ? 3 : 0 }}>
+      <div
+        className="w-[3px] h-full rounded-full transition-smooth duration-100"
+        style={{
+          background: active ? theme.accent : 'transparent',
+          boxShadow: active ? `0 0 8px ${theme.accent}` : 'none',
+          opacity: active ? 1 : 0,
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The rail's inline create / edit card. Everything a list can have done to it
+ * lives here so the panel never has to send you to the Settings window.
+ */
+function ListEditor({ list, lists, taskCount, theme, onSave, onMove, onDelete, onClose }: {
+  list: TaskListDef | null;
+  lists: TaskListDef[];
+  taskCount: number;
+  theme: TaskTheme;
+  onSave: (name: string, color: string) => void;
+  onMove: (dir: -1 | 1) => void;
+  onDelete: (mode: ListDeleteMode) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(list?.name ?? '');
+  const [color, setColor] = useState(list?.color ?? nextListColor(lists));
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { nameRef.current?.focus(); nameRef.current?.select(); }, []);
+
+  // General is structural: tasks with no list have to land somewhere, so it can
+  // be recoloured and renamed but never deleted or shuffled out of first place.
+  const isGeneral = list?.id === GENERAL_LIST_ID;
+  const idx = list ? lists.findIndex(l => l.id === list.id) : -1;
+  const canSave = !!name.trim();
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[60]" onMouseDown={onClose} />
+      <motion.div
+        initial={{ opacity: 0, y: -6, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -6, scale: 0.98 }}
+        transition={{ duration: 0.13, ease: [0.16, 1, 0.3, 1] }}
+        className="absolute left-2 right-2 top-full z-[61] mt-1 rounded-xl border p-2.5 shadow-xl"
+        style={{
+          background: theme.menuBg,
+          borderColor: theme.surfaceBdr,
+          boxShadow: theme.darkMode ? '0 18px 40px rgba(0,0,0,0.5)' : '0 18px 40px rgba(15,23,42,0.18)',
+        }}
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: theme.menuSub }}>
+            {list ? 'Edit list' : 'New list'}
+          </span>
+          <button onClick={onClose} className="p-0.5 rounded" style={{ color: theme.menuSub }} title="Close">
+            <X size={12} />
+          </button>
+        </div>
+
+        <input
+          ref={nameRef}
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && canSave) { e.preventDefault(); onSave(name, color); }
+            else if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+          }}
+          placeholder="List name"
+          maxLength={40}
+          className="w-full rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium outline-none mb-2"
+          style={{ background: theme.surfaceBg, color: theme.menuText, border: `1.5px solid ${color}66` }}
+        />
+
+        <div className="flex items-center gap-1.5 flex-wrap mb-2.5">
+          {TASK_LIST_COLORS.map(c => (
+            <button
+              key={c}
+              onClick={() => setColor(c)}
+              className="w-6 h-6 rounded-full transition-smooth hover:scale-110 active:scale-95 flex items-center justify-center"
+              style={{ background: c, border: `2px solid ${color.toLowerCase() === c.toLowerCase() ? theme.menuText : 'transparent'}` }}
+              title={c}
+            >
+              {color.toLowerCase() === c.toLowerCase() && (
+                <Check size={11} strokeWidth={3.2} color={theme.darkMode ? '#0b1220' : '#ffffff'} />
+              )}
+            </button>
+          ))}
+        </div>
+
+        {confirmingDelete && list ? (
+          <div
+            className="rounded-lg p-2 mb-2 flex flex-col gap-1.5"
+            style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}` }}
+          >
+            <span className="text-[11px] font-semibold" style={{ color: theme.menuText }}>
+              Delete “{list.name}”{taskCount > 0 ? ` — ${taskCount} open task${taskCount === 1 ? '' : 's'}` : ''}?
+            </span>
+            <button
+              onClick={() => onDelete('keep')}
+              className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-smooth active:scale-95"
+              style={{ background: theme.hoverBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+            >
+              <CornerDownRight size={11} />
+              Keep the tasks, move them to General
+            </button>
+            <button
+              onClick={() => onDelete('purge')}
+              className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-smooth active:scale-95"
+              style={{ background: '#ef444418', color: theme.darkMode ? '#ff6b6b' : '#e5484d', border: '1px solid #ef444440' }}
+            >
+              <Trash2 size={11} />
+              Delete the list and its tasks
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(false)}
+              className="w-full px-2 py-1 rounded-lg text-[11px] font-medium"
+              style={{ color: theme.menuSub }}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            {list && (
+              <>
+                <IconBtn theme={theme} title="Move left" disabled={idx <= 0} onClick={() => onMove(-1)}>
+                  <ArrowLeft size={12} />
+                </IconBtn>
+                <IconBtn theme={theme} title="Move right" disabled={idx < 0 || idx >= lists.length - 1} onClick={() => onMove(1)}>
+                  <ArrowRight size={12} />
+                </IconBtn>
+                {!isGeneral && (
+                  <IconBtn theme={theme} title="Delete list" danger onClick={() => setConfirmingDelete(true)}>
+                    <Trash2 size={12} />
+                  </IconBtn>
+                )}
+              </>
+            )}
+            <div className="flex-1" />
+            <button
+              onClick={() => canSave && onSave(name, color)}
+              disabled={!canSave}
+              className="px-3 py-1.5 rounded-lg text-[11.5px] font-bold transition-smooth active:scale-95 disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1.5"
+              style={{ background: color, color: theme.darkMode ? '#0b1220' : '#ffffff' }}
+            >
+              {list ? <Pencil size={11} /> : <Plus size={12} />}
+              {list ? 'Save' : 'Create'}
+            </button>
+          </div>
+        )}
+      </motion.div>
+    </>
+  );
+}
+
+function IconBtn({ theme, title, disabled, danger, onClick, children }: {
+  theme: TaskTheme; title: string; disabled?: boolean; danger?: boolean;
+  onClick: () => void; children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="p-1.5 rounded-lg transition-smooth active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
+      style={{
+        background: theme.surfaceBg,
+        border: `1px solid ${theme.surfaceBdr}`,
+        color: danger ? (theme.darkMode ? '#ff6b6b' : '#e5484d') : theme.menuSub,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 // Filter Chip Component
 function FilterChip({ label, count, active, danger, theme, onClick }: {
   label: string; count?: number; active: boolean; danger?: boolean; theme: TaskTheme; onClick: () => void;
@@ -1068,12 +2101,18 @@ function Section({ name, count, danger, collapsed, theme, onToggle, children }: 
 // Task List Component
 function TaskList({
   rows, today, timeFormat, theme, taskColor, taskCheckboxShape, showDate,
+  listOf, listsById, showListBadge, onListHover, onMoveToList,
   expandedParents, draggingId, dragOverId, pendingDoneIds,
   onDragStart, onDragOver, onDrop,
   onToggleExpand, onToggleDone, onOpenMenu,
 }: {
   rows: Row[]; today: string; timeFormat: TimeFormat; theme: TaskTheme;
   taskColor: string; taskCheckboxShape?: 'circle' | 'square'; showDate: boolean;
+  listOf: (t: Task) => string;
+  listsById: Record<string, TaskListDef>;
+  showListBadge: boolean;
+  onListHover: (listId: string | null) => void;
+  onMoveToList: (occId: string, listId: string) => void;
   expandedParents: Record<string, boolean>;
   draggingId: string | null;
   dragOverId: string | null;
@@ -1085,6 +2124,17 @@ function TaskList({
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
   onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
 }) {
+  /**
+   * The list chip on a row, shown only in the All view. General is deliberately
+   * unlabelled: tagging every unfiled task "General" is noise, and the absence
+   * of a chip already reads as "not filed anywhere".
+   */
+  const badgeFor = (t: Task): TaskListDef | null => {
+    if (!showListBadge) return null;
+    const id = listOf(t);
+    return id === GENERAL_LIST_ID ? null : listsById[id] ?? null;
+  };
+
   const presentIds = new Set(rows.map(r => r.task.id));
   const roots = rows.filter(r => !r.task.parentId || !presentIds.has(r.task.parentId));
   const childrenOf = (id: string) => rows.filter(r => r.task.parentId === id);
@@ -1209,6 +2259,15 @@ function TaskList({
     return (document.scrollingElement as HTMLElement) || document.documentElement;
   };
 
+  /**
+   * Which list pill the finger is over, if any. Checked before rows: the rail
+   * sits above the scroller, so a finger there means "file it", not "reorder".
+   */
+  const listUnder = (x: number, y: number): string | null => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    return el?.closest<HTMLElement>('[data-list-drop]')?.dataset.listDrop || null;
+  };
+
   /** Which row the finger is over, and which side of its middle. */
   const rowUnder = (x: number, y: number): { occId: string; edge: InsertEdge } | null => {
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
@@ -1229,16 +2288,24 @@ function TaskList({
     window.clearTimeout(hold.timer);
     if (hold.dragging) {
       if (commit) {
-        const target = rowUnder(hold.x, pointerYRef.current);
-        if (target && target.occId !== hold.occId) {
-          onDrop(hold.occId, target.occId, target.edge);
+        // A pill wins over a row: dropping on the rail files the task, and the
+        // rail is never a place you'd mean to reorder into.
+        const listId = listUnder(hold.x, pointerYRef.current);
+        if (listId) {
+          onMoveToList(hold.occId, listId);
+        } else {
+          const target = rowUnder(hold.x, pointerYRef.current);
+          if (target && target.occId !== hold.occId) {
+            onDrop(hold.occId, target.occId, target.edge);
+          }
         }
       }
+      onListHover(null);
       onDragStart(null);
       onDragOver(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onDrop, onDragStart, onDragOver, stopAutoScroll]);
+  }, [onDrop, onDragStart, onDragOver, onListHover, onMoveToList, stopAutoScroll]);
 
   // A non-passive touchmove that swallows the scroll. `touch-action` is only
   // read when the gesture starts, and the drag begins mid-gesture — after the
@@ -1262,6 +2329,13 @@ function TaskList({
       return;
     }
     hold.x = e.clientX;
+    const overList = listUnder(e.clientX, e.clientY);
+    onListHover(overList);
+    if (overList) {
+      // Over the rail: no insertion line, because nothing is being reordered.
+      onDragOver(null);
+      return;
+    }
     const target = rowUnder(e.clientX, e.clientY);
     if (target && target.occId !== hold.occId) {
       onDragOver(insertTarget(target.occId, target.edge));
@@ -1332,6 +2406,7 @@ function TaskList({
                   taskColor={taskColor}
                   taskCheckboxShape={taskCheckboxShape}
                   showDate={showDate}
+                  listBadge={badgeFor(r.task)}
                   childProgress={kids.length ? `${kids.filter(k => k.done).length}/${kids.length}` : null}
                   expanded={expanded}
                   isDragging={draggingId === r.occId}
@@ -1372,6 +2447,7 @@ function TaskList({
                             taskColor={taskColor}
                             taskCheckboxShape={taskCheckboxShape}
                             showDate={false}
+                            listBadge={null}
                             childProgress={null}
                             expanded={false}
                             isDragging={draggingId === k.occId}
@@ -1424,13 +2500,13 @@ function InsertLine({ active, theme }: { active: boolean; theme: TaskTheme }) {
 
 // Single Task Row Component
 function TaskRow({
-  row, today, timeFormat, theme, taskColor, taskCheckboxShape = 'circle', showDate, childProgress, expanded,
+  row, today, timeFormat, theme, taskColor, taskCheckboxShape = 'circle', showDate, listBadge, childProgress, expanded,
   isDragging, isDragActive, pendingDone, onDragStart, onDragOver, onDragEnd, onDrop,
   onToggleExpand, onToggleDone, onOpenMenu,
 }: {
   row: Row; today: string; timeFormat: TimeFormat; theme: TaskTheme; taskColor: string;
   taskCheckboxShape?: 'circle' | 'square';
-  showDate: boolean; childProgress: string | null; expanded: boolean;
+  showDate: boolean; listBadge: TaskListDef | null; childProgress: string | null; expanded: boolean;
   isDragging?: boolean; isDragActive?: boolean; pendingDone?: boolean;
   onDragStart?: () => void; onDragOver?: (edge: InsertEdge) => void; onDragEnd?: () => void; onDrop?: (edge: InsertEdge) => void;
   onToggleExpand?: () => void;
@@ -1499,7 +2575,12 @@ function TaskRow({
     >
       <span
         className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r-full"
-        style={{ background: visualDone ? `${theme.accent}80` : overdue ? dangerHue : 'transparent' }}
+        style={{
+          background: visualDone ? `${theme.accent}80`
+            : overdue ? dangerHue
+            : listBadge ? `${listBadge.color}99`
+            : 'transparent',
+        }}
       />
       <AnimatePresence>
         {pendingDone && (
@@ -1592,6 +2673,16 @@ function TaskRow({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {listBadge && (
+            <span
+              className="text-[10.5px] font-semibold flex items-center gap-1 px-1.5 py-0.5 rounded-md"
+              style={{ color: listBadge.color, background: `${listBadge.color}14`, border: `1px solid ${listBadge.color}33` }}
+              title={`In list: ${listBadge.name}`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: listBadge.color }} />
+              {listBadge.name}
+            </span>
+          )}
           {showDate && due && (
             <span
               className="text-[10.5px] font-semibold tabular-nums flex items-center gap-1 px-1.5 py-0.5 rounded-md"

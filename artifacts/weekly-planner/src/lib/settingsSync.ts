@@ -179,6 +179,7 @@ export interface AppSettings {
   // to show FROM the week start onwards (total columns = before + after).
   customDaysBefore: number;
   customDaysAfter: number;
+  customAnchor?: 'day' | 'week';
   focusDayStartHour: number;
   focusChime: FocusChimeId;
   focusCues: Record<FocusCueSlot, FocusCueId>;
@@ -233,6 +234,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   calendarView: 'week',
   customDaysBefore: 0,
   customDaysAfter: 0,
+  customAnchor: 'day',
   focusDayStartHour: 4,
   focusChime: 'bowl',
   focusCues: DEFAULT_FOCUS_CUES,
@@ -314,6 +316,7 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.calendarView === 'string') s.calendarView = r.calendarView;
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(-14, Math.min(14, Math.round(r.customDaysBefore)));
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(-14, Math.min(14, Math.round(r.customDaysAfter)));
+  if (r.customAnchor === 'day' || r.customAnchor === 'week') s.customAnchor = r.customAnchor;
   if (typeof r.focusDayStartHour === 'number') {
     s.focusDayStartHour = Math.max(0, Math.min(23, Math.round(r.focusDayStartHour)));
   }

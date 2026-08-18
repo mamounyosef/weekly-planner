@@ -20,6 +20,20 @@ export interface FocusTimerState {
    */
   lastPausedAt?: string | null;
   /**
+   * How much of the CURRENT session's elapsed time has already been written into
+   * a day's total by a manual edit ("Modify Focus Time").
+   *
+   * Editing a day while a session runs used to fight the running clock: the day
+   * total is `logged + elapsed`, so the edit had to guess a logged value that
+   * would come out right — and then the still-growing `elapsed` dragged the
+   * number up again, and completing the session logged that same elapsed time a
+   * second time. Instead, the edit banks the elapsed time so far here: the
+   * session keeps running and counting down exactly as before, but only the time
+   * run SINCE the edit counts toward the day (and toward the session finally
+   * logged). Reset to 0 with every new session.
+   */
+  creditedSeconds?: number;
+  /**
    * When this state was written, in ms. Stamped by whichever window pushed it,
    * and used purely to reject STALE echoes: a burst of duration edits produces a
    * burst of pushes, and the broadcast of an earlier one can land after a later
@@ -589,6 +603,7 @@ export const DEFAULT_FOCUS_TIMER: FocusTimerState = {
   lastStartedAt: null,
   sessionStartedAt: null,
   lastPausedAt: null,
+  creditedSeconds: 0,
 };
 
 export function dateKey(value: Date | string): string {
@@ -680,6 +695,7 @@ export function coerceFocusTimer(parsed: unknown): FocusTimerState {
     lastStartedAt: typeof p.lastStartedAt === 'string' ? p.lastStartedAt : null,
     sessionStartedAt: typeof p.sessionStartedAt === 'string' ? p.sessionStartedAt : null,
     lastPausedAt: typeof p.lastPausedAt === 'string' ? p.lastPausedAt : null,
+    creditedSeconds: Math.max(0, Math.floor(Number(p.creditedSeconds) || 0)),
     updatedAt: Number.isFinite(Number(p.updatedAt)) ? Number(p.updatedAt) : undefined,
   };
 }
@@ -702,7 +718,7 @@ export function focusTimerIdentity(timer: FocusTimerState): string {
  */
 export function focusTimerTransitionKey(timer: FocusTimerState): string {
   const t = coerceFocusTimer(timer);
-  return `${t.isRunning}|${t.sessionStartedAt ?? ''}|${t.lastStartedAt ?? ''}|${t.lastPausedAt ?? ''}|${t.accumulatedSeconds}`;
+  return `${t.isRunning}|${t.sessionStartedAt ?? ''}|${t.lastStartedAt ?? ''}|${t.lastPausedAt ?? ''}|${t.accumulatedSeconds}|${t.creditedSeconds}`;
 }
 
 /**
@@ -745,6 +761,10 @@ export function focusTimerPushKey(timer: FocusTimerState): string {
     isRunning: timer.isRunning,
     sessionStartedAt: timer.sessionStartedAt,
     accumulatedSeconds: timer.isRunning ? null : timer.accumulatedSeconds,
+    // A manual day edit while the session runs changes nothing else here, and it
+    // MUST reach the widget and the desk display — otherwise they keep counting
+    // the time the edit already banked and drift away from the main window.
+    creditedSeconds: timer.creditedSeconds ?? 0,
   });
 }
 
@@ -754,6 +774,26 @@ export function getFocusTimerElapsedSeconds(timer: FocusTimerState, now = Date.n
     ? Math.max(0, Math.floor((now - anchor) / 1000))
     : 0;
   return Math.max(0, Math.floor(timer.accumulatedSeconds + runningSeconds));
+}
+
+/**
+ * What the running session still contributes to its day's total.
+ *
+ * The countdown keeps using the full elapsed time — a manual edit must never
+ * shorten or lengthen the session the user is sitting in. Only the *day total*
+ * ignores the part that a manual edit already wrote into the day.
+ */
+export function getFocusTimerUncreditedSeconds(timer: FocusTimerState, now = Date.now()): number {
+  return Math.max(0, getFocusTimerElapsedSeconds(timer, now) - Math.max(0, timer.creditedSeconds ?? 0));
+}
+
+/**
+ * The duration to log when a session ends: whatever it ran, minus the part a
+ * manual day edit already banked. Without this, editing today's total and then
+ * finishing the session counted the pre-edit time twice.
+ */
+export function loggableSessionSeconds(timer: FocusTimerState, rawSeconds: number): number {
+  return Math.max(0, Math.floor(rawSeconds) - Math.max(0, timer.creditedSeconds ?? 0));
 }
 
 /**
@@ -814,3 +854,96 @@ export function sumFocusSecondsForDay(sessions: FocusSession[], day: Date, daySt
     .filter(session => focusDayKey(session.endedAt, dayStartHour) === key)
     .reduce((sum, session) => sum + session.durationSeconds, 0);
 }
+
+export function parseDurationInput(str: string): number {
+  const cleaned = str.trim().toLowerCase();
+  if (!cleaned || cleaned === '0' || cleaned === '—' || cleaned === '-' || cleaned === 'none' || cleaned === 'clear' || cleaned === '0m' || cleaned === '0h' || cleaned === '0s') {
+    return 0;
+  }
+
+  // hh:mm:ss or hh:mm
+  if (cleaned.includes(':')) {
+    const parts = cleaned.split(':').map(p => parseFloat(p) || 0);
+    if (parts.length === 3) {
+      return Math.max(0, Math.round(parts[0] * 3600 + parts[1] * 60 + parts[2]));
+    }
+    if (parts.length === 2) {
+      return Math.max(0, Math.round(parts[0] * 3600 + parts[1] * 60));
+    }
+  }
+
+  // Match patterns like "2h 30m", "2h30", "2 hours 30 mins", "2 hr 30", "2h", "45m"
+  const hMatch = cleaned.match(/([\d.]+)\s*(?:hours?|hrs?|h)\b/i) || cleaned.match(/^([\d.]+)\s*h/i);
+  const mMatch = cleaned.match(/([\d.]+)\s*(?:minutes?|mins?|m)\b/i) || cleaned.match(/[\s,]+([\d.]+)\s*m/i);
+  const trailingMinsMatch = cleaned.match(/(?:hours?|hrs?|h)\s*([\d.]+)(?!\s*[a-z])/i);
+
+  if (hMatch || mMatch || trailingMinsMatch) {
+    let totalSec = 0;
+    if (hMatch) {
+      totalSec += Math.round(parseFloat(hMatch[1]) * 3600);
+    }
+    if (mMatch) {
+      totalSec += Math.round(parseFloat(mMatch[1]) * 60);
+    } else if (trailingMinsMatch) {
+      totalSec += Math.round(parseFloat(trailingMinsMatch[1]) * 60);
+    }
+    return Math.max(0, totalSec);
+  }
+
+  // Decimal number e.g. "1.5" -> 1.5 hours
+  if (cleaned.includes('.')) {
+    const hours = parseFloat(cleaned);
+    return isNaN(hours) || hours <= 0 ? 0 : Math.max(0, Math.round(hours * 3600));
+  }
+
+  // Pure integer number
+  const num = parseInt(cleaned, 10);
+  if (isNaN(num) || num <= 0) return 0;
+  if (num <= 12) {
+    return num * 3600; // e.g. 6 -> 6 hours
+  } else {
+    return num * 60;   // e.g. 45 -> 45 minutes
+  }
+}
+
+export function formatDetailedDuration(seconds: number): string {
+  if (seconds <= 0) return '0 minutes (Cleared)';
+  const totalMins = Math.round(seconds / 60);
+  const hours = Math.floor(totalMins / 60);
+  const mins = totalMins % 60;
+
+  if (hours > 0 && mins > 0) {
+    return `${hours} hour${hours === 1 ? '' : 's'}, ${mins} minute${mins === 1 ? '' : 's'} (${totalMins} mins total)`;
+  } else if (hours > 0) {
+    return `${hours} hour${hours === 1 ? '' : 's'} (${totalMins} mins total)`;
+  } else {
+    return `${mins} minute${mins === 1 ? '' : 's'}`;
+  }
+}
+
+/**
+ * Creates a FocusSession record for a manual day edit.
+ * Ensures the generated session's endedAt timestamp falls cleanly on the specified focus day
+ * under any focusDayStartHour (0-23) and in any timezone.
+ */
+export function createManualFocusSession(dateKeyVal: string, newSeconds: number, focusDayStartHour = 0): FocusSession {
+  const parts = dateKeyVal.split('-').map(Number);
+  const y = parts[0] || new Date().getFullYear();
+  const m = (parts[1] || 1) - 1;
+  const d = parts[2] || 1;
+
+  // Local target hour safely within the focus day window
+  const targetHour = Math.min(23, Math.max(0, focusDayStartHour + 6));
+  const endDate = new Date(y, m, d, targetHour, 0, 0, 0);
+  const endIso = endDate.toISOString();
+  const startIso = new Date(endDate.getTime() - newSeconds * 1000).toISOString();
+
+  return {
+    id: `manual-${dateKeyVal}-${Date.now()}-${newSeconds}`,
+    startedAt: startIso,
+    endedAt: endIso,
+    durationSeconds: newSeconds,
+    plannedSeconds: newSeconds,
+  };
+}
+

@@ -334,13 +334,26 @@ export function stampNewItem<T extends RecurFields>(item: T, viewedWeekKey: stri
 export function editSeries<T extends RecurFields>(
   raw: Record<string, T>,
   occId: string,
-  patch: Partial<T>,
+  patchIn: Partial<T>,
   viewedWeekKey: string,
   weekStartsOn: WeekStartsOn,
 ): { events: Record<string, T>; targetId: string } {
   const { masterId, occDate } = parseOccId(occId);
   const master = raw[masterId];
   if (!master) return { events: raw, targetId: occId };
+
+  // A patch describes an item's CONTENT, never its identity. Several call sites
+  // build one by spreading a whole record (e.g. `withDueDate(task, …)`), and on a
+  // repeating item that record is the EXPANDED occurrence — so `id` would carry
+  // "<master>::<date>" straight into the stored record, and a detached copy would
+  // be filed under a key it doesn't match. Records with "::" in their id are
+  // dropped on the next load, so the item simply vanished after a reload.
+  let patch = patchIn;
+  if ('id' in patch || 'masterId' in patch || 'occDate' in patch) {
+    const p = { ...patch } as Partial<RecurFields>;
+    delete p.id; delete p.masterId; delete p.occDate;
+    patch = p as Partial<T>;
+  }
 
   // Non-repeating: plain in-place edit.
   if (!master.recur) {
@@ -571,4 +584,52 @@ export function parseGoogleRecurrence(recurrence: string[] | undefined): { recur
     }
   }
   return { recur, exdates: exdates.length ? exdates : undefined };
+}
+
+const SHORT_WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/**
+ * Produces a concise, human-friendly description for a Recurrence rule.
+ * Useful in task chips, popovers, and composer pill labels.
+ */
+export function formatRecurrenceLabel(recur?: Recurrence, anchorDate?: string): string {
+  if (!recur) return "Doesn't repeat";
+  const interval = Math.max(1, recur.interval || 1);
+
+  let label = '';
+  if (recur.freq === 'daily') {
+    label = interval === 1 ? 'Daily' : `Every ${interval} days`;
+  } else if (recur.freq === 'weekly') {
+    const defaultDay = anchorDate ? (parseDate(anchorDate).getDay() as Weekday) : 0;
+    const days = (recur.byWeekday && recur.byWeekday.length > 0) ? recur.byWeekday : [defaultDay];
+    const isWeekdays = days.length === 5 && [1, 2, 3, 4, 5].every(d => days.includes(d as Weekday));
+
+    if (isWeekdays) {
+      label = interval === 1 ? 'Weekdays' : `Every ${interval} wks on weekdays`;
+    } else if (days.length === 7) {
+      label = interval === 1 ? 'Daily' : `Every ${interval} weeks daily`;
+    } else if (interval === 1) {
+      label = days.length === 1 ? `Weekly (${SHORT_WD[days[0]]})` : `Weekly (${days.map(d => SHORT_WD[d]).join(', ')})`;
+    } else {
+      label = `Every ${interval} wks (${days.map(d => SHORT_WD[d]).join(', ')})`;
+    }
+  } else if (recur.freq === 'monthly') {
+    label = interval === 1 ? 'Monthly' : `Every ${interval} months`;
+  } else if (recur.freq === 'yearly') {
+    label = interval === 1 ? 'Yearly' : `Every ${interval} years`;
+  }
+
+  if (recur.end) {
+    if ('count' in recur.end) {
+      label += ` · ${recur.end.count}×`;
+    } else if ('until' in recur.end) {
+      try {
+        label += ` · until ${format(parseDate(recur.end.until), 'MMM d')}`;
+      } catch {
+        label += ` · until ${recur.end.until}`;
+      }
+    }
+  }
+
+  return label;
 }

@@ -17,6 +17,7 @@ import {
   resolveWeekTasks,
   toggleTaskDone as toggleTaskDoneHelper,
   isTaskDone,
+  coerceTasks,
   TASKS_STORAGE_KEY,
   type TaskData,
 } from '@/lib/tasks';
@@ -31,6 +32,8 @@ import {
   formatCountdown,
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
+  getFocusTimerUncreditedSeconds,
+  loggableSessionSeconds,
   checkpointFocusTimer,
   pauseFocusTimer,
   isCompletedFocusSession,
@@ -294,6 +297,8 @@ export default function Widget() {
   const [nowTick, setNowTick]           = useState(Date.now());
   const [isPinned, setIsPinned]         = useState(true);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  /** Serialized form of the sessions on screen — see `applyFocusSessions`. */
+  const lastFocusSessionsJsonRef = useRef<string | null>(null);
   /** True once the sessions have been read from the server at least once. */
   const [focusSessionsHydrated, setFocusSessionsHydrated] = useState(false);
   const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
@@ -339,14 +344,17 @@ export default function Widget() {
     setFocusSessions(loadLocalFocusSessions());
     setFocusTimer(loadLocalFocusTimer());
 
+    const applyTasks = (data: any) => {
+      if (data && typeof data === 'object' && !Array.isArray(data)) setTasks(coerceTasks(data));
+    };
     const loadTasks = () => {
       fetch('/api/tasks')
         .then(r => r.json())
-        .then(data => { if (data && typeof data === 'object') setTasks(data); })
+        .then(applyTasks)
         .catch(() => {
           try {
             const str = localStorage.getItem(TASKS_STORAGE_KEY);
-            if (str) setTasks(JSON.parse(str));
+            if (str) applyTasks(JSON.parse(str));
           } catch (_) {}
         });
     };
@@ -419,11 +427,18 @@ export default function Widget() {
         .catch(err => console.error('Failed to sync widget database:', err));
     };
 
+    // Only adopt a session list that differs from the one already shown. Both
+    // the poll and the stream hand over a freshly parsed array each time, and a
+    // new array identity re-runs every focus-analysis memo downstream even when
+    // the data is byte-identical. Same guard the events/tasks handlers use.
     const applyFocusSessions = (data: unknown) => {
       const sessions = safeFocusSessions(data);
-      setFocusSessions(sessions);
       setFocusSessionsHydrated(true);
-      localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+      const json = JSON.stringify(sessions);
+      if (json === lastFocusSessionsJsonRef.current) return;
+      lastFocusSessionsJsonRef.current = json;
+      setFocusSessions(sessions);
+      localStorage.setItem(FOCUS_SESSIONS_KEY, json);
     };
     const loadFocusSessions = () => {
       fetch('/api/focus-sessions')
@@ -443,7 +458,7 @@ export default function Widget() {
         try { setEvents(migrateEvents(JSON.parse(event.newValue) as PlannerData).events); } catch (_) {}
       }
       if (event.key === TASKS_STORAGE_KEY && event.newValue) {
-        try { setTasks(JSON.parse(event.newValue)); } catch (_) {}
+        try { applyTasks(JSON.parse(event.newValue)); } catch (_) {}
       }
     };
     window.addEventListener('storage', handleStorage);
@@ -452,7 +467,24 @@ export default function Widget() {
       loadEvents();
       loadTasks();
     };
-    const pollInterval = setInterval(syncWidgetData, 2500);
+
+    // Both of the widget's polls back off the moment their live stream is up,
+    // exactly as the main window's do. Before this the widget re-fetched and
+    // re-parsed the whole event store every 2.5s and the running timer every
+    // 1.5s, forever, whether or not anything had changed and whether or not the
+    // stream had already pushed the same data — roughly two HTTP round-trips a
+    // second, permanently, in a window that is always open. The polls exist as
+    // a safety net for a dropped stream, not as the transport, so once the
+    // stream connects they only need to tick slowly; if it errors they speed
+    // back up and carry the widget until it reconnects.
+    const STREAM_UP_MS = 60_000;
+    const STREAM_DOWN_MS = 2_500;
+    let dataPollId = 0 as unknown as ReturnType<typeof setInterval>;
+    const setDataPoll = (ms: number) => {
+      clearInterval(dataPollId);
+      dataPollId = setInterval(syncWidgetData, ms);
+    };
+    setDataPoll(STREAM_DOWN_MS);
     window.addEventListener('focus', syncWidgetData);
 
     // Shared running-timer state (see home.tsx for the echo-guard rationale).
@@ -498,12 +530,17 @@ export default function Widget() {
       on('events', applyEvents);
       on('settings', applySettings);
       on('focus-sessions', applyFocusSessions);
+      // Without this, tasks were the one store the stream didn't carry — so once
+      // the stream came up and the poll backed off to a minute, a task added in
+      // the main window took up to that long to appear here.
+      on('tasks', applyTasks);
+      dbStream.onopen = () => setDataPoll(STREAM_UP_MS);
+      dbStream.onerror = () => setDataPoll(STREAM_DOWN_MS);
     } catch (_) { /* fall back to the polls below */ }
 
     // Safety net only — the stream is what makes this feel instant.
-    const settingsPollId = setInterval(loadSettings, 15000);
-    const pollId = setInterval(loadEvents, 15000);
-    const focusPollId = setInterval(loadFocusSessions, 15000);
+    const settingsPollId = setInterval(loadSettings, 30000);
+    const focusPollId = setInterval(loadFocusSessions, 30000);
     // Live push of the shared timer; the poll below is only a safety net for a
     // dropped stream (see home.tsx).
     let timerStream: EventSource | null = null;
@@ -512,8 +549,15 @@ export default function Widget() {
       timerStream.onmessage = (evt) => {
         try { applyTimerFromServer(JSON.parse(evt.data), true); } catch (_) { /* ignore */ }
       };
+      timerStream.onopen = () => setTimerPoll(STREAM_UP_MS);
+      timerStream.onerror = () => setTimerPoll(1500);
     } catch (_) { /* fall back to the poll */ }
-    const timerPollId = setInterval(pullTimer, 1500);
+    let timerPollId = 0 as unknown as ReturnType<typeof setInterval>;
+    function setTimerPoll(ms: number) {
+      clearInterval(timerPollId);
+      timerPollId = setInterval(pullTimer, ms);
+    }
+    setTimerPoll(1500);
     // Browsers block audio until the page sees a gesture; unlock on the first one
     // so the completion chime fires instantly instead of warming up first.
     // Stays attached rather than unhooking after the first gesture: the context
@@ -533,9 +577,8 @@ export default function Widget() {
     return () => {
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('focus', syncWidgetData);
-      clearInterval(pollInterval);
+      clearInterval(dataPollId);
       clearInterval(settingsPollId);
-      clearInterval(pollId);
       clearInterval(focusPollId);
       clearInterval(timerPollId);
       clearInterval(clockId);
@@ -630,8 +673,13 @@ export default function Widget() {
   // 3 AM still counts as the previous day).
   const focusTodayKey = focusDayKey(today, focusDayStartHour);
   const focusTodayMidnight = new Date(`${focusTodayKey}T00:00:00`);
+  // The live session counts toward the day only for the part a manual edit in the
+  // main window hasn't already written into the logged sessions — same rule as
+  // there, so the two windows never disagree about today's total.
   const todayFocusSeconds = sumFocusSecondsForDay(focusSessions, focusTodayMidnight, focusDayStartHour)
-    + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === focusTodayKey ? focusElapsedSeconds : 0);
+    + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === focusTodayKey
+      ? getFocusTimerUncreditedSeconds(focusTimer, nowTick)
+      : 0);
   const todayFocusSessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === focusTodayKey && isCompletedFocusSession(session)).length;
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
@@ -897,16 +945,21 @@ export default function Widget() {
   };
 
   const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
-    localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+    const json = JSON.stringify(sessions);
+    // Our own write; recognise it when the server streams it back.
+    lastFocusSessionsJsonRef.current = json;
+    localStorage.setItem(FOCUS_SESSIONS_KEY, json);
     fetch('/api/focus-sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessions),
+      body: json,
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
 
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false, opts?: { endedAt?: Date; id?: string }) => {
-    const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
+    // Seconds already banked by a manual day edit are logged; don't log them twice.
+    const credited = Math.max(0, focusTimer.creditedSeconds ?? 0);
+    const duration = loggableSessionSeconds(focusTimer, durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
@@ -915,7 +968,7 @@ export default function Widget() {
     // `opts.endedAt` is for a session recovered after the machine was switched
     // off: it ended when the PC did, not when we noticed on the next launch.
     const endedAt = opts?.endedAt ?? new Date();
-    const startedAt = focusTimer.sessionStartedAt
+    const startedAt = focusTimer.sessionStartedAt && credited === 0
       ? new Date(focusTimer.sessionStartedAt)
       : new Date(endedAt.getTime() - duration * 1000);
 

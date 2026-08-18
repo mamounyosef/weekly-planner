@@ -358,6 +358,14 @@ export function makeTask(partial: Partial<Task>, weekStartsOn: WeekStartsOn): Ta
  * knows nothing about gTask* — a detached task would otherwise inherit the
  * master's Google Tasks id and the two would fight over one Google task.
  */
+/**
+ * Fields that describe the task ITSELF rather than one day of it. Reordering a
+ * list or filing it under another list must never detach an occurrence out of
+ * its series — that turned a repeating task into a one-off (and left a stray
+ * duplicate behind) every time the panel was drag-sorted.
+ */
+const TASK_SERIES_FIELDS = new Set(['order', 'listId']);
+
 export function editTaskSeries(
   raw: TaskData,
   occId: string,
@@ -365,6 +373,17 @@ export function editTaskSeries(
   viewedWeekKey: string,
   weekStartsOn: WeekStartsOn,
 ): { events: TaskData; targetId: string } {
+  const keys = Object.keys(patch);
+  if (keys.length && keys.every(k => TASK_SERIES_FIELDS.has(k))) {
+    const { masterId } = parseOccId(occId);
+    const master = raw[masterId];
+    if (!master) return { events: raw, targetId: occId };
+    return {
+      events: { ...raw, [masterId]: { ...master, ...patch, updatedAt: Date.now() } },
+      targetId: occId,
+    };
+  }
+
   const res = editSeries<Task>(raw, occId, patch, viewedWeekKey, weekStartsOn);
   const { masterId } = parseOccId(occId);
   const detached = res.targetId !== masterId ? res.events[res.targetId] : null;
@@ -444,6 +463,10 @@ export function coerceTasks(raw: unknown): TaskData {
     const task: Task = { id, title: t.title };
     if (typeof t.notes === 'string') task.notes = t.notes;
     if (typeof t.parentId === 'string') task.parentId = t.parentId;
+    // Which list / category the task was filed under. Dropping these here meant
+    // every task silently fell back to "General" on the next load.
+    if (typeof t.listId === 'string') task.listId = t.listId;
+    if (typeof t.categoryId === 'string') task.categoryId = t.categoryId;
     if (typeof t.order === 'number' && Number.isFinite(t.order)) task.order = t.order;
     if (typeof t.weekKey === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.weekKey)) task.weekKey = t.weekKey;
     if (typeof t.dayIndex === 'number') task.dayIndex = Math.max(0, Math.min(6, Math.round(t.dayIndex)));

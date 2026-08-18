@@ -2690,6 +2690,7 @@ export default defineConfig({
           enterCm: 48, exitCm: 52, sampleIntervalMs: 100, medianWindow: 5,
           presentConfirmMs: 2000, absentConfirmMs: 5000, calibrating: false,
           announceOnConnect: true, maxValidCm: 100, glitchHoldMs: 10000,
+          glitchIgnoreAlways: false,
         };
 
         // Live distance, streamed by the board only while calibrating.
@@ -2864,6 +2865,7 @@ export default defineConfig({
                 announceOnConnect: Boolean(parsed?.announceOnConnect),
                 maxValidCm: Number(parsed?.maxValidCm) || 100,
                 glitchHoldMs: Number(parsed?.glitchHoldMs) || 0,
+                glitchIgnoreAlways: Boolean(parsed?.glitchIgnoreAlways),
               };
               json({ success: true });
             } catch (_) {
@@ -2995,6 +2997,11 @@ export default defineConfig({
                   lastStartedAt: typeof parsed.lastStartedAt === 'string' ? parsed.lastStartedAt : null,
                   sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
                   lastPausedAt: typeof parsed.lastPausedAt === 'string' ? parsed.lastPausedAt : null,
+                  // Seconds of this session already written into a day total by a
+                  // manual edit. Dropping it here (this rebuilds the object field
+                  // by field) would make the hotkey un-bank them, and the session
+                  // would be counted twice on the day it belongs to.
+                  creditedSeconds: Math.max(0, Number(parsed.creditedSeconds) || 0),
                 };
               }
             } catch (_) { /* no file yet → defaults */ }

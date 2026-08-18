@@ -33,6 +33,37 @@ export const TASK_LIST_COLORS = [
 /** The list a task actually belongs to, treating "unset" as General. */
 export const listIdOf = (listId?: string | null): string => listId || GENERAL_LIST_ID;
 
+/**
+ * The same thing, but proof against a list that no longer exists.
+ *
+ * Lists can be deleted from the Settings window, which has no access to the
+ * task store and so cannot rewrite the tasks that pointed at them. Rather than
+ * leave those tasks invisible on a page nobody can open, every read resolves an
+ * unknown id back to General — deleting a list can never lose a task.
+ */
+export function resolveListId(listId: string | null | undefined, lists: TaskList[]): string {
+  const id = listIdOf(listId);
+  return lists.some(l => l.id === id) ? id : GENERAL_LIST_ID;
+}
+
+/** The next unused preset colour, so two new lists never look the same. */
+export function nextListColor(lists: TaskList[]): string {
+  const used = new Set(lists.map(l => l.color.toLowerCase()));
+  return TASK_LIST_COLORS.find(c => !used.has(c.toLowerCase()))
+    ?? TASK_LIST_COLORS[lists.length % TASK_LIST_COLORS.length];
+}
+
+/** Move a list one slot left/right. Returns the same array when it can't move. */
+export function moveList(lists: TaskList[], id: string, dir: -1 | 1): TaskList[] {
+  const idx = lists.findIndex(l => l.id === id);
+  const next = idx + dir;
+  if (idx < 0 || next < 0 || next >= lists.length) return lists;
+  const out = [...lists];
+  const [moved] = out.splice(idx, 1);
+  out.splice(next, 0, moved);
+  return out;
+}
+
 export function coerceTaskLists(raw: unknown): TaskList[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     return DEFAULT_TASK_LISTS.map(l => ({ ...l }));

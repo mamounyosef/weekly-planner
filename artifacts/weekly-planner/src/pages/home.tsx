@@ -34,7 +34,12 @@ import {
   focusDayKey,
   formatCountdown,
   formatFocusDuration,
+  formatDetailedDuration,
+  parseDurationInput,
+  createManualFocusSession,
   getFocusTimerElapsedSeconds,
+  getFocusTimerUncreditedSeconds,
+  loggableSessionSeconds,
   checkpointFocusTimer,
   pauseFocusTimer,
   loadLocalFocusSessions,
@@ -73,55 +78,6 @@ import {
   recoveredSessionId,
   safeFocusHeartbeat,
 } from '@/lib/focusSessions';
-
-function parseDurationInput(str: string): number {
-  const cleaned = str.trim().toLowerCase();
-  if (!cleaned || cleaned === '0' || cleaned === '—' || cleaned === '-') return 0;
-
-  if (cleaned.includes(':')) {
-    const parts = cleaned.split(':');
-    const h = parseInt(parts[0], 10) || 0;
-    const m = parseInt(parts[1], 10) || 0;
-    return (h * 60 + m) * 60;
-  }
-
-  if (cleaned.includes('h') || cleaned.includes('m')) {
-    let totalSec = 0;
-    const hMatch = cleaned.match(/([\d.]+)\s*h/);
-    const mMatch = cleaned.match(/([\d.]+)\s*m/);
-    if (hMatch) totalSec += Math.round(parseFloat(hMatch[1]) * 3600);
-    if (mMatch) totalSec += Math.round(parseFloat(mMatch[1]) * 60);
-    return totalSec;
-  }
-
-  if (cleaned.includes('.')) {
-    const hours = parseFloat(cleaned);
-    return isNaN(hours) ? 0 : Math.round(hours * 3600);
-  }
-
-  const num = parseInt(cleaned, 10);
-  if (isNaN(num) || num <= 0) return 0;
-  if (num <= 12) {
-    return num * 3600;
-  } else {
-    return num * 60;
-  }
-}
-
-function formatDetailedDuration(seconds: number): string {
-  if (seconds <= 0) return '0 minutes (Cleared)';
-  const totalMins = Math.round(seconds / 60);
-  const hours = Math.floor(totalMins / 60);
-  const mins = totalMins % 60;
-
-  if (hours > 0 && mins > 0) {
-    return `${hours} hour${hours === 1 ? '' : 's'}, ${mins} minute${mins === 1 ? '' : 's'} (${totalMins} mins total)`;
-  } else if (hours > 0) {
-    return `${hours} hour${hours === 1 ? '' : 's'} (${totalMins} mins total)`;
-  } else {
-    return `${mins} minute${mins === 1 ? '' : 's'}`;
-  }
-}
 
 function formatTimeLeft(mins: number): string {
   if (mins <= 0) return '0m left';
@@ -163,8 +119,8 @@ import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColo
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, resolveEventColor, type EventCategory } from '@/lib/categories';
-import { coerceTaskLists, GENERAL_LIST_ID, listIdOf, makeListId, TASK_LIST_COLORS, type TaskList } from '@/lib/taskLists';
-import TasksPanel, { type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
+import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
+import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -353,6 +309,8 @@ const TIME_FORMAT_KEY  = 'planner-timefmt';
 const WEEK_START_KEY  = 'planner-weekstart';
 const DAY_START_KEY  = 'planner-daystart';
 const DAY_END_KEY    = 'planner-dayend';
+/** Which task list this screen is looking at. Per-device, never synced. */
+const ACTIVE_TASK_LIST_KEY = 'planner-active-task-list';
 const HEADER_PX      = 56;
 const HEADER_COMPACT_PX = 28;
 const DRAG_THRESHOLD = 5;
@@ -817,9 +775,10 @@ export default function WeeklyPlanner() {
     if (isCalendarView(initialSettings.calendarView)) return initialSettings.calendarView;
     return 'week';
   });
-  // Custom view: P days before the week start, N days from the week start.
+  // Custom view: P days before the week start/day, N days after.
   const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
   const [customDaysAfter, setCustomDaysAfter]   = useState<number>(initialSettings.customDaysAfter);
+  const [customAnchor, setCustomAnchor]         = useState<'day' | 'week'>(() => initialSettings.customAnchor ?? 'day');
   // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
   // it's applied as CSS `zoom` on the root so layout reflows instead of blurring.
   const [appZoom, setAppZoom] = useState(1);
@@ -857,6 +816,12 @@ export default function WeeklyPlanner() {
   const [taskColor, setTaskColor]             = useState<string>(initialSettings.taskColor);
   const [categories, setCategories]           = useState<EventCategory[]>(initialSettings.categories ?? DEFAULT_CATEGORIES);
   const [taskLists, setTaskLists]             = useState<TaskList[]>(() => coerceTaskLists(initialSettings.taskLists));
+  // Which list the panel is showing. Deliberately device-local rather than a
+  // synced setting: the tab you happen to be reading on this screen is not
+  // something the phone or the widget should be dragged to as well.
+  const [activeTaskListId, setActiveTaskListId] = useState<string | null>(() => {
+    try { return localStorage.getItem(ACTIVE_TASK_LIST_KEY) || null; } catch { return null; }
+  });
   const [prayer, setPrayer]                   = useState<PrayerSettings>(initialSettings.prayer);
   const [hardware, setHardware]               = useState<HardwareSettings>(initialSettings.hardware);
   const [prayerPanelOpen, setPrayerPanelOpen] = useState(false);
@@ -875,6 +840,13 @@ export default function WeeklyPlanner() {
   const [dayStartH, setDayStartH]       = useState(initialSettings.dayStartH);
   const [dayEndH, setDayEndH]           = useState(initialSettings.dayEndH);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
+  /**
+   * Serialized form of the session list currently on screen, so an incoming
+   * copy that says the same thing can be dropped before it invalidates the
+   * (expensive) focus-analysis memos. Also updated when this window is the one
+   * writing, so our own save doesn't come back as "new" data.
+   */
+  const lastFocusSessionsJsonRef = useRef<string | null>(null);
   /** True once the sessions have been read from the server at least once. */
   const [focusSessionsHydrated, setFocusSessionsHydrated] = useState(false);
   // Hour (0–23, local) at which a new "focus day" begins. Sessions before this hour
@@ -1143,7 +1115,7 @@ export default function WeeklyPlanner() {
     cancelPendingTouch();
     setTouchHoldingId(null);
     if (autoScrollTimerRef.current) {
-      clearInterval(autoScrollTimerRef.current);
+      cancelAnimationFrame(autoScrollTimerRef.current);
       autoScrollTimerRef.current = null;
     }
     if (touchDragArmedRef.current) {
@@ -1628,12 +1600,22 @@ export default function WeeklyPlanner() {
   // their 0–6 week-relative dayIndex, so everything below works off this mapping
   // between a *visible slot* and the real day index it stands for.
   const dayViewColIdx = (currentDate.getDay() - weekStartsOn + 7) % 7;
-  // Custom view widens the grid past the anchor week: column offsets run from
-  // -P (P days before the week start) through N-1. Offsets outside 0–6 address
-  // days in the neighbouring weeks and are perfectly legal here — only STORED
-  // records must stay in range (see normalizeAnchor).
-  const customFrom = clamp(customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX);
-  const rawCustomTo = 6 + clamp(customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX) + 1;
+  // Custom view widens the grid:
+  // When anchored to 'day' (Current Day/Today): before/after offsets are relative to currentDate.
+  // When anchored to 'week': before/after offsets are relative to week start (0) and week end (6).
+  const isDayAnchor = customAnchor === 'day';
+  const customBeforeClamped = isDayAnchor
+    ? Math.max(0, Math.min(CUSTOM_BEFORE_MAX, customDaysBefore))
+    : clamp(customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX);
+  const customAfterClamped = isDayAnchor
+    ? Math.max(0, Math.min(CUSTOM_AFTER_MAX, customDaysAfter))
+    : clamp(customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX);
+  const customFrom = isDayAnchor
+    ? dayViewColIdx - customBeforeClamped
+    : customBeforeClamped;
+  const rawCustomTo = isDayAnchor
+    ? dayViewColIdx + customAfterClamped + 1
+    : 6 + customAfterClamped + 1;
   const customTo   = Math.max(customFrom + 1, rawCustomTo);
   const visibleCols   = calendarView === 'day'
     ? [dayViewColIdx]
@@ -2047,6 +2029,7 @@ export default function WeeklyPlanner() {
     calendarView: initialSettings.calendarView,
     customDaysBefore: initialSettings.customDaysBefore,
     customDaysAfter: initialSettings.customDaysAfter,
+    customAnchor: initialSettings.customAnchor ?? 'day',
     interval: initialSettings.interval,
     tasksPanelOpen: initialSettings.tasksPanelOpen,
     tasksPanelWidth: initialSettings.tasksPanelWidth,
@@ -2080,6 +2063,7 @@ export default function WeeklyPlanner() {
       widgetDarkPreset: true, widgetLightPreset: true, eventColorStyle: true,
       sidebarStyle: true, timeFormat: true, weekStartsOn: true, dayStartH: true,
       dayEndH: true, calendarView: true, customDaysBefore: true, customDaysAfter: true,
+      customAnchor: true,
       focusDayStartHour: true, focusChime: true, focusCues: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
       taskColor: true, taskCheckboxShape: true, taskFilters: true, googleSyncEnabled: true, googleTasksSync: true,
@@ -2125,6 +2109,7 @@ export default function WeeklyPlanner() {
     if (isCalendarView(s.calendarView)) setCalendarView(s.calendarView);
     setCustomDaysBefore(clamp(s.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
     setCustomDaysAfter(clamp(s.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
+    if (s.customAnchor === 'day' || s.customAnchor === 'week') setCustomAnchor(s.customAnchor);
     setTasksPanelOpen(s.tasksPanelOpen);
     setTasksPanelWidth(clampPanelWidth(s.tasksPanelWidth));
     setShowTaskRow(s.showTaskRow);
@@ -2178,6 +2163,7 @@ export default function WeeklyPlanner() {
     calendarView,
     customDaysBefore,
     customDaysAfter,
+    customAnchor,
     interval,
     tasksPanelOpen,
     tasksPanelWidth,
@@ -2197,7 +2183,7 @@ export default function WeeklyPlanner() {
     analysisTab,
     mobileTab,
     hiddenCategoryIds,
-  }), [calendarView, customDaysBefore, customDaysAfter, interval, tasksPanelOpen,
+  }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
        appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds]);
@@ -2207,6 +2193,7 @@ export default function WeeklyPlanner() {
     if (isCalendarView(d.calendarView)) setCalendarView(d.calendarView);
     setCustomDaysBefore(clamp(d.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
     setCustomDaysAfter(clamp(d.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
+    if (d.customAnchor === 'day' || d.customAnchor === 'week') setCustomAnchor(d.customAnchor);
     setIntervalOpt(d.interval);
     setTasksPanelOpen(d.tasksPanelOpen);
     setTasksPanelWidth(clampPanelWidth(d.tasksPanelWidth));
@@ -2474,10 +2461,11 @@ export default function WeeklyPlanner() {
     const title = (input.title ?? '').trim();
     if (!title) return null;
     const wso = editCtxRef.current.weekStartsOn;
-    const { dueDate, startTime, ...rest } = input;
+    const { dueDate, startTime, recur, ...rest } = input;
     let t = makeTask({ ...rest, title }, wso);
     if (dueDate !== undefined) t = withDueDate(t, dueDate, wso);
     if (startTime) t = withTime(t, startTime);
+    if (recur && t.weekKey) t = { ...t, recur };
     writeTasks({ ...tasksRef.current, [t.id]: t });
     return t.id;
   }, [writeTasks]);
@@ -2523,8 +2511,9 @@ export default function WeeklyPlanner() {
       if (!current) return;
       // Only the dragged chip changes day; the rest just get their new index.
       // Clear startTime & endTime so dropping onto the top task band turns timed tasks into top-of-day tasks.
-      const patch: Partial<Task> = isDragged
-        ? { ...withDueDate(current, ymd, wso), startTime: undefined, endTime: undefined, order: i }
+      const moved = isDragged ? withDueDate(current, ymd, wso) : null;
+      const patch: Partial<Task> = moved
+        ? { weekKey: moved.weekKey, dayIndex: moved.dayIndex, startTime: undefined, endTime: undefined, order: i }
         : { order: i };
       const res = editTaskSeries(map, t.id, patch, editCtxRef.current.viewedWeekKey, wso);
       map = res.events;
@@ -2539,6 +2528,46 @@ export default function WeeklyPlanner() {
 
   const handleToggleTaskDone = useCallback((occId: string) => {
     writeTasks(toggleTaskDone(tasksRef.current, occId));
+  }, [writeTasks]);
+
+  // ── Task lists ─────────────────────────────────────────────────────────────
+  const handleActiveTaskListChange = useCallback((id: string | null) => {
+    setActiveTaskListId(id);
+    try {
+      if (id) localStorage.setItem(ACTIVE_TASK_LIST_KEY, id);
+      else localStorage.removeItem(ACTIVE_TASK_LIST_KEY);
+    } catch { /* private mode */ }
+  }, []);
+
+  /**
+   * File a task onto a list. `listId` goes through `editTask`, which routes
+   * list changes to the MASTER of a repeating task rather than detaching the
+   * occurrence — filing a series is a property of the series, not of one day.
+   */
+  const moveTaskToList = useCallback((occId: string, listId: string) => {
+    editTask(occId, { listId: listId === GENERAL_LIST_ID ? undefined : listId });
+  }, [editTask]);
+
+  /**
+   * Delete a list. Either its tasks come back to General or they go with it —
+   * there is no third option where they quietly stop being reachable.
+   */
+  const deleteTaskList = useCallback((listId: string, mode: ListDeleteMode) => {
+    if (listId === GENERAL_LIST_ID) return;   // General has to exist for unfiled tasks
+    const victims = Object.values(tasksRef.current).filter(t => !t.deleted && t.listId === listId);
+    if (victims.length) {
+      let map = tasksRef.current;
+      for (const t of victims) {
+        // 'all' on a repeating task, because the list is going away entirely —
+        // and deleteTaskScoped is what knows about Google tombstones and takes
+        // orphaned subtasks with their parent.
+        map = mode === 'purge'
+          ? deleteTaskScoped(map, t.id, 'all')
+          : { ...map, [t.id]: { ...map[t.id], listId: undefined, updatedAt: Date.now() } };
+      }
+      writeTasks(map);
+    }
+    setTaskLists(prev => prev.filter(l => l.id !== listId));
   }, [writeTasks]);
 
   // Stable identities so the memoised tasks panel isn't invalidated every render.
@@ -2670,6 +2699,11 @@ export default function WeeklyPlanner() {
     return () => cancelAnimationFrame(raf);
   }, [viewedWeekKey, calendarView, showFocusAnalysis, liveLineOnScreen]);
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
+  // What the live session adds to a DAY TOTAL. Differs from the elapsed time
+  // above only after a manual edit of that day's total, which banks the seconds
+  // run so far into the logged sessions (see `creditedSeconds`). The countdown,
+  // the progress ring and the session itself always use the full elapsed time.
+  const focusDayLiveSeconds = getFocusTimerUncreditedSeconds(focusTimer, nowTick);
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
   const activeFocusDayKey = focusTimer.sessionStartedAt ? focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) : '';
@@ -2699,15 +2733,23 @@ export default function WeeklyPlanner() {
     };
   }), [days, focusLoggedByDay, focusExcludedSet]);
 
+  const todayFocusKey = useMemo(() => focusDayKey(new Date(nowTick), focusDayStartHour), [nowTick, focusDayStartHour]);
+  const todayFocusDate = useMemo(() => {
+    const d = new Date(nowTick);
+    if (d.getHours() < focusDayStartHour) {
+      d.setDate(d.getDate() - 1);
+    }
+    return d;
+  }, [nowTick, focusDayStartHour]);
+
   const focusStats = useMemo(() => {
-    const todayFocusKey = focusDayKey(new Date(nowTick), focusDayStartHour);
     const perDay = focusLoggedWeek.map(d => ({
       day: d.day,
       key: d.key,
       isExcluded: d.isExcluded,
       // A session that is still running hasn't been logged yet, so its elapsed
       // time is folded onto the day it belongs to.
-      seconds: d.loggedSeconds + (activeFocusDayKey === d.key ? focusElapsedSeconds : 0),
+      seconds: d.loggedSeconds + (activeFocusDayKey === d.key ? focusDayLiveSeconds : 0),
       sessions: d.sessions,
     }));
     const validDays = perDay.filter(d => !d.isExcluded);
@@ -2724,7 +2766,7 @@ export default function WeeklyPlanner() {
       maxSeconds,
       todaySeconds: perDay.find(day => day.key === todayFocusKey)?.seconds ?? 0,
     };
-  }, [activeFocusDayKey, focusElapsedSeconds, focusLoggedWeek, focusDayStartHour, nowTick]);
+  }, [activeFocusDayKey, focusDayLiveSeconds, focusLoggedWeek, todayFocusKey]);
 
   // â”€â”€ Focus analysis (month / year) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const focusAnalysis = useMemo(() => {
@@ -2867,7 +2909,7 @@ export default function WeeklyPlanner() {
   const weekAnalysisLive = useMemo(() => {
     const dayList = focusAnalysis.weekDays.map(d => ({
       ...d,
-      seconds: d.seconds + (activeFocusDayKey === d.key ? focusElapsedSeconds : 0),
+      seconds: d.seconds + (activeFocusDayKey === d.key ? focusDayLiveSeconds : 0),
     }));
     const validDays = dayList.filter(d => !d.isExcluded);
     const total  = validDays.reduce((s, d) => s + d.seconds, 0);
@@ -2880,15 +2922,15 @@ export default function WeeklyPlanner() {
       avgActive: active > 0 ? Math.floor(total / active) : 0,
       bestKey: (validDays.length > 0 ? validDays : dayList).reduce((b, d) => (d.seconds > b.seconds ? d : b), dayList[0]).key,
     };
-  }, [focusAnalysis.weekDays, activeFocusDayKey, focusElapsedSeconds]);
+  }, [focusAnalysis.weekDays, activeFocusDayKey, focusDayLiveSeconds]);
 
   // Same idea for the month tab's total: the in-progress session isn't logged yet.
   const monthLiveExtraSeconds = useMemo(() => {
-    if (!activeFocusDayKey || !focusElapsedSeconds) return 0;
+    if (!activeFocusDayKey || !focusDayLiveSeconds) return 0;
     if (focusExcludedSet.has(activeFocusDayKey)) return 0;
     const d = new Date(`${activeFocusDayKey}T00:00:00`);
-    return isSameMonth(d, analysisMonthCursor) ? focusElapsedSeconds : 0;
-  }, [activeFocusDayKey, focusElapsedSeconds, analysisMonthCursor, focusExcludedSet]);
+    return isSameMonth(d, analysisMonthCursor) ? focusDayLiveSeconds : 0;
+  }, [activeFocusDayKey, focusDayLiveSeconds, analysisMonthCursor, focusExcludedSet]);
 
   // `nowTick` is read from one end of this component to the other, so publishing
   // one every second re-renders the entire planner every second — several
@@ -2913,14 +2955,33 @@ export default function WeeklyPlanner() {
   useEffect(() => {
     setFocusSessions(loadLocalFocusSessions());
 
+    /**
+     * Adopt a session list only when it actually differs from the one already
+     * on screen. Both the 15s safety poll and the live stream hand over a
+     * freshly parsed array every time, and a new array identity — even holding
+     * byte-identical data — invalidates `focusLoggedByDay`, `focusLoggedWeek`,
+     * `focusStats` and `focusAnalysis`, the last of which walks every session
+     * ever recorded across the week, month and year cursors. Measured, that
+     * turned an idle window into a ~77ms main-thread stall every 15 seconds:
+     * nine dropped frames on a 120Hz screen, arriving on a fixed cadence, which
+     * is exactly the kind of periodic hitch that reads as "this app is heavy".
+     * The neighbouring `events` and `tasks` stream handlers already guard this
+     * way; focus sessions were the one path that didn't.
+     */
+    const adoptFocusSessions = (sessions: FocusSession[]) => {
+      const json = JSON.stringify(sessions);
+      if (json === lastFocusSessionsJsonRef.current) return;
+      lastFocusSessionsJsonRef.current = json;
+      setFocusSessions(sessions);
+      localStorage.setItem(FOCUS_SESSIONS_KEY, json);
+    };
+
     const loadFocusSessions = () => {
       fetch('/api/focus-sessions')
         .then(r => r.json())
         .then(data => {
-          const sessions = safeFocusSessions(data);
-          setFocusSessions(sessions);
+          adoptFocusSessions(safeFocusSessions(data));
           setFocusSessionsHydrated(true);
-          localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
         })
         .catch(err => {
           console.error('Failed to load focus sessions:', err);
@@ -2941,9 +3002,7 @@ export default function WeeklyPlanner() {
       dbStream = new EventSource('/api/db-stream');
       dbStream.addEventListener('focus-sessions', (evt) => {
         try {
-          const sessions = safeFocusSessions(JSON.parse((evt as MessageEvent).data));
-          setFocusSessions(sessions);
-          localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+          adoptFocusSessions(safeFocusSessions(JSON.parse((evt as MessageEvent).data)));
         } catch (_) { /* ignore */ }
       });
       dbStream.addEventListener('events', (evt) => {
@@ -3085,40 +3144,116 @@ export default function WeeklyPlanner() {
   }, []);
 
   const persistFocusSessions = useCallback((sessions: FocusSession[], force = false) => {
-    localStorage.setItem(FOCUS_SESSIONS_KEY, JSON.stringify(sessions));
+    const json = JSON.stringify(sessions);
+    // Record what we're about to save, so the server echoing it straight back
+    // over the stream is recognised as our own write and dropped.
+    lastFocusSessionsJsonRef.current = json;
+    localStorage.setItem(FOCUS_SESSIONS_KEY, json);
     fetch(`/api/focus-sessions${force ? '?force=1' : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(sessions),
+      body: json,
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
 
-  const commitFocusDayDuration = useCallback((dateKeyVal: string, dateVal: Date, newSeconds: number) => {
-    const remaining = focusSessions.filter(s => focusDayKey(s.endedAt, focusDayStartHour) !== dateKeyVal);
-    const updated = [...remaining];
+  const resetLiveFocusTimer = useCallback(() => {
+    const stamp = Date.now();
+    const newTimer: FocusTimerState = {
+      ...DEFAULT_FOCUS_TIMER,
+      plannedSeconds: focusTimer.plannedSeconds,
+      lastPausedAt: new Date(stamp).toISOString(),
+      updatedAt: stamp,
+    };
+    const json = focusTimerIdentity(newTimer);
+    lastTimerJsonRef.current = json;
+    lastTimerPushKeyRef.current = focusTimerPushKey(newTimer);
+    lastTransitionKeyRef.current = focusTimerTransitionKey(newTimer);
+    lastLocalPushAtRef.current = stamp;
+    lastLocalTimerChangeRef.current = stamp;
+    try {
+      localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(newTimer));
+    } catch (_) {}
+    setFocusTimer(newTimer);
+    fetch('/api/focus-timer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newTimer),
+    }).catch(err => console.error('Failed to reset focus timer:', err));
+  }, [focusTimer.plannedSeconds]);
 
-    if (newSeconds > 0) {
-      const endIso = `${dateKeyVal}T12:00:00.000Z`;
-      const startIso = new Date(new Date(endIso).getTime() - newSeconds * 1000).toISOString();
-      const newSession: FocusSession = {
-        id: `manual-${dateKeyVal}-${newSeconds}`,
-        startedAt: startIso,
-        endedAt: endIso,
-        durationSeconds: newSeconds,
-        plannedSeconds: newSeconds,
-      };
-      updated.push(newSession);
+  /**
+   * Set one day's focus total to exactly `newSeconds`.
+   *
+   * The day the live session belongs to is the awkward one: its total is
+   * `logged + live`, so writing the typed value into `logged` alone would leave
+   * the live part on top of it. Rather than deriving a logged value that cancels
+   * out (which the growing clock immediately invalidated, and which the eventual
+   * completion then counted a second time), the seconds run so far are *banked*:
+   * `creditedSeconds` records them as already-written, the typed value lands in
+   * the logged sessions untouched, and the session carries on counting down with
+   * only its future seconds still to come. The timer is never rewound, re-anchored
+   * or reset — editing a total is not allowed to disturb a session in progress.
+   */
+  const commitFocusDayDuration = useCallback((dateKeyVal: string, dateVal: Date, newSeconds: number) => {
+    // ONLY the day the live session is actually filed under. Using "today" here
+    // meant that with a session started before midnight (or before the focus-day
+    // cutoff) the edit subtracted time that was being shown on the previous day.
+    const activeKey = focusTimer.sessionStartedAt ? focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) : '';
+    const manualDuration = Math.max(0, Math.floor(newSeconds));
+
+    if (activeKey && activeKey === dateKeyVal) {
+      const elapsed = getFocusTimerElapsedSeconds(focusTimer);
+      const credited = Math.max(0, focusTimer.creditedSeconds ?? 0);
+      if (elapsed !== credited) {
+        const stamp = Date.now();
+        const adjustedTimer: FocusTimerState = { ...focusTimer, creditedSeconds: elapsed, updatedAt: stamp };
+        const json = focusTimerIdentity(adjustedTimer);
+        lastTimerJsonRef.current = json;
+        lastTimerPushKeyRef.current = focusTimerPushKey(adjustedTimer);
+        lastTransitionKeyRef.current = focusTimerTransitionKey(adjustedTimer);
+        lastLocalPushAtRef.current = stamp;
+        lastLocalTimerChangeRef.current = stamp;
+        try { localStorage.setItem(FOCUS_TIMER_KEY, JSON.stringify(adjustedTimer)); } catch (_) {}
+        setFocusTimer(adjustedTimer);
+        fetch('/api/focus-timer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(adjustedTimer),
+        }).catch(err => console.error('Failed to update focus timer:', err));
+      }
     }
 
-    setFocusSessions(updated);
-    persistFocusSessions(updated, true);
-  }, [focusSessions, focusDayStartHour, persistFocusSessions]);
+    setFocusSessions(prev => {
+      const remaining = prev.filter(s => focusDayKey(s.endedAt, focusDayStartHour) !== dateKeyVal);
+      const updated = [...remaining];
+
+      if (manualDuration > 0) {
+        const newSession = createManualFocusSession(dateKeyVal, manualDuration, focusDayStartHour);
+        updated.push(newSession);
+      }
+
+      persistFocusSessions(updated, true);
+      return updated;
+    });
+  }, [focusDayStartHour, focusTimer, persistFocusSessions]);
 
   const submittingEditRef = useRef(false);
 
-  const startEditingFocusDay = useCallback((dKey: string, dDate: Date, currentSecs: number) => {
+  /**
+   * Which editor is open, not just which day.
+   *
+   * Today is on screen in more than one place at once — the header's "Today"
+   * stat and its bar in the week chart — so keying the open editor on the day
+   * alone opened BOTH, each with `autoFocus`. The second one to mount stole the
+   * focus, the first fired `onBlur` with its untouched value, and that submit
+   * closed the pair again: double-clicking today's total in the header looked
+   * like it did nothing at all.
+   */
+  const focusEditKey = (scope: string, dKey: string) => `${scope}::${dKey}`;
+
+  const startEditingFocusDay = useCallback((scope: string, dKey: string, dDate: Date, currentSecs: number) => {
     submittingEditRef.current = false;
-    setEditingFocusDayKey(dKey);
+    setEditingFocusDayKey(focusEditKey(scope, dKey));
     setEditingFocusInput(currentSecs > 0 ? formatFocusDuration(currentSecs) : '');
   }, []);
 
@@ -3130,7 +3265,10 @@ export default function WeeklyPlanner() {
     const parsedSecs = parseDurationInput(textToParse);
     setEditingFocusDayKey(null);
 
-    if (parsedSecs !== currentSecs) {
+    // The box is pre-filled with the MINUTE-rounded total, so leaving it alone (or
+    // retyping the same thing) parses back to a value that differs from the true
+    // total only by its stray seconds. That isn't an edit — don't ask to confirm one.
+    if (Math.floor(currentSecs / 60) !== Math.floor(parsedSecs / 60)) {
       setConfirmFocusModal({
         date: dDate,
         dateKey: dKey,
@@ -3142,7 +3280,10 @@ export default function WeeklyPlanner() {
   }, [editingFocusInput]);
 
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false, opts?: { endedAt?: Date; id?: string }) => {
-    const duration = Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
+    // Time a manual day edit already banked has been logged once already — it
+    // must not be logged again when the session it was taken from finishes.
+    const credited = Math.max(0, focusTimer.creditedSeconds ?? 0);
+    const duration = loggableSessionSeconds(focusTimer, durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
     if (duration <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
@@ -3151,7 +3292,7 @@ export default function WeeklyPlanner() {
     // `opts.endedAt` is for a session recovered after the machine was switched
     // off: it ended when the PC did, not when we noticed on the next launch.
     const endedAt = opts?.endedAt ?? new Date();
-    const startedAt = focusTimer.sessionStartedAt
+    const startedAt = focusTimer.sessionStartedAt && credited === 0
       ? new Date(focusTimer.sessionStartedAt)
       : new Date(endedAt.getTime() - duration * 1000);
 
@@ -3378,7 +3519,7 @@ export default function WeeklyPlanner() {
   };
 
   const resetFocus = () => {
-    setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
+    resetLiveFocusTimer();
   };
 
   const stopFocus = () => {
@@ -3397,7 +3538,7 @@ export default function WeeklyPlanner() {
   // Read out of the same per-day buckets the week strip uses, rather than
   // re-scanning every session ever logged on each render.
   const hwTodaySeconds = (focusLoggedByDay.seconds.get(hwTodayKey) ?? 0)
-    + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === hwTodayKey ? focusElapsedSeconds : 0);
+    + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === hwTodayKey ? focusDayLiveSeconds : 0);
   const hwSessionsToday = focusLoggedByDay.sessions.get(hwTodayKey) ?? 0;
 
   const hardwareController = useHardwareController({
@@ -3766,7 +3907,9 @@ export default function WeeklyPlanner() {
   // â”€â”€ Backup & Restore â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Covers all three database files (events, settings, focus-sessions) so a
   // single exported file is a complete snapshot of the whole app's data.
-  const BACKUP_FORMAT_VERSION = 2;
+  // v3 adds `tasks`. Readers must accept 1 (bare events map), 2 (no tasks) and 3 —
+  // the same contract the server's automated backups use.
+  const BACKUP_FORMAT_VERSION = 3;
 
   const applyImportedSettings = (raw: unknown, backupShortcuts?: unknown) => {
     const restored = coerceSettings({
@@ -3790,6 +3933,7 @@ export default function WeeklyPlanner() {
     if (isCalendarView(restored.calendarView)) setCalendarView(restored.calendarView);
     setCustomDaysBefore(restored.customDaysBefore);
     setCustomDaysAfter(restored.customDaysAfter);
+    if (restored.customAnchor === 'day' || restored.customAnchor === 'week') setCustomAnchor(restored.customAnchor);
     setFocusDayStartHour(restored.focusDayStartHour);
     setFocusChime(restored.focusChime);
     setFocusCues(restored.focusCues);
@@ -3821,6 +3965,7 @@ export default function WeeklyPlanner() {
       events,
       settings: currentSettingsSnapshot(),
       focusSessions,
+      tasks,
     };
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backup, null, 2));
     const downloadAnchor = document.createElement('a');
@@ -3854,6 +3999,11 @@ export default function WeeklyPlanner() {
         const importedEvents: PlannerData = isComprehensive ? parsed.events : parsed;
         const s = isComprehensive ? parsed.settings : null;
         const sessions = isComprehensive && Array.isArray(parsed.focusSessions) ? parsed.focusSessions : null;
+        // v3 backups carry the task store too. Absent in v1/v2 files, in which
+        // case the current tasks are left alone rather than wiped.
+        const importedTasks = isComprehensive && parsed.tasks && typeof parsed.tasks === 'object' && !Array.isArray(parsed.tasks)
+          ? coerceTasks(parsed.tasks)
+          : null;
 
         const migrated = migrateEvents(importedEvents as PlannerData).events;
         const incoming = Object.keys(migrated).length;
@@ -3863,7 +4013,8 @@ export default function WeeklyPlanner() {
         const ok = window.confirm(
           `Import this backup?\n\n` +
           `It will replace all ${existing} current item${existing === 1 ? '' : 's'} with ${incoming} item${incoming === 1 ? '' : 's'} from the file` +
-          `${s ? ', and overwrite your settings' : ''}${sessions ? `, and replace your focus session history` : ''}.\n\n` +
+          `${s ? ', and overwrite your settings' : ''}${sessions ? `, and replace your focus session history` : ''}` +
+          `${importedTasks ? `, and replace your ${Object.keys(tasksRef.current).length} task${Object.keys(tasksRef.current).length === 1 ? '' : 's'}` : ''}.\n\n` +
           `This cannot be undone.`
         );
         if (!ok) { resetInput(); return; }
@@ -3879,6 +4030,15 @@ export default function WeeklyPlanner() {
 
         if (s && typeof s === 'object') applyImportedSettings(s, parsed.shortcuts);
 
+        if (importedTasks) {
+          writeTasks(importedTasks);
+          fetch('/api/tasks?force=1', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(importedTasks),
+          }).catch(() => showToast('Tasks imported locally, but saving to the server failed.', 'error'));
+        }
+
         if (sessions) {
           const safeSessions = safeFocusSessions(sessions);
           setFocusSessions(safeSessions);
@@ -3887,7 +4047,7 @@ export default function WeeklyPlanner() {
 
         showToast(
           isComprehensive
-            ? `Imported ${incoming} item${incoming === 1 ? '' : 's'}, settings and focus history.`
+            ? `Imported ${incoming} item${incoming === 1 ? '' : 's'}, settings${importedTasks ? ', tasks' : ''} and focus history.`
             : `Imported ${incoming} item${incoming === 1 ? '' : 's'}.`,
           'success'
         );
@@ -4252,8 +4412,34 @@ export default function WeeklyPlanner() {
 
         if (nearTop || nearBottom) {
           if (!autoScrollTimerRef.current) {
-            autoScrollTimerRef.current = window.setInterval(() => {
-              if (!autoScrollLastPosRef.current) return;
+            // Driven by requestAnimationFrame, not a 16ms setInterval. A timer
+            // ticking every 16ms is a 62Hz signal: on a 120Hz screen it lands
+            // between frames and the edge scroll visibly stutters, and on any
+            // screen it drifts against the compositor. rAF fires exactly once
+            // per displayed frame, whatever the refresh rate is.
+            //
+            // The speed is therefore expressed in pixels per SECOND and scaled
+            // by the real frame delta, so the scroll travels at the same rate
+            // at 60Hz and 240Hz instead of running twice as fast on the faster
+            // screen. scrollTop is fractional, so the leftovers of a sub-pixel
+            // step are not thrown away.
+            const SLOW_PX_S = 250;
+            const FAST_PX_S = 1250;
+            let lastTs = 0;
+            const step = (ts: number) => {
+              // First frame has no delta to measure against; assume one frame
+              // at 60Hz rather than scrolling by zero.
+              const dt = lastTs ? Math.min(64, ts - lastTs) : 16.7;
+              lastTs = ts;
+
+              const stop = () => {
+                if (autoScrollTimerRef.current) {
+                  cancelAnimationFrame(autoScrollTimerRef.current);
+                  autoScrollTimerRef.current = null;
+                }
+              };
+
+              if (!autoScrollLastPosRef.current) { autoScrollTimerRef.current = requestAnimationFrame(step); return; }
               const { clientX, clientY } = autoScrollLastPosRef.current;
               const curScroller = (mainRef.current && mainRef.current.scrollHeight > mainRef.current.clientHeight + 1)
                 ? mainRef.current
@@ -4264,33 +4450,29 @@ export default function WeeklyPlanner() {
               const curTopEdge = curSRect.top + EDGE_ZONE;
               const curBottomEdge = curSRect.bottom - EDGE_ZONE;
 
-              let dy = 0;
+              let pxPerSecond = 0;
               if (clientY < curTopEdge && curScroller.scrollTop > 0) {
                 const depth = Math.max(0, Math.min(1, (curTopEdge - clientY) / EDGE_ZONE));
-                dy = -Math.max(4, Math.round(20 * depth));
+                pxPerSecond = -(SLOW_PX_S + (FAST_PX_S - SLOW_PX_S) * depth);
               } else if (clientY > curBottomEdge && curScroller.scrollTop < curScroller.scrollHeight - curScroller.clientHeight - 1) {
                 const depth = Math.max(0, Math.min(1, (clientY - curBottomEdge) / EDGE_ZONE));
-                dy = Math.max(4, Math.round(20 * depth));
+                pxPerSecond = SLOW_PX_S + (FAST_PX_S - SLOW_PX_S) * depth;
               }
 
-              if (dy !== 0) {
-                const before = curScroller.scrollTop;
-                curScroller.scrollTop += dy;
-                if (curScroller.scrollTop !== before) {
-                  const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
-                  flushSync(() => processMove(fakeEvent));
-                } else if (autoScrollTimerRef.current) {
-                  clearInterval(autoScrollTimerRef.current);
-                  autoScrollTimerRef.current = null;
-                }
-              } else if (autoScrollTimerRef.current) {
-                clearInterval(autoScrollTimerRef.current);
-                autoScrollTimerRef.current = null;
-              }
-            }, 16);
+              if (pxPerSecond === 0) { stop(); return; }
+
+              const before = curScroller.scrollTop;
+              curScroller.scrollTop = before + (pxPerSecond * dt) / 1000;
+              if (curScroller.scrollTop === before) { stop(); return; } // hit the end
+
+              const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
+              flushSync(() => processMove(fakeEvent));
+              autoScrollTimerRef.current = requestAnimationFrame(step);
+            };
+            autoScrollTimerRef.current = requestAnimationFrame(step);
           }
         } else if (autoScrollTimerRef.current) {
-          clearInterval(autoScrollTimerRef.current);
+          cancelAnimationFrame(autoScrollTimerRef.current);
           autoScrollTimerRef.current = null;
         }
       }
@@ -4561,7 +4743,7 @@ export default function WeeklyPlanner() {
       if (pendingMove) { const last = pendingMove; cancelPendingMove(); processMove(last); }
       cancelPendingMove();
       if (autoScrollTimerRef.current) {
-        clearInterval(autoScrollTimerRef.current);
+        cancelAnimationFrame(autoScrollTimerRef.current);
         autoScrollTimerRef.current = null;
       }
       const dr = dragRef.current;
@@ -5033,9 +5215,13 @@ export default function WeeklyPlanner() {
     setCurrentDate(d => {
       switch (calendarView) {
         case 'day':   return addDays(d, dir);
-        // The custom window is anchored to the week start, so stepping moves a whole
-        // week — the window keeps the same shape (e.g. Sat → next Sat) as it walks.
-        case 'custom': return dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1);
+        // Custom window: if anchored to day, step by the custom span; if anchored to week, step by 1 week.
+        case 'custom':
+          if (customAnchor === 'day') {
+            const span = Math.max(1, Math.max(0, customDaysBefore) + Math.max(0, customDaysAfter) + 1);
+            return addDays(d, dir * span);
+          }
+          return dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1);
         case 'month': return dir < 0 ? subMonths(d, 1) : addMonths(d, 1);
         case 'year':  return dir < 0 ? subMonths(d, 12) : addMonths(d, 12);
         default:      return dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1);
@@ -5579,55 +5765,94 @@ export default function WeeklyPlanner() {
                     );
                   })}
                 </div>
-                {/* Custom window size: P days before the week start, N days from it. */}
+                {/* Custom window size and anchor mode */}
                 {calendarView === 'custom' && (
-                  <div className="flex flex-col rounded-lg px-1 py-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                    {([
-                      {
-                        label: 'Before',
-                        title: `Start day offset from week start (${format(weekStart, 'EEEE')}): ${customDaysBefore > 0 ? `+${customDaysBefore}` : customDaysBefore} (${format(addDays(weekStart, customDaysBefore), 'EEEE')})`,
-                        value: customDaysBefore,
-                        min: CUSTOM_BEFORE_MIN,
-                        max: CUSTOM_BEFORE_MAX,
-                        set: setCustomDaysBefore,
-                        dayName: format(addDays(weekStart, customDaysBefore), 'EEE'),
-                      },
-                      {
-                        label: 'After',
-                        title: `End day offset from week end (${format(addDays(weekStart, 6), 'EEEE')}): ${customDaysAfter > 0 ? `+${customDaysAfter}` : customDaysAfter} (${format(addDays(weekStart, 6 + customDaysAfter), 'EEEE')})`,
-                        value: customDaysAfter,
-                        min: CUSTOM_AFTER_MIN,
-                        max: CUSTOM_AFTER_MAX,
-                        set: setCustomDaysAfter,
-                        dayName: format(addDays(weekStart, 6 + customDaysAfter), 'EEE'),
-                      },
-                    ] as const).map(s => (
-                      <div key={s.label} className="flex items-center h-[19px]" title={s.title}>
-                        <span className="text-[8.5px] font-bold uppercase tracking-wider w-[34px]" style={{ color: headerInactive }}>{s.label}</span>
-                        <button
-                          onClick={() => s.set(v => Math.max(s.min, v - 1))}
-                          disabled={s.value <= s.min}
-                          className="px-0.5 rounded transition-colors disabled:opacity-30"
-                          style={{ color: headerInactive }}
-                          onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        ><Minus size={10}/></button>
-                        <span className="w-[22px] text-center text-[10.5px] font-semibold tabular-nums" style={{ color: menuText }}>
-                          {s.value > 0 ? `+${s.value}` : s.value}
-                        </span>
-                        <button
-                          onClick={() => s.set(v => Math.min(s.max, v + 1))}
-                          disabled={s.value >= s.max}
-                          className="px-0.5 rounded transition-colors disabled:opacity-30"
-                          style={{ color: headerInactive }}
-                          onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        ><Plus size={10}/></button>
-                        <span className="text-[9px] font-medium text-muted-foreground ml-1 opacity-80" style={{ color: headerInactive }}>
-                          ({s.dayName})
-                        </span>
-                      </div>
-                    ))}
+                  <div className="flex items-center gap-1">
+                    {/* Anchor mode toggle: Today (default) vs Week */}
+                    <div className="flex flex-col rounded-lg p-0.5 shadow-sm justify-center" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                      <button
+                        onClick={() => setCustomAnchor('day')}
+                        title="Anchor custom view to the current day (Today)"
+                        className="px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-smooth uppercase tracking-wider"
+                        style={{
+                          background: customAnchor === 'day' ? (darkMode ? 'rgba(255,255,255,0.16)' : '#fff') : 'transparent',
+                          color: customAnchor === 'day' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                          boxShadow: customAnchor === 'day' ? '0 1px 2px rgba(0,0,0,0.15)' : 'none',
+                        }}
+                      >
+                        Today
+                      </button>
+                      <button
+                        onClick={() => setCustomAnchor('week')}
+                        title="Anchor custom view to the start and end of the week"
+                        className="px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-smooth uppercase tracking-wider"
+                        style={{
+                          background: customAnchor === 'week' ? (darkMode ? 'rgba(255,255,255,0.16)' : '#fff') : 'transparent',
+                          color: customAnchor === 'week' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                          boxShadow: customAnchor === 'week' ? '0 1px 2px rgba(0,0,0,0.15)' : 'none',
+                        }}
+                      >
+                        Week
+                      </button>
+                    </div>
+
+                    {/* Steppers */}
+                    <div className="flex flex-col rounded-lg px-1 py-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                      {([
+                        {
+                          label: 'Before',
+                          title: customAnchor === 'day'
+                            ? `Start day: ${Math.max(0, customDaysBefore)} day(s) before current day (${format(currentDate, 'EEEE')}): ${format(addDays(currentDate, -Math.max(0, customDaysBefore)), 'EEEE')}`
+                            : `Start day offset from week start (${format(weekStart, 'EEEE')}): ${customDaysBefore > 0 ? `+${customDaysBefore}` : customDaysBefore} (${format(addDays(weekStart, customDaysBefore), 'EEEE')})`,
+                          value: customAnchor === 'day' ? Math.max(0, customDaysBefore) : customDaysBefore,
+                          min: customAnchor === 'day' ? 0 : CUSTOM_BEFORE_MIN,
+                          max: CUSTOM_BEFORE_MAX,
+                          set: setCustomDaysBefore,
+                          dayName: customAnchor === 'day'
+                            ? format(addDays(currentDate, -Math.max(0, customDaysBefore)), 'EEE')
+                            : format(addDays(weekStart, customDaysBefore), 'EEE'),
+                        },
+                        {
+                          label: 'After',
+                          title: customAnchor === 'day'
+                            ? `End day: ${Math.max(0, customDaysAfter)} day(s) after current day (${format(currentDate, 'EEEE')}): ${format(addDays(currentDate, Math.max(0, customDaysAfter)), 'EEEE')}`
+                            : `End day offset from week end (${format(addDays(weekStart, 6), 'EEEE')}): ${customDaysAfter > 0 ? `+${customDaysAfter}` : customDaysAfter} (${format(addDays(weekStart, 6 + customDaysAfter), 'EEEE')})`,
+                          value: customAnchor === 'day' ? Math.max(0, customDaysAfter) : customDaysAfter,
+                          min: customAnchor === 'day' ? 0 : CUSTOM_AFTER_MIN,
+                          max: CUSTOM_AFTER_MAX,
+                          set: setCustomDaysAfter,
+                          dayName: customAnchor === 'day'
+                            ? format(addDays(currentDate, Math.max(0, customDaysAfter)), 'EEE')
+                            : format(addDays(weekStart, 6 + customDaysAfter), 'EEE'),
+                        },
+                      ] as const).map(s => (
+                        <div key={s.label} className="flex items-center h-[19px]" title={s.title}>
+                          <span className="text-[8.5px] font-bold uppercase tracking-wider w-[34px]" style={{ color: headerInactive }}>{s.label}</span>
+                          <button
+                            onClick={() => s.set(v => Math.max(s.min, (customAnchor === 'day' ? Math.max(0, v) : v) - 1))}
+                            disabled={s.value <= s.min}
+                            className="px-0.5 rounded transition-colors disabled:opacity-30"
+                            style={{ color: headerInactive }}
+                            onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                          ><Minus size={10}/></button>
+                          <span className="w-[22px] text-center text-[10.5px] font-semibold tabular-nums" style={{ color: menuText }}>
+                            {customAnchor === 'day' ? s.value : (s.value > 0 ? `+${s.value}` : s.value)}
+                          </span>
+                          <button
+                            onClick={() => s.set(v => Math.min(s.max, (customAnchor === 'day' ? Math.max(0, v) : v) + 1))}
+                            disabled={s.value >= s.max}
+                            className="px-0.5 rounded transition-colors disabled:opacity-30"
+                            style={{ color: headerInactive }}
+                            onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                          ><Plus size={10}/></button>
+                          <span className="text-[9px] font-medium text-muted-foreground ml-1 opacity-80" style={{ color: headerInactive }}>
+                            ({s.dayName})
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </>
@@ -5988,7 +6213,7 @@ export default function WeeklyPlanner() {
           )}
           {isTimelineView && (!isPhone || focusBannerOpen) && (
           <section
-            className={`rounded-xl border overflow-hidden ${isPhone ? 'mb-2' : 'mb-4'}`}
+            className={`rounded-xl border relative z-20 ${isPhone ? 'mb-2' : 'mb-4'}`}
             style={{
               background: darkMode ? 'linear-gradient(135deg, rgba(96,165,250,0.10), rgba(34,197,94,0.06))' : 'linear-gradient(135deg, rgba(59,130,246,0.08), rgba(34,197,94,0.06))',
               borderColor: surfaceBdr,
@@ -6027,19 +6252,42 @@ export default function WeeklyPlanner() {
                 ].filter((_, i) => !isPhone || i === 0).map(([label, value, editable]) => (
                   <div key={label as string} className="min-w-0">
                     <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
-                    <div
-                      onDoubleClick={(e) => {
-                        if (editable) {
-                          e.stopPropagation();
-                          startEditingFocusDay(dateKey(nowOwnerDate), nowOwnerDate, focusStats.todaySeconds);
-                        }
-                      }}
-                      className={`text-sm font-semibold tabular-nums truncate ${editable ? 'cursor-pointer hover:underline' : ''}`}
-                      style={{ color: menuText }}
-                      title={editable ? "Double-click to edit today's focus time" : undefined}
-                    >
-                      {value}
-                    </div>
+                    {editable && editingFocusDayKey === focusEditKey('header', todayFocusKey) ? (
+                      <input
+                        autoFocus
+                        onFocus={e => e.target.select()}
+                        value={editingFocusInput}
+                        onChange={e => setEditingFocusInput(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            submitFocusDayEdit(todayFocusKey, todayFocusDate, focusStats.todaySeconds, e.currentTarget.value);
+                          }
+                          if (e.key === 'Escape') {
+                            submittingEditRef.current = true;
+                            setEditingFocusDayKey(null);
+                          }
+                        }}
+                        onBlur={e => submitFocusDayEdit(todayFocusKey, todayFocusDate, focusStats.todaySeconds, e.target.value)}
+                        className="w-20 text-sm font-semibold bg-transparent border-b outline-none"
+                        style={{ color: menuText, borderColor: '#60a5fa' }}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      <div
+                        onDoubleClick={(e) => {
+                          if (editable) {
+                            e.stopPropagation();
+                            startEditingFocusDay('header', todayFocusKey, todayFocusDate, focusStats.todaySeconds);
+                          }
+                        }}
+                        className={`text-sm font-semibold tabular-nums truncate ${editable ? 'cursor-pointer hover:underline' : ''}`}
+                        style={{ color: menuText }}
+                        title={editable ? "Double-click to edit today's focus time" : undefined}
+                      >
+                        {value}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -6077,7 +6325,7 @@ export default function WeeklyPlanner() {
                             <button
                               onClick={() => {
                                 setOpenDayMenuKey(null);
-                                startEditingFocusDay(day.key, day.day, day.seconds);
+                                startEditingFocusDay('bar', day.key, day.day, day.seconds);
                               }}
                               className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
                               style={{ color: menuText }}
@@ -6112,7 +6360,7 @@ export default function WeeklyPlanner() {
                         className="text-[9px] font-bold tabular-nums text-center truncate leading-none"
                         style={{ color: day.isExcluded ? '#f59e0b' : (day.seconds > 0 ? (active ? '#60a5fa' : menuText) : menuSub), opacity: day.seconds > 0 || day.isExcluded ? 1 : 0.45 }}
                       >
-                        {editingFocusDayKey === day.key ? (
+                        {editingFocusDayKey === focusEditKey('bar', day.key) ? (
                           <input
                             autoFocus
                             onFocus={e => e.target.select()}
@@ -6129,7 +6377,7 @@ export default function WeeklyPlanner() {
                               }
                             }}
                             onBlur={e => submitFocusDayEdit(day.key, day.day, day.seconds, e.target.value)}
-                            className="w-12 text-center text-[9px] font-bold bg-transparent border-b outline-none z-30"
+                            className="w-16 text-center text-[9px] font-bold bg-transparent border-b outline-none z-30"
                             style={{ color: menuText, borderColor: '#60a5fa' }}
                             onClick={e => e.stopPropagation()}
                           />
@@ -6137,7 +6385,7 @@ export default function WeeklyPlanner() {
                           <span
                             onDoubleClick={(e) => {
                               e.stopPropagation();
-                              startEditingFocusDay(day.key, day.day, day.seconds);
+                              startEditingFocusDay('bar', day.key, day.day, day.seconds);
                             }}
                             className={`cursor-pointer hover:underline ${day.isExcluded ? 'line-through text-amber-400 opacity-75' : ''}`}
                             title="Double-click to edit focus time"
@@ -6150,7 +6398,7 @@ export default function WeeklyPlanner() {
                         <div
                           onDoubleClick={(e) => {
                             e.stopPropagation();
-                            startEditingFocusDay(day.key, day.day, day.seconds);
+                            startEditingFocusDay('bar', day.key, day.day, day.seconds);
                           }}
                           className="w-full rounded-t-md transition-smooth duration-300 cursor-pointer"
                           title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}${day.isExcluded ? ' (Excluded from analysis)' : (day.sessions ? ` · ${day.sessions} session${day.sessions === 1 ? '' : 's'}` : '')} (Double-click to edit)`}
@@ -6325,8 +6573,7 @@ export default function WeeklyPlanner() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      const k = dateKey(nowOwnerDate);
-                      setOpenDayMenuKey(openDayMenuKey === k ? null : k);
+                      setOpenDayMenuKey(openDayMenuKey === todayFocusKey ? null : todayFocusKey);
                     }}
                     className="w-7 h-7 rounded-md flex items-center justify-center transition-smooth active:scale-[0.98]"
                     style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub }}
@@ -6334,7 +6581,7 @@ export default function WeeklyPlanner() {
                   >
                     <MoreHorizontal size={13} />
                   </button>
-                  {openDayMenuKey === dateKey(nowOwnerDate) && (
+                  {openDayMenuKey === todayFocusKey && (
                     <div
                       ref={dayMenuRef}
                       onClick={(e) => e.stopPropagation()}
@@ -6344,7 +6591,7 @@ export default function WeeklyPlanner() {
                       <button
                         onClick={() => {
                           setOpenDayMenuKey(null);
-                          startEditingFocusDay(dateKey(nowOwnerDate), nowOwnerDate, focusStats.todaySeconds);
+                          startEditingFocusDay('header', todayFocusKey, todayFocusDate, focusStats.todaySeconds);
                         }}
                         className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
                         style={{ color: menuText }}
@@ -6354,18 +6601,18 @@ export default function WeeklyPlanner() {
                       </button>
                       <button
                         onClick={() => {
-                          toggleExcludeFocusDay(dateKey(nowOwnerDate));
+                          toggleExcludeFocusDay(todayFocusKey);
                         }}
                         className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-md hover:bg-amber-500/15 font-medium transition-colors"
-                        style={{ color: focusExcludedSet.has(dateKey(nowOwnerDate)) ? '#f59e0b' : menuText }}
+                        style={{ color: focusExcludedSet.has(todayFocusKey) ? '#f59e0b' : menuText }}
                       >
                         <div className="flex items-center gap-2 min-w-0 truncate">
-                          <CalendarX size={13} className={focusExcludedSet.has(dateKey(nowOwnerDate)) ? 'text-amber-400' : 'text-slate-400'} />
+                          <CalendarX size={13} className={focusExcludedSet.has(todayFocusKey) ? 'text-amber-400' : 'text-slate-400'} />
                           <span className="truncate">Exclude today</span>
                         </div>
                         <input
                           type="checkbox"
-                          checked={focusExcludedSet.has(dateKey(nowOwnerDate))}
+                          checked={focusExcludedSet.has(todayFocusKey)}
                           onChange={() => {}}
                           className="rounded cursor-pointer accent-amber-500 shrink-0 ml-1.5"
                         />
@@ -8363,7 +8610,7 @@ export default function WeeklyPlanner() {
                       {weekAnalysisLive.days.map((d, i) => (
                         <div
                           key={d.key}
-                          onDoubleClick={() => startEditingFocusDay(d.key, d.date, d.seconds)}
+                          onDoubleClick={() => startEditingFocusDay('week', d.key, d.date, d.seconds)}
                           className="flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5 relative group"
                           style={{
                             background: d.isExcluded
@@ -8391,7 +8638,7 @@ export default function WeeklyPlanner() {
                               className="tabular-nums flex items-center gap-2"
                               style={{ color: d.isExcluded ? '#f59e0b' : (d.seconds > 0 ? menuText : menuSub) }}
                             >
-                              {editingFocusDayKey === d.key ? (
+                              {editingFocusDayKey === focusEditKey('week', d.key) ? (
                                 <input
                                   autoFocus
                                   onFocus={e => e.target.select()}
@@ -8442,7 +8689,7 @@ export default function WeeklyPlanner() {
                                   <button
                                     onClick={() => {
                                       setOpenDayMenuKey(null);
-                                      startEditingFocusDay(d.key, d.date, d.seconds);
+                                      startEditingFocusDay('week', d.key, d.date, d.seconds);
                                     }}
                                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
                                     style={{ color: menuText }}
@@ -8528,7 +8775,7 @@ export default function WeeklyPlanner() {
                         const isExcluded = focusExcludedSet.has(key);
                         // Fold in the session that's running right now, same as the week tab.
                         const secs = (focusAnalysis.byDaySeconds.get(key) ?? 0)
-                          + (activeFocusDayKey === key ? focusElapsedSeconds : 0);
+                          + (activeFocusDayKey === key ? focusDayLiveSeconds : 0);
                         const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
                         const inMonth = isSameMonth(d, analysisMonthCursor);
                         const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
@@ -8545,6 +8792,10 @@ export default function WeeklyPlanner() {
                                 : (secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg),
                               border: `1px ${isExcluded ? 'dashed #f59e0b' : 'solid'} ${todayCell ? '#60a5fa' : surfaceBdr}`,
                               opacity: inMonth ? 1 : 0.35,
+                            }}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              startEditingFocusDay('month', key, d, secs);
                             }}
                           >
                             {/* 3-dots day options menu */}
@@ -8570,7 +8821,7 @@ export default function WeeklyPlanner() {
                                   <button
                                     onClick={() => {
                                       setOpenDayMenuKey(null);
-                                      startEditingFocusDay(key, d, secs);
+                                      startEditingFocusDay('month', key, d, secs);
                                     }}
                                     className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
                                     style={{ color: menuText }}
@@ -8607,12 +8858,12 @@ export default function WeeklyPlanner() {
                             <span
                               onDoubleClick={(e) => {
                                 e.stopPropagation();
-                                startEditingFocusDay(key, d, secs);
+                                startEditingFocusDay('month', key, d, secs);
                               }}
                               className={`text-[15px] font-bold tabular-nums leading-none cursor-pointer ${isExcluded ? 'line-through opacity-75 text-amber-400' : ''}`}
                               style={{ color: isExcluded ? '#f59e0b' : (secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub), opacity: secs > 0 || isExcluded ? 1 : 0.45 }}
                             >
-                              {editingFocusDayKey === key ? (
+                              {editingFocusDayKey === focusEditKey('month', key) ? (
                                 <input
                                   autoFocus
                                   onFocus={e => e.target.select()}
@@ -8789,6 +9040,12 @@ export default function WeeklyPlanner() {
           taskColor={taskColor}
           taskCheckboxShape={taskCheckboxShape}
           theme={taskPanelTheme}
+          lists={taskLists}
+          activeListId={activeTaskListId}
+          onActiveListChange={handleActiveTaskListChange}
+          onListsChange={setTaskLists}
+          onDeleteList={deleteTaskList}
+          onMoveTaskToList={moveTaskToList}
           onFiltersChange={setTaskFilters}
           onCreate={createTask}
           onToggleDone={handleToggleTaskDone}
@@ -8836,6 +9093,17 @@ export default function WeeklyPlanner() {
                 </span>
               </div>
             </div>
+
+            {activeFocusDayKey === confirmFocusModal.dateKey && focusDayLiveSeconds > 0 && (
+              <div className="rounded-xl p-3 mb-4 border border-blue-500/30 bg-blue-500/10 text-blue-300 text-xs flex items-start gap-2.5">
+                <Clock size={16} className="flex-shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold block mb-0.5">A session is running on this day</span>
+                  The {formatFocusDuration(focusDayLiveSeconds)} it has counted so far is included in the new total.
+                  The session keeps running — only time from now on will be added.
+                </div>
+              </div>
+            )}
 
             <div className="rounded-xl p-3 mb-5 border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs flex items-start gap-2.5">
               <AlertTriangle size={16} className="flex-shrink-0 mt-0.5 text-amber-400" />
@@ -9764,6 +10032,33 @@ export default function WeeklyPlanner() {
                 </>
               )}
             </div>
+
+            {/* Which list it's filed under. Subtasks follow their parent, so
+                they get no picker of their own. */}
+            {!menuTask.parentId && taskLists.length > 1 && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <ListTodo size={12} style={{ color: menuSub }} />
+                {taskLists.map(l => {
+                  const active = resolveListId(menuTask.listId, taskLists) === l.id;
+                  return (
+                    <button
+                      key={l.id}
+                      onClick={() => moveTaskToList(taskMenuId!, l.id)}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition-smooth active:scale-95"
+                      style={{
+                        background: active ? `${l.color}22` : surfaceBg,
+                        border: `1px solid ${active ? l.color : surfaceBdr}`,
+                        color: active ? l.color : menuSub,
+                      }}
+                      title={`Move to ${l.name}`}
+                    >
+                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: l.color }} />
+                      <span className="truncate max-w-[90px]">{l.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             <textarea
               value={menuTask.notes ?? ''}
@@ -10712,25 +11007,64 @@ export default function WeeklyPlanner() {
               {/* Custom view's day counts, inline so the picker is the one place
                   the shape of the view is decided. */}
               {!showFocusAnalysis && calendarView === 'custom' && (
-                <div className="mt-1 rounded-xl p-3" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                <div className="mt-1 rounded-xl p-3 flex flex-col gap-2.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  <div className="flex items-center justify-between pb-1 border-b border-border/10">
+                    <span className="text-[12px] font-semibold" style={{ color: menuText }}>Anchor</span>
+                    <div className="flex rounded-lg p-0.5" style={{ background: menuBg, border: `1px solid ${surfaceBdr}` }}>
+                      <button
+                        onClick={() => setCustomAnchor('day')}
+                        className="px-2.5 py-1 text-xs font-semibold rounded-md transition-smooth"
+                        style={{
+                          background: customAnchor === 'day' ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent',
+                          color: customAnchor === 'day' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                          boxShadow: customAnchor === 'day' ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                        }}
+                      >
+                        Today
+                      </button>
+                      <button
+                        onClick={() => setCustomAnchor('week')}
+                        className="px-2.5 py-1 text-xs font-semibold rounded-md transition-smooth"
+                        style={{
+                          background: customAnchor === 'week' ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent',
+                          color: customAnchor === 'week' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                          boxShadow: customAnchor === 'week' ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                        }}
+                      >
+                        Week
+                      </button>
+                    </div>
+                  </div>
                   {([
-                    { label: 'Days before', value: customDaysBefore, min: CUSTOM_BEFORE_MIN, max: CUSTOM_BEFORE_MAX, set: setCustomDaysBefore },
-                    { label: 'Days after', value: customDaysAfter, min: CUSTOM_AFTER_MIN, max: CUSTOM_AFTER_MAX, set: setCustomDaysAfter },
+                    {
+                      label: 'Days before',
+                      value: customAnchor === 'day' ? Math.max(0, customDaysBefore) : customDaysBefore,
+                      min: customAnchor === 'day' ? 0 : CUSTOM_BEFORE_MIN,
+                      max: CUSTOM_BEFORE_MAX,
+                      set: setCustomDaysBefore,
+                    },
+                    {
+                      label: 'Days after',
+                      value: customAnchor === 'day' ? Math.max(0, customDaysAfter) : customDaysAfter,
+                      min: customAnchor === 'day' ? 0 : CUSTOM_AFTER_MIN,
+                      max: CUSTOM_AFTER_MAX,
+                      set: setCustomDaysAfter,
+                    },
                   ] as const).map(row => (
-                    <div key={row.label} className="flex items-center justify-between py-1.5">
+                    <div key={row.label} className="flex items-center justify-between py-1">
                       <span className="text-[12.5px] font-semibold" style={{ color: menuText }}>{row.label}</span>
                       <div className="flex items-center gap-1">
                         <button
-                          onClick={() => row.set(v => Math.max(row.min, v - 1))}
+                          onClick={() => row.set(v => Math.max(row.min, (customAnchor === 'day' ? Math.max(0, v) : v) - 1))}
                           disabled={row.value <= row.min}
                           className="w-9 h-9 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
                           style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
                         ><Minus size={15} /></button>
                         <span className="w-9 text-center text-[13px] font-bold tabular-nums" style={{ color: menuText }}>
-                          {row.value > 0 ? `+${row.value}` : row.value}
+                          {customAnchor === 'day' ? row.value : (row.value > 0 ? `+${row.value}` : row.value)}
                         </span>
                         <button
-                          onClick={() => row.set(v => Math.min(row.max, v + 1))}
+                          onClick={() => row.set(v => Math.min(row.max, (customAnchor === 'day' ? Math.max(0, v) : v) + 1))}
                           disabled={row.value >= row.max}
                           className="w-9 h-9 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
                           style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}

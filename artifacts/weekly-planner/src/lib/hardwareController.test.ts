@@ -359,11 +359,19 @@ section('Session chaining');
   d.event('presence', true); d.advance(32);
   check('first session running', d.isRunning);
   d.isRunning = false; d.hasSession = false;      // the hour is up, timer completes
+  d.advance(1);
+  check('next session starts immediately (0s delay by default)', d.isRunning && d.hasSession, `running=${d.isRunning}`);
+}
+{
+  const d = new Desk({ autoRestartArmSeconds: 30 });
+  d.event('presence', true); d.advance(32);
+  check('first session running with 30s delay', d.isRunning);
+  d.isRunning = false; d.hasSession = false;      // session completes
   d.advance(2);
-  check('countdown re-arms while still seated', armingSecondsLeft(d.state, d.t) > 0,
+  check('countdown re-arms with 30s delay', armingSecondsLeft(d.state, d.t) > 0,
     `arming=${armingSecondsLeft(d.state, d.t)}`);
   d.advance(32);
-  check('next session starts by itself', d.isRunning && d.hasSession, `running=${d.isRunning}`);
+  check('next session starts after delay', d.isRunning && d.hasSession, `running=${d.isRunning}`);
 }
 {
   const d = new Desk({ autoRestartEnabled: false });
@@ -390,7 +398,7 @@ section('Session chaining');
   check('does not restart while you are away', !d.hasSession, `hasSession=${d.hasSession}`);
 }
 {
-  const d = new Desk();
+  const d = new Desk({ autoRestartArmSeconds: 30 });
   d.event('presence', true); d.advance(32);
   d.isRunning = false; d.hasSession = false;      // session completes
   d.advance(10);

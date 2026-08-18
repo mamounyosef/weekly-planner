@@ -108,7 +108,7 @@ export function getDeviceLabel(): string {
  * broadcasts make the pages overwrite each other forever).
  */
 export const DEVICE_SCOPED_KEYS = [
-  'calendarView', 'customDaysBefore', 'customDaysAfter',
+  'calendarView', 'customDaysBefore', 'customDaysAfter', 'customAnchor',
   'interval',
   'tasksPanelOpen', 'tasksPanelWidth', 'showTaskRow',
   'stickyAllDayMain', 'stickyTasksMain',
@@ -153,7 +153,8 @@ const clampNum = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo
 export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDeviceKind()): DeviceSettings {
   const shared: Pick<AppSettings, DeviceScopedKey> = {
     calendarView: base.calendarView, customDaysBefore: base.customDaysBefore,
-    customDaysAfter: base.customDaysAfter, interval: base.interval,
+    customDaysAfter: base.customDaysAfter, customAnchor: base.customAnchor ?? 'day',
+    interval: base.interval,
     tasksPanelOpen: base.tasksPanelOpen, tasksPanelWidth: base.tasksPanelWidth,
     showTaskRow: base.showTaskRow,
     stickyAllDayMain: base.stickyAllDayMain, stickyTasksMain: base.stickyTasksMain,
@@ -192,6 +193,7 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   }
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = clampNum(Math.round(r.customDaysBefore), -14, 14);
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = clampNum(Math.round(r.customDaysAfter), -14, 14);
+  if (r.customAnchor === 'day' || r.customAnchor === 'week') s.customAnchor = r.customAnchor;
   if (typeof r.interval === 'number' && [5, 15, 30, 60].includes(r.interval)) s.interval = r.interval as IntervalMin;
   if (typeof r.tasksPanelOpen === 'boolean') s.tasksPanelOpen = r.tasksPanelOpen;
   if (typeof r.tasksPanelWidth === 'number' && Number.isFinite(r.tasksPanelWidth)) {
