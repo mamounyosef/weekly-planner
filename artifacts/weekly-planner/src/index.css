@@ -327,10 +327,14 @@ body {
   }
   /* iOS Safari zooms the whole page in when a font smaller than 16px gets
      focus, and never zooms back out. 16px on every text input prevents it. */
+  /* !important because these are bare element selectors and every one of these
+     controls also carries a Tailwind `text-xs`/`text-sm` class, which wins on
+     specificity — so without it the rule silently did nothing and iOS kept
+     zooming in on focus and never zooming back out. */
   input[type="text"], input[type="number"], input[type="search"],
   input[type="email"], input[type="url"], input[type="time"],
   input[type="date"], input[type="password"], input:not([type]), textarea, select {
-    font-size: max(16px, 1em);
+    font-size: max(16px, 1em) !important;
   }
   /* Scrollbars are overlays on touch platforms; a 6px track just eats width. */
   ::-webkit-scrollbar {
@@ -351,11 +355,28 @@ body {
   overscroll-behavior: contain;
 }
 
+/* For a strip that scrolls SIDEWAYS only.
+   `overscroll-behavior` applies to a box the moment it is a scroll container in
+   ANY axis — and `overflow-x: auto` with `overflow-y: visible` is not a legal
+   pair, so the browser silently promotes the y axis to `auto` as well. Put
+   plain `.touch-scroll` on such a strip and it becomes a vertical scroll
+   container that cannot scroll vertically AND refuses to hand the gesture to
+   the page behind it: every downward swipe over it does nothing at all. This
+   contains the sideways bounce and leaves the vertical gesture to chain. */
+.touch-scroll-x {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+}
+
 @media (pointer: coarse), (max-width: 768px) {
   /* Compositor layer promotion for silky 60/120 FPS scrolling */
   .touch-scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
+  }
+  .touch-scroll-x {
+    overscroll-behavior-y: auto;
   }
 
   /* Eliminate expensive full-screen rasterization blur on lower-end mobile GPUs */

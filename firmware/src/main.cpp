@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Weekly Planner -- focus timer hardware controller (ESP32-S3).
+// Daily Planner -- focus timer hardware controller (ESP32-S3).
 //
 // This firmware is deliberately dumb. It reports what the sensor and buttons
 // see, renders whatever the server tells it to, and holds no opinion about
@@ -42,8 +42,81 @@ static LiquidCrystal_I2C *lcd = nullptr;
 // it visibly flicker, so each line is only pushed when it actually changes.
 static String lcdLine0Shown = "";
 static String lcdLine1Shown = "";
+static bool lcdNeedsResync = false;
+
+// ---------------------------------------------------------------------------
+// LCD Hardware Recovery & Auto-Healing
+// ---------------------------------------------------------------------------
+// The HD44780 LCD controller operates in 4-bit mode over the PCF8574 I2C
+// expander. In 4-bit mode, every byte is split into two nibbles. If an electrical
+// noise pulse (e.g. from WiFi TX bursts, ultrasonic transducer pings, or static)
+// glitches an Enable strobe, the HD44780's internal nibble state machine becomes
+// desynchronized (high and low nibbles inverted). Subsequent writes are
+// misinterpreted as arbitrary commands, corrupting DDRAM, entry mode, or CGRAM
+// (producing scrambled/garbled characters and broken blocks on screen).
+//
+// Because the HD44780 is write-only in this configuration, it cannot report its
+// corrupted state. The only way to recover WITHOUT power-cycling the board is the
+// official Hitachi HD44780 hardware reset sequence: pulsing 0x03 three times to
+// force it back to 8-bit mode, then pulsing 0x02 to switch to 4-bit mode.
+static void lcdHardwareResync() {
+  if (!lcd) return;
+
+  Wire.setTimeOut(50);
+
+  // Helper to send a raw 4-bit nibble with Enable pulse directly via PCF8574
+  auto pulseRawNibble = [](uint8_t nibble4bit) {
+    uint8_t val = (nibble4bit << 4) | 0x08; // Backlight ON (bit 3), RS=0 (command), RW=0
+    Wire.beginTransmission(lcdAddr);
+    Wire.write(val);
+    Wire.endTransmission();
+
+    Wire.beginTransmission(lcdAddr);
+    Wire.write(val | 0x04); // EN = 1
+    Wire.endTransmission();
+    delayMicroseconds(2);
+
+    Wire.beginTransmission(lcdAddr);
+    Wire.write(val & ~0x04); // EN = 0
+    Wire.endTransmission();
+    delayMicroseconds(50);
+  };
+
+  // Step 1: Force HD44780 into 8-bit mode (3x 0x03 pulses with delays per datasheet)
+  pulseRawNibble(0x03);
+  delayMicroseconds(4500); // > 4.1ms
+
+  pulseRawNibble(0x03);
+  delayMicroseconds(4500); // > 4.1ms
+
+  pulseRawNibble(0x03);
+  delayMicroseconds(200);  // > 100us
+
+  // Step 2: Switch to 4-bit interface (nibble phase is now 100% aligned to high nibble)
+  pulseRawNibble(0x02);
+  delayMicroseconds(200);
+
+  // Step 3: Re-apply essential LCD configuration registers without blanking the screen
+  // (Using Return Home 0x02 instead of Clear 0x01 ensures zero visible flicker).
+  lcd->command(0x28); // Function Set: 4-bit mode, 2 lines, 5x8 font
+  delayMicroseconds(50);
+  lcd->command(0x0C); // Display ON, Cursor OFF, Blink OFF
+  delayMicroseconds(50);
+  lcd->command(0x06); // Entry Mode Set: increment cursor, no display shift
+  delayMicroseconds(50);
+  lcd->command(0x02); // Return Home: resets address counter without blanking DDRAM
+  delayMicroseconds(2000); // Return Home requires > 1.52ms
+  lcd->backlight();
+
+  // Clear line caches to force an in-place overwrite of all 32 character cells
+  lcdLine0Shown = "";
+  lcdLine1Shown = "";
+  lcdNeedsResync = false;
+}
 
 static void lcdShow(uint8_t row, const String &text) {
+  if (!lcd) return;
+
   String padded = text;
   while (padded.length() < 16) padded += ' ';
   padded = padded.substring(0, 16);
@@ -51,10 +124,9 @@ static void lcdShow(uint8_t row, const String &text) {
   String &cache = row == 0 ? lcdLine0Shown : lcdLine1Shown;
   if (cache == padded) return;
 
-  // Repainting the whole line every second (which is what a ticking clock
-  // does) blanks and redraws all 16 cells, and that reads as a flicker. Only
-  // the runs of characters that actually differ are pushed, so a ticking
-  // seconds field touches two cells instead of sixteen.
+  // Repainting the whole line every second blanks and redraws all 16 cells,
+  // which reads as a flicker. Only the runs of characters that actually differ
+  // are pushed, reducing I2C bus traffic.
   const bool sameLength = cache.length() == padded.length();
   int i = 0;
   while (i < 16) {
@@ -121,14 +193,15 @@ static void ledApply(LedState state, bool blinkPhase) {
 // Ultrasonic sensor
 // ---------------------------------------------------------------------------
 
-// A disconnected or dead HC-SR04 reads exactly like an empty desk: ECHO simply
-// never goes high. Presence is therefore not acted on until the sensor has
-// proved it works at least once, so a sensor that was never wired up cannot
-// pause and then terminate a session you are sitting in front of.
-static bool sensorProven = false;
-
-// One HC-SR04 ping. Returns distance in cm, or DIST_TIMEOUT_AS_CM when nothing
-// echoes back (which means "clear ahead", not "measurement failed").
+// One HC-SR04 ping. Returns the raw distance in cm, or 0 when nothing echoed
+// back within the timeout.
+//
+// Nothing is filtered, clamped or interpreted here. A reading of 400 might be
+// an empty room or a foot resting against the transducer, and 6 cm might be a
+// hand or the module ringing -- telling those apart needs several seconds of
+// context and a good deal of arithmetic, which is the app's job (see
+// src/lib/sensorFilter.ts). The board's only responsibility is to report
+// honestly and often.
 static float pingOnce() {
   digitalWrite(PIN_TRIG, LOW);
   delayMicroseconds(3);
@@ -137,108 +210,26 @@ static float pingOnce() {
   digitalWrite(PIN_TRIG, LOW);
 
   unsigned long us = pulseIn(PIN_ECHO, HIGH, 30000UL);
-  if (us == 0) return DIST_TIMEOUT_AS_CM;
-
-  float cm = us / 58.0f;
-  if (cm < DIST_MIN_VALID_CM || cm > DIST_MAX_VALID_CM) return DIST_TIMEOUT_AS_CM;
-
-  // An echo inside the plausible band is only something a working sensor can
-  // produce, so this is what clears the guard above.
-  if (!sensorProven) {
-    sensorProven = true;
-    Serial.println("[sensor] first valid reading -- presence enabled");
-  }
-  return cm;
+  if (us == 0) return 0.0f;  // no echo -- a real observation, not a failure
+  return us / 58.0f;
 }
 
-// Live tuning, replaced by whatever the app's settings say. The values here are
-// only what gets used in the seconds before the first config fetch succeeds.
+// The one number the board still needs of its own: how often to ping. Replaced
+// by whatever the app's settings say; the value here is only what gets used in
+// the seconds before the first config fetch succeeds.
 struct SensorConfig {
-  float enterCm = PRESENCE_ENTER_CM;
-  float exitCm = PRESENCE_EXIT_CM;
   long sampleIntervalMs = SAMPLE_INTERVAL_MS;
-  int medianWindow = MEDIAN_WINDOW;
-  long presentConfirmMs = PRESENT_CONFIRM_MS;
-  long absentConfirmMs = ABSENT_CONFIRM_MS;
-  bool calibrating = false;
-  bool announceOnConnect = true;
-  float maxValidCm = GLITCH_MAX_CM;
-  long glitchHoldMs = GLITCH_HOLD_MS;
-  bool glitchIgnoreAlways = false;
 };
 static SensorConfig cfg;
 
-// Sized for the largest window the app is allowed to ask for; only the first
-// cfg.medianWindow entries are ever used.
-static float sampleRing[MEDIAN_WINDOW_MAX];
-static int sampleCount = 0;
-static int sampleHead = 0;
+// Raw pings waiting to be posted. Sized well past what one batch interval can
+// produce at the fastest allowed rate, so a slow or retried POST cannot make
+// the board drop readings the filter is counting on.
+static float sampleBatch[SAMPLE_BATCH_MAX];
+static int sampleBatchCount = 0;
 
 static void pushSample(float cm) {
-  const int window = constrain(cfg.medianWindow, 1, MEDIAN_WINDOW_MAX);
-  sampleRing[sampleHead] = cm;
-  sampleHead = (sampleHead + 1) % window;
-  if (sampleCount < window) sampleCount++;
-}
-
-// Median rather than mean: a single spurious reading gets sorted to one end and
-// has no influence at all, whereas an average would let it shift the result.
-static float medianDistance() {
-  if (sampleCount == 0) return DIST_TIMEOUT_AS_CM;
-
-  float sorted[MEDIAN_WINDOW_MAX];
-  for (int i = 0; i < sampleCount; i++) sorted[i] = sampleRing[i];
-  for (int i = 1; i < sampleCount; i++) {
-    float key = sorted[i];
-    int j = i - 1;
-    while (j >= 0 && sorted[j] > key) {
-      sorted[j + 1] = sorted[j];
-      j--;
-    }
-    sorted[j + 1] = key;
-  }
-  return sorted[sampleCount / 2];
-}
-
-// Confirmed presence state, and the candidate currently being timed.
-static bool presencePresent = false;
-static bool presenceCandidate = false;
-static unsigned long candidateSince = 0;
-static bool presenceInitialized = false;
-
-// Feeds one median through the hysteresis + dwell-time logic.
-// Returns true when the confirmed state just flipped.
-static bool updatePresence(float median, unsigned long now) {
-  // The very first full window establishes where we stand, with no dwell time.
-  // Without this the boot state would be published as "absent" no matter what
-  // the sensor sees -- which, after a mid-session reset, would pause a session
-  // while you are sitting right in front of it.
-  if (!presenceInitialized) {
-    presenceInitialized = true;
-    presencePresent = median < cfg.enterCm;
-    presenceCandidate = presencePresent;
-    candidateSince = now;
-    return true;
-  }
-
-  // Hysteresis: the bar to change state depends on the state we are in, so a
-  // distance hovering near the threshold cannot oscillate.
-  bool raw = presencePresent ? (median <= cfg.exitCm) : (median < cfg.enterCm);
-
-  if (raw != presenceCandidate) {
-    presenceCandidate = raw;
-    candidateSince = now;
-    return false;
-  }
-  if (raw == presencePresent) return false;
-
-  // Leaving needs a longer confirmation than arriving -- briefly leaning out of
-  // the beam should not count as walking away.
-  unsigned long needed = raw ? cfg.presentConfirmMs : cfg.absentConfirmMs;
-  if (now - candidateSince < needed) return false;
-
-  presencePresent = raw;
-  return true;
+  if (sampleBatchCount < SAMPLE_BATCH_MAX) sampleBatch[sampleBatchCount++] = cm;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,41 +345,40 @@ static void pollConfig() {
   if (http.GET() == 200) {
     String body = http.getString();
     long n = 0;
-
-    if (jsonNumber(body, "enterCm", n)) cfg.enterCm = n;
-    if (jsonNumber(body, "exitCm", n)) cfg.exitCm = n;
+    // Thresholds, dwell times and glitch handling are all read by the app's
+    // filter now, not here. The ping rate is the only setting that describes
+    // what the board physically does, so it is the only one it still reads.
     if (jsonNumber(body, "sampleIntervalMs", n)) cfg.sampleIntervalMs = constrain(n, 40L, 2000L);
-    if (jsonNumber(body, "presentConfirmMs", n)) cfg.presentConfirmMs = constrain(n, 0L, 60000L);
-    if (jsonNumber(body, "absentConfirmMs", n)) cfg.absentConfirmMs = constrain(n, 0L, 60000L);
-    if (jsonNumber(body, "maxValidCm", n)) cfg.maxValidCm = constrain(n, 20L, 400L);
-    if (jsonNumber(body, "glitchHoldMs", n)) cfg.glitchHoldMs = constrain(n, 0L, 60000L);
-    cfg.calibrating = body.indexOf("\"calibrating\":true") >= 0;
-    cfg.announceOnConnect = body.indexOf("\"announceOnConnect\":true") >= 0;
-    cfg.glitchIgnoreAlways = body.indexOf("\"glitchIgnoreAlways\":true") >= 0;
-
-    if (jsonNumber(body, "medianWindow", n)) {
-      const int w = constrain((int)n, 1, MEDIAN_WINDOW_MAX);
-      if (w != cfg.medianWindow) {
-        // Resizing the ring invalidates what is in it -- a median taken across
-        // the old and new window sizes would be meaningless.
-        cfg.medianWindow = w;
-        sampleCount = 0;
-        sampleHead = 0;
-      }
-    }
   }
   http.end();
 }
 
-// Streams the current reading and the board's own verdict on it, so the
-// settings page can show what the sensor sees and whether it counts as being
-// at the desk. Fast while calibrating, slow otherwise.
-static void streamLive(float median) {
+// Ships the pings collected since the last batch.
+//
+// Batched rather than sent one at a time because each POST costs a TCP
+// connection: at a 100 ms ping rate, posting individually would mean ten round
+// trips a second and the board would spend most of its life inside HTTPClient.
+// A batch every few hundred milliseconds is one extra request per existing
+// poll cycle, and still lands every sample well inside the shortest dwell time
+// the filter uses.
+//
+// `dt` rather than timestamps: the board's millis() and the PC's clock share no
+// epoch, and millis() restarts on every reset, so the server reconstructs the
+// sample times backwards from the moment the batch arrived instead.
+static void postSamples() {
+  String cmList = "[";
+  for (int i = 0; i < sampleBatchCount; i++) {
+    if (i) cmList += ",";
+    cmList += String(sampleBatch[i], 1);
+  }
+  cmList += "]";
+  sampleBatchCount = 0;
+
   // Raw button levels ride along: a button that produces no events at all is
   // otherwise indistinguishable from one that is never pressed, and the board
   // has no cable attached to check with.
-  postEvent(String("{\"type\":\"distance\",\"distanceCm\":") + String(median, 1) +
-            ",\"present\":" + (presencePresent ? "true" : "false") +
+  postEvent(String("{\"type\":\"samples\",\"dt\":") + String(cfg.sampleIntervalMs) +
+            ",\"cm\":" + cmList +
             ",\"btnA\":" + String(digitalRead(PIN_BTN_A)) +
             ",\"btnB\":" + String(digitalRead(PIN_BTN_B)) +
             ",\"edgesA\":" + String(btnAEdges) +
@@ -426,20 +416,11 @@ static void pollState() {
     consecutiveFailures = 0;
     lastServerOkAt = millis();
 
-    // "offline" means the server is up but no app window is driving it. The
-    // board typically boots long before the PC has finished starting, so the
-    // presence it detected at power-on was posted into the void. Re-announcing
-    // the moment a window appears is what makes sitting at an already-occupied
-    // desk behave like arriving at it -- otherwise nothing happens until you
-    // get up and sit back down.
-    const bool appAlive = ui.mode != "offline";
-    static bool wasAppAlive = false;
-    if (appAlive && !wasAppAlive && sensorProven && cfg.announceOnConnect) {
-      Serial.printf("[app] window appeared -- re-announcing presence=%s\n", presencePresent ? "true" : "false");
-      postEvent(String("{\"type\":\"presence\",\"present\":") + (presencePresent ? "true" : "false") +
-                ",\"distanceCm\":" + String(medianDistance(), 1) + "}");
-    }
-    wasAppAlive = appAlive;
+    // Re-announcing presence to a window that has just appeared used to be
+    // done from here, because the board was the thing that knew when the link
+    // came back. It is now the server's job: it holds the presence filter, so
+    // it already knows the answer without being told, and it can see a window
+    // opening directly (see /api/hardware/events).
   }
   else {
     Serial.printf("[poll] failed: %d (host %s)\n", code, resolvedHost.c_str());
@@ -727,6 +708,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(PIN_BTN_B), onBtnB, CHANGE);
 
   Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setTimeOut(50);
   // Left at the standard 100kHz: partial redraws cut the traffic enough that
   // the extra speed bought nothing, and the slower clock is more tolerant of
   // the level shifter and the run of jumper wire to the display.
@@ -741,8 +723,7 @@ void setup() {
   }
 
   lcd = new LiquidCrystal_I2C(lcdAddr, 16, 2);
-  lcd->init();
-  lcd->backlight();
+  lcdHardwareResync();
 
 #if DIAG_NO_WIFI
   // Diagnostic mode: no radio, no LED, just a clock ticking on the display.
@@ -770,62 +751,43 @@ void loop() {
 
   drainButtons(now);
 
+  // --- LCD auto-healing & resilience ---
+  // If an electrical spike / EMI glitches the 4-bit nibble state machine,
+  // this self-healing cycle resets the HD44780 controller and rewrites the screen.
+  static unsigned long lastLcdResync = 0;
+  static unsigned long lastLcdForceRefresh = 0;
+
+  if (lcdNeedsResync || (now - lastLcdResync >= LCD_RESYNC_INTERVAL_MS)) {
+    lastLcdResync = now;
+    lastLcdForceRefresh = now;
+    lcdHardwareResync();
+  } else if (now - lastLcdForceRefresh >= LCD_FORCE_REFRESH_MS) {
+    // Periodic refresh: re-writes all 32 character cells to wipe away any single-character bit flips
+    lastLcdForceRefresh = now;
+    lcdLine0Shown = "";
+    lcdLine1Shown = "";
+  }
+
   // --- sensor ---
+  // Ping, remember, ship. No thresholds, no median, no state: the board has no
+  // opinion about what any of these numbers mean, which is the point. Deciding
+  // presence needs several seconds of context and a good deal of arithmetic,
+  // and doing it here would mean reflashing to change any of it.
   static unsigned long lastSample = 0;
   if (now - lastSample >= (unsigned long)cfg.sampleIntervalMs) {
     lastSample = now;
+    pushSample(pingOnce());
+  }
 
-    // An over-range reading is dropped rather than pushed, so a burst of them
-    // cannot move the median at all -- the window simply holds its last good
-    // values and the session carries on undisturbed. But an empty desk with
-    // nothing in the beam reads identically, so a run that lasts longer than
-    // any plausible glitch is let through instead: at that point it is not a
-    // misfire, it is the truth, and refusing it would mean never noticing that
-    // you left. Any valid reading ends the run.
-    const float reading = pingOnce();
-    static unsigned long glitchRunSince = 0;
-
-    if (reading > cfg.maxValidCm) {
-      if (glitchRunSince == 0) glitchRunSince = now;
-      const bool believeIt = !cfg.glitchIgnoreAlways && (unsigned long)(now - glitchRunSince) >= (unsigned long)cfg.glitchHoldMs;
-      if (believeIt) {
-        pushSample(reading);
-      } else {
-        static unsigned long lastGlitchLog = 0;
-        if (now - lastGlitchLog > 2000) {
-          lastGlitchLog = now;
-          Serial.printf("[glitch] ignoring %.0fcm (%lums into the run)\n", reading, now - glitchRunSince);
-        }
-      }
-    } else {
-      glitchRunSince = 0;
-      pushSample(reading);
-    }
-
-    // Wait for a full window before trusting the median, otherwise the very
-    // first readings decide the state on partial evidence. sensorProven keeps
-    // an absent sensor from being reported as an absent person.
-    if (sensorProven && sampleCount >= constrain(cfg.medianWindow, 1, MEDIAN_WINDOW_MAX)) {
-      float med = medianDistance();
-
-      // The raw truth about this desk, independent of the thresholds being
-      // tuned -- otherwise you would be calibrating against numbers the current
-      // thresholds had already filtered.
-      static unsigned long lastStream = 0;
-      const unsigned long streamEvery = cfg.calibrating ? CALIBRATION_STREAM_MS : LIVE_STREAM_MS;
-      if (now - lastStream >= streamEvery) {
-        lastStream = now;
-        streamLive(med);
-      }
-
-      bool flipped = updatePresence(med, now);
-
-      if (flipped) {
-        Serial.printf("[presence] %s (median %.1f cm)\n", presencePresent ? "PRESENT" : "ABSENT", med);
-        postEvent(String("{\"type\":\"presence\",\"present\":") + (presencePresent ? "true" : "false") +
-                  ",\"distanceCm\":" + String(med, 1) + "}");
-      }
-    }
+  // A batch goes out on a fixed cadence rather than when the buffer fills, so
+  // the filter's dwell timers advance at a steady rate however the ping rate is
+  // tuned. The heartbeat interval keeps the button levels and link diagnostics
+  // flowing even at ping rates too slow to produce a sample every batch.
+  static unsigned long lastBatch = 0;
+  if (now - lastBatch >= SAMPLE_BATCH_MS
+      && (sampleBatchCount > 0 || now - lastBatch >= SAMPLE_HEARTBEAT_MS)) {
+    lastBatch = now;
+    postSamples();
   }
 
   // --- server poll ---
@@ -865,6 +827,9 @@ void loop() {
   static bool lastLinkUp = true;
   if (linkUp != lastLinkUp) {
     lastLinkUp = linkUp;
+    // Wipe line caches on state change so the new message is fully drawn
+    lcdLine0Shown = "";
+    lcdLine1Shown = "";
     Serial.printf("[link] %s (valid=%d wifi=%d sinceOk=%ldms)\n", linkUp ? "UP" : "DOWN", ui.valid ? 1 : 0,
                   WiFi.status() == WL_CONNECTED ? 1 : 0, sinceOk);
   }

@@ -178,17 +178,56 @@ export function dedupeFocusSessions(sessions: FocusSession[]): FocusSession[] {
 // low-mid register, and rolled off with a lowpass — the old version was a bare
 // C6–E6–G6 sine stack at near-full gain, which read as shrill and abrupt.
 
-export type FocusChimeId = 'bowl' | 'marimba' | 'bell' | 'drops' | 'breath';
+export type FocusChimeId =
+  | 'bowl'
+  | 'zen_bell'
+  | 'breath'
+  | 'marimba'
+  | 'kalimba'
+  | 'bamboo'
+  | 'drops'
+  | 'harp'
+  | 'windchimes'
+  | 'glass'
+  | 'bell'
+  | 'rhodes'
+  | 'sunrise'
+  | 'dreamscape';
 
-export const FOCUS_CHIMES: { id: FocusChimeId; label: string; hint: string }[] = [
-  { id: 'bowl',    label: 'Singing bowl', hint: 'One low note that swells and fades. Calmest.' },
-  { id: 'marimba', label: 'Marimba',      hint: 'Warm wooden triad. Short and friendly.' },
-  { id: 'bell',    label: 'Soft bell',    hint: 'Struck bell with a long shimmer.' },
-  { id: 'drops',   label: 'Water drops',  hint: 'Two rounded blips, very light.' },
-  { id: 'breath',  label: 'Breath',       hint: 'Barely-there rising swell. Quietest.' },
+export type FocusChimeCategory = 'meditative' | 'acoustic' | 'celestial' | 'ambient';
+
+export interface FocusChimeOption {
+  id: FocusChimeId;
+  label: string;
+  hint: string;
+  category: FocusChimeCategory;
+}
+
+export const FOCUS_CHIMES: FocusChimeOption[] = [
+  // 🧘 Meditative
+  { id: 'bowl',        category: 'meditative', label: 'Singing bowl',     hint: 'Deep Tibetan singing bowl with slow binaural beating and serene resonance.' },
+  { id: 'zen_bell',    category: 'meditative', label: 'Zen temple gong',  hint: 'Authentic bronze temple bell with deep sub-octave hum and long decay.' },
+  { id: 'breath',      category: 'meditative', label: 'Breath of dawn',   hint: 'Ultra-quiet, soothing ambient chord swell that breathes in and fades out.' },
+
+  // 🪵 Acoustic & Organic
+  { id: 'marimba',     category: 'acoustic',   label: 'Marimba glow',     hint: 'Warm rosewood marimba chord roll with woody bar overtones.' },
+  { id: 'kalimba',     category: 'acoustic',   label: 'Kalimba tines',    hint: 'Sweet African thumb piano flourish with metallic click and wooden body.' },
+  { id: 'bamboo',      category: 'acoustic',   label: 'Bamboo chimes',    hint: 'Hollow wooden pipes clattering gently in an organic mountain breeze.' },
+  { id: 'drops',       category: 'acoustic',   label: 'Water ripple',     hint: 'Three crystal droplets splashing peacefully into still water.' },
+
+  // ✨ Celestial & Shimmering
+  { id: 'harp',        category: 'celestial',  label: 'Celestial harp',   hint: 'Ascending concert harp arpeggio across a lush Eb Major 9 chord.' },
+  { id: 'windchimes',  category: 'celestial',  label: 'Windchimes',       hint: 'Breezy cluster of sparkling silver chimes ringing in stereo.' },
+  { id: 'glass',       category: 'celestial',  label: 'Glass harp',       hint: 'Pure singing crystal wine glass harmonics with gentle tremolo vibrato.' },
+  { id: 'bell',        category: 'celestial',  label: 'Soft bell',        hint: 'Struck orchestral bell with a long crystalline shimmer.' },
+
+  // 🌅 Modern & Ambient
+  { id: 'rhodes',      category: 'ambient',    label: 'Warm Rhodes',      hint: 'Lush lo-fi electric piano chord with authentic tine attack and vibrato.' },
+  { id: 'sunrise',     category: 'ambient',    label: 'Sunrise horizon',  hint: 'Uplifting major 9th progression welcoming the next part of your day.' },
+  { id: 'dreamscape',  category: 'ambient',    label: 'Analog dreamscape',hint: 'Warm 80s vintage analog synth pad swell with rich chorus warmth.' },
 ];
 
-export const DEFAULT_FOCUS_CHIME: FocusChimeId = 'bowl';
+export const DEFAULT_FOCUS_CHIME: FocusChimeId = 'breath';
 
 export function coerceFocusChime(value: unknown): FocusChimeId {
   return FOCUS_CHIMES.some(c => c.id === value) ? (value as FocusChimeId) : DEFAULT_FOCUS_CHIME;
@@ -266,6 +305,7 @@ interface ToneOpts {
   pan?: number;
   /** Cents of detune. A couple of cents between partials stops it sounding sterile. */
   detune?: number;
+  decayStage1Ratio?: number;
 }
 
 function tone(ctx: AudioContext, dest: AudioNode, o: ToneOpts): void {
@@ -275,18 +315,18 @@ function tone(ctx: AudioContext, dest: AudioNode, o: ToneOpts): void {
   osc.type = o.type ?? 'sine';
   osc.frequency.setValueAtTime(o.freq, t);
   if (o.detune) osc.detune.setValueAtTime(o.detune, t);
-  if (o.glide) osc.frequency.exponentialRampToValueAtTime(o.freq * o.glide, t + o.dur);
-  const attack = o.attack ?? 0.012;
+  if (o.glide) osc.frequency.exponentialRampToValueAtTime(Math.max(10, o.freq * o.glide), t + o.dur);
+  const attack = Math.max(0.001, o.attack ?? 0.012);
   g.gain.setValueAtTime(0.00001, t);
-  g.gain.exponentialRampToValueAtTime(o.peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.00001, o.peak), t + attack);
   // Real struck bodies decay along a curve, not a straight exponential to zero.
-  // Two stages — a quick initial drop, then a long tail — is what reads as "rich".
-  g.gain.exponentialRampToValueAtTime(o.peak * 0.32, t + attack + o.dur * 0.18);
+  const stage1Ratio = o.decayStage1Ratio ?? 0.32;
+  g.gain.exponentialRampToValueAtTime(Math.max(0.00001, o.peak * stage1Ratio), t + attack + o.dur * 0.18);
   g.gain.exponentialRampToValueAtTime(0.00001, t + o.dur);
   osc.connect(g);
   if (o.pan !== undefined && typeof ctx.createStereoPanner === 'function') {
     const p = ctx.createStereoPanner();
-    p.pan.value = o.pan;
+    p.pan.value = Math.max(-1, Math.min(1, o.pan));
     g.connect(p);
     p.connect(dest);
   } else {
@@ -296,13 +336,203 @@ function tone(ctx: AudioContext, dest: AudioNode, o: ToneOpts): void {
   osc.stop(t + o.dur + 0.05);
 }
 
+interface FmToneOpts {
+  carrierFreq: number;
+  modRatio: number;
+  modDepth: number;
+  at: number;
+  dur: number;
+  peak: number;
+  attack?: number;
+  modAttack?: number;
+  modDecay?: number;
+  carrierType?: OscillatorType;
+  modType?: OscillatorType;
+  pan?: number;
+  detune?: number;
+  tremoloFreq?: number;
+  tremoloDepth?: number;
+}
+
+function fmTone(ctx: AudioContext, dest: AudioNode, o: FmToneOpts): void {
+  const t = ctx.currentTime + o.at;
+  const carrier = ctx.createOscillator();
+  const carrierGain = ctx.createGain();
+  const modulator = ctx.createOscillator();
+  const modGain = ctx.createGain();
+
+  carrier.type = o.carrierType ?? 'sine';
+  modulator.type = o.modType ?? 'sine';
+
+  const freq = o.carrierFreq;
+  carrier.frequency.setValueAtTime(freq, t);
+  if (o.detune) carrier.detune.setValueAtTime(o.detune, t);
+  modulator.frequency.setValueAtTime(freq * o.modRatio, t);
+
+  // Modulation envelope
+  const modAtt = Math.max(0.001, o.modAttack ?? 0.003);
+  const modDec = Math.max(0.01, o.modDecay ?? o.dur * 0.25);
+  modGain.gain.setValueAtTime(0.0001, t);
+  modGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, o.modDepth), t + modAtt);
+  modGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, o.modDepth * 0.06), t + modAtt + modDec);
+  modGain.gain.exponentialRampToValueAtTime(0.0001, t + o.dur);
+
+  modulator.connect(modGain);
+  modGain.connect(carrier.frequency);
+
+  // Carrier amplitude envelope
+  const attack = Math.max(0.001, o.attack ?? 0.004);
+  carrierGain.gain.setValueAtTime(0.00001, t);
+  carrierGain.gain.exponentialRampToValueAtTime(Math.max(0.00001, o.peak), t + attack);
+  carrierGain.gain.exponentialRampToValueAtTime(Math.max(0.00001, o.peak * 0.35), t + attack + o.dur * 0.2);
+  carrierGain.gain.exponentialRampToValueAtTime(0.00001, t + o.dur);
+
+  carrier.connect(carrierGain);
+
+  let outputNode: AudioNode = carrierGain;
+
+  // Optional tremolo
+  if (o.tremoloFreq && o.tremoloDepth) {
+    const tremoloOsc = ctx.createOscillator();
+    const tremoloGain = ctx.createGain();
+    tremoloOsc.frequency.setValueAtTime(o.tremoloFreq, t);
+    tremoloGain.gain.setValueAtTime(o.tremoloDepth * 0.5, t);
+    const tremoloTarget = ctx.createGain();
+    tremoloTarget.gain.setValueAtTime(1 - o.tremoloDepth * 0.5, t);
+    tremoloOsc.connect(tremoloGain);
+    tremoloGain.connect(tremoloTarget.gain);
+    carrierGain.connect(tremoloTarget);
+    outputNode = tremoloTarget;
+    tremoloOsc.start(t);
+    tremoloOsc.stop(t + o.dur + 0.05);
+  }
+
+  if (o.pan !== undefined && typeof ctx.createStereoPanner === 'function') {
+    const p = ctx.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, o.pan));
+    outputNode.connect(p);
+    p.connect(dest);
+  } else {
+    outputNode.connect(dest);
+  }
+
+  modulator.start(t);
+  carrier.start(t);
+  modulator.stop(t + o.dur + 0.05);
+  carrier.stop(t + o.dur + 0.05);
+}
+
+interface FilteredToneOpts {
+  freq: number;
+  at: number;
+  dur: number;
+  peak: number;
+  type?: OscillatorType;
+  attack?: number;
+  filterType?: BiquadFilterType;
+  filterStart: number;
+  filterPeak?: number;
+  filterEnd: number;
+  filterQ?: number;
+  detune?: number;
+  pan?: number;
+}
+
+function filteredTone(ctx: AudioContext, dest: AudioNode, o: FilteredToneOpts): void {
+  const t = ctx.currentTime + o.at;
+  const osc = ctx.createOscillator();
+  const filter = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+
+  osc.type = o.type ?? 'sawtooth';
+  osc.frequency.setValueAtTime(o.freq, t);
+  if (o.detune) osc.detune.setValueAtTime(o.detune, t);
+
+  filter.type = o.filterType ?? 'lowpass';
+  filter.Q.value = o.filterQ ?? 2.0;
+  filter.frequency.setValueAtTime(Math.max(20, o.filterStart), t);
+  const filterPeak = o.filterPeak ?? o.filterStart * 2.5;
+  const attack = Math.max(0.005, o.attack ?? 0.1);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(20, filterPeak), t + attack);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(20, o.filterEnd), t + o.dur);
+
+  gain.gain.setValueAtTime(0.00001, t);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.00001, o.peak), t + attack);
+  gain.gain.exponentialRampToValueAtTime(Math.max(0.00001, o.peak * 0.4), t + attack + o.dur * 0.35);
+  gain.gain.exponentialRampToValueAtTime(0.00001, t + o.dur);
+
+  osc.connect(filter);
+  filter.connect(gain);
+
+  if (o.pan !== undefined && typeof ctx.createStereoPanner === 'function') {
+    const p = ctx.createStereoPanner();
+    p.pan.value = Math.max(-1, Math.min(1, o.pan));
+    gain.connect(p);
+    p.connect(dest);
+  } else {
+    gain.connect(dest);
+  }
+
+  osc.start(t);
+  osc.stop(t + o.dur + 0.05);
+}
+
+interface NoiseBurstOpts {
+  at: number;
+  dur: number;
+  peak: number;
+  filterFreq: number;
+  filterQ?: number;
+  filterType?: BiquadFilterType;
+  pan?: number;
+}
+
+function noiseBurst(ctx: AudioContext, dest: AudioNode, o: NoiseBurstOpts): void {
+  try {
+    const t = ctx.currentTime + o.at;
+    const bufferSize = Math.floor(ctx.sampleRate * Math.max(0.005, o.dur));
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = o.filterType ?? 'bandpass';
+    filter.frequency.setValueAtTime(o.filterFreq, t);
+    filter.Q.value = o.filterQ ?? 4.0;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(Math.max(0.00001, o.peak), t);
+    gain.gain.exponentialRampToValueAtTime(0.00001, t + o.dur);
+
+    noise.connect(filter);
+    filter.connect(gain);
+
+    if (o.pan !== undefined && typeof ctx.createStereoPanner === 'function') {
+      const p = ctx.createStereoPanner();
+      p.pan.value = Math.max(-1, Math.min(1, o.pan));
+      gain.connect(p);
+      p.connect(dest);
+    } else {
+      gain.connect(dest);
+    }
+
+    noise.start(t);
+    noise.stop(t + o.dur + 0.02);
+  } catch (_) { /* ignore noise generation errors */ }
+}
+
 // A small algorithmic room, rendered once and reused. Reverb is most of what
 // separates "a beep" from something that sounds like it was recorded in a space.
 let sharedIR: AudioBuffer | null = null;
 
 function getReverbIR(ctx: AudioContext): AudioBuffer {
   if (sharedIR) return sharedIR;
-  const seconds = 2.2;
+  const seconds = 2.4;
   const len = Math.floor(ctx.sampleRate * seconds);
   const buf = ctx.createBuffer(2, len, ctx.sampleRate);
   for (let ch = 0; ch < 2; ch++) {
@@ -323,7 +553,7 @@ function getReverbIR(ctx: AudioContext): AudioBuffer {
  * The lowpass takes the glassy edge off; the reverb is what gives the sound
  * depth instead of the flat "computer beep" quality of the old version.
  */
-function buildChain(ctx: AudioContext, cutoff = 3200): { master: GainNode; send: GainNode } {
+function buildChain(ctx: AudioContext, cutoff = 3400): { master: GainNode; send: GainNode } {
   const master = ctx.createGain();
   master.gain.value = 0.5;
   const lp = ctx.createBiquadFilter();
@@ -349,7 +579,7 @@ function buildChain(ctx: AudioContext, cutoff = 3200): { master: GainNode; send:
     verb.buffer = getReverbIR(ctx);
     const verbTone = ctx.createBiquadFilter();
     verbTone.type = 'lowpass';
-    verbTone.frequency.value = 2200;
+    verbTone.frequency.value = 2400;
     lp.connect(send);
     send.connect(verb);
     verb.connect(verbTone);
@@ -374,80 +604,348 @@ export function playFocusChime(id: FocusChimeId = DEFAULT_FOCUS_CHIME): void {
 function renderChime(ctx: AudioContext, id: FocusChimeId): void {
   try {
     const { master, send } = buildChain(ctx);
-    let wetAmount = 0.3;
+    let wetAmount = 0.35;
 
     switch (coerceFocusChime(id)) {
-      case 'marimba': {
-        // Warm major triad, struck in quick succession. Marimba bars ring an
-        // octave-plus-a-fifth above the fundamental, which is what makes the
-        // timbre read as wooden rather than as a plain sine.
-        wetAmount = 0.22;
-        [392.0, 493.9, 587.3].forEach((f, i) => {
-          const at = i * 0.07;
-          const pan = (i - 1) * 0.22;
-          tone(ctx, master, { freq: f, at, dur: 0.62, peak: 0.15, attack: 0.004, pan });
-          tone(ctx, master, { freq: f * 3.0, at, dur: 0.2, peak: 0.035, attack: 0.003, pan });
-          tone(ctx, master, { freq: f * 6.0, at, dur: 0.09, peak: 0.012, attack: 0.002, pan });
+      // 🧘 MEDITATIVE ──────────────────────────────────────────────────────────
+      case 'bowl': {
+        // Singing bowl: low fundamental (F3 = 174.6Hz) with a beating partner a few cents
+        // away (that slow hypnotic throb is the signature of a real Tibetan bowl),
+        // resonant 2.76x and 5.4x partials, and a high singing rim overtone.
+        wetAmount = 0.52;
+        noiseBurst(ctx, master, { at: 0, dur: 0.035, peak: 0.02, filterFreq: 380, filterQ: 3.5, pan: 0 });
+        tone(ctx, master, { freq: 174.61, at: 0, dur: 4.2, peak: 0.16, attack: 0.08, pan: -0.15 });
+        tone(ctx, master, { freq: 174.61, at: 0, dur: 4.0, peak: 0.12, attack: 0.09, detune: 4.2, pan: 0.15 });
+        tone(ctx, master, { freq: 174.61 * 2.76, at: 0.02, dur: 3.2, peak: 0.055, attack: 0.12, pan: 0.22 });
+        tone(ctx, master, { freq: 174.61 * 5.4, at: 0.04, dur: 2.4, peak: 0.022, attack: 0.15, pan: -0.22 });
+        tone(ctx, master, { freq: 174.61 * 8.9, at: 0.06, dur: 1.8, peak: 0.012, attack: 0.18, pan: 0.08 });
+        break;
+      }
+
+      case 'zen_bell': {
+        // Japanese Rin gong / Buddhist temple bell: deep bronze with inharmonic partials
+        // (hum sub-octave lingering longest, prime fundamental, and strike overtones).
+        wetAmount = 0.55;
+        noiseBurst(ctx, master, { at: 0, dur: 0.025, peak: 0.04, filterFreq: 900, filterQ: 4.0, pan: 0 });
+        const f = 277.18; // Db4
+        tone(ctx, master, { freq: f * 0.5, at: 0, dur: 4.4, peak: 0.09, attack: 0.02, pan: 0 });
+        tone(ctx, master, { freq: f, at: 0, dur: 3.8, peak: 0.14, attack: 0.005, pan: -0.1 });
+        const partials: [number, number, number, number][] = [
+          [1.19, 0.065, 3.2, 0.12],
+          [1.50, 0.048, 2.8, -0.18],
+          [2.00, 0.042, 2.2, 0.18],
+          [2.74, 0.024, 1.6, -0.1],
+          [4.15, 0.014, 1.0, 0.15],
+        ];
+        partials.forEach(([ratio, peak, dur, pan]) => {
+          tone(ctx, master, { freq: f * ratio, at: 0, dur, peak, attack: 0.006, pan });
         });
         break;
       }
-      case 'bell': {
-        // Struck bell. Real bells are inharmonic: hum an octave below, then the
-        // prime, minor third, fifth and nominal — that ratio set is why this
-        // sounds like metal instead of an organ.
-        wetAmount = 0.45;
-        const f = 523.25;
-        const partials: [number, number, number][] = [
-          // [ratio, peak, seconds]
-          [0.5,  0.085, 3.2],
-          [1.0,  0.14,  2.8],
-          [1.19, 0.055, 2.0],
-          [1.5,  0.045, 1.6],
-          [2.0,  0.05,  1.5],
-          [2.51, 0.022, 0.9],
-          [3.01, 0.014, 0.6],
-        ];
-        partials.forEach(([ratio, peak, dur], i) => {
-          tone(ctx, master, {
-            freq: f * ratio, at: 0, dur, peak,
-            attack: 0.004 + i * 0.001,
-            detune: (i % 2 === 0 ? 1 : -1) * 2.5,
-            pan: (i % 3 - 1) * 0.18,
+
+      case 'breath': {
+        // Slow swell on a warm Major 9th chord voicing (Fmaj9). Opens gently with a
+        // sweeping resonant lowpass filter and exhales out smoothly.
+        wetAmount = 0.55;
+        const notes = [174.61, 261.63, 329.63, 392.00, 440.00, 523.25];
+        notes.forEach((f, i) => {
+          const pan = ((i / (notes.length - 1)) - 0.5) * 0.6;
+          filteredTone(ctx, master, {
+            freq: f,
+            at: i * 0.03,
+            dur: 3.2,
+            peak: 0.055,
+            type: 'triangle',
+            attack: 1.1,
+            filterStart: 350,
+            filterPeak: 1200,
+            filterEnd: 250,
+            filterQ: 1.2,
+            detune: (i % 2 === 0 ? 3 : -3),
+            pan,
           });
         });
         break;
       }
-      case 'drops': {
-        // Two rounded blips, each pitch-dropping like a droplet hitting water,
-        // with a faint high sparkle on the tail of each.
+
+      // 🪵 ACOUSTIC & ORGANIC ──────────────────────────────────────────────────
+      case 'marimba': {
+        // Warm Honduran rosewood marimba chord roll in C Major 9 (C4, G4, E5, B5, D6).
+        // Each bar produces woody transient noise, fundamental, 4x double-octave, and strike overtones.
+        wetAmount = 0.28;
+        const freqs = [261.63, 392.00, 659.25, 987.77, 1174.66];
+        freqs.forEach((f, i) => {
+          const at = i * 0.04;
+          const pan = (i - 2) * 0.18;
+          noiseBurst(ctx, master, { at, dur: 0.012, peak: 0.025, filterFreq: 1800, filterQ: 4.5, pan });
+          tone(ctx, master, { freq: f, at, dur: 0.72, peak: 0.13, attack: 0.003, pan });
+          tone(ctx, master, { freq: f * 4.0, at, dur: 0.24, peak: 0.032, attack: 0.002, pan });
+          tone(ctx, master, { freq: f * 10.0, at, dur: 0.07, peak: 0.012, attack: 0.002, pan });
+        });
+        break;
+      }
+
+      case 'kalimba': {
+        // African thumb piano / mbira: FM metallic tine plucks layered with resonant wooden body knock.
+        wetAmount = 0.35;
+        const kalimbaNotes = [
+          { f: 329.63, at: 0.00,  pan: -0.3 },
+          { f: 493.88, at: 0.065, pan: 0.25 },
+          { f: 659.25, at: 0.13,  pan: -0.2 },
+          { f: 830.61, at: 0.195, pan: 0.2 },
+          { f: 987.77, at: 0.26,  pan: 0.0 },
+        ];
+        kalimbaNotes.forEach(({ f, at, pan }) => {
+          fmTone(ctx, master, {
+            carrierFreq: f,
+            modRatio: 5.42,
+            modDepth: 380,
+            at,
+            dur: 0.85,
+            peak: 0.13,
+            attack: 0.002,
+            modDecay: 0.055,
+            pan,
+          });
+          tone(ctx, master, { freq: 175, at, dur: 0.14, peak: 0.045, attack: 0.002, glide: 0.9, pan });
+        });
+        break;
+      }
+
+      case 'bamboo': {
+        // Hollow bamboo pipes clattering in a mountain breeze with pitch glide transients and organic timing.
         wetAmount = 0.38;
-        tone(ctx, master, { freq: 880, at: 0,    dur: 0.38, peak: 0.12, attack: 0.005, glide: 0.7,  pan: -0.25 });
-        tone(ctx, master, { freq: 1760, at: 0,   dur: 0.12, peak: 0.03, attack: 0.003, glide: 0.7,  pan: -0.25 });
-        tone(ctx, master, { freq: 660, at: 0.2,  dur: 0.5,  peak: 0.1,  attack: 0.005, glide: 0.74, pan: 0.25 });
-        tone(ctx, master, { freq: 1320, at: 0.2, dur: 0.14, peak: 0.024, attack: 0.003, glide: 0.74, pan: 0.25 });
+        const bambooHits = [
+          { f: 440, at: 0.00, glide: 0.88, pan: -0.32, dur: 0.35 },
+          { f: 730, at: 0.08, glide: 0.91, pan: 0.28,  dur: 0.28 },
+          { f: 580, at: 0.17, glide: 0.89, pan: -0.15, dur: 0.32 },
+          { f: 920, at: 0.24, glide: 0.92, pan: 0.22,  dur: 0.24 },
+          { f: 350, at: 0.32, glide: 0.86, pan: 0.0,   dur: 0.42 },
+        ];
+        bambooHits.forEach(({ f, at, glide, pan, dur }) => {
+          noiseBurst(ctx, master, { at, dur: 0.018, peak: 0.035, filterFreq: f * 1.5, filterQ: 6.0, pan });
+          tone(ctx, master, { freq: f, at, dur, peak: 0.11, attack: 0.003, glide, pan, type: 'triangle' });
+          tone(ctx, master, { freq: f * 2.4, at, dur: dur * 0.4, peak: 0.025, attack: 0.002, glide, pan });
+        });
         break;
       }
-      case 'breath': {
-        // Slow swell on a perfect fifth, doubled with a few cents of detune so it
-        // shimmers instead of sitting still. Quietest option by some margin.
-        wetAmount = 0.5;
-        tone(ctx, master, { freq: 329.6, at: 0,    dur: 2.0, peak: 0.07,  attack: 0.4,  pan: -0.2 });
-        tone(ctx, master, { freq: 329.6, at: 0,    dur: 2.0, peak: 0.045, attack: 0.45, detune: 6, pan: 0.2 });
-        tone(ctx, master, { freq: 493.9, at: 0.14, dur: 1.9, peak: 0.05,  attack: 0.5,  pan: 0.25 });
-        tone(ctx, master, { freq: 659.3, at: 0.28, dur: 1.6, peak: 0.022, attack: 0.55, pan: -0.25 });
+
+      case 'drops': {
+        // Three crystal droplets falling into still water with pitch glides and soothing ripple overtones.
+        wetAmount = 0.45;
+        tone(ctx, master, { freq: 720, at: 0.00, dur: 0.35, peak: 0.12, attack: 0.004, glide: 1.6, pan: -0.28 });
+        tone(ctx, master, { freq: 1850, at: 0.01, dur: 0.12, peak: 0.025, attack: 0.002, pan: -0.28 });
+
+        tone(ctx, master, { freq: 540, at: 0.18, dur: 0.42, peak: 0.11, attack: 0.004, glide: 1.55, pan: 0.26 });
+        tone(ctx, master, { freq: 1420, at: 0.19, dur: 0.14, peak: 0.022, attack: 0.002, pan: 0.26 });
+
+        tone(ctx, master, { freq: 380, at: 0.38, dur: 0.55, peak: 0.10, attack: 0.004, glide: 1.5, pan: -0.05 });
+        tone(ctx, master, { freq: 440, at: 0.40, dur: 1.2, peak: 0.045, attack: 0.08, pan: 0 });
         break;
       }
-      case 'bowl':
+
+      // ✨ CELESTIAL & SHIMMERING ───────────────────────────────────────────────
+      case 'harp': {
+        // Celestial harp glissando across an Eb Major 9 chord (Eb4 -> F6) with warm string harmonics.
+        wetAmount = 0.50;
+        const harpNotes = [311.13, 466.16, 622.25, 783.99, 932.33, 1174.66, 1396.91];
+        harpNotes.forEach((f, i) => {
+          const at = i * 0.045;
+          const pan = ((i / (harpNotes.length - 1)) - 0.5) * 0.8;
+          tone(ctx, master, { freq: f, at, dur: 1.6 - i * 0.1, peak: 0.12, attack: 0.003, type: 'triangle', pan });
+          tone(ctx, master, { freq: f * 2.0, at, dur: 0.9, peak: 0.035, attack: 0.002, pan });
+          tone(ctx, master, { freq: f * 3.0, at, dur: 0.4, peak: 0.015, attack: 0.002, pan });
+        });
+        break;
+      }
+
+      case 'windchimes': {
+        // Breeze catching tuned silver tubes: high FM metallic rings with stereo spread and shimmering delay.
+        wetAmount = 0.48;
+        const chimeNotes = [
+          { f: 1318.5, at: 0.00,  pan: -0.4 },
+          { f: 1661.2, at: 0.035, pan: 0.35 },
+          { f: 1975.5, at: 0.075, pan: -0.15 },
+          { f: 2489.0, at: 0.115, pan: 0.4 },
+          { f: 2959.9, at: 0.16,  pan: -0.3 },
+          { f: 3322.4, at: 0.205, pan: 0.1 },
+        ];
+        chimeNotes.forEach(({ f, at, pan }) => {
+          fmTone(ctx, master, {
+            carrierFreq: f,
+            modRatio: 2.76,
+            modDepth: 650,
+            at,
+            dur: 1.4,
+            peak: 0.07,
+            attack: 0.002,
+            modDecay: 0.08,
+            pan,
+          });
+          tone(ctx, master, { freq: f, at, dur: 1.8, peak: 0.05, attack: 0.002, pan });
+        });
+        break;
+      }
+
+      case 'glass': {
+        // Pure singing wine glass / crystal bowl: pure sine FM, subtle 4.2Hz rubbing tremolo vibrato.
+        wetAmount = 0.52;
+        const glassNotes = [
+          { f: 440.00,  at: 0.00, pan: -0.3 },
+          { f: 659.25,  at: 0.08, pan: 0.3 },
+          { f: 987.77,  at: 0.16, pan: -0.15 },
+          { f: 1108.73, at: 0.24, pan: 0.15 },
+        ];
+        glassNotes.forEach(({ f, at, pan }) => {
+          fmTone(ctx, master, {
+            carrierFreq: f,
+            modRatio: 1.0,
+            modDepth: 80,
+            at,
+            dur: 2.8,
+            peak: 0.08,
+            attack: 0.25,
+            modDecay: 1.5,
+            tremoloFreq: 4.2,
+            tremoloDepth: 0.35,
+            pan,
+          });
+          tone(ctx, master, { freq: f * 2.0, at: at + 0.1, dur: 2.0, peak: 0.02, attack: 0.3, pan });
+          tone(ctx, master, { freq: f * 3.0, at: at + 0.15, dur: 1.4, peak: 0.008, attack: 0.35, pan });
+        });
+        break;
+      }
+
+      case 'bell': {
+        // Struck orchestral bell with classic inharmonic metallic series.
+        wetAmount = 0.46;
+        const f = 523.25;
+        const partials: [number, number, number, number][] = [
+          [0.5,  0.085, 3.2, 0.0],
+          [1.0,  0.14,  2.8, -0.1],
+          [1.19, 0.055, 2.0, 0.18],
+          [1.5,  0.045, 1.6, -0.15],
+          [2.0,  0.05,  1.5, 0.12],
+          [2.51, 0.022, 0.9, -0.08],
+          [3.01, 0.014, 0.6, 0.1],
+        ];
+        partials.forEach(([ratio, peak, dur, pan], i) => {
+          tone(ctx, master, {
+            freq: f * ratio, at: 0, dur, peak,
+            attack: 0.003 + i * 0.001,
+            detune: (i % 2 === 0 ? 1 : -1) * 2.5,
+            pan,
+          });
+        });
+        break;
+      }
+
+      // 🌅 MODERN & AMBIENT ───────────────────────────────────────────────────
+      case 'rhodes': {
+        // Vintage lo-fi electric piano chord (Fmaj9#11) with FM tine attack and soft tremolo vibrato.
+        wetAmount = 0.38;
+        const rhodesChord = [
+          { f: 174.61, pan: -0.35 },
+          { f: 261.63, pan: -0.2 },
+          { f: 329.63, pan: -0.05 },
+          { f: 392.00, pan: 0.1 },
+          { f: 493.88, pan: 0.25 },
+          { f: 659.25, pan: 0.4 },
+        ];
+        rhodesChord.forEach(({ f, pan }, i) => {
+          const at = i * 0.015;
+          fmTone(ctx, master, {
+            carrierFreq: f,
+            modRatio: 14.0,
+            modDepth: 450,
+            at,
+            dur: 2.2,
+            peak: 0.09,
+            attack: 0.002,
+            modDecay: 0.08,
+            tremoloFreq: 4.8,
+            tremoloDepth: 0.3,
+            pan,
+          });
+          tone(ctx, master, { freq: f, at, dur: 2.4, peak: 0.06, attack: 0.008, pan });
+        });
+        break;
+      }
+
+      case 'sunrise': {
+        // Uplifting 2-stage major 9th progression (Abmaj7 -> Cmaj9) with warm synth swell and sparkle.
+        wetAmount = 0.46;
+        const stage1 = [207.65, 261.63, 311.13, 392.00];
+        stage1.forEach((f, i) => {
+          tone(ctx, master, { freq: f, at: 0, dur: 1.2, peak: 0.07, attack: 0.05, type: 'triangle', pan: (i - 1.5) * 0.2 });
+        });
+        const stage2 = [261.63, 329.63, 392.00, 493.88, 587.33, 659.25];
+        stage2.forEach((f, i) => {
+          const at = 0.26 + i * 0.035;
+          const pan = ((i / (stage2.length - 1)) - 0.5) * 0.7;
+          filteredTone(ctx, master, {
+            freq: f,
+            at,
+            dur: 2.4,
+            peak: 0.065,
+            type: 'sawtooth',
+            attack: 0.04,
+            filterStart: 600,
+            filterPeak: 2200,
+            filterEnd: 400,
+            filterQ: 2.0,
+            pan,
+          });
+          tone(ctx, master, { freq: f * 2.0, at, dur: 0.9, peak: 0.02, attack: 0.003, pan });
+        });
+        break;
+      }
+
+      case 'dreamscape': {
+        // 80s vintage warm polyphonic synth pad (Dbmaj9) with resonant filter envelope and stereo chorus.
+        wetAmount = 0.50;
+        const dreamNotes = [138.59, 207.65, 261.63, 311.13, 349.23, 415.30];
+        dreamNotes.forEach((f, i) => {
+          const pan = ((i / (dreamNotes.length - 1)) - 0.5) * 0.7;
+          filteredTone(ctx, master, {
+            freq: f,
+            at: 0,
+            dur: 3.4,
+            peak: 0.06,
+            type: 'sawtooth',
+            attack: 0.6,
+            filterStart: 250,
+            filterPeak: 1900,
+            filterEnd: 300,
+            filterQ: 2.8,
+            detune: -5,
+            pan,
+          });
+          filteredTone(ctx, master, {
+            freq: f,
+            at: 0.05,
+            dur: 3.3,
+            peak: 0.05,
+            type: 'triangle',
+            attack: 0.65,
+            filterStart: 250,
+            filterPeak: 1900,
+            filterEnd: 300,
+            filterQ: 2.8,
+            detune: 5,
+            pan: -pan,
+          });
+        });
+        break;
+      }
+
       default: {
-        // Singing bowl: low fundamental with a beating partner a few cents away
-        // (that slow throb is the signature of a real bowl), a fifth above, and a
-        // faint shimmer on top. Long, slow, unhurried.
+        // Fallback default singing bowl
         wetAmount = 0.5;
-        tone(ctx, master, { freq: 261.6, at: 0,    dur: 3.4, peak: 0.15,  attack: 0.07, pan: -0.15 });
-        tone(ctx, master, { freq: 261.6, at: 0,    dur: 3.2, peak: 0.09,  attack: 0.09, detune: 7, pan: 0.15 });
-        tone(ctx, master, { freq: 392.0, at: 0.03, dur: 2.8, peak: 0.06,  attack: 0.11, pan: 0.22 });
+        tone(ctx, master, { freq: 261.6, at: 0, dur: 3.4, peak: 0.15, attack: 0.07, pan: -0.15 });
+        tone(ctx, master, { freq: 261.6, at: 0, dur: 3.2, peak: 0.09, attack: 0.09, detune: 7, pan: 0.15 });
+        tone(ctx, master, { freq: 392.0, at: 0.03, dur: 2.8, peak: 0.06, attack: 0.11, pan: 0.22 });
         tone(ctx, master, { freq: 654.0, at: 0.06, dur: 2.0, peak: 0.025, attack: 0.14, pan: -0.22 });
-        tone(ctx, master, { freq: 784.0, at: 0.06, dur: 1.6, peak: 0.016, attack: 0.16, pan: 0.1 });
         break;
       }
     }
@@ -478,7 +976,7 @@ export type FocusCueSlot = 'start' | 'pause' | 'resume';
 export const DEFAULT_FOCUS_CUES: Record<FocusCueSlot, FocusCueId> = {
   start: 'rise',
   pause: 'fall',
-  resume: 'pebble',
+  resume: 'rise',
 };
 
 export function coerceFocusCue(value: unknown, slot: FocusCueSlot): FocusCueId {

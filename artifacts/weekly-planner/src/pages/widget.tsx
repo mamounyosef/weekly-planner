@@ -71,7 +71,7 @@ import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, par
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { DEFAULT_CATEGORIES, resolveEventColor, coerceCategories, type EventCategory } from '@/lib/categories';
-import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset } from '@/lib/settingsSync';
+import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset, type TaskCheckboxShape } from '@/lib/settingsSync';
 import { fetchDeviceSettings, loadDeviceSettingsLocal, subscribeDeviceSettings } from '@/lib/deviceSettings';
 import { matchesCombo, formatCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
 import {
@@ -329,6 +329,7 @@ export default function Widget() {
   const [stickyTasksWidget, setStickyTasksWidget]   = useState(true);
   const [showTaskRow, setShowTaskRow]               = useState(true);
   const [taskColor, setTaskColor]                   = useState('#7dd3fc');
+  const [taskCheckboxShape, setTaskCheckboxShape]   = useState<TaskCheckboxShape>('circle');
   const [tasks, setTasks]                           = useState<TaskData>({});
   const [overflowModal, setOverflowModal]           = useState<{
     type: 'all-day' | 'tasks';
@@ -375,6 +376,7 @@ export default function Widget() {
         if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
         if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
         if (s.taskColor) setTaskColor(s.taskColor);
+        if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape as TaskCheckboxShape);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
@@ -698,10 +700,12 @@ export default function Widget() {
     const items: Array<{ ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' }> = [];
     for (const ev of Object.values(weekEvents)) {
       if (ev.allDay) continue; // Skip all-day events in the timeline scroll area
-      if (isBoundarySpanning(ev)) {
-        const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
-        let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
-        if (e <= s) e += 1440;
+      const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
+      let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
+      if (e <= s) e += 1440;
+      const isSpanning = s < dayStartMin + 1440 && e > dayStartMin + 1440;
+
+      if (isSpanning) {
         if (ev.dayIndex === todayColIdx) {
           items.push({ ev, key: ev.id, startMin: s, endMin: dayStartMin + 1440, segKind: 'tail' });
         }
@@ -713,13 +717,13 @@ export default function Widget() {
       if (ev.dayIndex === todayColIdx) {
         items.push({
           ev, key: ev.id, segKind: 'normal',
-          startMin: normalizeMin(timeToMin(ev.startTime), dayStartH),
-          endMin: normalizeMin(timeToMin(ev.endTime), dayStartH),
+          startMin: s,
+          endMin: e,
         });
       }
     }
     return items;
-  }, [weekEvents, todayColIdx, isBoundarySpanning, dayStartMin, dayEndMin, dayStartH]);
+  }, [weekEvents, todayColIdx, dayStartMin, dayStartH]);
 
   const layout = useMemo(() => {
     const layoutInput = colEvents.map(item => ({
@@ -1809,7 +1813,11 @@ export default function Widget() {
                           }}
                         >
                           <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
-                            {done ? <CheckSquare size={10} /> : <Square size={10} />}
+                            {done ? (
+                              taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />
+                            ) : (
+                              taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />
+                            )}
                           </span>
                           <span className={`truncate flex-1 ${done ? 'line-through opacity-60' : ''}`}>
                             {t.title || 'Untitled task'}
@@ -2019,7 +2027,10 @@ export default function Widget() {
             // Live/duration status always reflects the event's true full start–end, not just this segment.
             const fullStartMin = timeToMin(ev.startTime);
             const fullEndMin   = timeToMin(ev.endTime);
-            const spansBoundary = fullStartMin < dayStartMin && fullEndMin >= dayStartMin;
+            const sNormEv      = normalizeMin(fullStartMin, dayStartH);
+            let eNormEv        = normalizeMin(fullEndMin, dayStartH);
+            if (eNormEv <= sNormEv) eNormEv += 1440;
+            const spansBoundary = sNormEv < dayStartMin + 1440 && eNormEv > dayStartMin + 1440;
             // "Live" is scoped to this segment's own on-screen range (each segment lives in a
             // different day column, so at most one of tail/head is ever the active one).
             const isLive       = normNowMin >= item.startMin && normNowMin < item.endMin;
@@ -2027,10 +2038,10 @@ export default function Widget() {
               ? fullEndMin + 1440 - normNowMin
               : segKind === 'head'
                 ? fullEndMin - normNowMin
-                : normalizeMin(fullEndMin, dayStartH) - normNowMin);
+                : eNormEv - normNowMin);
             const durationMin  = Math.max(0, spansBoundary
               ? fullEndMin - fullStartMin
-              : normalizeMin(fullEndMin, dayStartH) - normalizeMin(fullStartMin, dayStartH));
+              : eNormEv - sNormEv);
             const durationLabel = durationMin < 60
               ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
               : durationMin % 60 === 0
@@ -2380,7 +2391,11 @@ export default function Widget() {
                       }}
                     >
                       <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
-                        {done ? <CheckSquare size={12} /> : <Square size={12} />}
+                        {done ? (
+                          taskCheckboxShape === 'square' ? <CheckSquare size={12} /> : <CheckCircle2 size={12} />
+                        ) : (
+                          taskCheckboxShape === 'square' ? <Square size={12} /> : <Circle size={12} />
+                        )}
                       </span>
                       <span className={`break-words flex-1 leading-snug ${done ? 'line-through opacity-60' : ''}`}>
                         {t.title || 'Untitled task'}

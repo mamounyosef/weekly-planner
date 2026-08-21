@@ -1,6 +1,6 @@
 kind = "web"
 previewPath = "/"
-title = "Weekly Planner"
+title = "Daily Planner"
 version = "1.0.0"
 id = "artifacts/weekly-planner"
 router = "path"

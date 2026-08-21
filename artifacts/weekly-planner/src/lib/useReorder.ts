@@ -39,6 +39,10 @@ export interface ReorderApi<E extends HTMLElement = HTMLDivElement> {
   containerRef: React.RefObject<E | null>;
   /** The item currently being dragged, if any. */
   dragId: string | null;
+  /** How far the pointer has travelled along `axis` since the drag began, in px.
+   *  Render it as a transform on the dragged item — without it the item stays
+   *  put under the finger and only reappears somewhere else on release. */
+  dragDelta: number;
   /** The gap the item would drop into, 0..items.length. */
   dropIndex: number | null;
   startDrag: (e: React.PointerEvent<HTMLElement>, id: string) => void;
@@ -55,11 +59,12 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
   { axis = 'y', threshold = 5, holdMs = 260, ignore = DEFAULT_IGNORE }: ReorderOptions = {},
 ): ReorderApi<E> {
   const containerRef = useRef<E | null>(null);
-  const dragRef = useRef<{ id: string; origin: number; touch: boolean; timer: number; dragging: boolean } | null>(null);
+  const dragRef = useRef<{ id: string; origin: number; ox: number; oy: number; touch: boolean; timer: number; dragging: boolean } | null>(null);
   const gestureRef = useRef<AbortController | null>(null);
   const justDraggedRef = useRef(false);
 
   const [dragId, setDragId] = useState<string | null>(null);
+  const [dragDelta, setDragDelta] = useState(0);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   // Mirrored in a ref so the commit on pointerup can read the final gap without
   // doing work inside a setState updater, which React is free to run twice.
@@ -94,6 +99,7 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
 
     const gap = dropIndexRef.current;
     setDragId(null);
+    setDragDelta(0);
     setGap(null);
     if (!commit || gap === null) return;
 
@@ -127,6 +133,8 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
     dragRef.current = {
       id,
       origin,
+      ox: e.clientX,
+      oy: e.clientY,
       touch,
       timer: touch ? window.setTimeout(begin, holdMs) : 0,
       dragging: false,
@@ -143,26 +151,35 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
       const point = axis === 'x' ? ev.clientX : ev.clientY;
       if (!drag.dragging) {
         // Moving before the hold expires means the user meant to scroll, so the
-        // pick-up is abandoned rather than fought with.
-        if (drag.touch) { if (Math.abs(point - drag.origin) > 12) end(false); }
+        // pick-up is abandoned rather than fought with. Measured in BOTH axes:
+        // a horizontal rail that only watched X never noticed the vertical swipe
+        // scrolling the page through it, so the hold ripened and the swipe
+        // picked a pill up instead.
+        if (drag.touch) { if (Math.hypot(ev.clientX - drag.ox, ev.clientY - drag.oy) > 12) end(false); }
         else if (Math.abs(point - drag.origin) > threshold) begin();
         if (!dragRef.current?.dragging) return;
       }
+      setDragDelta(point - drag.origin);
       setGap(gapUnder(point));
     }, { signal });
     window.addEventListener('pointerup', () => end(true), { signal });
     window.addEventListener('pointercancel', () => end(false), { signal });
     // touch-action is read when the gesture starts and this one only becomes a
     // drag partway through, so preventDefault is the only thing left that can
-    // stop the page scrolling out from under the finger.
-    document.addEventListener('touchmove', ev => {
-      if (dragRef.current?.dragging && ev.cancelable) ev.preventDefault();
-    }, { passive: false, signal });
+    // stop the page scrolling out from under the finger. Touch only: a
+    // non-passive touchmove listener forces every scroll that starts on one of
+    // these items through the main thread before the compositor may move it,
+    // and for a mouse it can never fire anyway.
+    if (touch) {
+      document.addEventListener('touchmove', ev => {
+        if (dragRef.current?.dragging && ev.cancelable) ev.preventDefault();
+      }, { passive: false, signal });
+    }
   }, [items, idOf, axis, threshold, holdMs, ignore, gapUnder, end, setGap]);
 
   useEffect(() => () => { gestureRef.current?.abort(); }, []);
 
   const wasDragged = useCallback(() => justDraggedRef.current, []);
 
-  return { containerRef, dragId, dropIndex, startDrag, wasDragged };
+  return { containerRef, dragId, dragDelta, dropIndex, startDrag, wasDragged };
 }

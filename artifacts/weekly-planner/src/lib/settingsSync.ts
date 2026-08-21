@@ -192,6 +192,7 @@ export interface AppSettings {
   taskColor: string;         // '#rrggbb' — the one colour tasks wear on the grid
   taskCheckboxShape: TaskCheckboxShape; // 'circle' | 'square'
   taskFilters: string[];     // panel filter selection; empty = show everything
+  autoRollRecurringTasks: boolean; // when next occurrence arrives, roll overdue repeating tasks to Today
   googleSyncEnabled: boolean;         // Master toggle for Google integration & synchronization
   googleTasksSync: boolean;
   // ── Sticky Header Bands ───────────────────────────────────────────────────
@@ -236,7 +237,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customDaysAfter: 0,
   customAnchor: 'day',
   focusDayStartHour: 4,
-  focusChime: 'bowl',
+  focusChime: 'breath',
   focusCues: DEFAULT_FOCUS_CUES,
   shortcuts: DEFAULT_SHORTCUTS,
   autoBackup: { enabled: true, intervalHours: 24, keep: 50 },
@@ -246,7 +247,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   taskColor: '#7dd3fc',
   taskCheckboxShape: 'circle',
   taskFilters: [],
-  googleSyncEnabled: true,
+  autoRollRecurringTasks: true,
+  googleSyncEnabled: false,
   googleTasksSync: true,
   stickyAllDayMain: true,
   stickyTasksMain: true,
@@ -351,6 +353,7 @@ export function coerceSettings(raw: unknown): AppSettings {
     // Re-derived in canonical order, so an out-of-order array can never round-trip.
     s.taskFilters = TASK_FILTER_ORDER.filter(f => (r.taskFilters as unknown[]).includes(f));
   }
+  if (typeof r.autoRollRecurringTasks === 'boolean') s.autoRollRecurringTasks = r.autoRollRecurringTasks;
   if (typeof r.googleSyncEnabled === 'boolean') s.googleSyncEnabled = r.googleSyncEnabled;
   if (typeof r.googleTasksSync === 'boolean') s.googleTasksSync = r.googleTasksSync;
   if (typeof r.stickyAllDayMain === 'boolean') s.stickyAllDayMain = r.stickyAllDayMain;

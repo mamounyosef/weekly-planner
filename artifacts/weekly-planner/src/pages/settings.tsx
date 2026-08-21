@@ -37,13 +37,24 @@ import {
   GripVertical,
   Square,
   CheckSquare,
+  Repeat,
   Eye,
   EyeOff,
+  User,
+  LogOut,
+  Globe,
+  Wifi,
+  Copy,
+  ExternalLink,
 } from 'lucide-react';
+import { useAuth } from '@/lib/auth';
 import {
   FOCUS_CHIMES,
   FOCUS_CUES,
+  DEFAULT_FOCUS_CHIME,
+  DEFAULT_FOCUS_CUES,
   FocusChimeId,
+  FocusChimeCategory,
   FocusCueSlot,
   FocusCueId,
   playFocusChime,
@@ -78,7 +89,7 @@ import {
   type PrayerSettings,
   type PrayerStyle,
 } from '@/lib/prayerTimes';
-import { DEFAULT_HARDWARE_SETTINGS, MEDIAN_WINDOW_MAX, type HardwareSettings } from '@/lib/hardwareController';
+import { DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from '@/lib/hardwareController';
 import { NumberField } from '@/components/NumberField';
 import { useViewport } from '@/hooks/use-mobile';
 import {
@@ -177,11 +188,13 @@ function RedirectUriHelp({ textPrimary, textSecondary, cardBdr, darkMode, onCopi
             key={u}
             type="button"
             onClick={() => { navigator.clipboard?.writeText(u).then(onCopied, () => {}); }}
-            className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-left transition-colors"
+            className="touch-target flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-left transition-colors"
             style={{ borderColor: cardBdr, background: darkMode ? 'rgba(0,0,0,0.25)' : '#fff' }}
             title="Copy"
           >
-            <code className="text-[11px] font-mono truncate" style={{ color: textPrimary }}>{u}</code>
+            {/* min-w-0, or a long origin refuses to shrink and pushes the row
+                off a narrow screen instead of truncating. */}
+            <code className="text-[11px] font-mono truncate min-w-0" style={{ color: textPrimary }}>{u}</code>
             <span className="text-[10px] font-semibold flex-shrink-0" style={{ color: textSecondary }}>Copy</span>
           </button>
         ))}
@@ -204,6 +217,93 @@ function RedirectUriHelp({ textPrimary, textSecondary, cardBdr, darkMode, onCopi
  * that actually separates them — and it makes an unworkable placement (the two
  * readings overlapping) immediately obvious instead of a mystery later.
  */
+/**
+ * The presence filter's own working, live.
+ *
+ * Presence used to be decided on the ESP32, where a wrong verdict left nothing
+ * behind to look at — the board reported "away" and the only recourse was to
+ * guess which of the thresholds or timers had been wrong. It is decided on the
+ * PC now, so the evidence can simply be shown: how much of the recent window
+ * agreed with the believed distance, how far apart the readings are, whether a
+ * departure is being counted down or actively withheld, and why.
+ */
+function FilterReadout({ f, textPrimary, textSecondary, cardBdr }: {
+  f: Record<string, unknown>;
+  textPrimary: string;
+  textSecondary: string;
+  cardBdr: string;
+}) {
+  const num = (k: string) => (typeof f[k] === 'number' ? (f[k] as number) : 0);
+  const pct = (k: string) => `${Math.round(num(k) * 100)}%`;
+  const holding = typeof f.holding === 'string' ? f.holding : null;
+  const awayNeeds = num('awayNeedsMs');
+  const arriveNeeds = num('arriveNeedsMs');
+
+  // Phrased as what it means for the desk, not as what the code calls it.
+  const HOLD_TEXT: Record<string, string> = {
+    'near-reading': 'something is still reading close — you are demonstrably here',
+    'unstable': 'the readings disagree too much to be one object',
+    'no-consensus': 'no group of readings is big enough to speak for the window',
+    'ramp-masked': 'the readings are mid-jump; waiting for them to settle',
+    'over-range-ignored': 'over-range readings never count as away on this desk',
+  };
+
+  const rows: Array<[string, string]> = [
+    ['Agreement', `${pct('support')} of the last ${num('windowCount')} readings`],
+    ['Spread', `${num('spreadCm').toFixed(0)}cm`],
+    ['Close readings', pct('nearRatio')],
+    ['Over-range readings', pct('overRatio')],
+  ];
+
+  return (
+    <div className="rounded-xl border p-3 flex flex-col gap-2" style={{ borderColor: cardBdr }}>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-baseline justify-between gap-2">
+            <span className="text-[10px]" style={{ color: textSecondary }}>{label}</span>
+            <span className="text-[10px] font-semibold tabular-nums" style={{ color: textPrimary }}>{value}</span>
+          </div>
+        ))}
+      </div>
+
+      {f.masked === true && (
+        <p className="text-[10px]" style={{ color: '#f59e0b' }}>
+          Ignoring the current readings — they are jumping in strides no body makes, which is a beam losing its
+          reflector rather than someone leaving.
+        </p>
+      )}
+
+      {holding ? (
+        <p className="text-[10px]" style={{ color: '#f59e0b' }}>
+          Holding you at the desk: {HOLD_TEXT[holding] ?? holding}
+          {num('holdingMs') > 1000 ? ` (${(num('holdingMs') / 1000).toFixed(0)}s so far)` : ''}.
+        </p>
+      ) : awayNeeds > 0 && num('awayProgressMs') > 0 ? (
+        <p className="text-[10px]" style={{ color: textSecondary }}>
+          Counting down to away: {(num('awayProgressMs') / 1000).toFixed(1)}s of {(awayNeeds / 1000).toFixed(0)}s.
+        </p>
+      ) : arriveNeeds > 0 && num('arriveProgressMs') > 0 ? (
+        <p className="text-[10px]" style={{ color: textSecondary }}>
+          Counting down to at-desk: {(num('arriveProgressMs') / 1000).toFixed(1)}s of {(arriveNeeds / 1000).toFixed(0)}s.
+        </p>
+      ) : null}
+
+      {f.everEchoed === false && (
+        <p className="text-[10px]" style={{ color: '#ef4444' }}>
+          The sensor has not returned a single echo. A disconnected module reads exactly like an empty desk, so
+          nothing is being decided until one arrives.
+        </p>
+      )}
+      {f.forced === true && (
+        <p className="text-[10px]" style={{ color: '#ef4444' }}>
+          Gave up waiting for the readings to make sense and called it away. If this keeps happening, the sensor is
+          aimed at something it cannot get a clean echo off.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPrimary, textSecondary }: {
   hardware: HardwareSettings;
   patchHardware: (patch: Partial<HardwareSettings>) => void;
@@ -213,7 +313,9 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
   textSecondary: string;
 }) {
   const [live, setLive] = useState<number | null>(null);
+  const [liveRaw, setLiveRaw] = useState<number | null>(null);
   const [livePresent, setLivePresent] = useState<boolean | null>(null);
+  const [liveFilter, setLiveFilter] = useState<Record<string, unknown> | null>(null);
   const [seated, setSeated] = useState<number | null>(null);
   const [empty, setEmpty] = useState<number | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -230,7 +332,9 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
         const data = await res.json();
         if (cancelled) return;
         setLive(typeof data?.distanceCm === 'number' ? data.distanceCm : null);
+        setLiveRaw(typeof data?.rawCm === 'number' ? data.rawCm : null);
         setLivePresent(typeof data?.present === 'boolean' ? data.present : null);
+        setLiveFilter(data?.filter && typeof data.filter === 'object' ? data.filter : null);
       } catch (_) { /* transient */ }
     };
     void tick();
@@ -269,7 +373,7 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
             patchHardware({ calibrating: !hardware.calibrating });
             setSeated(null); setEmpty(null); setNote(null);
           }}
-          className="px-3 py-1.5 rounded-lg border text-[11px]"
+          className="touch-target px-3 py-1.5 rounded-lg border text-[11px] flex-shrink-0"
           style={{
             background: hardware.calibrating ? '#3b82f6' : cardBg,
             borderColor: hardware.calibrating ? '#3b82f6' : cardBdr,
@@ -280,15 +384,21 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
         </button>
       </div>
 
-      {/* Live readout, shown whether or not calibration is running */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-baseline gap-2">
+      {/* Live readout, shown whether or not calibration is running. Wraps: the
+          number, its two captions and the state pill are wider than a phone. */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-baseline gap-2 flex-wrap min-w-0">
           <span className="text-2xl font-semibold tabular-nums" style={{ color: textPrimary }}>
             {live === null ? '--' : live.toFixed(1)}
           </span>
           <span className="text-[11px]" style={{ color: textSecondary }}>
-            {live === null ? 'board not reporting' : 'cm'}
+            {live === null ? 'board not reporting' : 'cm believed'}
           </span>
+          {liveRaw !== null && (
+            <span className="text-[11px] tabular-nums" style={{ color: textSecondary }}>
+              · raw {liveRaw <= 0 ? 'no echo' : `${liveRaw.toFixed(0)}cm`}
+            </span>
+          )}
         </div>
         {live !== null && livePresent !== null && (
           <span
@@ -305,9 +415,15 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
       {live !== null && (
         <p className="text-[10px] -mt-1" style={{ color: textSecondary }}>
           Counts as at the desk below {hardware.enterCm}cm, as away above {hardware.exitCm}cm; in between it holds
-          whatever it already decided.
+          whatever it already decided. The believed number is the middle of the largest group of readings that agree
+          with each other — not the raw ping, which is what makes a blocked sensor survivable.
         </p>
       )}
+
+      {/* What the filter is doing with those readings right now. Presence used
+          to be decided on the board, where the only way to find out why it had
+          gone wrong was to guess. Every number the decision rests on is here. */}
+      {liveFilter && <FilterReadout f={liveFilter} textPrimary={textPrimary} textSecondary={textSecondary} cardBdr={cardBdr} />}
 
       {hardware.calibrating ? (
         <>
@@ -486,7 +602,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'categories' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware';
+type TabCategory = 'appearance' | 'calendar' | 'categories' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
 
 interface Toast {
   id: number;
@@ -514,11 +630,25 @@ function DropGap({ active, color }: { active: boolean; color: string }) {
 
 export default function SettingsPage() {
   const [, setLocation] = useLocation();
+  const { user, logout } = useAuth();
   // Settings is a two-column layout with a 256px sidebar — on a phone that
   // leaves ~130px for the controls themselves, so the sidebar becomes a
   // horizontally scrolling strip of chips above the content instead.
   const vp = useViewport();
   const isPhone = vp.isPhone;
+  // Hit-target sizing follows the pointer, not the width: a small tablet is
+  // still fingers. Controls that stay their designed size but need a bigger
+  // catchment carry index.css's `touch-target` instead, which only exists
+  // inside a `pointer: coarse` media query — so a mouse never sees any of this.
+  const isTouch = vp.isTouch;
+  /**
+   * index.css already pushes every text input to 16px on a coarse pointer, but
+   * its `select` rule is a bare element selector and loses to Tailwind's
+   * `.text-xs`. A <select> left at 12px makes iOS Safari zoom the whole page in
+   * on focus and never zoom back out — so the size is restated inline, where
+   * nothing can outrank it, along with a finger-sized row height.
+   */
+  const selectTouch: React.CSSProperties = isTouch ? { fontSize: 16, minHeight: 44 } : {};
 
   // Active Sidebar Tab
   // `?tab=integrations` deep-links a section — the header's "Google disconnected"
@@ -561,6 +691,8 @@ export default function SettingsPage() {
   const [mobileUiZoom, setMobileUiZoom] = useState<number>(1);
   const [focusDayStartHour, setFocusDayStartHour] = useState<number>(initialSettings.focusDayStartHour);
   const [focusChime, setFocusChime] = useState<FocusChimeId>(initialSettings.focusChime);
+  const [chimeCategory, setChimeCategory] = useState<'all' | FocusChimeCategory>('all');
+  const [previewingChimeId, setPreviewingChimeId] = useState<string | null>(null);
   const [focusCues, setFocusCues] = useState<{ start: FocusCueId; pause: FocusCueId; resume: FocusCueId }>(initialSettings.focusCues);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(initialSettings.shortcuts);
   const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(initialSettings.autoBackup);
@@ -569,10 +701,11 @@ export default function SettingsPage() {
   const [tasksPanelOpen, setTasksPanelOpen] = useState<boolean>(initialSettings.tasksPanelOpen);
   const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
   const [taskFilters, setTaskFilters] = useState<string[]>(initialSettings.taskFilters);
+  const [autoRollRecurringTasks, setAutoRollRecurringTasks] = useState<boolean>(initialSettings.autoRollRecurringTasks ?? true);
   const [showTaskRow, setShowTaskRow] = useState<boolean>(initialSettings.showTaskRow);
   const [taskColor, setTaskColor] = useState<string>(initialSettings.taskColor);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<TaskCheckboxShape>(initialSettings.taskCheckboxShape ?? 'circle');
-  const [googleSyncEnabled, setGoogleSyncEnabled] = useState<boolean>(initialSettings.googleSyncEnabled ?? true);
+  const [googleSyncEnabled, setGoogleSyncEnabled] = useState<boolean>(initialSettings.googleSyncEnabled ?? false);
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [stickyAllDayMain, setStickyAllDayMain] = useState<boolean>(initialSettings.stickyAllDayMain ?? true);
   const [stickyTasksMain, setStickyTasksMain] = useState<boolean>(initialSettings.stickyTasksMain ?? true);
@@ -913,6 +1046,7 @@ export default function SettingsPage() {
       setShortcuts(s.shortcuts);
       setAutoBackup(s.autoBackup);
       setTaskFilters(s.taskFilters);
+      if (typeof s.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(s.autoRollRecurringTasks);
       setTaskColor(s.taskColor);
       if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape);
       if (typeof s.googleSyncEnabled === 'boolean') setGoogleSyncEnabled(s.googleSyncEnabled);
@@ -959,6 +1093,7 @@ export default function SettingsPage() {
           setShortcuts(coerced.shortcuts);
           setAutoBackup(coerced.autoBackup);
           setTaskFilters(coerced.taskFilters);
+          if (typeof coerced.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(coerced.autoRollRecurringTasks);
           setTaskColor(coerced.taskColor);
           setTaskCheckboxShape(coerced.taskCheckboxShape);
           setGoogleTasksSync(coerced.googleTasksSync);
@@ -1009,6 +1144,7 @@ export default function SettingsPage() {
       shortcuts,
       autoBackup,
       taskFilters,
+      autoRollRecurringTasks,
       taskColor,
       taskCheckboxShape,
       googleSyncEnabled,
@@ -1029,7 +1165,7 @@ export default function SettingsPage() {
     taskLists,
     }), 150);
     return () => window.clearTimeout(broadcastId);
-  }, [hardware, prayer, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, showTaskRow, taskColor,
+  }, [hardware, prayer, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -1073,7 +1209,7 @@ export default function SettingsPage() {
           showToast(body?.error || 'Backup failed.', 'error');
           return;
         }
-        showToast(`Backup saved (${body.count} items).`, 'success');
+        showToast(`Full backup snapshot saved (${body.count} events bundled).`, 'success');
         return fetch('/api/auto-backup')
           .then(r => r.json())
           .then(s => setBackupStatus({ count: Number(s.count) || 0, lastBackupAt: s.lastBackupAt ?? null }));
@@ -1106,6 +1242,7 @@ export default function SettingsPage() {
     tasksPanelOpen,
     tasksPanelWidth,
     taskFilters,
+    autoRollRecurringTasks,
     showTaskRow,
     taskColor,
     taskCheckboxShape,
@@ -1162,10 +1299,20 @@ export default function SettingsPage() {
     setTasksPanelOpen(restored.tasksPanelOpen);
     setTasksPanelWidth(restored.tasksPanelWidth);
     setTaskFilters(restored.taskFilters);
+    if (typeof restored.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(restored.autoRollRecurringTasks);
     setShowTaskRow(restored.showTaskRow);
     setTaskColor(restored.taskColor);
     if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
     setGoogleTasksSync(restored.googleTasksSync);
+    setGoogleSyncEnabled(restored.googleSyncEnabled);
+    setGcalPushEnabled(restored.gcalPushEnabled);
+    setGcalPushTarget(restored.gcalPushTarget);
+    setGcalPushOtherCalendars(restored.gcalPushOtherCalendars);
+    setGcalPullDailyEdits(restored.gcalPullDailyEdits);
+    setGcalPullDailyNew(restored.gcalPullDailyNew);
+    setGcalPullOtherCalendars(restored.gcalPullOtherCalendars);
+    setGcalMirrorLocalDeletions(restored.gcalMirrorLocalDeletions);
+    setGcalMirrorGoogleDeletions(restored.gcalMirrorGoogleDeletions);
     setPrayer(restored.prayer);
     setHardware(restored.hardware);
     broadcastSettingsChange(restored);
@@ -1196,7 +1343,7 @@ export default function SettingsPage() {
       const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(backupData, null, 2));
       const downloadAnchor = document.createElement('a');
       downloadAnchor.setAttribute('href', dataStr);
-      downloadAnchor.setAttribute('download', `weekly-planner-backup-${new Date().toISOString().split('T')[0]}.json`);
+      downloadAnchor.setAttribute('download', `daily-planner-backup-${new Date().toISOString().split('T')[0]}.json`);
       document.body.appendChild(downloadAnchor);
       downloadAnchor.click();
       downloadAnchor.remove();
@@ -1322,18 +1469,22 @@ export default function SettingsPage() {
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
     { id: 'calendar', label: 'Calendar Grid', icon: <Calendar size={17} /> },
-    { id: 'categories', label: 'Categories & Lists', icon: <Tag size={17} />, badge: `${categories.length + taskLists.length}` },
+    { id: 'categories', label: 'Tasks & Categories', icon: <Tag size={17} />, badge: `${categories.length + taskLists.length}` },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
     { id: 'backup', label: 'Backups & Data', icon: <Database size={17} /> },
-    { id: 'integrations', label: 'Integrations', icon: <Link2 size={17} />, badge: gCalStatus.authenticated ? 'Connected' : undefined },
+    { id: 'integrations', label: 'Integrations', icon: <Link2 size={17} />, badge: (googleSyncEnabled && gCalStatus.authenticated) ? 'Connected' : (!googleSyncEnabled ? 'Off' : undefined) },
     { id: 'hardware', label: 'Desk Controller', icon: <Cpu size={17} /> },
+    { id: 'account', label: 'User Account', icon: <User size={17} /> },
   ];
 
   return (
     <div
-      className={`min-h-screen flex flex-col font-sans transition-colors duration-300 relative ${
+      // `100vh` is the URL-bar-hidden height, but this page lives inside App's
+      // `fixed inset-0` scroller, which is the URL-bar-shown height — so on a
+      // phone min-h-screen alone adds ~60px of empty scroll under the content.
+      className={`${isPhone ? 'min-h-full' : 'min-h-screen'} flex flex-col font-sans transition-colors duration-300 relative ${
         darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
       }`}
       style={{ backgroundColor: pageBg }}
@@ -1415,14 +1566,21 @@ export default function SettingsPage() {
       </header>
 
       {/* ── Main Layout Body ────────────────────────────────────────────────── */}
-      <div className={`flex-1 max-w-7xl w-full mx-auto ${isPhone ? 'flex flex-col px-3 pt-3 pb-8 gap-4' : 'flex px-6 py-8 gap-8'}`}>
+      <div
+        className={`flex-1 max-w-7xl w-full mx-auto ${isPhone ? 'flex flex-col px-3 pt-3 gap-4' : 'flex px-6 py-8 gap-8'}`}
+        // The last control of the last section would otherwise sit under the
+        // home bar, where it can be seen but never tapped.
+        style={isPhone ? { paddingBottom: 'calc(2rem + var(--safe-bottom))' } : undefined}
+      >
         {/* Category navigation. A vertical rail on a desktop; on a phone the
             same list turned on its side into a sticky, swipeable chip strip —
             no accordion, no hamburger, and the current section always visible. */}
         {isPhone ? (
           <div
             className="sticky z-40 -mx-3 px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar touch-scroll"
-            style={{ top: 'calc(56px + var(--safe-top))', background: headerBg }}
+            // Must be the header's exact height (10 + 40 + 10 + 1px border): a
+            // few pixels short and scrolling content shows through the seam.
+            style={{ top: 'calc(61px + var(--safe-top))', background: headerBg }}
           >
             {tabs.map(tab => {
               const active = activeTab === tab.id;
@@ -1430,7 +1588,7 @@ export default function SettingsPage() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className="flex items-center gap-1.5 px-3 h-9 rounded-xl text-[12px] font-bold whitespace-nowrap flex-shrink-0 active:scale-95 transition-transform"
+                  className="flex items-center gap-1.5 px-3 h-10 rounded-xl text-[12px] font-bold whitespace-nowrap flex-shrink-0 active:scale-95 transition-transform"
                   style={{
                     background: active ? accentLight : (darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'),
                     color: active ? accentColor : textSecondary,
@@ -1570,7 +1728,7 @@ export default function SettingsPage() {
                               key={preset}
                               type="button"
                               onClick={() => setMobileContentZoom(preset)}
-                              className="py-1.5 rounded-lg text-[11px] font-semibold border transition-smooth text-center"
+                              className="touch-target py-1.5 rounded-lg text-[11px] font-semibold border transition-smooth text-center"
                               style={{
                                 background: active ? accentLight : cardBg,
                                 borderColor: active ? accentColor : cardBdr,
@@ -1644,7 +1802,7 @@ export default function SettingsPage() {
                               key={preset}
                               type="button"
                               onClick={() => setMobileUiZoom(preset)}
-                              className="py-1.5 rounded-lg text-[11px] font-semibold border transition-smooth text-center"
+                              className="touch-target py-1.5 rounded-lg text-[11px] font-semibold border transition-smooth text-center"
                               style={{
                                 background: active ? accentLight : cardBg,
                                 borderColor: active ? accentColor : cardBdr,
@@ -1687,7 +1845,7 @@ export default function SettingsPage() {
                       role="switch"
                       aria-checked={darkMode}
                       onClick={() => setDarkMode(d => !d)}
-                      className="relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
+                      className="touch-target relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
                       style={{
                         background: darkMode ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'),
                       }}
@@ -2023,7 +2181,7 @@ export default function SettingsPage() {
                             setDayEndH(newStart + duration);
                           }}
                           className="w-full py-2 px-3 text-xs font-semibold rounded-xl border outline-none transition-colors"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, ...selectTouch }}
                         >
                           {Array.from({ length: 24 }, (_, i) => i).map(h => (
                             <option key={h} value={h}>{h === 0 ? '12:00 AM' : h < 12 ? `${h}:00 AM` : h === 12 ? '12:00 PM' : `${h - 12}:00 PM`}</option>
@@ -2037,7 +2195,7 @@ export default function SettingsPage() {
                           value={Math.max(1, dayEndH - dayStartH)}
                           onChange={e => setDayEndH(dayStartH + parseInt(e.target.value))}
                           className="w-full py-2 px-3 text-xs font-semibold rounded-xl border outline-none transition-colors"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, ...selectTouch }}
                         >
                           {Array.from({ length: 24 }, (_, i) => i + 1).map(d => (
                             <option key={d} value={d}>{d} {d === 1 ? 'Hour' : 'Hours'}{d === 24 ? ' (Full Day)' : ''}</option>
@@ -2084,7 +2242,7 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         onClick={() => setStickyAllDayMain(v => !v)}
-                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
                         style={{ background: stickyAllDayMain ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                         aria-pressed={stickyAllDayMain}
                       >
@@ -2105,7 +2263,7 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         onClick={() => setStickyTasksMain(v => !v)}
-                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
                         style={{ background: stickyTasksMain ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                         aria-pressed={stickyTasksMain}
                       >
@@ -2130,7 +2288,7 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         onClick={() => setStickyAllDayWidget(v => !v)}
-                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
                         style={{ background: stickyAllDayWidget ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                         aria-pressed={stickyAllDayWidget}
                       >
@@ -2151,7 +2309,7 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         onClick={() => setStickyTasksWidget(v => !v)}
-                        className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
                         style={{ background: stickyTasksWidget ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                         aria-pressed={stickyTasksWidget}
                       >
@@ -2183,7 +2341,7 @@ export default function SettingsPage() {
                     <button
                       type="button"
                       onClick={() => setShowTaskRow(v => !v)}
-                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                      className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
                       style={{ background: showTaskRow ? taskColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                       aria-pressed={showTaskRow}
                     >
@@ -2237,7 +2395,7 @@ export default function SettingsPage() {
                         <button
                           key={hex}
                           onClick={() => setTaskColor(hex)}
-                          className="w-8 h-8 rounded-lg transition-transform hover:scale-110"
+                          className={`${isTouch ? 'w-11 h-11' : 'w-8 h-8'} rounded-lg transition-transform hover:scale-110`}
                           style={{
                             background: hex,
                             border: `2px solid ${taskColor.toLowerCase() === hex ? textPrimary : 'transparent'}`,
@@ -2254,7 +2412,7 @@ export default function SettingsPage() {
                           type="color"
                           value={taskColor}
                           onChange={e => setTaskColor(e.target.value)}
-                          className="w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
+                          className="touch-target w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
                         />
                       </label>
                     </div>
@@ -2291,7 +2449,7 @@ export default function SettingsPage() {
                     <button
                       type="button"
                       onClick={openCreateCategory}
-                      className="px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
+                      className="touch-target px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
                       style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
                     >
                       <Plus size={15} />
@@ -2377,7 +2535,7 @@ export default function SettingsPage() {
                               <button
                                 type="button"
                                 onClick={() => openEditCategory(cat)}
-                                className="px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
+                                className="touch-target px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
                                 style={{ borderColor: cardBdr, color: textPrimary }}
                               >
                                 <Edit2 size={11} />
@@ -2390,14 +2548,14 @@ export default function SettingsPage() {
                                   <button
                                     type="button"
                                     onClick={() => handleDeleteCategory(cat.id)}
-                                    className="px-2 h-7 rounded-lg text-[10.5px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30 transition-smooth"
+                                    className="touch-target px-2 h-7 rounded-lg text-[10.5px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30 transition-smooth"
                                   >
                                     Confirm
                                   </button>
                                   <button
                                     type="button"
                                     onClick={() => setDeleteConfirmCatId(null)}
-                                    className="px-1.5 h-7 rounded-lg text-[10.5px] border transition-smooth"
+                                    className="touch-target px-1.5 h-7 rounded-lg text-[10.5px] border transition-smooth"
                                     style={{ borderColor: cardBdr, color: textSecondary }}
                                   >
                                     <X size={12} />
@@ -2408,7 +2566,7 @@ export default function SettingsPage() {
                                   type="button"
                                   onClick={() => setDeleteConfirmCatId(cat.id)}
                                   disabled={categories.length <= 1}
-                                  className="w-7 h-7 rounded-lg border flex items-center justify-center text-xs transition-smooth hover:bg-rose-500/10 hover:text-rose-400 hover:border-rose-500/30 disabled:opacity-20 disabled:cursor-not-allowed"
+                                  className="touch-target w-7 h-7 rounded-lg border flex items-center justify-center text-xs transition-smooth hover:bg-rose-500/10 hover:text-rose-400 hover:border-rose-500/30 disabled:opacity-20 disabled:cursor-not-allowed"
                                   style={{ borderColor: cardBdr, color: textSecondary }}
                                   title="Delete category"
                                 >
@@ -2484,7 +2642,7 @@ export default function SettingsPage() {
                     <button
                       type="button"
                       onClick={handleAddTaskList}
-                      className="px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
+                      className="touch-target px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
                       style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
                     >
                       <Plus size={15} />
@@ -2547,7 +2705,7 @@ export default function SettingsPage() {
                                 type="button"
                                 onClick={() => setDeleteConfirmListId(list.id)}
                                 disabled={isGeneral}
-                                className="w-7 h-7 rounded-lg flex items-center justify-center border transition-smooth active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
+                                className="touch-target w-7 h-7 rounded-lg flex items-center justify-center border transition-smooth active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
                                 style={{ borderColor: cardBdr, color: '#ef4444' }}
                                 title={isGeneral ? 'The default list cannot be deleted' : 'Delete list'}
                               >
@@ -2564,7 +2722,7 @@ export default function SettingsPage() {
                                   key={hex}
                                   type="button"
                                   onClick={() => patchTaskList(list.id, { color: hex })}
-                                  className="w-6 h-6 rounded-full flex items-center justify-center transition-smooth hover:scale-110 active:scale-95"
+                                  className={`${isTouch ? 'w-10 h-10' : 'w-6 h-6'} rounded-full flex items-center justify-center transition-smooth hover:scale-110 active:scale-95`}
                                   style={{ background: hex, border: `2px solid ${selected ? textPrimary : 'transparent'}` }}
                                   title={hex}
                                 >
@@ -2586,7 +2744,7 @@ export default function SettingsPage() {
                                 <button
                                   type="button"
                                   onClick={() => setDeleteConfirmListId(null)}
-                                  className="px-3 h-8 rounded-lg text-[11px] font-semibold border"
+                                  className="touch-target px-3 h-8 rounded-lg text-[11px] font-semibold border"
                                   style={{ borderColor: cardBdr, color: textSecondary }}
                                 >
                                   Cancel
@@ -2594,7 +2752,7 @@ export default function SettingsPage() {
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteTaskList(list.id)}
-                                  className="px-3 h-8 rounded-lg text-[11px] font-bold text-white"
+                                  className="touch-target px-3 h-8 rounded-lg text-[11px] font-bold text-white"
                                   style={{ background: '#ef4444' }}
                                 >
                                   Delete
@@ -2610,17 +2768,85 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                {/* Create / Edit Category Modal */}
+                {/* ── Task Recurrence & Overdue Behavior ─────────────────── */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex items-center gap-2">
+                    <Repeat size={18} style={{ color: accentColor }} />
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Task Recurrence & Overdue Behavior</h2>
+                  </div>
+                  <p className="text-xs -mt-2" style={{ color: textSecondary }}>
+                    Control how repeating tasks behave when scheduled occurrences are missed.
+                  </p>
+
+                  <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)', borderColor: cardBdr }}>
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <span className="text-xs font-semibold block" style={{ color: textPrimary }}>
+                          Roll Overdue Recurring Tasks to Today
+                        </span>
+                        <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
+                          When a recurring task reaches its next scheduled occurrence, remove older missed instances from Overdue and display the task only in Today.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoRollRecurringTasks}
+                        onClick={() => setAutoRollRecurringTasks(v => !v)}
+                        className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                        style={{ background: autoRollRecurringTasks ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                      >
+                        <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: autoRollRecurringTasks ? 22 : 2 }} />
+                      </button>
+                    </div>
+
+                    <div
+                      className="rounded-xl p-3 text-[11px] leading-relaxed border"
+                      style={{
+                        background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+                        borderColor: cardBdr,
+                        color: textSecondary,
+                      }}
+                    >
+                      <strong style={{ color: textPrimary }}>How this works: </strong>
+                      If a task repeats daily and was missed yesterday, it stays in the Overdue section until today arrives. Once today arrives, it automatically clears from Overdue and appears as today's task. For tasks repeating every X days, missed tasks stay overdue until the next occurrence day arrives.
+                    </div>
+                  </div>
+                </div>
+
+                {/* Create / Edit Category Modal.
+
+                    A centred card on a phone leaves its footer buttons under the
+                    keyboard the moment the name field is focused, so on touch it
+                    becomes a bottom sheet: anchored to the bottom, shortened by
+                    whatever the keyboard is eating, scrolling inside itself, and
+                    padded clear of the home bar. */}
                 <AnimatePresence>
                   {(isAddingCategory || !!editingCategory) && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                    <div
+                      className={`fixed inset-0 z-50 flex justify-center bg-black/60 backdrop-blur-sm ${
+                        isPhone ? 'items-end' : 'items-center p-4'
+                      }`}
+                      style={isPhone ? { height: `calc(100% - ${vp.keyboardInset}px)` } : undefined}
+                      // Tapping outside is the gesture a sheet is expected to answer.
+                      onPointerDown={e => { if (isPhone && e.target === e.currentTarget) closeCategoryModal(); }}
+                    >
                       <motion.div
                         initial={{ opacity: 0, scale: 0.95, y: 10 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 10 }}
                         transition={{ duration: 0.18 }}
-                        className="w-full max-w-lg rounded-3xl border shadow-2xl p-5 sm:p-6 flex flex-col gap-5 overflow-y-auto max-h-[90vh]"
-                        style={{ background: activeTheme.cardBg, borderColor: cardBdr }}
+                        className={`w-full max-w-lg border shadow-2xl p-5 sm:p-6 flex flex-col gap-5 overflow-y-auto touch-scroll ${
+                          isPhone ? 'rounded-t-3xl' : 'rounded-3xl max-h-[90vh]'
+                        }`}
+                        style={{
+                          background: activeTheme.cardBg,
+                          borderColor: cardBdr,
+                          ...(isPhone ? {
+                            maxHeight: '100%',
+                            paddingBottom: 'calc(var(--safe-bottom) + 20px)',
+                          } : {}),
+                        }}
                       >
                         {/* Modal Header */}
                         <div className="flex items-center justify-between">
@@ -2640,7 +2866,7 @@ export default function SettingsPage() {
                           <button
                             type="button"
                             onClick={closeCategoryModal}
-                            className="w-7 h-7 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                            className="touch-target w-7 h-7 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 flex-shrink-0"
                             style={{ color: textSecondary }}
                           >
                             <X size={16} />
@@ -2661,7 +2887,9 @@ export default function SettingsPage() {
                               borderColor: cardBdr,
                               color: textPrimary,
                             }}
-                            autoFocus
+                            // Autofocus on a phone opens the keyboard over the
+                            // sheet before you have seen what is in it.
+                            autoFocus={!isTouch}
                           />
                         </div>
 
@@ -2696,7 +2924,7 @@ export default function SettingsPage() {
                                   type="button"
                                   title={pc.label}
                                   onClick={() => setCategoryForm(prev => ({ ...prev, color: pc.hex }))}
-                                  className="h-8 rounded-xl border flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
+                                  className={`${isTouch ? 'h-11' : 'h-8'} rounded-xl border flex items-center justify-center transition-transform hover:scale-105 active:scale-95`}
                                   style={{
                                     backgroundColor: pc.hex,
                                     borderColor: isSelected ? '#ffffff' : 'transparent',
@@ -2716,7 +2944,7 @@ export default function SettingsPage() {
                               type="color"
                               value={categoryForm.color}
                               onChange={e => setCategoryForm(prev => ({ ...prev, color: e.target.value }))}
-                              className="w-8 h-8 rounded-lg cursor-pointer border-0 bg-transparent p-0 flex-shrink-0"
+                              className="touch-target w-8 h-8 rounded-lg cursor-pointer border-0 bg-transparent p-0 flex-shrink-0"
                               title="Pick custom RGB color"
                             />
                             <div className="flex items-center gap-1 flex-1 px-3 py-1.5 rounded-xl border" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff' }}>
@@ -2744,19 +2972,21 @@ export default function SettingsPage() {
                             Default Item Settings
                           </span>
 
-                          {/* Default Duration */}
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
+                          {/* Default Duration — six chips beside a label is
+                              ~270px of unshrinkable row, so on a phone the
+                              chips drop onto their own line and wrap. */}
+                          <div className={`flex gap-3 ${isPhone ? 'flex-col' : 'items-center justify-between'}`}>
+                            <div className="min-w-0">
                               <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Default Duration</span>
                               <span className="text-[11px]" style={{ color: textSecondary }}>Pre-set duration when creating timed items in this category</span>
                             </div>
-                            <div className="flex items-center gap-1 bg-muted/20 p-1 rounded-xl border" style={{ borderColor: cardBdr }}>
+                            <div className="flex items-center gap-1 bg-muted/20 p-1 rounded-xl border flex-wrap" style={{ borderColor: cardBdr }}>
                               {[15, 30, 45, 60, 90, 120].map(dur => (
                                 <button
                                   key={dur}
                                   type="button"
                                   onClick={() => setCategoryForm(prev => ({ ...prev, defaultDurationMin: dur }))}
-                                  className={`px-2 py-1 rounded-lg text-[11px] font-bold tabular-nums transition-smooth ${
+                                  className={`${isTouch ? 'px-3 py-2.5' : 'px-2 py-1'} rounded-lg text-[11px] font-bold tabular-nums transition-smooth ${
                                     categoryForm.defaultDurationMin === dur ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
                                   }`}
                                 >
@@ -2775,7 +3005,7 @@ export default function SettingsPage() {
                             <button
                               type="button"
                               onClick={() => setCategoryForm(prev => ({ ...prev, defaultAllDay: !prev.defaultAllDay }))}
-                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
                               style={{ background: categoryForm.defaultAllDay ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                             >
                               <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.defaultAllDay ? 22 : 2 }} />
@@ -2791,7 +3021,7 @@ export default function SettingsPage() {
                             <button
                               type="button"
                               onClick={() => setCategoryForm(prev => ({ ...prev, defaultNoCheckbox: !prev.defaultNoCheckbox }))}
-                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
                               style={{ background: categoryForm.defaultNoCheckbox ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                             >
                               <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.defaultNoCheckbox ? 22 : 2 }} />
@@ -2807,7 +3037,7 @@ export default function SettingsPage() {
                             <button
                               type="button"
                               onClick={() => setCategoryForm(prev => ({ ...prev, showInWidget: !prev.showInWidget }))}
-                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
                               style={{ background: categoryForm.showInWidget ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                             >
                               <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.showInWidget ? 22 : 2 }} />
@@ -2823,7 +3053,7 @@ export default function SettingsPage() {
                             <button
                               type="button"
                               onClick={() => setCategoryForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
-                              className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
                               style={{ background: categoryForm.isDefault ? '#10b981' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                             >
                               <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.isDefault ? 22 : 2 }} />
@@ -2918,7 +3148,7 @@ export default function SettingsPage() {
                     <button
                       type="button"
                       onClick={() => patchPrayer({ enabled: !prayer.enabled })}
-                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                      className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
                       style={{ background: prayer.enabled ? prayer.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                       aria-pressed={prayer.enabled}
                       title={prayer.enabled ? 'Prayer times are shown' : 'Prayer times are hidden'}
@@ -2970,7 +3200,7 @@ export default function SettingsPage() {
                           value={prayer.method}
                           onChange={e => patchPrayer({ method: Number(e.target.value) })}
                           className="px-3 py-2 rounded-xl border text-xs outline-none"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, ...selectTouch }}
                         >
                           {PRAYER_METHODS.map(m => (
                             <option key={m.id} value={m.id}>{m.label}</option>
@@ -2992,7 +3222,7 @@ export default function SettingsPage() {
                               key={label}
                               type="button"
                               onClick={() => patchPrayer({ school: val })}
-                              className="px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
+                              className="touch-target px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
                               style={{
                                 background: prayer.school === val ? prayer.color : 'transparent',
                                 color: prayer.school === val ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
@@ -3025,7 +3255,7 @@ export default function SettingsPage() {
                                       : [...prayer.hidden, k],
                                   });
                                 }}
-                                className="px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth"
+                                className="touch-target px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth"
                                 style={{
                                   background: on ? prayer.color : 'transparent',
                                   borderColor: on ? prayer.color : cardBdr,
@@ -3074,7 +3304,7 @@ export default function SettingsPage() {
                             <button
                               key={hex}
                               onClick={() => patchPrayer({ color: hex })}
-                              className="w-8 h-8 rounded-lg transition-transform hover:scale-110"
+                              className={`${isTouch ? 'w-11 h-11' : 'w-8 h-8'} rounded-lg transition-transform hover:scale-110`}
                               style={{ background: hex, border: `2px solid ${prayer.color.toLowerCase() === hex ? textPrimary : 'transparent'}` }}
                               title={hex}
                             />
@@ -3085,7 +3315,7 @@ export default function SettingsPage() {
                               type="color"
                               value={prayer.color}
                               onChange={e => patchPrayer({ color: e.target.value })}
-                              className="w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
+                              className="touch-target w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
                             />
                           </label>
                         </div>
@@ -3124,7 +3354,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={() => patchPrayer({ showInWidget: !prayer.showInWidget })}
-                          className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                          className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
                           style={{ background: prayer.showInWidget ? prayer.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                           aria-pressed={prayer.showInWidget}
                         >
@@ -3178,65 +3408,144 @@ export default function SettingsPage() {
                 className="flex flex-col gap-6"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div>
-                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
-                      Focus Audio & Chimes
-                    </h2>
-                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                      Preview and select soothing WebAudio synthesizers for timer events.
-                    </p>
+                  <div className={`flex gap-3 ${isPhone ? 'flex-col items-start' : 'items-center justify-between'}`}>
+                    <div className="min-w-0">
+                      <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                        Focus Audio & Chimes
+                      </h2>
+                      <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                        Preview and select soothing WebAudio synthesizers for timer events.
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setFocusChime(DEFAULT_FOCUS_CHIME);
+                        setFocusCues({ ...DEFAULT_FOCUS_CUES });
+                      }}
+                      className="touch-target flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth flex-shrink-0"
+                      style={{ background: cardBg, borderColor: cardBdr, color: textSecondary }}
+                    >
+                      <RotateCcw size={14} />
+                      <span>Reset Defaults</span>
+                    </button>
                   </div>
 
                   {/* Chime picker */}
                   <div className="flex flex-col gap-3">
-                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>Session-Complete Sound Chime</span>
-                    <div className="flex flex-col gap-2.5">
-                      {FOCUS_CHIMES.map(c => {
-                        const active = focusChime === c.id;
-                        return (
-                          <div
-                            key={c.id}
-                            className="flex items-center justify-between p-3.5 rounded-2xl border transition-smooth"
-                            style={{
-                              background: active ? accentLight : 'transparent',
-                              borderColor: active ? accentColor : cardBdr,
-                            }}
-                          >
-                            <div className="flex items-center gap-3">
-                              <button
-                                onClick={() => playFocusChime(c.id)}
-                                className="p-2.5 rounded-xl border transition-smooth hover:scale-105"
-                                style={{ background: cardBg, borderColor: cardBdr, color: accentColor }}
-                                title="Click to preview chime"
-                              >
-                                <Volume2 size={16} />
-                              </button>
-                              <div>
-                                <span className="text-xs font-bold block" style={{ color: active ? accentColor : textPrimary }}>
-                                  {c.label}
-                                </span>
-                                <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
-                                  {c.hint}
-                                </span>
-                              </div>
-                            </div>
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                      <div>
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Session-Complete Sound Chime</span>
+                        <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                          Procedurally synthesized WebAudio soundscapes — zero lag, zero files to download.
+                        </p>
+                      </div>
 
+                      {/* Category Filter Pills */}
+                      <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                        {([
+                          { id: 'all', label: 'All', count: FOCUS_CHIMES.length },
+                          { id: 'meditative', label: 'Meditative', count: FOCUS_CHIMES.filter(c => c.category === 'meditative').length },
+                          { id: 'acoustic', label: 'Acoustic', count: FOCUS_CHIMES.filter(c => c.category === 'acoustic').length },
+                          { id: 'celestial', label: 'Celestial', count: FOCUS_CHIMES.filter(c => c.category === 'celestial').length },
+                          { id: 'ambient', label: 'Ambient', count: FOCUS_CHIMES.filter(c => c.category === 'ambient').length },
+                        ] as { id: 'all' | FocusChimeCategory; label: string; count: number }[]).map(cat => {
+                          const active = chimeCategory === cat.id;
+                          return (
                             <button
-                              onClick={() => {
-                                setFocusChime(c.id);
-                                playFocusChime(c.id);
-                              }}
-                              className="px-4 py-2 rounded-xl text-xs font-semibold transition-smooth"
+                              key={cat.id}
+                              type="button"
+                              onClick={() => setChimeCategory(cat.id)}
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all duration-150 flex items-center gap-1"
                               style={{
-                                background: active ? accentColor : (darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'),
-                                color: active ? '#ffffff' : textPrimary,
+                                background: active ? (darkMode ? 'rgba(255,255,255,0.12)' : '#ffffff') : 'transparent',
+                                color: active ? textPrimary : textSecondary,
+                                boxShadow: active ? '0 1px 3px rgba(0,0,0,0.12)' : 'none',
                               }}
                             >
-                              {active ? 'Selected' : 'Select'}
+                              <span>{cat.label}</span>
+                              <span className="text-[9.5px] opacity-60 font-mono">({cat.count})</span>
                             </button>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2.5">
+                      {FOCUS_CHIMES
+                        .filter(c => chimeCategory === 'all' || c.category === chimeCategory)
+                        .map(c => {
+                          const active = focusChime === c.id;
+                          const isPreviewing = previewingChimeId === c.id;
+                          return (
+                            <div
+                              key={c.id}
+                              className="flex items-center justify-between p-3.5 rounded-2xl border transition-smooth"
+                              style={{
+                                background: active ? accentLight : 'transparent',
+                                borderColor: active ? accentColor : cardBdr,
+                              }}
+                            >
+                              <div className="flex items-center gap-3 min-w-0 pr-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPreviewingChimeId(c.id);
+                                    playFocusChime(c.id);
+                                    setTimeout(() => setPreviewingChimeId(prev => prev === c.id ? null : prev), 1800);
+                                  }}
+                                  className={`touch-target p-2.5 rounded-xl border transition-all duration-200 flex-shrink-0 ${
+                                    isPreviewing ? 'scale-110 ring-2 ring-blue-400 ring-offset-1' : 'hover:scale-105'
+                                  }`}
+                                  style={{
+                                    background: isPreviewing ? accentColor : cardBg,
+                                    borderColor: cardBdr,
+                                    color: isPreviewing ? '#ffffff' : accentColor,
+                                  }}
+                                  title="Click to preview chime"
+                                >
+                                  <Volume2 size={16} className={isPreviewing ? 'animate-pulse' : ''} />
+                                </button>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs font-bold" style={{ color: active ? accentColor : textPrimary }}>
+                                      {c.label}
+                                    </span>
+                                    <span
+                                      className="text-[9.5px] font-semibold px-2 py-0.5 rounded-md uppercase tracking-wider"
+                                      style={{
+                                        background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+                                        color: textSecondary,
+                                      }}
+                                    >
+                                      {c.category}
+                                    </span>
+                                  </div>
+                                  <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
+                                    {c.hint}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFocusChime(c.id);
+                                  setPreviewingChimeId(c.id);
+                                  playFocusChime(c.id);
+                                  setTimeout(() => setPreviewingChimeId(prev => prev === c.id ? null : prev), 1800);
+                                }}
+                                className="touch-target px-4 py-2 rounded-xl text-xs font-semibold transition-smooth flex-shrink-0"
+                                style={{
+                                  background: active ? accentColor : (darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'),
+                                  color: active ? '#ffffff' : textPrimary,
+                                }}
+                              >
+                                {active ? 'Selected' : 'Select'}
+                              </button>
+                            </div>
+                          );
+                        })}
                     </div>
                   </div>
 
@@ -3260,7 +3569,7 @@ export default function SettingsPage() {
                                   setFocusCues(prev => ({ ...prev, [slot]: c.id }));
                                   playFocusCue(c.id);
                                 }}
-                                className="px-3 py-1.5 rounded-xl text-xs font-semibold transition-smooth"
+                                className="touch-target px-3 py-1.5 rounded-xl text-xs font-semibold transition-smooth"
                                 style={{
                                   background: active ? accentColor : cardBg,
                                   border: `1px solid ${active ? accentColor : cardBdr}`,
@@ -3290,8 +3599,8 @@ export default function SettingsPage() {
                 className="flex flex-col gap-6"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div className="flex items-center justify-between">
-                    <div>
+                  <div className={`flex gap-3 ${isPhone ? 'flex-col items-start' : 'items-center justify-between'}`}>
+                    <div className="min-w-0">
                       <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
                         Keyboard Shortcuts
                       </h2>
@@ -3302,13 +3611,26 @@ export default function SettingsPage() {
 
                     <button
                       onClick={() => setShortcuts({ ...DEFAULT_SHORTCUTS })}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth"
+                      className="touch-target flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-smooth flex-shrink-0"
                       style={{ background: cardBg, borderColor: cardBdr, color: textSecondary }}
                     >
                       <RotateCcw size={14} />
                       <span>Reset Defaults</span>
                     </button>
                   </div>
+
+                  {/* Rebinding needs keys to press. A phone has none, so the
+                      boxes below can be read but never changed — say so rather
+                      than leaving taps that appear to do nothing. */}
+                  {isTouch && (
+                    <p
+                      className="text-[11px] leading-snug p-3 rounded-xl border"
+                      style={{ color: textSecondary, borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}
+                    >
+                      These are shown for reference only on a touch device — rebinding needs a physical
+                      keyboard. Open Settings on the PC to change them; the bindings are shared.
+                    </p>
+                  )}
 
                   {(['Navigation', 'View', 'Editing', 'Focus'] as const).map(group => (
                     <div key={group} className="flex flex-col gap-3">
@@ -3394,7 +3716,7 @@ export default function SettingsPage() {
                         role="switch"
                         aria-checked={autoBackup.enabled}
                         onClick={() => setAutoBackup(c => ({ ...c, enabled: !c.enabled }))}
-                        className="relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
+                        className="touch-target relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
                         style={{ background: autoBackup.enabled ? '#10b981' : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)') }}
                       >
                         <span
@@ -3412,7 +3734,7 @@ export default function SettingsPage() {
                           onChange={e => setAutoBackup(c => ({ ...c, intervalHours: parseInt(e.target.value) }))}
                           disabled={!autoBackup.enabled}
                           className="w-full py-2 px-3 text-xs font-semibold rounded-xl border outline-none"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, opacity: autoBackup.enabled ? 1 : 0.4 }}
+                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, opacity: autoBackup.enabled ? 1 : 0.4, ...selectTouch }}
                         >
                           {[[1, 'Every Hour'], [3, 'Every 3 Hours'], [6, 'Every 6 Hours'], [12, 'Every 12 Hours'], [24, 'Daily'], [168, 'Weekly']].map(([h, label]) => (
                             <option key={h as number} value={h as number}>{label as string}</option>
@@ -3438,7 +3760,7 @@ export default function SettingsPage() {
 
                     <div className="flex items-center justify-between pt-2">
                       <span className="text-[11px]" style={{ color: textSecondary }}>
-                        {backupStatus ? `${backupStatus.count} backups stored in /backups folder` : 'No backup status'}
+                        {backupStatus ? `${backupStatus.count} backups stored in database/users/${user?.username || 'user'}/backups` : 'Loading backup status...'}
                       </span>
                       <button
                         onClick={runBackupNow}
@@ -3497,7 +3819,7 @@ export default function SettingsPage() {
                     <button
                       type="button"
                       onClick={() => patchHardware({ enabled: !hardware.enabled })}
-                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                      className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
                       style={{ background: hardware.enabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                       aria-pressed={hardware.enabled}
                       title={hardware.enabled ? 'The desk controller is active' : 'The desk controller is ignored'}
@@ -3520,7 +3842,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={() => patchHardware({ buttonsEnabled: !hardware.buttonsEnabled })}
-                          className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                          className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
                           style={{ background: hardware.buttonsEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                           aria-pressed={hardware.buttonsEnabled}
                         >
@@ -3539,7 +3861,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={() => patchHardware({ sensorEnabled: !hardware.sensorEnabled })}
-                          className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-4"
+                          className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-4"
                           style={{ background: hardware.sensorEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                           aria-pressed={hardware.sensorEnabled}
                         >
@@ -3582,7 +3904,7 @@ export default function SettingsPage() {
                             <button
                               type="button"
                               onClick={() => patchHardware({ awayPauseEnabled: !hardware.awayPauseEnabled })}
-                              className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                              className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
                               style={{ background: hardware.awayPauseEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                               aria-pressed={hardware.awayPauseEnabled}
                             >
@@ -3605,7 +3927,7 @@ export default function SettingsPage() {
                               <button
                                 type="button"
                                 onClick={() => patchHardware({ autoRestartEnabled: !hardware.autoRestartEnabled })}
-                                className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                                className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
                                 style={{ background: hardware.autoRestartEnabled ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                                 aria-pressed={hardware.autoRestartEnabled}
                               >
@@ -3649,7 +3971,7 @@ export default function SettingsPage() {
                             <button
                               type="button"
                               onClick={() => patchHardware({ announceOnConnect: !hardware.announceOnConnect })}
-                              className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                              className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
                               style={{ background: hardware.announceOnConnect ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
                               aria-pressed={hardware.announceOnConnect}
                             >
@@ -3736,22 +4058,23 @@ export default function SettingsPage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <label className="flex flex-col gap-1">
-                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Median window size</span>
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Analysis window (ms)</span>
                             <NumberField
-                              min={1} max={MEDIAN_WINDOW_MAX} step={2} oddOnly
-                              value={hardware.medianWindow}
-                              onCommit={n => patchHardware({ medianWindow: n })}
-                              ariaLabel="Median window size"
+                              min={200} max={10000} step={100}
+                              value={hardware.clusterWindowMs}
+                              onCommit={n => patchHardware({ clusterWindowMs: n })}
+                              ariaLabel="Analysis window, ms"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
                             <span className="text-[10px]" style={{ color: textSecondary }}>
-                              The board takes the <span style={{ color: textPrimary }}>median</span> (middle value) of
-                              the last N readings, not the average — a wild reading sorts to an end and is discarded
-                              outright, where an average would let it drag the result. At {hardware.medianWindow},
-                              up to {Math.floor(hardware.medianWindow / 2)} bad reading
-                              {Math.floor(hardware.medianWindow / 2) === 1 ? '' : 's'} in every {hardware.medianWindow} are
-                              ignored. Odd numbers only, max {MEDIAN_WINDOW_MAX}.
+                              Every decision is made on the readings from the last{' '}
+                              {(hardware.clusterWindowMs / 1000).toFixed(1)}s — roughly{' '}
+                              {Math.max(1, Math.round(hardware.clusterWindowMs / hardware.sampleIntervalMs))} of them.
+                              The believed distance is the middle of the <span style={{ color: textPrimary }}>largest
+                              group that agree with each other</span>, not the average and not the middle value: a
+                              cluster keeps describing the real target even when corrupt readings outnumber it, which
+                              is exactly what happens when something blocks part of the sensor.
                             </span>
                           </label>
                           <label className="flex flex-col gap-1">
@@ -3764,6 +4087,44 @@ export default function SettingsPage() {
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
+                            <span className="text-[10px]" style={{ color: textSecondary }}>
+                              The only thing the board still decides for itself. Everything else on this page is
+                              worked out on the PC from the raw numbers it sends.
+                            </span>
+                          </label>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Readings agree within (cm)</span>
+                            <NumberField
+                              min={1} max={100} step={1}
+                              value={hardware.clusterTolCm}
+                              onCommit={n => patchHardware({ clusterTolCm: n })}
+                              ariaLabel="Readings agree within, cm"
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                            <span className="text-[10px]" style={{ color: textSecondary }}>
+                              Two readings this close are taken to be measuring the same thing. Widen it if you fidget
+                              a lot; narrow it if you and the empty chair read almost the same.
+                            </span>
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Spread that means chaos (cm)</span>
+                            <NumberField
+                              min={5} max={400} step={5}
+                              value={hardware.chaosSpreadCm}
+                              onCommit={n => patchHardware({ chaosSpreadCm: n })}
+                              ariaLabel="Chaotic spread, cm"
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                            <span className="text-[10px]" style={{ color: textSecondary }}>
+                              When the readings are spread wider than this they are not describing one object, so no
+                              departure is read out of them. Leaving a desk produces a <em>quiet</em> signal; a sensor
+                              being interfered with produces a loud one.
+                            </span>
                           </label>
                         </div>
 
@@ -3792,20 +4153,57 @@ export default function SettingsPage() {
                           </label>
                         </div>
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
-                          A state has to hold this long before it is believed. Leaving is usually given the longer
-                          fuse, so briefly leaning out of the beam does not read as walking away.
+                          A state has to hold this long before it is believed. Arriving is trusted quickly — a sensor
+                          with nothing in front of it cannot invent a close reading — while leaving is only ever a
+                          theory that has to survive the longer fuse, and any close reading at all resets it.
+                        </p>
+
+                        {/* Implausible recessions — the partly-blocked-sensor guard */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Impossible jump (cm)</span>
+                            <NumberField
+                              min={2} max={200} step={1}
+                              value={hardware.rampStepCm}
+                              onCommit={n => patchHardware({ rampStepCm: n })}
+                              ariaLabel="Impossible jump, cm"
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>…this many in a row</span>
+                            <NumberField
+                              min={2} max={10} step={1}
+                              value={hardware.rampMinSteps}
+                              onCommit={n => patchHardware({ rampMinSteps: n })}
+                              ariaLabel="Jumps in a row"
+                              className="px-3 py-2 rounded-xl border text-xs outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                          </label>
+                        </div>
+                        <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
+                          This is what stops a partly blocked sensor from evicting you. Rest a foot against half the
+                          transducer and the echo path lengthens instead of vanishing, so a seated 30cm walks up
+                          through 80 and 120 before finally timing out — and every one of those numbers looks like an
+                          ordinary empty chair. {hardware.rampMinSteps} jumps of {hardware.rampStepCm}cm or more in a
+                          row is a target receding at metres per second, which nothing sitting at a desk can do, so
+                          the readings spanning the jump are <span style={{ color: textPrimary }}>thrown out
+                          entirely</span> until the signal settles again. Only where it settles is allowed to mean
+                          anything, and a real departure settles on the empty chair within a second.
                         </p>
 
                         <div className={`grid gap-3 ${hardware.glitchIgnoreAlways ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
                           <div className="flex flex-col gap-1">
                             <div className="flex items-center justify-between gap-2 h-6">
-                              <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Ignore readings beyond (cm)</span>
+                              <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Implausible beyond (cm)</span>
                               <div
                                 onClick={() => patchHardware({ glitchIgnoreAlways: !hardware.glitchIgnoreAlways })}
                                 className="flex items-center gap-1.5 cursor-pointer select-none"
-                                title="Always discard readings beyond this limit"
+                                title="Readings beyond this may never prove you left"
                               >
-                                <span className="text-[10px]" style={{ color: textSecondary }}>Always discard</span>
+                                <span className="text-[10px]" style={{ color: textSecondary }}>Never counts as away</span>
                                 <button
                                   type="button"
                                   className="relative w-9 h-5 rounded-full transition-colors flex-shrink-0 pointer-events-none"
@@ -3823,7 +4221,8 @@ export default function SettingsPage() {
                               min={20} max={400} step={5}
                               value={hardware.maxValidCm}
                               onCommit={n => patchHardware({ maxValidCm: n })}
-                              ariaLabel="Ignore readings beyond, cm"
+                              validateExtra={n => (n <= hardware.exitCm ? `Must stay above the away distance (${hardware.exitCm})` : null)}
+                              ariaLabel="Implausible beyond, cm"
                               className="px-3 py-2 rounded-xl border text-xs outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
@@ -3832,13 +4231,13 @@ export default function SettingsPage() {
                           {!hardware.glitchIgnoreAlways && (
                             <div className="flex flex-col gap-1">
                               <div className="flex items-center gap-2 h-6">
-                                <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>…unless they persist for (ms)</span>
+                                <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>…unless they hold for (ms)</span>
                               </div>
                               <NumberField
-                                min={0} max={60000} step={500}
+                                min={0} max={120000} step={500}
                                 value={hardware.glitchHoldMs}
                                 onCommit={n => patchHardware({ glitchHoldMs: n })}
-                                ariaLabel="Persist for, ms"
+                                ariaLabel="Over-range hold, ms"
                                 className="px-3 py-2 rounded-xl border text-xs outline-none"
                                 style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                               />
@@ -3846,20 +4245,43 @@ export default function SettingsPage() {
                           )}
                         </div>
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
+                          Leaving is proved in two tiers. Landing on a distance this desk can actually produce — the
+                          empty chair, anything up to {hardware.maxValidCm}cm — counts after the{' '}
+                          {(hardware.absentConfirmMs / 1000).toFixed(0)}s above. Going past {hardware.maxValidCm}cm is
+                          the module&rsquo;s known failure mode rather than a real distance, so{' '}
                           {hardware.glitchIgnoreAlways ? (
                             <>
-                              Cheap ultrasonic modules sometimes spray maximum-range values for a second or two. With always discard enabled,
-                              readings beyond {hardware.maxValidCm}cm are dropped outright and will never be accepted regardless of how long they persist.
+                              it <span style={{ color: textPrimary }}>never proves you left at all</span>. That is the
+                              right setting whenever your empty desk reads inside {hardware.maxValidCm}cm, because
+                              then a timeout can only ever be a fault. Leaving is still detected normally, off the
+                              empty chair.
                             </>
                           ) : (
                             <>
-                              Cheap ultrasonic modules sometimes spray maximum-range values for a second or two. Those are
-                              dropped outright, so a burst cannot disturb a running session. They cannot be ignored
-                              forever though — an empty desk with nothing in the beam reads exactly the same — so a run
-                              lasting longer than {(hardware.glitchHoldMs / 1000).toFixed(0)}s is taken at face value.
+                              it has to hold unbroken for{' '}
+                              {(Math.max(hardware.absentConfirmMs, hardware.glitchHoldMs) / 1000).toFixed(0)}s first,
+                              and a single close reading resets that clock from scratch.
                             </>
                           )}
                         </p>
+
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[11px] font-semibold" style={{ color: textPrimary }}>Give up after (ms)</span>
+                          <NumberField
+                            min={0} max={600000} step={5000}
+                            value={hardware.chaosMaxMs}
+                            onCommit={n => patchHardware({ chaosMaxMs: n })}
+                            ariaLabel="Give up after, ms"
+                            className="w-32 px-3 py-2 rounded-xl border text-xs outline-none"
+                            style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                          />
+                          <span className="text-[10px]" style={{ color: textSecondary }}>
+                            Every protection above refuses to call you away while the signal is nonsense, which on its
+                            own would hold a session open forever against a sensor that has genuinely stopped working.
+                            After {(hardware.chaosMaxMs / 1000).toFixed(0)}s of far-but-incoherent readings with not
+                            one close reading among them, it stops arguing and calls it away. 0 disables it.
+                          </span>
+                        </div>
                       </div>
 
                       <div className="pt-4 border-t flex items-center justify-between gap-4" style={{ borderColor: cardBdr }}>
@@ -3869,7 +4291,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={() => setHardware(DEFAULT_HARDWARE_SETTINGS)}
-                          className="px-3 py-2 rounded-xl border text-xs whitespace-nowrap"
+                          className="touch-target px-3 py-2 rounded-xl border text-xs whitespace-nowrap"
                           style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                         >
                           Reset to defaults
@@ -3891,391 +4313,650 @@ export default function SettingsPage() {
                 transition={{ duration: 0.18 }}
                 className="flex flex-col gap-6"
               >
-                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div>
-                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
-                      Google Calendar Integration
-                    </h2>
-                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                      Sync your events bidirectionally with Google Calendar.
-                    </p>
-                  </div>
+                {/* Unified Master Google Integration Hero Card */}
+                <div
+                  className="p-5 sm:p-7 rounded-3xl border shadow-sm flex flex-col gap-6 relative overflow-hidden transition-all duration-300"
+                  style={{
+                    background: cardBg,
+                    borderColor: googleSyncEnabled ? (darkMode ? 'rgba(59, 130, 246, 0.4)' : 'rgba(59, 130, 246, 0.3)') : cardBdr,
+                  }}
+                >
+                  {/* Subtle ambient glow when enabled */}
+                  {googleSyncEnabled && (
+                    <div
+                      className="absolute -top-24 -right-24 w-64 h-64 rounded-full pointer-events-none blur-3xl opacity-15"
+                      style={{ background: '#3b82f6' }}
+                    />
+                  )}
 
-                  {/* Master Enable/Disable Toggle */}
-                  <div className="p-4 rounded-2xl border flex items-center justify-between gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
-                    <div className="min-w-0 flex-1">
-                      <span className="text-xs font-bold block" style={{ color: textPrimary }}>
-                        Master Google Synchronization
-                      </span>
-                      <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
-                        {googleSyncEnabled
-                          ? 'Google sync is enabled. The app will sync with Google Calendar & Tasks when connected.'
-                          : 'Google sync is completely DISABLED. The app runs offline without contacting Google or showing warnings.'}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={googleSyncEnabled}
-                      onClick={() => setGoogleSyncEnabled(v => !v)}
-                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                      style={{ background: googleSyncEnabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)') }}
-                    >
-                      <span className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-200" style={{ transform: googleSyncEnabled ? 'translateX(20px)' : 'translateX(0px)' }} />
-                    </button>
-                  </div>
-
-                  <div className="p-4 rounded-2xl border flex flex-col gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-500">
-                          <Link2 size={20} />
-                        </div>
-                        <div>
-                          <span className="text-xs font-bold block" style={{ color: textPrimary }}>
-                            {gCalStatus.authenticated ? 'Connected to Google' : gCalStatus.configured ? 'OAuth Client Configured' : 'Not Connected'}
-                          </span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
-                            {gCalStatus.email || 'Configure your Client ID & Secret to authorize Google Calendar.'}
-                          </span>
-                        </div>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-start sm:items-center gap-3.5">
+                      <div
+                        className="p-3 rounded-2xl flex-shrink-0 transition-colors"
+                        style={{
+                          background: googleSyncEnabled
+                            ? (darkMode ? 'rgba(59, 130, 246, 0.18)' : 'rgba(59, 130, 246, 0.12)')
+                            : (darkMode ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)'),
+                          color: googleSyncEnabled ? '#3b82f6' : textSecondary,
+                        }}
+                      >
+                        {googleSyncEnabled ? <Link2 size={24} /> : <Link2Off size={24} />}
                       </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2.5 h-2.5 rounded-full ${gCalStatus.authenticated ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h2 className="text-base font-bold tracking-tight" style={{ color: textPrimary }}>
+                            Google Workspace & Calendar Integration
+                          </h2>
+                          <span
+                            className={`px-2 py-0.5 text-[10px] font-bold rounded-full uppercase tracking-wider ${
+                              googleSyncEnabled
+                                ? (gCalStatus.authenticated
+                                    ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                                    : 'bg-blue-500/15 text-blue-500 border border-blue-500/30')
+                                : 'bg-slate-500/15 text-slate-400 border border-slate-500/20'
+                            }`}
+                          >
+                            {googleSyncEnabled ? (gCalStatus.authenticated ? 'Active • Connected' : 'Enabled') : 'Disabled'}
+                          </span>
+                        </div>
+                        <p className="text-xs mt-1 leading-relaxed" style={{ color: textSecondary }}>
+                          Synchronize events, schedule, and daily tasks bidirectionally with Google Calendar and Google Tasks.
+                        </p>
                       </div>
                     </div>
 
-                    {!gCalStatus.configured ? (
-                      <div className="flex flex-col gap-3 pt-3 border-t" style={{ borderColor: cardBdr }}>
-                        <input
-                          type="text"
-                          placeholder="Client ID"
-                          value={clientIdInput}
-                          onChange={e => setClientIdInput(e.target.value)}
-                          className="w-full py-2 px-3 text-xs rounded-xl border outline-none"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
-                        />
-                        <input
-                          type="password"
-                          placeholder="Client Secret"
-                          value={clientSecretInput}
-                          onChange={e => setClientSecretInput(e.target.value)}
-                          className="w-full py-2 px-3 text-xs rounded-xl border outline-none"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
-                        />
-                        <button
-                          onClick={() => {
-                            if (!clientIdInput || !clientSecretInput) return;
-                            fetch('/api/google-auth/setup', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ clientId: clientIdInput, clientSecret: clientSecretInput, autoSync: true }),
-                            })
-                              .then(r => r.json())
-                              .then(res => {
-                                if (res.success) {
-                                  setGCalStatus(prev => ({ ...prev, configured: true, autoSync: true }));
-                                  showToast('Credentials saved successfully!', 'success');
-                                }
-                              });
-                          }}
-                          disabled={!clientIdInput || !clientSecretInput}
-                          className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+                    {/* Big Unified On/Off Switch Button */}
+                    <div className="flex items-center gap-3 self-start sm:self-center">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={googleSyncEnabled}
+                        onClick={() => setGoogleSyncEnabled(v => !v)}
+                        className="flex items-center gap-3 px-4 py-2.5 rounded-2xl border transition-all duration-200 cursor-pointer select-none group"
+                        style={{
+                          background: googleSyncEnabled
+                            ? (darkMode ? 'rgba(59, 130, 246, 0.15)' : 'rgba(59, 130, 246, 0.08)')
+                            : (darkMode ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.03)'),
+                          borderColor: googleSyncEnabled
+                            ? '#3b82f6'
+                            : (darkMode ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.12)'),
+                        }}
+                      >
+                        <span
+                          className="text-xs font-bold tracking-tight transition-colors"
+                          style={{ color: googleSyncEnabled ? '#3b82f6' : textSecondary }}
                         >
-                          Save OAuth Credentials
-                        </button>
+                          {googleSyncEnabled ? 'Turn OFF' : 'Turn ON'}
+                        </span>
+                        <div
+                          className="relative w-12 h-6 rounded-full transition-colors flex-shrink-0"
+                          style={{
+                            background: googleSyncEnabled
+                              ? accentColor
+                              : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                          }}
+                        >
+                          <span
+                            className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-transform duration-200"
+                            style={{
+                              transform: googleSyncEnabled ? 'translateX(26px)' : 'translateX(2px)',
+                            }}
+                          />
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Informational Banner */}
+                  {!googleSyncEnabled ? (
+                    <div
+                      className="p-4 rounded-2xl border flex items-start gap-3.5"
+                      style={{
+                        background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+                        borderColor: cardBdr,
+                      }}
+                    >
+                      <ShieldCheck size={18} className="text-emerald-500 flex-shrink-0 mt-0.5" />
+                      <div className="flex flex-col gap-1">
+                        <span className="text-xs font-bold" style={{ color: textPrimary }}>
+                          100% Offline & Private Mode
+                        </span>
+                        <span className="text-xs leading-relaxed" style={{ color: textSecondary }}>
+                          Google synchronization is completely turned off. All your calendar events and tasks remain local, private, and secure on this device. No network calls are made to Google, and no authentication warnings will be displayed.
+                        </span>
                       </div>
-                    ) : (
-                      <div className="flex flex-col gap-3 pt-3 border-t" style={{ borderColor: cardBdr }}>
-                        {!gCalStatus.authenticated ? (
-                          <>
-                            <RedirectUriHelp
-                              textPrimary={textPrimary}
-                              textSecondary={textSecondary}
-                              cardBdr={cardBdr}
-                              darkMode={darkMode}
-                              onCopied={() => showToast('Redirect URI copied.', 'success')}
+                    </div>
+                  ) : (
+                    <div
+                      className="p-4 rounded-2xl border flex items-start gap-3.5"
+                      style={{
+                        background: darkMode ? 'rgba(59,130,246,0.04)' : 'rgba(59,130,246,0.03)',
+                        borderColor: darkMode ? 'rgba(59,130,246,0.2)' : 'rgba(59,130,246,0.15)',
+                      }}
+                    >
+                      <Zap size={18} className="text-blue-500 flex-shrink-0 mt-0.5" />
+                      <div className="flex flex-col gap-1">
+                        <span className="text-xs font-bold" style={{ color: textPrimary }}>
+                          Google Synchronization Active
+                        </span>
+                        <span className="text-xs leading-relaxed" style={{ color: textSecondary }}>
+                          The app is configured to communicate with Google Calendar and Google Tasks using your authorized settings below.
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Sub-sections are only shown when googleSyncEnabled is TRUE */}
+                {googleSyncEnabled && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0, y: -6 }}
+                    animate={{ opacity: 1, height: 'auto', y: 0 }}
+                    exit={{ opacity: 0, height: 0, y: -6 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex flex-col gap-6"
+                  >
+                    {/* 1. Account & Connection Status Card */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div>
+                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                          Account & OAuth Authorization
+                        </h2>
+                        <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                          Connect your Google account and manage credentials.
+                        </p>
+                      </div>
+
+                      <div className="p-4 rounded-2xl border flex flex-col gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-500">
+                              <Link2 size={20} />
+                            </div>
+                            <div>
+                              <span className="text-xs font-bold block" style={{ color: textPrimary }}>
+                                {gCalStatus.authenticated ? 'Connected to Google' : gCalStatus.configured ? 'OAuth Client Configured' : 'Not Connected'}
+                              </span>
+                              <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                                {gCalStatus.email || 'Configure your Client ID & Secret to authorize Google Calendar.'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className={`w-2.5 h-2.5 rounded-full ${gCalStatus.authenticated ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                          </div>
+                        </div>
+
+                        {!gCalStatus.configured ? (
+                          <div className="flex flex-col gap-3 pt-3 border-t" style={{ borderColor: cardBdr }}>
+                            <input
+                              type="text"
+                              placeholder="Client ID"
+                              value={clientIdInput}
+                              onChange={e => setClientIdInput(e.target.value)}
+                              className="w-full py-2 px-3 text-xs rounded-xl border outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
+                            <input
+                              type="password"
+                              placeholder="Client Secret"
+                              value={clientSecretInput}
+                              onChange={e => setClientSecretInput(e.target.value)}
+                              className="w-full py-2 px-3 text-xs rounded-xl border outline-none"
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
+                            />
+                            <button
+                              onClick={() => {
+                                if (!clientIdInput || !clientSecretInput) return;
+                                fetch('/api/google-auth/setup', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ clientId: clientIdInput, clientSecret: clientSecretInput, autoSync: true }),
+                                })
+                                  .then(r => r.json())
+                                  .then(res => {
+                                    if (res.success) {
+                                      setGCalStatus(prev => ({ ...prev, configured: true, autoSync: true }));
+                                      showToast('Credentials saved successfully!', 'success');
+                                    }
+                                  });
+                              }}
+                              disabled={!clientIdInput || !clientSecretInput}
+                              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              Save OAuth Credentials
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-3 pt-3 border-t" style={{ borderColor: cardBdr }}>
+                            {!gCalStatus.authenticated ? (
+                              <>
+                                <RedirectUriHelp
+                                  textPrimary={textPrimary}
+                                  textSecondary={textSecondary}
+                                  cardBdr={cardBdr}
+                                  darkMode={darkMode}
+                                  onCopied={() => showToast('Redirect URI copied.', 'success')}
+                                />
+                                <button
+                                  onClick={() => {
+                                    const redirectUri = window.location.origin;
+                                    fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
+                                      .then(r => r.json())
+                                      .then(res => {
+                                        if (res.url) {
+                                          window.location.href = res.url;
+                                        } else {
+                                          showToast(res.error || 'Could not build the Google sign-in link.', 'error');
+                                        }
+                                      })
+                                      .catch(() => showToast("Couldn't reach the server to start sign-in.", 'error'));
+                                  }}
+                                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700"
+                                >
+                                  Link Google Account
+                                </button>
+                              </>
+                            ) : (
+                              <div className="flex items-center justify-between gap-3">
+                                <button
+                                  onClick={triggerGCalSync}
+                                  disabled={gCalSyncing}
+                                  className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                                >
+                                  <RefreshCw size={14} className={gCalSyncing ? 'animate-spin' : ''} />
+                                  <span>{gCalSyncing ? 'Syncing...' : 'Sync Now'}</span>
+                                </button>
+
+                                <button
+                                  onClick={() => {
+                                    fetch('/api/google-auth/disconnect', { method: 'POST' })
+                                      .then(r => r.json())
+                                      .then(res => {
+                                        if (res.success) {
+                                          setGCalStatus({ configured: false, authenticated: false, autoSync: false });
+                                          showToast('Google Account disconnected.', 'info');
+                                        }
+                                      });
+                                  }}
+                                  className="px-4 py-2.5 rounded-xl text-xs font-bold transition-smooth border text-red-400 border-red-500/20 hover:bg-red-500/10"
+                                >
+                                  Disconnect
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* 2. Google Sync Policy & Modification Rules */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div>
+                        <h2 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
+                          <ShieldCheck size={16} className="text-blue-500" />
+                          Google Sync Policy & Modification Rules
+                        </h2>
+                        <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                          Configure direction, target calendars, and authority permissions between Google Calendar and this planner.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-col gap-4">
+                        {/* Section A: App -> Google (Push) */}
+                        <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-blue-500">App → Google (Push Controls)</span>
+                          
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Push local events to Google Calendar</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Create and update events on Google when authored in the planner</span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalPushEnabled}
+                              onClick={() => setGcalPushEnabled(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalPushEnabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPushEnabled ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {/* The option labels are long enough that a non-shrinking
+                              select pushes this row off a 390px screen — on a phone
+                              it takes its own full-width line. */}
+                          <div className={`flex gap-3 pt-2 border-t ${isPhone ? 'flex-col' : 'items-center justify-between'}`} style={{ borderColor: cardBdr }}>
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Google Calendar Destination</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Where newly created app events land on Google Calendar</span>
+                            </div>
+                            <select
+                              value={gcalPushTarget}
+                              onChange={e => setGcalPushTarget(e.target.value as 'daily' | 'primary')}
+                              className={`py-1.5 px-3 text-xs font-semibold rounded-xl border outline-none cursor-pointer ${isPhone ? 'w-full min-w-0' : 'flex-shrink-0'}`}
+                              style={{ background: cardBg, borderColor: cardBdr, color: textPrimary, ...selectTouch }}
+                            >
+                              <option value="daily">Daily Calendar (Isolated & Recommended)</option>
+                              <option value="primary">Primary Google Calendar</option>
+                            </select>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow updating external Google Calendar events</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Local edits to external Google Calendar cards will push back to their original calendar</span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalPushOtherCalendars}
+                              onClick={() => setGcalPushOtherCalendars(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalPushOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Section B: Google -> App (Pull & Protection Rules) */}
+                        <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-500">Google → App (Pull & Protection Rules)</span>
+                          
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow Google edits to modify Daily Calendar app items</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
+                                {gcalPullDailyEdits ? 'Google Calendar changes will overwrite local app items' : 'OFF (Recommended): App is sole source of truth; Google edits cannot touch local items'}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalPullDailyEdits}
+                              onClick={() => setGcalPullDailyEdits(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalPullDailyEdits ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import raw new events from Google Daily Calendar</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Import new items created directly on Google Calendar into the planner</span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalPullDailyNew}
+                              onClick={() => setGcalPullDailyNew(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalPullDailyNew ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import events from other Google Calendars</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Display items from Primary, Work, and Personal Google Calendars as read-only cards</span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalPullOtherCalendars}
+                              onClick={() => setGcalPullOtherCalendars(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalPullOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Section C: Deletion Rules */}
+                        <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-purple-500">Deletion Mirroring Rules</span>
+                          
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting in app deletes on Google Calendar</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Removing an event in the planner issues a DELETE call to Google Calendar</span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalMirrorLocalDeletions}
+                              onClick={() => setGcalMirrorLocalDeletions(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalMirrorLocalDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting on Google Calendar deletes in app</span>
+                              <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
+                                {gcalMirrorGoogleDeletions ? 'Deleting an item on Google Calendar wipes it locally' : 'OFF (Protected): Items deleted on Google Calendar will stay safe in your local planner'}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={gcalMirrorGoogleDeletions}
+                              onClick={() => setGcalMirrorGoogleDeletions(v => !v)}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ background: gcalMirrorGoogleDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 3. Google Tasks */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div>
+                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Google Tasks Integration</h2>
+                        <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                          Two-way sync with your <strong>Daily Tasks</strong> list — create, edit, complete or delete from either side.
+                        </p>
+                      </div>
+
+                      {gCalStatus.authenticated && !gCalStatus.hasTasksScope && (
+                        <div
+                          className="p-4 rounded-2xl border flex items-start gap-3"
+                          style={{ background: 'rgba(245,158,11,0.08)', borderColor: 'rgba(245,158,11,0.35)' }}
+                        >
+                          <AlertCircle size={17} className="text-amber-500 flex-shrink-0 mt-0.5" />
+                          <div className="flex flex-col gap-2.5 min-w-0">
+                            <div>
+                              <span className="text-xs font-bold block" style={{ color: textPrimary }}>
+                                One more permission needed
+                              </span>
+                              <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
+                                Your Google connection was authorised for Calendar only, so tasks sync is paused.
+                                Reconnecting grants both — nothing else changes and your events are untouched.
+                              </span>
+                            </div>
                             <button
                               onClick={() => {
                                 const redirectUri = window.location.origin;
                                 fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
                                   .then(r => r.json())
-                                  .then(res => {
-                                    if (res.url) {
-                                      window.location.href = res.url;
-                                    } else {
-                                      showToast(res.error || 'Could not build the Google sign-in link.', 'error');
-                                    }
-                                  })
-                                  .catch(() => showToast("Couldn't reach the server to start sign-in.", 'error'));
+                                  .then(res => { if (res.url) window.location.href = res.url; });
                               }}
-                              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700"
+                              className="self-start py-2 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-amber-600 hover:bg-amber-700"
                             >
-                              Link Google Account
-                            </button>
-                          </>
-                        ) : (
-                          <div className="flex items-center justify-between gap-3">
-                            <button
-                              onClick={triggerGCalSync}
-                              disabled={gCalSyncing}
-                              className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
-                            >
-                              <RefreshCw size={14} className={gCalSyncing ? 'animate-spin' : ''} />
-                              <span>{gCalSyncing ? 'Syncing...' : 'Sync Now'}</span>
-                            </button>
-
-                            <button
-                              onClick={() => {
-                                fetch('/api/google-auth/disconnect', { method: 'POST' })
-                                  .then(r => r.json())
-                                  .then(res => {
-                                    if (res.success) {
-                                      setGCalStatus({ configured: false, authenticated: false, autoSync: false });
-                                      showToast('Google Account disconnected.', 'info');
-                                    }
-                                  });
-                              }}
-                              className="px-4 py-2.5 rounded-xl text-xs font-bold transition-smooth border text-red-400 border-red-500/20 hover:bg-red-500/10"
-                            >
-                              Disconnect
+                              Reconnect Google
                             </button>
                           </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                        </div>
+                      )}
 
-                {/* Google Sync Policy & Modification Rules */}
-                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <label className="flex items-center justify-between gap-4 cursor-pointer">
+                        <span className="flex flex-col min-w-0">
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sync tasks with Google</span>
+                          <span className="text-[11px]" style={{ color: textSecondary }}>
+                            Repeating tasks can't be expressed in the Tasks API, so the repeat rule stays in the planner
+                            and Google always holds just the next due occurrence. Times ride along as a “⏰ HH:MM” line in the notes.
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setGoogleTasksSync(v => !v)}
+                          className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                          style={{ background: googleTasksSync ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                          aria-pressed={googleTasksSync}
+                        >
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: googleTasksSync ? 22 : 2 }} />
+                        </button>
+                      </label>
+                    </div>
+                  </motion.div>
+                )}
+              </motion.div>
+            )}
+
+            {/* 👤 ACCOUNT & SECURITY TAB */}
+            {activeTab === 'account' && (
+              <motion.div
+                key="account"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+                className="flex flex-col gap-6"
+              >
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
-                    <h2 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
-                      <ShieldCheck size={16} className="text-blue-500" />
-                      Google Sync Policy & Modification Rules
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                      User Account & Isolation
                     </h2>
                     <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                      Configure direction, target calendars, and authority permissions between Google Calendar and this planner.
+                      Manage your session and verify your private database isolation status.
                     </p>
                   </div>
 
-                  <div className="flex flex-col gap-4">
-                    {/* Section A: App -> Google (Push) */}
-                    <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-blue-500">App → Google (Push Controls)</span>
-                      
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Push local events to Google Calendar</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Create and update events on Google when authored in the planner</span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalPushEnabled}
-                          onClick={() => setGcalPushEnabled(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalPushEnabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPushEnabled ? 22 : 2 }} />
-                        </button>
+                  {/* Active User Card */}
+                  <div className="p-5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                    <div className="flex items-center gap-3.5 min-w-0">
+                      <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center flex-shrink-0 text-emerald-400">
+                        <User size={22} />
                       </div>
-
-                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Google Calendar Destination</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Where newly created app events land on Google Calendar</span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold truncate" style={{ color: textPrimary }}>
+                            {user?.name || user?.username || 'User'}
+                          </span>
+                          <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                            Active Session
+                          </span>
                         </div>
-                        <select
-                          value={gcalPushTarget}
-                          onChange={e => setGcalPushTarget(e.target.value as 'daily' | 'primary')}
-                          className="py-1.5 px-3 text-xs font-semibold rounded-xl border outline-none cursor-pointer flex-shrink-0"
-                          style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
-                        >
-                          <option value="daily">Daily Calendar (Isolated & Recommended)</option>
-                          <option value="primary">Primary Google Calendar</option>
-                        </select>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow updating external Google Calendar events</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Local edits to external Google Calendar cards will push back to their original calendar</span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalPushOtherCalendars}
-                          onClick={() => setGcalPushOtherCalendars(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalPushOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPushOtherCalendars ? 22 : 2 }} />
-                        </button>
+                        <span className="text-xs font-mono block mt-0.5" style={{ color: textSecondary }}>
+                          @{user?.username || 'unknown'}
+                        </span>
                       </div>
                     </div>
 
-                    {/* Section B: Google -> App (Pull & Protection Rules) */}
-                    <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-500">Google → App (Pull & Protection Rules)</span>
-                      
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Allow Google edits to modify Daily Calendar app items</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
-                            {gcalPullDailyEdits ? 'Google Calendar changes will overwrite local app items' : 'OFF (Recommended): App is sole source of truth; Google edits cannot touch local items'}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalPullDailyEdits}
-                          onClick={() => setGcalPullDailyEdits(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalPullDailyEdits ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullDailyEdits ? 22 : 2 }} />
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import raw new events from Google Daily Calendar</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Import new items created directly on Google Calendar into the planner</span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalPullDailyNew}
-                          onClick={() => setGcalPullDailyNew(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalPullDailyNew ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullDailyNew ? 22 : 2 }} />
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Import events from other Google Calendars</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Display items from Primary, Work, and Personal Google Calendars as read-only cards</span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalPullOtherCalendars}
-                          onClick={() => setGcalPullOtherCalendars(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalPullOtherCalendars ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalPullOtherCalendars ? 22 : 2 }} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Section C: Deletion Rules */}
-                    <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
-                      <span className="text-[11px] font-bold uppercase tracking-wider text-purple-500">Deletion Mirroring Rules</span>
-                      
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting in app deletes on Google Calendar</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>Removing an event in the planner issues a DELETE call to Google Calendar</span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalMirrorLocalDeletions}
-                          onClick={() => setGcalMirrorLocalDeletions(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalMirrorLocalDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalMirrorLocalDeletions ? 22 : 2 }} />
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: cardBdr }}>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Deleting on Google Calendar deletes in app</span>
-                          <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
-                            {gcalMirrorGoogleDeletions ? 'Deleting an item on Google Calendar wipes it locally' : 'OFF (Protected): Items deleted on Google Calendar will stay safe in your local planner'}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={gcalMirrorGoogleDeletions}
-                          onClick={() => setGcalMirrorGoogleDeletions(v => !v)}
-                          className="relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                          style={{ background: gcalMirrorGoogleDeletions ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                        >
-                          <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: gcalMirrorGoogleDeletions ? 22 : 2 }} />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Google Tasks */}
-                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div>
-                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Google Tasks Integration</h2>
-                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                      Two-way sync with your <strong>Daily Tasks</strong> list — create, edit, complete or delete from either side.
-                    </p>
-                  </div>
-
-                  {gCalStatus.authenticated && !gCalStatus.hasTasksScope && (
-                    <div
-                      className="p-4 rounded-2xl border flex items-start gap-3"
-                      style={{ background: 'rgba(245,158,11,0.08)', borderColor: 'rgba(245,158,11,0.35)' }}
-                    >
-                      <AlertCircle size={17} className="text-amber-500 flex-shrink-0 mt-0.5" />
-                      <div className="flex flex-col gap-2.5 min-w-0">
-                        <div>
-                          <span className="text-xs font-bold block" style={{ color: textPrimary }}>
-                            One more permission needed
-                          </span>
-                          <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
-                            Your Google connection was authorised for Calendar only, so tasks sync is paused.
-                            Reconnecting grants both — nothing else changes and your events are untouched.
-                          </span>
-                        </div>
-                        <button
-                          onClick={() => {
-                            const redirectUri = window.location.origin;
-                            fetch(`/api/google-auth/url?redirectUri=${encodeURIComponent(redirectUri)}`)
-                              .then(r => r.json())
-                              .then(res => { if (res.url) window.location.href = res.url; });
-                          }}
-                          className="self-start py-2 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-amber-600 hover:bg-amber-700"
-                        >
-                          Reconnect Google
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <label className="flex items-center justify-between gap-4 cursor-pointer">
-                    <span className="flex flex-col min-w-0">
-                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Sync tasks with Google</span>
-                      <span className="text-[11px]" style={{ color: textSecondary }}>
-                        Repeating tasks can't be expressed in the Tasks API, so the repeat rule stays in the planner
-                        and Google always holds just the next due occurrence. Times ride along as a “⏰ HH:MM” line in the notes.
-                      </span>
-                    </span>
                     <button
                       type="button"
-                      onClick={() => setGoogleTasksSync(v => !v)}
-                      className="relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
-                      style={{ background: googleTasksSync ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
-                      aria-pressed={googleTasksSync}
+                      onClick={() => logout()}
+                      className="touch-target flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border font-semibold text-xs transition-all hover:bg-red-500/10 hover:border-red-500/30 text-red-400 cursor-pointer"
+                      style={{ borderColor: 'rgba(239, 68, 68, 0.25)', background: 'rgba(239, 68, 68, 0.05)' }}
                     >
-                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: googleTasksSync ? 22 : 2 }} />
+                      <LogOut size={15} />
+                      <span>Sign Out</span>
                     </button>
-                  </label>
+                  </div>
+
+                  {/* Database Isolation Status Card */}
+                  <div className="p-4 sm:p-5 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(16, 185, 129, 0.03)' : 'rgba(16, 185, 129, 0.02)', borderColor: darkMode ? 'rgba(16, 185, 129, 0.2)' : 'rgba(16, 185, 129, 0.15)' }}>
+                    <div className="flex items-center gap-2 text-emerald-400">
+                      <ShieldCheck size={18} />
+                      <span className="text-xs font-bold uppercase tracking-wider">Discrete Database Isolation Active</span>
+                    </div>
+                    <p className="text-xs leading-relaxed" style={{ color: textSecondary }}>
+                      Your events, tasks, settings, focus sessions, prayer checklists, and device preferences are stored strictly inside your dedicated directory (<code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300">database/users/{user?.username || 'user'}/</code>). Zero settings or data are shared across users.
+                    </p>
+                  </div>
+
+                  {/* Managing Users note */}
+                  <div className="p-4 rounded-2xl border flex flex-col gap-2" style={{ background: darkMode ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.015)', borderColor: cardBdr }}>
+                    <span className="text-xs font-bold" style={{ color: textPrimary }}>Adding or Managing Users</span>
+                    <p className="text-xs leading-relaxed" style={{ color: textSecondary }}>
+                      Usernames and passwords are stored securely in <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-white/5" style={{ color: textPrimary }}>database/users.json</code> on the host PC. To add a friend or update a password, edit that file on your PC — new users take effect immediately without restarting.
+                    </p>
+                  </div>
+
+                  {/* Public & Local Access Links */}
+                  <div className="p-4 sm:p-5 rounded-2xl border flex flex-col gap-3.5" style={{ background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', borderColor: cardBdr }}>
+                    <div className="flex items-center gap-2" style={{ color: textPrimary }}>
+                      <Globe size={17} className="text-blue-400" />
+                      <span className="text-xs font-bold uppercase tracking-wider">Access & Sharing Links</span>
+                    </div>
+
+                    <div className="flex flex-col gap-2.5">
+                      {/* Public Tailscale link */}
+                      <div className="p-3 rounded-xl border flex items-center justify-between gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Globe size={15} className="text-emerald-400 flex-shrink-0" />
+                          <div className="min-w-0">
+                            <span className="text-[10px] font-bold uppercase tracking-wider block text-emerald-400">Public Domain Link (Tailscale)</span>
+                            <span className="text-xs font-mono truncate block" style={{ color: textPrimary }}>
+                              https://mamoun.tail27d0a5.ts.net/
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText('https://mamoun.tail27d0a5.ts.net/');
+                            showToast('Link copied to clipboard!', 'success');
+                          }}
+                          className="p-2 rounded-lg border hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
+                          style={{ borderColor: cardBdr, color: textSecondary }}
+                          title="Copy Link"
+                        >
+                          <Copy size={14} />
+                        </button>
+                      </div>
+
+                      {/* Local Wi-Fi link */}
+                      <div className="p-3 rounded-xl border flex items-center justify-between gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <Wifi size={15} className="text-blue-400 flex-shrink-0" />
+                          <div className="min-w-0">
+                            <span className="text-[10px] font-bold uppercase tracking-wider block text-blue-400">Local Wi-Fi / LAN Link</span>
+                            <span className="text-xs font-mono truncate block" style={{ color: textPrimary }}>
+                              http://192.168.1.118:5173
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText('http://192.168.1.118:5173');
+                            showToast('Local Wi-Fi link copied to clipboard!', 'success');
+                          }}
+                          className="p-2 rounded-lg border hover:bg-white/5 transition-colors flex-shrink-0"
+                          style={{ borderColor: cardBdr, color: textSecondary }}
+                          title="Copy Local Link"
+                        >
+                          <Copy size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </motion.div>
             )}
@@ -4284,7 +4965,15 @@ export default function SettingsPage() {
       </div>
 
       {/* ── Toast Notifications Stack ───────────────────────────────────────── */}
-      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none">
+      {/* A 384px stack anchored 24px from the right runs off the left edge of a
+          390px screen, and `bottom-6` puts it under the home bar. On a phone it
+          spans the screen instead and clears the inset. */}
+      <div
+        className={`fixed z-50 flex flex-col gap-2.5 pointer-events-none ${
+          isPhone ? 'left-3 right-3' : 'bottom-6 right-6 max-w-sm w-full'
+        }`}
+        style={isPhone ? { bottom: 'calc(16px + var(--safe-bottom))' } : undefined}
+      >
         <AnimatePresence>
           {toasts.map(t => (
             <motion.div

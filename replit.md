@@ -1,6 +1,6 @@
-# Weekly Planner
+# Daily Planner
 
-A personal weekly time-management web app with a clean calendar grid, drag-and-drop scheduling, and no backend — all data lives in the browser's localStorage.
+A personal daily time-management web app with a clean calendar grid, drag-and-drop scheduling, and no backend — all data lives in the browser's localStorage.
 
 ## Run & Operate
 

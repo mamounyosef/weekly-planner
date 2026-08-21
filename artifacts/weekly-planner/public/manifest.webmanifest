@@ -1,7 +1,7 @@
 {
-  "name": "Weekly Planner",
+  "name": "Daily Planner",
   "short_name": "Planner",
-  "description": "Weekly planner, tasks, prayer times and focus timer.",
+  "description": "Daily planner, tasks, prayer times and focus timer.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

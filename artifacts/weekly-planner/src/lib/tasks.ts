@@ -130,24 +130,43 @@ export function resolveWeekTasks(raw: TaskData, viewedWeekKey: string, range?: {
   return resolveWeek<Task>(scheduled, viewedWeekKey, range);
 }
 
+export interface ExpandTaskRangeOptions {
+  autoRollRecurring?: boolean;
+  today?: string;
+}
+
 /**
- * Every occurrence of one task between two dates, as `{ occId, occDate }`.
- * Non-repeating tasks yield at most one entry; general tasks yield none.
- * This is the panel's expansion — the grid uses `resolveWeekTasks` instead
- * because it needs the per-week `dayIndex` remapping.
+ * Occurrences of one task visible in the panel between two dates, as `{ occId, occDate }`.
+ * - Non-repeating tasks yield at most one entry if due in range.
+ * - Repeating tasks yield their completed occurrences in range PLUS at most ONE active open
+ *   occurrence. When `autoRollRecurring` is enabled (default), a recurring task whose next
+ *   occurrence has arrived rolls to Today rather than staying in Overdue.
  */
-export function expandTaskRange(t: Task, fromYmd: string, toYmd: string): Array<{ occId: string; occDate: string }> {
+export function expandTaskRange(
+  t: Task,
+  fromYmd: string,
+  toYmd: string,
+  options?: ExpandTaskRangeOptions,
+): Array<{ occId: string; occDate: string }> {
   if (!t.weekKey || t.deleted) return [];
-  const from = parseYmd(fromYmd);
-  const to = parseYmd(toYmd);
   if (!t.recur) {
     const d = dueDateOf(t);
     return d && d >= fromYmd && d <= toYmd ? [{ occId: t.id, occDate: d }] : [];
   }
-  return occurrenceStarts(t, from, addDays(to, 1)).map(d => {
-    const occDate = ymd(d);
-    return { occId: makeOccId(t.id, occDate), occDate };
-  });
+  const results: Array<{ occId: string; occDate: string }> = [];
+  const doneDates = new Set(t.completedDates ?? []);
+  for (const date of t.completedDates ?? []) {
+    if (date >= fromYmd && date <= toYmd) {
+      results.push({ occId: makeOccId(t.id, date), occDate: date });
+    }
+  }
+  const autoRoll = options?.autoRollRecurring ?? true;
+  const today = options?.today ?? todayYmd();
+  const nextOpen = currentOpenOccurrence(t, today, autoRoll);
+  if (nextOpen && nextOpen >= fromYmd && nextOpen <= toYmd && !doneDates.has(nextOpen)) {
+    results.push({ occId: makeOccId(t.id, nextOpen), occDate: nextOpen });
+  }
+  return results;
 }
 
 // ─── Completion ──────────────────────────────────────────────────────────────
@@ -164,14 +183,20 @@ export function isTaskDone(t: Task, occDate?: string | null): boolean {
  * Flip the done state of the occurrence shown as `occId`. Repeating tasks record
  * completion per occurrence date; one-off tasks use the boolean.
  */
-export function toggleTaskDone(raw: TaskData, occId: string): TaskData {
+export function toggleTaskDone(
+  raw: TaskData,
+  occId: string,
+  options?: ExpandTaskRangeOptions,
+): TaskData {
   const { masterId, occDate } = parseOccId(occId);
   const master = raw[masterId];
   if (!master) return raw;
   const now = Date.now();
 
   if (master.recur) {
-    const date = occDate ?? dueDateOf(master);
+    const today = options?.today ?? todayYmd();
+    const autoRoll = options?.autoRollRecurring ?? true;
+    const date = occDate ?? currentOpenOccurrence(master, today, autoRoll) ?? dueDateOf(master);
     if (!date) return raw;
     const done = master.completedDates ?? [];
     const next = done.includes(date) ? done.filter(d => d !== date) : [...done, date].sort();
@@ -192,14 +217,89 @@ export const ROLL_HORIZON_DAYS = 400;
  * BYDAY, UNTIL/COUNT and exdates, so this only has to skip completed dates.
  * Returns null when the series is exhausted.
  */
-export function nextOpenOccurrence(m: Task, fromYmd: string, horizonDays = ROLL_HORIZON_DAYS): string | null {
-  const from = parseYmd(fromYmd);
+export function nextOpenOccurrence(m: Task, fromYmd?: string, horizonDays = ROLL_HORIZON_DAYS): string | null {
+  const fromStr = fromYmd || dueDateOf(m) || todayYmd();
+  const from = parseYmd(fromStr);
   const done = new Set(m.completedDates ?? []);
-  for (const d of occurrenceStarts(m, from, addDays(from, horizonDays))) {
+  const today = parseYmd(todayYmd());
+  const maxEnd = addDays(today > from ? today : from, horizonDays);
+  for (const d of occurrenceStarts(m, from, maxEnd)) {
     const date = ymd(d);
     if (!done.has(date)) return date;
   }
   return null;
+}
+
+/**
+ * Find the single active open occurrence of a repeating task.
+ *
+ * If `autoRollRecurring` is true:
+ * - If today is an occurrence date of the task:
+ *     - If today is not completed: today is the active open occurrence (superseding older missed occurrences,
+ *       moving it to Today instead of Overdue).
+ *     - If today is already completed: the next open occurrence is the first uncompleted occurrence strictly after today.
+ * - If today is NOT an occurrence date:
+ *     - Find the most recent occurrence date before today (if any).
+ *     - If that latest past occurrence was NOT completed, it is Overdue (and is the active open occurrence).
+ *     - If that latest past occurrence was completed (or if no past occurrence exists), the active open occurrence
+ *       is the first uncompleted occurrence after today.
+ *
+ * If `autoRollRecurring` is false (legacy behavior):
+ * - Returns `nextOpenOccurrence(master, dueDateOf(master) || todayStr)`, which always picks the oldest uncompleted occurrence.
+ */
+export function currentOpenOccurrence(
+  master: Task,
+  todayStr: string = todayYmd(),
+  autoRollRecurring: boolean = true,
+): string | null {
+  if (!master.recur || !master.weekKey) {
+    return dueDateOf(master);
+  }
+  if (!autoRollRecurring) {
+    return nextOpenOccurrence(master, dueDateOf(master) || todayStr);
+  }
+
+  const done = new Set(master.completedDates ?? []);
+  const todayDate = parseYmd(todayStr);
+  const anchorStr = dueDateOf(master) || todayStr;
+  const anchorDate = parseYmd(anchorStr);
+
+  // If the task series starts in the future after today:
+  if (anchorDate > todayDate) {
+    return nextOpenOccurrence(master, anchorStr);
+  }
+
+  // Scan occurrences from the anchor up to today + 1 day
+  // (to check if today is an occurrence, and find the latest past occurrence)
+  const pastAndTodayOccurrences: string[] = [];
+  for (const d of occurrenceStarts(master, anchorDate, addDays(todayDate, 1))) {
+    pastAndTodayOccurrences.push(ymd(d));
+  }
+
+  const isTodayOcc = pastAndTodayOccurrences.includes(todayStr);
+
+  if (isTodayOcc) {
+    if (!done.has(todayStr)) {
+      return todayStr;
+    }
+    // Today is done. Scan for next uncompleted occurrence strictly after today.
+    const tomorrowStr = ymd(addDays(todayDate, 1));
+    return nextOpenOccurrence(master, tomorrowStr);
+  }
+
+  // Today is NOT an occurrence date.
+  // Find the latest occurrence date before today.
+  const pastOccs = pastAndTodayOccurrences.filter(d => d < todayStr);
+  const latestPast = pastOccs.length > 0 ? pastOccs[pastOccs.length - 1] : null;
+
+  if (latestPast && !done.has(latestPast)) {
+    // The previous occurrence was not completed, so it is overdue.
+    return latestPast;
+  }
+
+  // Otherwise, previous occurrence was done (or none existed), so find next open after today.
+  const tomorrowStr = ymd(addDays(todayDate, 1));
+  return nextOpenOccurrence(master, tomorrowStr);
 }
 
 // ─── Google Tasks notes ⇄ time marker ────────────────────────────────────────

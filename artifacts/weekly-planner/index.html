@@ -5,17 +5,21 @@
     <!-- viewport-fit=cover lets the app paint under the notch and the home bar;
          the layout pays that back with env(safe-area-inset-*) padding. Browser
          pinch-zoom stays off because the app has its own zoom (per device) and
-         a double-tap zoom on a calendar grid fights every drag gesture. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-    <title>Weekly Planner</title>
-    <meta name="description" content="Weekly Planner — built on Replit. Update this description to reflect the app." />
+         a double-tap zoom on a calendar grid fights every drag gesture.
+         interactive-widget=resizes-content makes the software keyboard shrink the
+         LAYOUT viewport, not just the visual one — without it 100dvh and every
+         `position: fixed; bottom: 0` sheet stay pinned behind the keyboard, so
+         typing an event's title put the caret and the Done button off screen. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>Daily Planner</title>
+    <meta name="description" content="Daily Planner — built on Replit. Update this description to reflect the app." />
     <meta name="robots" content="index, follow" />
-    <meta property="og:title" content="Weekly Planner" />
-    <meta property="og:description" content="Weekly Planner — built on Replit. Update this description to reflect the app." />
+    <meta property="og:title" content="Daily Planner" />
+    <meta property="og:description" content="Daily Planner — built on Replit. Update this description to reflect the app." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Weekly Planner" />
-    <meta name="twitter:description" content="Weekly Planner — built on Replit. Update this description to reflect the app." />
+    <meta name="twitter:title" content="Daily Planner" />
+    <meta name="twitter:description" content="Daily Planner — built on Replit. Update this description to reflect the app." />
     <!-- Chrome paints the address bar with this. Kept in sync with the live theme
          at runtime (see home.tsx) so the bar matches the chosen preset exactly. -->
     <meta name="theme-color" content="#050506" />

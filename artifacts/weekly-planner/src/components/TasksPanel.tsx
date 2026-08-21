@@ -69,6 +69,7 @@ interface TasksPanelProps {
   weekStartsOn: WeekStartsOn;
   taskColor: string;
   taskCheckboxShape?: 'circle' | 'square';
+  autoRollRecurringTasks?: boolean;
   theme: TaskTheme;
   /** Every list, in the order they appear on the rail. Always contains General. */
   lists: TaskListDef[];
@@ -126,9 +127,9 @@ const fmtTime = (hhmm: string, timeFormat: TimeFormat): string => {
 const TIME_PRESETS = ['09:00', '12:00', '15:00', '18:00'];
 
 const LOOKBACK_DAYS = 28;
-const LOOKAHEAD_DAYS = 60;
+const LOOKAHEAD_DAYS = 365;
 
-function useTaskRows(tasks: TaskData, today: string): Row[] {
+function useTaskRows(tasks: TaskData, today: string, autoRollRecurringTasks = true): Row[] {
   return useMemo(() => {
     const day = (n: number) => format(addDays(new Date(`${today}T00:00:00`), n), 'yyyy-MM-dd');
     const from = day(-LOOKBACK_DAYS);
@@ -142,18 +143,19 @@ function useTaskRows(tasks: TaskData, today: string): Row[] {
         rows.push({ occId: t.id, task: t, due: null, done: isTaskDone(t) });
         continue;
       }
-      for (const { occId, occDate } of expandTaskRange(t, from, to)) {
+      for (const { occId, occDate } of expandTaskRange(t, from, to, { autoRollRecurring: autoRollRecurringTasks, today })) {
         const done = isTaskDone(t, occDate);
         if (done && occDate < staleBefore) continue;
         rows.push({ occId, task: t.recur ? { ...t, occDate } : t, due: occDate, done });
       }
     }
     return rows;
-  }, [tasks, today]);
+  }, [tasks, today, autoRollRecurringTasks]);
 }
 
 function TasksPanel({
-  open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle', theme,
+  open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle',
+  autoRollRecurringTasks = true, theme,
   lists, activeListId, onActiveListChange, onListsChange, onDeleteList, onMoveTaskToList,
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
   sheet = false,
@@ -163,7 +165,7 @@ function TasksPanel({
   const today = todayYmd();
   const tomorrow = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd'), [today]);
 
-  const allRows = useTaskRows(tasks, today);
+  const allRows = useTaskRows(tasks, today, autoRollRecurringTasks);
 
   // ── Lists ──────────────────────────────────────────────────────────────────
   // A list is resolved, never trusted: a task pointing at a list that has since
@@ -383,11 +385,13 @@ function TasksPanel({
     const [moved] = reordered.splice(sourceIndex, 1);
 
     const targetIndex = reordered.findIndex(r => r.occId === targetOccId);
-    if (targetIndex !== -1) {
-      reordered.splice(edge === 'after' ? targetIndex + 1 : targetIndex, 0, moved);
-    } else {
-      reordered.push(moved);
-    }
+    // A row in a DIFFERENT section is not a reorder target. Appending to the end
+    // (what this did) meant a drag that overshot into Tomorrow or Completed sent
+    // the task to the bottom of its own section instead — and, worse, flipped
+    // the whole panel to manual sort while doing it. Do nothing rather than
+    // something the user never pointed at.
+    if (targetIndex === -1) return;
+    reordered.splice(edge === 'after' ? targetIndex + 1 : targetIndex, 0, moved);
 
     applyManualOrder(reordered);
   }, [applyManualOrder]);
@@ -2137,6 +2141,10 @@ function TaskList({
 
   const presentIds = new Set(rows.map(r => r.task.id));
   const roots = rows.filter(r => !r.task.parentId || !presentIds.has(r.task.parentId));
+  // The touch drag's listeners outlive the render that created them, so the
+  // "is this drop target one of mine?" test reads the rows through a ref.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
   const childrenOf = (id: string) => rows.filter(r => r.task.parentId === id);
   const insertTarget = (id: string, edge: InsertEdge) => `${id}:${edge}`;
   const targetFromPointer = (e: React.DragEvent<HTMLElement>, list: Row[]): { row: Row; edge: InsertEdge } | null => {
@@ -2217,6 +2225,20 @@ function TaskList({
   const gestureRef = useRef<AbortController | null>(null);
   const autoScrollRef = useRef(0);
   const pointerYRef = useRef(0);
+  /**
+   * How far the finger has moved since it picked the row up. The row used to
+   * simply fade in place and reappear somewhere else on release — there was
+   * nothing under the finger to look at, and the only landing cue was a 0.5px
+   * insert line that a fingertip covers completely. This is what makes the row
+   * actually come with you.
+   */
+  const dragOriginYRef = useRef(0);
+  const [dragDy, setDragDy] = useState(0);
+  /** The row a FINGER is currently carrying (null for mouse/HTML5 drags). */
+  const [liftedId, setLiftedId] = useState<string | null>(null);
+  /** True for the tick after a touch drag, so its trailing click is ignored. */
+  const justTouchDraggedRef = useRef(false);
+  const suppressClick = useCallback(() => justTouchDraggedRef.current, []);
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollRef.current) {
@@ -2286,7 +2308,14 @@ function TaskList({
     gestureRef.current = null;
     if (!hold) return;
     window.clearTimeout(hold.timer);
+    setDragDy(0);
+    setLiftedId(null);
     if (hold.dragging) {
+      // A hold that ripened and was then released — moved or not — is a drag,
+      // not a tap. Without this the synthetic click that follows the lift threw
+      // the full-screen editor open every time you thought better of a drag.
+      justTouchDraggedRef.current = true;
+      window.setTimeout(() => { justTouchDraggedRef.current = false; }, 0);
       if (commit) {
         // A pill wins over a row: dropping on the rail files the task, and the
         // rail is never a place you'd mean to reorder into.
@@ -2295,7 +2324,12 @@ function TaskList({
           onMoveToList(hold.occId, listId);
         } else {
           const target = rowUnder(hold.x, pointerYRef.current);
-          if (target && target.occId !== hold.occId) {
+          // Rows in ANOTHER section are not reorder targets. elementFromPoint
+          // happily returns them, and the drop handler answers "not in my list"
+          // by appending to the end — so a slightly long drag silently sent the
+          // task to the bottom of its own section and flipped the whole panel
+          // to manual sort. Ignore it instead.
+          if (target && target.occId !== hold.occId && rowsRef.current.some(r => r.occId === target.occId)) {
             onDrop(hold.occId, target.occId, target.edge);
           }
         }
@@ -2329,6 +2363,7 @@ function TaskList({
       return;
     }
     hold.x = e.clientX;
+    setDragDy(e.clientY - dragOriginYRef.current);
     const overList = listUnder(e.clientX, e.clientY);
     onListHover(overList);
     if (overList) {
@@ -2337,8 +2372,10 @@ function TaskList({
       return;
     }
     const target = rowUnder(e.clientX, e.clientY);
-    if (target && target.occId !== hold.occId) {
+    if (target && target.occId !== hold.occId && rowsRef.current.some(r => r.occId === target.occId)) {
       onDragOver(insertTarget(target.occId, target.edge));
+    } else {
+      onDragOver(null);
     }
     if (!autoScrollRef.current) runAutoScroll();
   }
@@ -2361,6 +2398,9 @@ function TaskList({
       const hold = holdRef.current;
       if (!hold) return;
       hold.dragging = true;
+      dragOriginYRef.current = pointerYRef.current;
+      setDragDy(0);
+      setLiftedId(occId);
       try { navigator.vibrate?.(12); } catch { /* unsupported */ }
       onDragStart(occId);
     }, HOLD_MS);
@@ -2388,7 +2428,7 @@ function TaskList({
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onDragOver(null);
       }}
     >
-      <InsertLine active={activeGap === 0} theme={theme} />
+      <InsertLine active={activeGap === 0} theme={theme} touch={!!liftedId} />
       <AnimatePresence initial={false}>
         {roots.map((r, index) => {
           const kids = childrenOf(r.task.id);
@@ -2411,6 +2451,9 @@ function TaskList({
                   expanded={expanded}
                   isDragging={draggingId === r.occId}
                   isDragActive={!!draggingId}
+                  lifted={liftedId === r.occId}
+                  dragOffset={liftedId === r.occId ? dragDy : 0}
+                  suppressClick={suppressClick}
                   pendingDone={!!pendingDoneIds[r.occId]}
                   onDragStart={() => onDragStart(r.occId)}
                   onDragOver={edge => onDragOver(insertTarget(r.occId, edge))}
@@ -2434,7 +2477,7 @@ function TaskList({
                   onDragOver={e => updateNearestTarget(e, kids)}
                   onDrop={e => dropAtNearestTarget(e, kids)}
                 >
-                  <InsertLine active={kidsActiveGap === 0} theme={theme} />
+                  <InsertLine active={kidsActiveGap === 0} theme={theme} touch={!!liftedId} />
                   <AnimatePresence initial={false}>
                     {kids.map((k, childIndex) => (
                       <React.Fragment key={k.occId}>
@@ -2452,6 +2495,9 @@ function TaskList({
                             expanded={false}
                             isDragging={draggingId === k.occId}
                             isDragActive={!!draggingId}
+                            lifted={liftedId === k.occId}
+                            dragOffset={liftedId === k.occId ? dragDy : 0}
+                            suppressClick={suppressClick}
                             pendingDone={!!pendingDoneIds[k.occId]}
                             onDragStart={() => onDragStart(k.occId)}
                             onDragOver={edge => onDragOver(insertTarget(k.occId, edge))}
@@ -2467,13 +2513,13 @@ function TaskList({
                             onOpenMenu={onOpenMenu}
                           />
                         </div>
-                        <InsertLine active={kidsActiveGap === childIndex + 1} theme={theme} />
+                        <InsertLine active={kidsActiveGap === childIndex + 1} theme={theme} touch={!!liftedId} />
                       </React.Fragment>
                     ))}
                   </AnimatePresence>
                 </div>
               )}
-              <InsertLine active={activeGap === index + 1} theme={theme} />
+              <InsertLine active={activeGap === index + 1} theme={theme} touch={!!liftedId} />
             </React.Fragment>
           );
         })}
@@ -2482,11 +2528,16 @@ function TaskList({
   );
 }
 
-function InsertLine({ active, theme }: { active: boolean; theme: TaskTheme }) {
+/**
+ * Where the dragged row will land. On a mouse a hairline beside a 1px cursor is
+ * plenty; under a fingertip 40-50px wide a 0.5px line in a 6px gap is invisible,
+ * so on touch it grows into something you can actually see beside your thumb.
+ */
+function InsertLine({ active, theme, touch }: { active: boolean; theme: TaskTheme; touch?: boolean }) {
   return (
-    <div className="h-1.5 flex items-center px-2 pointer-events-none">
+    <div className={`${touch ? 'h-3' : 'h-1.5'} flex items-center px-2 pointer-events-none`}>
       <div
-        className="h-0.5 w-full rounded-full transition-smooth duration-100"
+        className={`${touch ? 'h-1' : 'h-0.5'} w-full rounded-full transition-smooth duration-100`}
         style={{
           background: active ? theme.accent : 'transparent',
           boxShadow: active ? `0 0 10px ${theme.accent}80` : 'none',
@@ -2501,13 +2552,13 @@ function InsertLine({ active, theme }: { active: boolean; theme: TaskTheme }) {
 // Single Task Row Component
 function TaskRow({
   row, today, timeFormat, theme, taskColor, taskCheckboxShape = 'circle', showDate, listBadge, childProgress, expanded,
-  isDragging, isDragActive, pendingDone, onDragStart, onDragOver, onDragEnd, onDrop,
+  isDragging, isDragActive, lifted = false, dragOffset = 0, suppressClick, pendingDone, onDragStart, onDragOver, onDragEnd, onDrop,
   onToggleExpand, onToggleDone, onOpenMenu,
 }: {
   row: Row; today: string; timeFormat: TimeFormat; theme: TaskTheme; taskColor: string;
   taskCheckboxShape?: 'circle' | 'square';
   showDate: boolean; listBadge: TaskListDef | null; childProgress: string | null; expanded: boolean;
-  isDragging?: boolean; isDragActive?: boolean; pendingDone?: boolean;
+  isDragging?: boolean; isDragActive?: boolean; lifted?: boolean; dragOffset?: number; suppressClick?: () => boolean; pendingDone?: boolean;
   onDragStart?: () => void; onDragOver?: (edge: InsertEdge) => void; onDragEnd?: () => void; onDrop?: (edge: InsertEdge) => void;
   onToggleExpand?: () => void;
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
@@ -2528,7 +2579,10 @@ function TaskRow({
 
   return (
     <motion.div
-      layout="position"
+      // While the finger has hold of this row, framer must not also be animating
+      // it into a layout slot — the two fight and the row appears to fly off on
+      // its own, which is exactly the "it spun off somewhere else" complaint.
+      layout={lifted ? false : 'position'}
       initial={{ opacity: 0, y: -6, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -6, scale: 0.96 }}
@@ -2559,15 +2613,24 @@ function TaskRow({
         onDrop?.(edgeFromEvent(e));
       }}
       className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-smooth cursor-grab active:cursor-grabbing border overflow-hidden ${
-        isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:shadow-md hover:-translate-y-px'
+        lifted ? '' : isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:shadow-md hover:-translate-y-px'
       }`}
       style={{
         background: visualDone ? `${theme.accent}10` : overdue ? `${dangerHue}08` : theme.surfaceBg,
         borderColor: overdue ? `${dangerHue}40` : theme.surfaceBdr,
-        boxShadow: '0 1px 0 rgba(0,0,0,0.03)',
+        boxShadow: lifted ? '0 12px 30px rgba(0,0,0,0.38)' : '0 1px 0 rgba(0,0,0,0.03)',
+        // Carried by the finger: off the page, above its neighbours, and
+        // transparent to hit-testing so elementFromPoint reads what is BELOW it.
+        ...(lifted ? {
+          transform: `translateY(${dragOffset}px) scale(1.03)`,
+          zIndex: 60,
+          position: 'relative' as const,
+          pointerEvents: 'none' as const,
+          transition: 'none',
+        } : null),
       }}
       onClick={e => {
-        if (rowDragStartedRef.current) return;
+        if (rowDragStartedRef.current || suppressClick?.()) return;
         if ((e.target as HTMLElement).closest('button')) return;
         onOpenMenu(row.occId, { x: e.clientX, y: e.clientY });
       }}

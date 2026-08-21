@@ -23,73 +23,41 @@
 #define PIN_LED_YELLOW 2
 
 // ---------------------------------------------------------------------------
-// Presence detection
+// Ultrasonic sensor
 // ---------------------------------------------------------------------------
-// Measured on this desk: seated reads 30-39 cm, empty chair reads 57-59 cm.
-// Two thresholds instead of one gives hysteresis -- once you are detected as
-// present it takes a clearly larger distance to drop you, so a reading sitting
-// right on the boundary cannot rattle the state back and forth.
+// The board does not decide presence. It pings, buffers the raw centimetres,
+// and posts them; the app's filter (artifacts/weekly-planner/src/lib/
+// sensorFilter.ts) is what turns that stream into "at the desk" / "away".
 //
-// NOTE: these are only the fallbacks used before the app has been reached.
-// The live values come from the app's settings over /api/hardware/config, so
-// the sensor can be retuned without plugging the board into the PC.
-#define PRESENCE_ENTER_CM 48.0f  // absent -> present when median drops below this
-#define PRESENCE_EXIT_CM 52.0f   // present -> absent when median rises above this
+// That split is deliberate. Telling a real departure apart from a partially
+// blocked transducer takes seconds of context, cluster statistics and several
+// tunable rules -- none of which belong on a microcontroller that has to be
+// reflashed to change any of them. Down here the only question is how often to
+// look and how often to send.
 
-// Readings outside this band are physically implausible for a desk and are
-// discarded before they can pollute the filter.
-#define DIST_MIN_VALID_CM 4.0f
-#define DIST_MAX_VALID_CM 300.0f
-
-// A single HC-SR04 ping is noisy and occasionally returns nonsense. We sample
-// fast and take the MEDIAN of a sliding window: unlike an average, one wild
-// outlier cannot drag the result at all, it just gets sorted to an end and
-// ignored. An odd window size means there is always a true middle element.
+// How often to ping. Fallback only: the live value comes from the app's
+// settings over /api/hardware/config, so the rate can be changed without
+// plugging the board into the PC.
 #define SAMPLE_INTERVAL_MS 100
-#define MEDIAN_WINDOW 5
 
-// The sample ring is a fixed array, so the window the app may request has to be
-// bounded at compile time. Keep in step with MEDIAN_WINDOW_MAX in
-// hardwareController.ts.
-#define MEDIAN_WINDOW_MAX 15
+// How often the collected pings are shipped. One POST per batch rather than
+// per ping: each POST costs a TCP connection, and at 100 ms pings the board
+// would otherwise spend its life inside HTTPClient. 400 ms still puts every
+// sample in front of the filter a long way inside its shortest dwell time.
+#define SAMPLE_BATCH_MS 400
+
+// Even with no samples to send (a ping rate slower than the batch interval), a
+// batch goes out this often so the button levels and link diagnostics riding
+// along with it keep flowing.
+#define SAMPLE_HEARTBEAT_MS 1000
+
+// The batch buffer. Sized well past what one batch interval can produce at the
+// fastest allowed ping rate (400 / 40 = 10), so a slow or retried POST cannot
+// make the board silently drop readings the filter is counting on.
+#define SAMPLE_BATCH_MAX 32
 
 // How often the board re-reads its tuning from the app.
 #define CONFIG_POLL_INTERVAL_MS 3000
-
-// While calibrating, how often the live distance is streamed to the settings
-// page. Fast enough to feel live, slow enough not to flood the dev server.
-#define CALIBRATION_STREAM_MS 250
-
-// Outside calibration the reading is still streamed, just slower, so the
-// settings page can always show what the sensor sees. Being able to watch the
-// live number is the difference between diagnosing a placement problem and
-// guessing at one.
-#define LIVE_STREAM_MS 1000
-
-// Even a clean median flickers while you shift in your seat, so a candidate
-// state must hold continuously for this long before it is believed. Leaving is
-// given a longer fuse than arriving: briefly leaning out of the beam to grab
-// something should not read as "left the desk".
-#define PRESENT_CONFIRM_MS 2000
-#define ABSENT_CONFIRM_MS 5000
-
-// A timeout means nothing echoed back, i.e. nothing is in front of the sensor.
-// That is a legitimate "absent" observation, not a failed reading, so it feeds
-// the filter as a far distance rather than being thrown away.
-#define DIST_TIMEOUT_AS_CM 400.0f
-
-// Cheap ultrasonic modules occasionally spray maximum-range values for a second
-// or two for no reason. There is a wall behind this desk, so nothing can
-// legitimately read past about a metre -- anything further is the module
-// misfiring, and is dropped rather than fed to the filter.
-//
-// Dropping alone would be dangerous: an empty desk with nothing at all in the
-// beam produces exactly the same readings, so discarding them forever would
-// mean leaving was never detected. A run that survives GLITCH_HOLD_MS unbroken
-// is therefore believed and allowed through. Fallbacks only -- the live values
-// come from the app's settings.
-#define GLITCH_MAX_CM 100.0f
-#define GLITCH_HOLD_MS 10000
 
 // ---------------------------------------------------------------------------
 // Networking
@@ -118,7 +86,19 @@
 #define DIAG_NO_WIFI 0
 
 // ---------------------------------------------------------------------------
+// LCD Resilience & Auto-Healing
+// ---------------------------------------------------------------------------
+// How often the HD44780 controller hardware state machine is forcibly
+// resynchronized (clearing any 4-bit nibble desync, CGRAM corruptions, or mode errors).
+#define LCD_RESYNC_INTERVAL_MS 30000
+
+// How often the full 16x2 character grid is refreshed regardless of diffs,
+// wiping away any single-character bit flips or noise glitches.
+#define LCD_FORCE_REFRESH_MS 5000
+
+// ---------------------------------------------------------------------------
 // Status LED
 // ---------------------------------------------------------------------------
 // Dimmed heavily: the onboard WS2812 is painfully bright at full scale.
 #define LED_BRIGHTNESS 40
+

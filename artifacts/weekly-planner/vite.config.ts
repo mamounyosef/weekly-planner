@@ -6,6 +6,23 @@ import { defineConfig } from 'vite';
 
 import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 
+// The presence filter is shared with the app and the tests rather than
+// reimplemented here: the board posts raw centimetres and this is the only
+// place that decides what they mean, so there must be exactly one copy of it.
+import { createPresenceFilter, coerceSensorFilterConfig } from './src/lib/sensorFilter';
+import {
+  loadAccessConfig,
+  getUserDbPaths,
+  ensureUserDb,
+  migrateLegacyDatabase,
+  createSessionToken,
+  getAuthUser,
+  autoBackupPaths,
+  sanitizeUsername,
+  SESSION_COOKIE,
+  type AppUser,
+} from './server-user-db';
+
 // ─── File-database safety net ──────────────────────────────────────────────
 // Guards against a save silently wiping real data (e.g. a stale/empty client
 // state getting POSTed, or the server briefly pointing at the wrong path
@@ -115,17 +132,6 @@ async function safeWriteJsonFile(opts: {
     return { ok: false, status: 409, error: `Refused to overwrite non-empty ${baseName} with an empty save. Retry with ?force=1 if this is intentional.` };
   }
 
-  if (existing !== null && !existingIsEmpty) {
-    try {
-      await fsp.mkdir(backupDir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await fsp.writeFile(path.join(backupDir, `${baseName}.${stamp}.json`), existing, 'utf-8');
-      await pruneBackups(backupDir, baseName);
-    } catch {
-      // a failed backup should never block the actual save
-    }
-  }
-
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
   await fsp.writeFile(filePath, body, 'utf-8');
   return { ok: true };
@@ -159,17 +165,6 @@ async function readJsonSafe(filePath: string, fallback: unknown) {
   }
 }
 
-function autoBackupPaths(rootDir: string) {
-  return {
-    dbPath:       path.resolve(rootDir, 'database', 'database.json'),
-    settingsPath: path.resolve(rootDir, 'database', 'settings.json'),
-    sessionsPath: path.resolve(rootDir, 'database', 'focus-sessions.json'),
-    tasksPath:    path.resolve(rootDir, 'database', 'tasks.json'),
-    statePath:    path.resolve(rootDir, 'database', 'auto-backup-state.json'),
-    outDir:       path.resolve(rootDir, 'backups'),
-  };
-}
-
 const AUTO_BACKUP_PREFIX = 'planner-backup.';
 
 async function pruneAutoBackups(outDir: string, keep: number) {
@@ -185,8 +180,8 @@ async function pruneAutoBackups(outDir: string, keep: number) {
   }
 }
 
-async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') {
-  const p = autoBackupPaths(rootDir);
+async function writeAutoBackup(rootDir: string, username: string, reason: 'scheduled' | 'manual') {
+  const p = autoBackupPaths(rootDir, username);
   const settings = await readJsonSafe(p.settingsPath, {});
   const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
   const events = await readJsonSafe(p.dbPath, {});
@@ -200,6 +195,7 @@ async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') 
     // v3 adds `tasks`. Readers must accept 2 (no tasks) and 3.
     backupFormatVersion: 3,
     exportedAt: new Date().toISOString(),
+    user: username,
     source: reason,
     events,
     settings,
@@ -217,15 +213,20 @@ async function writeAutoBackup(rootDir: string, reason: 'scheduled' | 'manual') 
 }
 
 async function maybeRunAutoBackup(rootDir: string) {
-  const p = autoBackupPaths(rootDir);
-  const settings = await readJsonSafe(p.settingsPath, {});
-  const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
-  if (!cfg.enabled) return;
-  const state = await readJsonSafe(p.statePath, {});
-  const last = Date.parse((state as Record<string, string>).lastBackupAt || '');
-  const dueAfterMs = cfg.intervalHours * 3600_000;
-  if (Number.isFinite(last) && Date.now() - last < dueAfterMs) return;
-  await writeAutoBackup(rootDir, 'scheduled').catch(() => {});
+  const { users } = await loadAccessConfig(rootDir);
+  for (const u of users) {
+    try {
+      const p = autoBackupPaths(rootDir, u.username);
+      const settings = await readJsonSafe(p.settingsPath, {});
+      const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
+      if (!cfg.enabled) continue;
+      const state = await readJsonSafe(p.statePath, {});
+      const last = Date.parse((state as Record<string, string>).lastBackupAt || '');
+      const dueAfterMs = cfg.intervalHours * 3600_000;
+      if (Number.isFinite(last) && Date.now() - last < dueAfterMs) continue;
+      await writeAutoBackup(rootDir, u.username, 'scheduled').catch(() => {});
+    } catch (_) {}
+  }
 }
 
 const rawPort = process.env.PORT || '5173';
@@ -248,79 +249,108 @@ export default defineConfig({
       async configureServer(server) {
           const fs = await import('fs/promises');
           const path = await import('path');
+          const rootDir = path.resolve(import.meta.dirname, '..', '..');
+          await migrateLegacyDatabase(rootDir);
 
-          // ── Password gate for the public (Tailscale Funnel) address ──────
-          // Funnel puts this server on the open internet and the app has no
-          // login of its own, so anyone with the link would get full read/write
-          // on the calendar. Traffic that arrives through the funnel is proxied
-          // by tailscaled, which stamps `x-forwarded-for`; direct traffic from
-          // this PC or the home LAN carries no such header and is left alone, so
-          // the desktop window, the widget and the phone at home never see a
-          // prompt. Credentials live in database/public-access.json.
-          const accessPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'public-access.json');
-          let access: { enabled?: boolean; user?: string; password?: string } | null = null;
-          try {
-            access = JSON.parse(await fs.readFile(accessPath, 'utf8'));
-          } catch {
-            access = null;
+          const syncHealthMap = new Map<string, any>();
+          function getUserSyncHealth(username: string) {
+            const safe = sanitizeUsername(username);
+            let h = syncHealthMap.get(safe);
+            if (!h) {
+              h = {
+                auth: { ok: true, needsReconnect: false, error: null, at: 0 },
+                calendar: { lastRunAt: 0, lastOkAt: 0, pushed: 0, pulled: 0, deleted: 0, incomplete: false, error: null },
+                tasks:    { lastRunAt: 0, lastOkAt: 0, pushed: 0, pulled: 0, deleted: 0, incomplete: false, error: null, skipped: null },
+              };
+              syncHealthMap.set(safe, h);
+            }
+            return h;
           }
-          const isLocalAddr = (raw: string) => {
-            const ip = raw.replace(/^::ffff:/, '');
-            return (
-              ip === '127.0.0.1' || ip === '::1' || ip.startsWith('10.') ||
-              ip.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
-            );
-          };
-          // A browser only remembers Basic credentials for as long as the tab
-          // lives, so a phone would be asked again every time Chrome restarts.
-          // On the first successful sign-in the response drops a year-long
-          // cookie carrying a hash of the credentials, and every later request
-          // is let through on that cookie alone — one prompt per device, ever.
-          // Changing the password changes the hash, which logs every device out.
-          const { createHash } = await import('crypto');
-          const accessToken = access?.password
-            ? createHash('sha256')
-                .update(`${access.user || 'planner'}:${access.password}`)
-                .digest('hex')
-            : '';
-          const COOKIE = 'planner_access';
-          // Chrome does not build the installable app on the phone: it sends the
-          // manifest and icon URLs to Google's WebAPK service, which fetches them
-          // ANONYMOUSLY. Behind the password gate those fetches got a 401, the
-          // build failed, and "Install" silently degraded to a plain shortcut
-          // that reopens in a tab with the address bar — which is exactly the
-          // "still not fullscreen" symptom. These files hold no personal data,
-          // so they are served to anyone; everything else stays gated.
-          const publicPaths = new Set([
-            '/manifest.webmanifest', '/sw.js', '/favicon.ico', '/favicon-v4.ico',
-            '/favicon.svg', '/app-icon-192.png', '/app-icon-512.png',
-            '/app-icon-v4.png', '/app-icon.png',
-          ]);
-          server.middlewares.use((req, res, next) => {
-            if (!access?.enabled || !access.password) return next();
-            if (publicPaths.has((req.url || '').split('?')[0])) return next();
-            const remote = req.socket?.remoteAddress || '';
-            const proxied = Boolean(req.headers['x-forwarded-for']);
-            if (!proxied && isLocalAddr(remote)) return next();
-            if (String(req.headers.cookie || '').split(';').some(
-              (c) => c.trim() === `${COOKIE}=${accessToken}`,
-            )) return next();
-            const header = String(req.headers.authorization || '');
-            if (header.startsWith('Basic ')) {
-              const [user, ...rest] = Buffer.from(header.slice(6), 'base64')
-                .toString('utf8').split(':');
-              if (user === (access.user || 'planner') && rest.join(':') === access.password) {
+
+          // ── Multi-User Session Authentication Endpoints ──────────────────
+          server.middlewares.use('/api/auth/me', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'GET') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            const { users } = await loadAccessConfig(rootDir);
+            const user = getAuthUser(req, users);
+            if (!user) {
+              res.end(JSON.stringify({ authenticated: false }));
+              return;
+            }
+            res.end(JSON.stringify({
+              authenticated: true,
+              user: { username: user.username, name: user.name || user.username },
+            }));
+          });
+
+          server.middlewares.use('/api/auth/login', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+              try {
+                const { username, password } = JSON.parse(body || '{}');
+                const cleanUser = sanitizeUsername(username);
+                const { users } = await loadAccessConfig(rootDir);
+                const matched = users.find(u => u.username === cleanUser && u.password === password);
+                if (!matched) {
+                  res.statusCode = 401;
+                  res.end(JSON.stringify({ error: 'Invalid username or password' }));
+                  return;
+                }
+                await ensureUserDb(rootDir, matched.username);
+                const sessionToken = createSessionToken(matched.username, matched.password);
                 res.setHeader(
                   'Set-Cookie',
-                  `${COOKIE}=${accessToken}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`,
+                  `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`,
                 );
-                return next();
+                res.end(JSON.stringify({
+                  success: true,
+                  user: { username: matched.username, name: matched.name || matched.username },
+                }));
+              } catch {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'Invalid login payload' }));
               }
-            }
-            res.statusCode = 401;
-            res.setHeader('WWW-Authenticate', 'Basic realm="Weekly Planner", charset="UTF-8"');
-            res.end('Authentication required');
+            });
           });
+
+          server.middlewares.use('/api/auth/logout', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            res.setHeader(
+              'Set-Cookie',
+              `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`,
+            );
+            res.end(JSON.stringify({ success: true }));
+          });
+
+          async function requireAuth(req: any, res: any) {
+            const { users } = await loadAccessConfig(rootDir);
+            const user = getAuthUser(req, users);
+            if (!user) {
+              res.statusCode = 401;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'Authentication required' }));
+              return null;
+            }
+            const userPaths = await ensureUserDb(rootDir, user.username);
+            const syncHealth = getUserSyncHealth(user.username);
+            return { user, userPaths, syncHealth };
+          }
 
           // ── Crash-proof "open in editor" ─────────────────────────────────
           // Vite 7's launchEditor calls onErrorCallback() on its Windows UNC-path
@@ -351,31 +381,6 @@ export default defineConfig({
             })();
           });
 
-          const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'database.json');
-          const configPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'google-config.json');
-          const tokensPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'google-tokens.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
-
-          /**
-           * Live health of the Google connection, reported to the UI.
-           *
-           * Sync used to fail completely silently: the refresh token died, every
-           * run bailed at `getGoogleToken() → null`, and the app went on showing
-           * "Syncing" and "authenticated" for days while nothing moved in either
-           * direction. Every failure now lands here and is surfaced.
-           */
-          const syncHealth = {
-            auth: {
-              ok: true,
-              /** True only for errors a reconnect fixes (invalid_grant & friends). */
-              needsReconnect: false,
-              error: null,
-              at: 0,
-            },
-            calendar: { lastRunAt: 0, lastOkAt: 0, pushed: 0, pulled: 0, deleted: 0, incomplete: false, error: null },
-            tasks:    { lastRunAt: 0, lastOkAt: 0, pushed: 0, pulled: 0, deleted: 0, incomplete: false, error: null, skipped: null },
-          };
-
           /** Live OAuth `state` nonces, keyed by value (CSRF protection). */
           const pendingOAuthStates = new Map();
 
@@ -387,33 +392,33 @@ export default defineConfig({
             'invalid_request',
           ]);
 
-          async function markAuthBroken(reason, needsReconnect) {
+          async function markAuthBroken(userPaths: any, syncHealth: any, reason: string, needsReconnect: boolean) {
             syncHealth.auth = { ok: false, needsReconnect, error: reason, at: Date.now() };
             if (!needsReconnect) return;
             // Persist it so a dev-server restart doesn't go back to claiming the
             // connection is fine, and so the UI can ask for a reconnect on boot.
             try {
-              const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+              const toks = JSON.parse(await fs.readFile(userPaths.tokensPath, 'utf-8'));
               if (toks.invalid === reason) return;
               toks.invalid = reason;
               toks.invalidAt = Date.now();
               await safeWriteJsonFile({
-                filePath: tokensPath, backupDir, baseName: 'google-tokens',
+                filePath: userPaths.tokensPath, backupDir: userPaths.backupDir, baseName: 'google-tokens',
                 body: JSON.stringify(toks), kind: 'object', force: true,
               });
             } catch (_) {}
           }
 
-          async function markAuthOk() {
+          async function markAuthOk(syncHealth: any) {
             syncHealth.auth = { ok: true, needsReconnect: false, error: null, at: Date.now() };
           }
 
           // Single-flight refresh: several syncs (calendar + tasks + a manual run)
           // can want a token at the same moment, and three parallel refreshes of
           // the same grant is how you get Google to start rejecting them.
-          let refreshInFlight = null;
+          const userRefreshInFlight = new Map<string, Promise<any>>();
 
-          async function refreshAccessToken(config, tokens) {
+          async function refreshAccessToken(config: any, tokens: any, userPaths: any, syncHealth: any) {
             const params = new URLSearchParams();
             params.append('client_id', config.clientId);
             params.append('client_secret', config.clientSecret);
@@ -438,6 +443,8 @@ export default defineConfig({
               const fatal = FATAL_OAUTH_ERRORS.has(code);
               const reason = description || code || `HTTP ${tokenRes.status}`;
               await markAuthBroken(
+                userPaths,
+                syncHealth,
                 fatal ? `Google rejected the saved authorisation (${reason}). Reconnect to fix.` : `Token refresh failed: ${reason}`,
                 fatal,
               );
@@ -458,14 +465,14 @@ export default defineConfig({
             delete tokens.invalidAt;
 
             await safeWriteJsonFile({
-              filePath: tokensPath,
-              backupDir,
+              filePath: userPaths.tokensPath,
+              backupDir: userPaths.backupDir,
               baseName: 'google-tokens',
               body: JSON.stringify(tokens),
               kind: 'object',
               force: true,
             });
-            await markAuthOk();
+            await markAuthOk(syncHealth);
             return tokens.access_token;
           }
 
@@ -473,15 +480,15 @@ export default defineConfig({
            * Access token, refreshed when stale. `force` throws away a cached token
            * that Google has started 401ing on mid-run.
            */
-          async function getGoogleToken(force = false) {
+          async function getGoogleTokenForUser(userPaths: any, syncHealth: any, force = false) {
             try {
               let config: any = null;
               let tokens: any = null;
               try {
-                config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+                config = JSON.parse(await fs.readFile(userPaths.configPath, 'utf-8'));
               } catch (_) {}
               try {
-                tokens = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+                tokens = JSON.parse(await fs.readFile(userPaths.tokensPath, 'utf-8'));
               } catch (_) {}
 
               if (!config || !config.clientId || !tokens || !tokens.refresh_token) {
@@ -491,36 +498,30 @@ export default defineConfig({
 
               const now = Date.now();
               if (!force && tokens.expires_at && now < tokens.expires_at - 60000) {
-                if (!tokens.invalid) await markAuthOk();
+                if (!tokens.invalid) await markAuthOk(syncHealth);
                 return tokens.access_token;
               }
 
-              if (!refreshInFlight) {
-                refreshInFlight = refreshAccessToken(config, tokens)
-                  .finally(() => { refreshInFlight = null; });
+              const usernameKey = userPaths.safeName || 'default';
+              let inFlight = userRefreshInFlight.get(usernameKey);
+              if (!inFlight) {
+                inFlight = refreshAccessToken(config, tokens, userPaths, syncHealth)
+                  .finally(() => { userRefreshInFlight.delete(usernameKey); });
+                userRefreshInFlight.set(usernameKey, inFlight);
               }
-              return await refreshInFlight;
+              return await inFlight;
             } catch (err) {
-              console.error('Error in getGoogleToken:', err);
+              console.error('Error in getGoogleTokenForUser:', err);
               return null;
             }
           }
 
           /**
            * One Google API call with the retries the previous code had none of.
-           *
-           * • 401 → the access token died mid-run; refresh once and retry.
-           * • 429 / 5xx → Google is rate-limiting or wobbling; back off and retry.
-           * • Network throw → same treatment; a dropped Wi-Fi packet must not look
-           *   like "this event no longer exists on Google".
-           *
-           * Returns the Response (which may still be !ok) or null when the call
-           * never completed, so callers can tell "Google said no" from "we never
-           * got an answer" — the distinction that keeps deletion mirroring safe.
            */
-          async function gfetch(url, init = {}, opts = {}) {
+          async function gfetchForUser(userPaths: any, syncHealth: any, url: string, init: any = {}, opts: any = {}) {
             const { tries = 3, label = 'google' } = opts;
-            let token = await getGoogleToken();
+            let token = await getGoogleTokenForUser(userPaths, syncHealth);
             if (!token) return null;
 
             for (let attempt = 0; attempt < tries; attempt++) {
@@ -532,7 +533,7 @@ export default defineConfig({
                 });
               } catch (err) {
                 if (attempt === tries - 1) {
-                  console.error(`[google] ${label} network failure:`, err.message);
+                  console.error(`[google] ${label} network failure:`, (err as Error)?.message);
                   return null;
                 }
                 await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
@@ -540,7 +541,7 @@ export default defineConfig({
               }
 
               if (res.status === 401 && attempt < tries - 1) {
-                const fresh = await getGoogleToken(true);
+                const fresh = await getGoogleTokenForUser(userPaths, syncHealth, true);
                 if (!fresh) return res; // reconnect needed — reported by getGoogleToken
                 token = fresh;
                 continue;
@@ -742,7 +743,12 @@ export default defineConfig({
           const TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
           let isTasksSyncing = false;
 
-          async function runGoogleTasksSync(clientTasks, todayYmdOpt, weekStartsOnOpt = 0) {
+          async function runGoogleTasksSync(userPaths: any, syncHealth: any, clientTasks: any, todayYmdOpt: any, weekStartsOnOpt = 0) {
+            const tokensPath = userPaths.tokensPath;
+            const backupDir = userPaths.backupDir;
+            const getGoogleToken = (force = false) => getGoogleTokenForUser(userPaths, syncHealth, force);
+            const gfetch = (url: string, init: any = {}, opts: any = {}) => gfetchForUser(userPaths, syncHealth, url, init, opts);
+
             if (isTasksSyncing) {
               syncHealth.tasks.skipped = 'A tasks sync was already running';
               return clientTasks;
@@ -1161,7 +1167,14 @@ export default defineConfig({
 
           // Main sync logic
           let isSyncing = false;
-          async function runGoogleSync(clientEvents, weekStartsOnOpt = 0, policyOpts: any = null) {
+          async function runGoogleSync(userPaths: any, syncHealth: any, clientEvents: any, weekStartsOnOpt = 0, policyOpts: any = null) {
+            const tokensPath = userPaths.tokensPath;
+            const settingsPath = userPaths.settingsPath;
+            const dbPath = userPaths.dbPath;
+            const backupDir = userPaths.backupDir;
+            const getGoogleToken = (force = false) => getGoogleTokenForUser(userPaths, syncHealth, force);
+            const gfetch = (url: string, init: any = {}, opts: any = {}) => gfetchForUser(userPaths, syncHealth, url, init, opts);
+
             if (isSyncing) {
               console.log('Sync already in progress. Skipping concurrent run.');
               return clientEvents;
@@ -1194,7 +1207,6 @@ export default defineConfig({
                 gcalMirrorGoogleDeletions: false,
               };
               try {
-                const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'settings.json');
                 const storedSettings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
                 policy = { ...policy, ...storedSettings, ...(policyOpts || {}) };
               } catch (_) {
@@ -1629,13 +1641,17 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths, syncHealth } = auth;
+
             try {
               let configured = false;
               let clientId = '';
               let clientSecret = '';
               let autoSync = false;
               try {
-                const conf = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+                const conf = JSON.parse(await fs.readFile(userPaths.configPath, 'utf-8'));
                 clientId = conf.clientId || '';
                 clientSecret = conf.clientSecret || '';
                 autoSync = !!conf.autoSync;
@@ -1645,27 +1661,19 @@ export default defineConfig({
               let authenticated = false;
               let email = '';
               let hasTasksScope = false;
-              // A stored refresh token Google has since rejected is NOT a working
-              // connection. Reporting it as one is what let the app show "Syncing"
-              // for days while every single call was failing.
               let storedInvalid = null;
               try {
-                const toks = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+                const toks = JSON.parse(await fs.readFile(userPaths.tokensPath, 'utf-8'));
                 authenticated = !!toks.refresh_token;
                 email = toks.email || '';
                 hasTasksScope = String(toks.scope || '').includes('/auth/tasks');
                 storedInvalid = toks.invalid || null;
               } catch (_) {}
 
-              // Probe the credential when we don't already know it's broken. This
-              // is what makes the UI notice a dead authorisation on its own: a
-              // still-valid access token returns from cache with no network call,
-              // and an expired one costs exactly one refresh (whose failure is
-              // then remembered, so this never becomes a poll against Google).
               if (authenticated && !storedInvalid && !syncHealth.auth.needsReconnect) {
-                await getGoogleToken();
+                await getGoogleTokenForUser(userPaths, syncHealth);
                 try {
-                  const fresh = JSON.parse(await fs.readFile(tokensPath, 'utf-8'));
+                  const fresh = JSON.parse(await fs.readFile(userPaths.tokensPath, 'utf-8'));
                   storedInvalid = fresh.invalid || null;
                   hasTasksScope = String(fresh.scope || '').includes('/auth/tasks');
                 } catch (_) {}
@@ -1700,6 +1708,10 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths } = auth;
+
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
@@ -1712,8 +1724,8 @@ export default defineConfig({
                   return;
                 }
                 await safeWriteJsonFile({
-                  filePath: configPath,
-                  backupDir,
+                  filePath: userPaths.configPath,
+                  backupDir: userPaths.backupDir,
                   baseName: 'google-config',
                   body: JSON.stringify({ clientId, clientSecret, autoSync: !!autoSync }),
                   kind: 'object',
@@ -1734,8 +1746,12 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths } = auth;
+
             try {
-              const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+              const config = JSON.parse(await fs.readFile(userPaths.configPath, 'utf-8'));
               const redirectUri = new URL(req.url || '', 'http://localhost').searchParams.get('redirectUri');
               if (!redirectUri) {
                 res.statusCode = 400;
@@ -1743,15 +1759,6 @@ export default defineConfig({
                 return;
               }
 
-              // Google matches this string EXACTLY against the client's Authorized
-              // redirect URIs — scheme, host, port, path and trailing slash all
-              // count, and http://localhost:5173 and http://127.0.0.1:5173 are two
-              // different entries. This app is opened under both (the main window
-              // via localhost, the widget via 127.0.0.1), which is exactly how you
-              // end up staring at Error 400: redirect_uri_mismatch. Reject anything
-              // malformed here rather than letting Google reject it after a
-              // full-page navigation, and hand the caller both spellings so the UI
-              // can tell the user precisely what to register.
               let parsed;
               try {
                 parsed = new URL(redirectUri);
@@ -1770,24 +1777,15 @@ export default defineConfig({
                 ? ['localhost', '127.0.0.1'].map(h => `${parsed.protocol}//${h}${parsed.port ? ':' + parsed.port : ''}${parsed.pathname === '/' ? '' : parsed.pathname}`)
                 : [redirectUri];
 
-              // CSRF: Google hands this back untouched on the callback, and the
-              // exchange refuses a code that doesn't carry the nonce we issued.
               const state = crypto.randomUUID();
               pendingOAuthStates.set(state, { at: Date.now(), redirectUri });
               for (const [k, v] of pendingOAuthStates) {
                 if (Date.now() - v.at > 15 * 60 * 1000) pendingOAuthStates.delete(k);
               }
-              // Calendar + Tasks. An existing refresh token was minted calendar-only,
-              // so adding Tasks requires a reconnect — `prompt=consent` already forces
-              // the consent screen and reissues a refresh token, so a plain reconnect
-              // is enough. `include_granted_scopes` keeps it incremental.
               const scope = [
                 'https://www.googleapis.com/auth/calendar',
                 'https://www.googleapis.com/auth/tasks',
               ].join(' ');
-              // access_type=offline + prompt=consent is what guarantees a REFRESH
-              // token comes back (without consent, a repeat authorisation returns
-              // an access token only, and sync dies again in an hour).
               const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
                 + `?client_id=${encodeURIComponent(config.clientId)}`
                 + `&redirect_uri=${encodeURIComponent(redirectUri)}`
@@ -1811,17 +1809,17 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths, syncHealth } = auth;
+
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
               try {
                 const { code, redirectUri, state } = JSON.parse(body);
-                const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+                const config = JSON.parse(await fs.readFile(userPaths.configPath, 'utf-8'));
 
-                // Refuse a code that didn't come from an authorisation we started.
-                // Tolerated when absent so a link opened from an older build (or a
-                // manually pasted code) still works — the nonce is the check, its
-                // absence just means we can't perform it.
                 if (state) {
                   const pending = pendingOAuthStates.get(state);
                   if (!pending) {
@@ -1864,7 +1862,6 @@ export default defineConfig({
                   access_token: tokenData.access_token,
                   refresh_token: tokenData.refresh_token,
                   expires_at: Date.now() + tokenData.expires_in * 1000,
-                  // What Google actually granted — checked before any Tasks call.
                   scope: tokenData.scope || '',
                   email: ''
                 };
@@ -1880,17 +1877,15 @@ export default defineConfig({
                 } catch (_) {}
 
                 await safeWriteJsonFile({
-                  filePath: tokensPath,
-                  backupDir,
+                  filePath: userPaths.tokensPath,
+                  backupDir: userPaths.backupDir,
                   baseName: 'google-tokens',
                   body: JSON.stringify(tokens),
                   kind: 'object',
                   force: true
                 });
 
-                // A fresh grant clears the "reconnect me" state held in memory —
-                // without this the UI kept demanding a reconnect it had just done.
-                await markAuthOk();
+                await markAuthOk(syncHealth);
                 syncHealth.calendar.error = null;
                 syncHealth.tasks.error = null;
                 syncHealth.tasks.skipped = null;
@@ -1909,11 +1904,13 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths, syncHealth } = auth;
+
             try {
-              await fs.unlink(tokensPath).catch(() => {});
-              // Deliberately disconnected is not "broken" — clear the alarm, or the
-              // header would nag for a reconnect the user just chose to undo.
-              await markAuthOk();
+              await fs.unlink(userPaths.tokensPath).catch(() => {});
+              await markAuthOk(syncHealth);
               res.end(JSON.stringify({ success: true }));
             } catch (_) {
               res.statusCode = 500;
@@ -1928,21 +1925,21 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths, syncHealth } = auth;
+
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
               try {
                 const { events: clientEvents, weekStartsOn: weekStartsOnOpt, settings: clientSettings } = JSON.parse(body);
-                const synced = await runGoogleSync(clientEvents, weekStartsOnOpt || 0, clientSettings);
+                const synced = await runGoogleSync(userPaths, syncHealth, clientEvents, weekStartsOnOpt || 0, clientSettings);
 
-                // runGoogleSync returns the exact same object it was given when a sync was
-                // skipped (another run already in progress, or Google not connected). In that
-                // case it did no merge — don't write it back, or we'd clobber a concurrent
-                // real merge with un-annotated events.
                 if (synced !== clientEvents) {
                   await safeWriteJsonFile({
-                    filePath: dbPath,
-                    backupDir,
+                    filePath: userPaths.dbPath,
+                    backupDir: userPaths.backupDir,
                     baseName: 'database',
                     body: JSON.stringify(synced),
                     kind: 'object',
@@ -1960,14 +1957,11 @@ export default defineConfig({
               } catch (err) {
                 console.error('Error in google-sync endpoint:', err);
                 res.statusCode = 500;
-                res.end(JSON.stringify({ error: `Sync failed: ${err.message}` }));
+                res.end(JSON.stringify({ error: `Sync failed: ${(err as Error)?.message || err}` }));
               }
             });
           });
 
-          // Note the registration order: connect matches by prefix, and
-          // '/api/google-sync' is not a prefix of '/api/google-tasks-sync', so
-          // these two don't shadow each other.
           server.middlewares.use('/api/google-tasks-sync', async (req, res) => {
             res.setHeader('Content-Type', 'application/json');
             if (req.method !== 'POST') {
@@ -1975,20 +1969,21 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths, syncHealth } = auth;
+
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
               try {
                 const { tasks: clientTasks, today, weekStartsOn: wso } = JSON.parse(body);
-                const synced = await runGoogleTasksSync(clientTasks || {}, today, wso || 0);
+                const synced = await runGoogleTasksSync(userPaths, syncHealth, clientTasks || {}, today, wso || 0);
 
-                // Same contract as /api/google-sync: an identical reference back
-                // means the run bailed and merged nothing — writing it would
-                // clobber a concurrent real merge.
                 if (synced !== clientTasks) {
                   await safeWriteJsonFile({
-                    filePath: path.resolve(import.meta.dirname, '..', '..', 'database', 'tasks.json'),
-                    backupDir,
+                    filePath: userPaths.tasksPath,
+                    backupDir: userPaths.backupDir,
                     baseName: 'tasks',
                     body: JSON.stringify(synced),
                     kind: 'object',
@@ -2006,98 +2001,93 @@ export default defineConfig({
               } catch (err) {
                 console.error('Error in google-tasks-sync endpoint:', err);
                 res.statusCode = 500;
-                res.end(JSON.stringify({ error: `Tasks sync failed: ${err.message}` }));
+                res.end(JSON.stringify({ error: `Tasks sync failed: ${(err as Error)?.message || err}` }));
               }
             });
           });
 
           server.middlewares.use('/api/events', async (req, res, next) => {
+            if (req.method !== 'GET' && req.method !== 'POST') return next();
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths } = auth;
             const fs = await import('fs/promises');
-            const path = await import('path');
-            const dbPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'database.json');
-            const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
-          if (req.method === 'GET') {
-            try {
-              const data = await fs.readFile(dbPath, 'utf-8');
-              res.setHeader('Content-Type', 'application/json');
-              res.end(data);
-            } catch (err) {
-              res.setHeader('Content-Type', 'application/json');
-              res.end('{}');
-            }
-          } else if (req.method === 'POST') {
-            let body = '';
-            req.on('data', chunk => {
-              body += chunk;
-            });
-            req.on('end', async () => {
+            if (req.method === 'GET') {
               try {
-                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const result = await safeWriteJsonFile({ filePath: dbPath, backupDir, baseName: 'database', body, kind: 'object', force });
+                const data = await fs.readFile(userPaths.dbPath, 'utf-8');
                 res.setHeader('Content-Type', 'application/json');
-                if (!result.ok) {
-                  res.statusCode = result.status;
-                  res.end(JSON.stringify({ error: result.error }));
-                  return;
-                }
-                res.end(JSON.stringify({ success: true }));
-                // NOTE: Google sync is driven exclusively by the client via /api/google-sync.
-                // Kicking off a second background sync here raced with that call and could
-                // write back un-annotated events (losing gCalId links → duplicate Google events).
+                res.end(data);
               } catch (err) {
-                res.statusCode = 500;
                 res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ error: 'Failed to write to file database' }));
+                res.end('{}');
               }
-            });
-          } else {
-            next();
-          }
-        });
-
-        // Tasks live in their OWN file, never in database.json. Mixing them would
-        // hand them to runGoogleSync, which pushes everything it is given to the
-        // Daily calendar — tasks belong to Google TASKS, not Google Calendar.
-        server.middlewares.use('/api/tasks', async (req, res, next) => {
-          const fs = await import('fs/promises');
-          const path = await import('path');
-          const tasksPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'tasks.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
-
-          if (req.method === 'GET') {
-            try {
-              const data = await fs.readFile(tasksPath, 'utf-8');
-              res.setHeader('Content-Type', 'application/json');
-              res.end(data);
-            } catch {
-              res.setHeader('Content-Type', 'application/json');
-              res.end('{}');
-            }
-          } else if (req.method === 'POST') {
-            let body = '';
-            req.on('data', chunk => { body += chunk; });
-            req.on('end', async () => {
-              try {
-                const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const result = await safeWriteJsonFile({ filePath: tasksPath, backupDir, baseName: 'tasks', body, kind: 'object', force });
-                res.setHeader('Content-Type', 'application/json');
-                if (!result.ok) {
-                  res.statusCode = result.status;
-                  res.end(JSON.stringify({ error: result.error }));
-                  return;
+            } else if (req.method === 'POST') {
+              let body = '';
+              req.on('data', chunk => {
+                body += chunk;
+              });
+              req.on('end', async () => {
+                try {
+                  const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                  const result = await safeWriteJsonFile({ filePath: userPaths.dbPath, backupDir: userPaths.backupDir, baseName: 'database', body, kind: 'object', force });
+                  res.setHeader('Content-Type', 'application/json');
+                  if (!result.ok) {
+                    res.statusCode = result.status;
+                    res.end(JSON.stringify({ error: result.error }));
+                    return;
+                  }
+                  res.end(JSON.stringify({ success: true }));
+                } catch (err) {
+                  res.statusCode = 500;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify({ error: 'Failed to write to file database' }));
                 }
-                res.end(JSON.stringify({ success: true }));
-              } catch {
-                res.statusCode = 500;
+              });
+            }
+          });
+
+          // Tasks live in their OWN file, never in database.json. Mixing them would
+          // hand them to runGoogleSync, which pushes everything it is given to the
+          // Daily calendar — tasks belong to Google TASKS, not Google Calendar.
+          server.middlewares.use('/api/tasks', async (req, res, next) => {
+            if (req.method !== 'GET' && req.method !== 'POST') return next();
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { userPaths } = auth;
+            const fs = await import('fs/promises');
+
+            if (req.method === 'GET') {
+              try {
+                const data = await fs.readFile(userPaths.tasksPath, 'utf-8');
                 res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ error: 'Failed to write tasks' }));
+                res.end(data);
+              } catch {
+                res.setHeader('Content-Type', 'application/json');
+                res.end('{}');
               }
-            });
-          } else {
-            next();
-          }
-        });
+            } else if (req.method === 'POST') {
+              let body = '';
+              req.on('data', chunk => { body += chunk; });
+              req.on('end', async () => {
+                try {
+                  const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
+                  const result = await safeWriteJsonFile({ filePath: userPaths.tasksPath, backupDir: userPaths.backupDir, baseName: 'tasks', body, kind: 'object', force });
+                  res.setHeader('Content-Type', 'application/json');
+                  if (!result.ok) {
+                    res.statusCode = result.status;
+                    res.end(JSON.stringify({ error: result.error }));
+                    return;
+                  }
+                  res.end(JSON.stringify({ success: true }));
+                } catch {
+                  res.statusCode = 500;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.end(JSON.stringify({ error: 'Failed to write tasks' }));
+                }
+              });
+            }
+          });
 
         // ── Prayer times ──────────────────────────────────────────────────────
         // The Aladhan API is hit from the server, not the browser: one shared
@@ -2148,7 +2138,7 @@ export default defineConfig({
             + `?city=${encodeURIComponent(city)}&country=${encodeURIComponent(country)}`
             + `&method=${method}&school=${school === 1 ? 1 : 0}`;
           try {
-            const resp = await fetch(api, { headers: { 'User-Agent': 'weekly-planner' } });
+            const resp = await fetch(api, { headers: { 'User-Agent': 'daily-planner' } });
             if (!resp.ok) throw new Error(`Aladhan responded ${resp.status}`);
             const json: any = await resp.json();
             const rows: any[] = Array.isArray(json?.data) ? json.data : [];
@@ -2197,14 +2187,15 @@ export default defineConfig({
 
         // Which prayers have been ticked off: { 'yyyy-MM-dd': ['fajr', ...] }.
         server.middlewares.use('/api/prayer-done', async (req, res, next) => {
+          if (req.method !== 'GET' && req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
           const fs = await import('fs/promises');
-          const path = await import('path');
-          const donePath = path.resolve(import.meta.dirname, '..', '..', 'database', 'prayer-done.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
-              const data = await fs.readFile(donePath, 'utf-8');
+              const data = await fs.readFile(userPaths.donePath, 'utf-8');
               res.setHeader('Content-Type', 'application/json');
               res.end(data);
             } catch {
@@ -2217,7 +2208,7 @@ export default defineConfig({
             req.on('end', async () => {
               try {
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const result = await safeWriteJsonFile({ filePath: donePath, backupDir, baseName: 'prayer-done', body, kind: 'object', force });
+                const result = await safeWriteJsonFile({ filePath: userPaths.donePath, backupDir: userPaths.backupDir, baseName: 'prayer-done', body, kind: 'object', force });
                 res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
                   res.statusCode = result.status;
@@ -2231,20 +2222,19 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Failed to write prayer completion' }));
               }
             });
-          } else {
-            next();
           }
         });
 
         server.middlewares.use('/api/settings', async (req, res, next) => {
+          if (req.method !== 'GET' && req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
           const fs = await import('fs/promises');
-          const path = await import('path');
-          const settingsPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'settings.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
-              const data = await fs.readFile(settingsPath, 'utf-8');
+              const data = await fs.readFile(userPaths.settingsPath, 'utf-8');
               res.setHeader('Content-Type', 'application/json');
               res.end(data);
             } catch (err) {
@@ -2259,7 +2249,7 @@ export default defineConfig({
             req.on('end', async () => {
               try {
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const result = await safeWriteJsonFile({ filePath: settingsPath, backupDir, baseName: 'settings', body, kind: 'object', force });
+                const result = await safeWriteJsonFile({ filePath: userPaths.settingsPath, backupDir: userPaths.backupDir, baseName: 'settings', body, kind: 'object', force });
                 res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
                   res.statusCode = result.status;
@@ -2273,20 +2263,18 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Failed to write settings file' }));
               }
             });
-          } else {
-            next();
           }
         });
 
         // ── Per-device settings ──────────────────────────────────────────────
-        // Which view, how far zoomed, how wide the tasks panel: preferences that
-        // belong to a SCREEN rather than to the plan. Keyed by a device id the
-        // browser mints once, so the phone and the desktop each remember their
-        // own layout instead of overwriting each other through settings.json.
         server.middlewares.use('/api/device-settings', async (req, res, next) => {
-          const devicePath = path.resolve(import.meta.dirname, '..', '..', 'database', 'device-settings.json');
+          if (req.method !== 'GET' && req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
+
           const readAll = async (): Promise<Record<string, any>> => {
-            const raw = await readJsonSafe(devicePath, {});
+            const raw = await readJsonSafe(userPaths.devicePath, {});
             return raw && typeof raw === 'object' ? raw as Record<string, any> : {};
           };
 
@@ -2296,13 +2284,10 @@ export default defineConfig({
             const kind = params.get('kind') || '';
             const all = await readAll();
             let entry = device ? all[device] : null;
-            // Unknown id (cleared site data, new browser profile): fall back to the
-            // most recently used device of the same kind, so a phone lands on the
-            // phone's layout rather than inheriting the desktop's.
             if (!entry && kind) {
               const sameKind = Object.values(all)
                 .filter((e: any) => e && e.kind === kind)
-                .sort((a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0));
+                .sort((a: any, b: any) => (b.updatedAt || 0) - (a[1]?.updatedAt || 0));
               if (sameKind.length) entry = { ...sameKind[0], inherited: true };
             }
             res.setHeader('Content-Type', 'application/json');
@@ -2330,13 +2315,11 @@ export default defineConfig({
                   updatedAt: Date.now(),
                   settings: parsed.settings,
                 };
-                // Cap the file: one entry per browser profile adds up over years of
-                // private windows and reinstalls, and none of it is worth keeping.
                 const entries = Object.entries(all)
                   .sort((a: any, b: any) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0))
                   .slice(0, 24);
-                await fsp.mkdir(path.dirname(devicePath), { recursive: true });
-                await fsp.writeFile(devicePath, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf-8');
+                await fsp.mkdir(path.dirname(userPaths.devicePath), { recursive: true });
+                await fsp.writeFile(userPaths.devicePath, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf-8');
                 res.end(JSON.stringify({ success: true }));
               } catch (err) {
                 res.statusCode = 500;
@@ -2345,21 +2328,22 @@ export default defineConfig({
             });
             return;
           }
-
-          next();
         });
 
         // ── Automated backups ────────────────────────────────────────────────
         {
           const rootDir = path.resolve(import.meta.dirname, '..', '..');
-          // Check on boot, then hourly. The interval itself lives in settings, so
-          // changing it in the UI takes effect at the next hourly check.
           maybeRunAutoBackup(rootDir).catch(() => {});
           const backupTimer = setInterval(() => { maybeRunAutoBackup(rootDir).catch(() => {}); }, 3600_000);
           if (typeof backupTimer.unref === 'function') backupTimer.unref();
 
           server.middlewares.use('/api/auto-backup', async (req, res, next) => {
-            const p = autoBackupPaths(rootDir);
+            if (req.method !== 'GET' && req.method !== 'POST') return next();
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const { user } = auth;
+
+            const p = autoBackupPaths(rootDir, user.username);
             if (req.method === 'GET') {
               let files: string[] = [];
               try {
@@ -2380,9 +2364,9 @@ export default defineConfig({
             }
             if (req.method === 'POST') {
               try {
-                const result = await writeAutoBackup(rootDir, 'manual');
+                const result = await writeAutoBackup(rootDir, user.username, 'manual');
                 res.setHeader('Content-Type', 'application/json');
-                if (!result.ok) { res.statusCode = 409; res.end(JSON.stringify({ error: result.reason })); return; }
+                if (!result.ok) { res.statusCode = 409; res.end(JSON.stringify({ error: (result as any).reason })); return; }
                 res.end(JSON.stringify({ success: true, ...result }));
               } catch (err) {
                 res.statusCode = 500;
@@ -2391,19 +2375,19 @@ export default defineConfig({
               }
               return;
             }
-            next();
           });
         }
 
         server.middlewares.use('/api/focus-sessions', async (req, res, next) => {
+          if (req.method !== 'GET' && req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
           const fs = await import('fs/promises');
-          const path = await import('path');
-          const focusPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-sessions.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
-              const data = await fs.readFile(focusPath, 'utf-8');
+              const data = await fs.readFile(userPaths.focusPath, 'utf-8');
               res.setHeader('Content-Type', 'application/json');
               res.end(data);
             } catch (err) {
@@ -2418,14 +2402,8 @@ export default defineConfig({
             req.on('end', async () => {
               try {
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                // The main window and the widget each hold the whole session list
-                // and POST all of it. A plain overwrite therefore loses a session
-                // the *other* window logged since this one last read the file —
-                // that is how a completed hour of focus vanished. Merge by id
-                // instead. `force` (a deliberate manual edit of a day's total,
-                // which legitimately removes rows) still replaces outright.
-                const merged = force ? body : await mergeFocusSessions(focusPath, body);
-                const result = await safeWriteJsonFile({ filePath: focusPath, backupDir, baseName: 'focus-sessions', body: merged, kind: 'array', force });
+                const merged = force ? body : await mergeFocusSessions(userPaths.focusPath, body);
+                const result = await safeWriteJsonFile({ filePath: userPaths.focusPath, backupDir: userPaths.backupDir, baseName: 'focus-sessions', body: merged, kind: 'array', force });
                 res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
                   res.statusCode = result.status;
@@ -2439,8 +2417,6 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Failed to write focus sessions file' }));
               }
             });
-          } else {
-            next();
           }
         });
 
@@ -2451,9 +2427,14 @@ export default defineConfig({
           if (req.method !== 'GET') return next();
           const fs = await import('fs');
           const fsp = await import('fs/promises');
-          const path = await import('path');
-          const dbDir = path.resolve(import.meta.dirname, '..', '..', 'database');
-          // SSE event name → file in database/.
+          const { users } = await loadAccessConfig(rootDir);
+          const user = getAuthUser(req, users);
+          if (!user) {
+            res.statusCode = 401;
+            res.end('Unauthorized');
+            return;
+          }
+          const userPaths = await ensureUserDb(rootDir, user.username);
           const WATCHED: Record<string, string> = {
             events: 'database.json',
             settings: 'settings.json',
@@ -2472,17 +2453,13 @@ export default defineConfig({
             const file = WATCHED[name];
             if (!file) return;
             try {
-              const data = await fsp.readFile(path.join(dbDir, file), 'utf-8');
+              const data = await fsp.readFile(path.join(userPaths.dbDir, file), 'utf-8');
               if (data === lastSent[name]) return;
               lastSent[name] = data;
               res.write(`event: ${name}\ndata: ${data.replace(/\s*\n\s*/g, ' ')}\n\n`);
             } catch (_) { /* not written yet */ }
           };
 
-          // Watch the directory, not each file: atomic writes replace the inode and
-          // a file-level watcher would go deaf after the first save. The watch event
-          // often lands while the temp file is still being renamed into place, so
-          // re-read a couple of times before giving up on it.
           const sendSoon = (name: string) => {
             send(name);
             setTimeout(() => send(name), 40);
@@ -2490,7 +2467,7 @@ export default defineConfig({
           };
           let watcher: any = null;
           try {
-            watcher = fs.watch(dbDir, (_evt, changed) => {
+            watcher = fs.watch(userPaths.dbDir, (_evt, changed) => {
               if (!changed) return;
               for (const [name, file] of Object.entries(WATCHED)) {
                 if (String(changed).startsWith(file)) sendSoon(name);
@@ -2498,9 +2475,6 @@ export default defineConfig({
             });
           } catch (_) { /* the sweep below still covers it */ }
 
-          // Backstop: fs.watch drops events on Windows often enough to be felt.
-          // Re-reading a handful of small files a few times a second is nothing, and it
-          // caps the worst case at a quarter second instead of seconds.
           const sweep = setInterval(() => {
             for (const name of Object.keys(WATCHED)) send(name);
           }, 250);
@@ -2513,16 +2487,19 @@ export default defineConfig({
           });
         });
 
-        // Live push of the shared timer state. Polling for it meant a start/pause
-        // made elsewhere (widget, system-wide hotkey) only showed up on the next
-        // tick; this delivers it the moment the file changes.
+        // Live push of the shared timer state.
         server.middlewares.use('/api/focus-timer/stream', async (req, res, next) => {
           if (req.method !== 'GET') return next();
           const fs = await import('fs');
           const fsp = await import('fs/promises');
-          const path = await import('path');
-          const dbDir = path.resolve(import.meta.dirname, '..', '..', 'database');
-          const timerPath = path.join(dbDir, 'focus-timer.json');
+          const { users } = await loadAccessConfig(rootDir);
+          const user = getAuthUser(req, users);
+          if (!user) {
+            res.statusCode = 401;
+            res.end('Unauthorized');
+            return;
+          }
+          const userPaths = await ensureUserDb(rootDir, user.username);
 
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
@@ -2533,7 +2510,7 @@ export default defineConfig({
           let lastSent = '';
           const send = async () => {
             try {
-              const data = await fsp.readFile(timerPath, 'utf-8');
+              const data = await fsp.readFile(userPaths.timerPath, 'utf-8');
               if (data === lastSent) return;
               lastSent = data;
               res.write(`data: ${data.replace(/\s*\n\s*/g, ' ')}\n\n`);
@@ -2541,10 +2518,6 @@ export default defineConfig({
           };
           await send();
 
-          // Watch the directory, not the file: atomic writes replace the inode and
-          // a file-level watcher would go deaf after the first save. The event often
-          // lands while the temp file is still being renamed in, so re-read a couple
-          // of times rather than trusting the first look.
           const sendSoon = () => {
             send();
             setTimeout(send, 40);
@@ -2552,16 +2525,13 @@ export default defineConfig({
           };
           let watcher: any = null;
           try {
-            watcher = fs.watch(dbDir, (_evt, name) => {
+            watcher = fs.watch(userPaths.dbDir, (_evt, name) => {
               if (!name || String(name).startsWith('focus-timer.json')) sendSoon();
             });
           } catch (_) { /* the sweep below still covers it */ }
 
-          // Backstop: fs.watch drops events on Windows often enough to be felt —
-          // this is what keeps a hotkey press from ever appearing to hang.
           const sweep = setInterval(send, 200);
 
-          // Keep-alive comment so proxies/browsers don't drop an idle stream.
           const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
           req.on('close', () => {
             clearInterval(ping);
@@ -2570,23 +2540,12 @@ export default defineConfig({
           });
         });
 
-        // Start/pause the focus timer without a browser window in the picture. This is
-        // what the system-wide hotkey helper (focus-hotkey.py) calls, so the shortcut
-        // works from any app on the desktop. Registered BEFORE /api/focus-timer because
-        // connect matches by prefix.
-        // A single physical keypress must never land as two toggles. Key repeat,
-        // a bouncy switch or a duplicate hotkey helper would otherwise start and
-        // immediately pause again, which reads as "it pressed itself twice".
         let lastToggleAt = 0;
         const TOGGLE_DEBOUNCE_MS = 300;
 
-        // Both windows watch the same timer, so both would play the same cue.
-        // localStorage can't arbitrate that: the main window is Chrome and the
-        // widget is WebView2, with separate storage. The server is the one thing
-        // they share, so it hands the cue to whoever asks first.
         const cueClaims = new Map<string, number>();
 
-        server.middlewares.use('/api/focus-cue/claim', (req, res, next) => {
+        server.middlewares.use('/api/focus-cue/claim', async (req, res, next) => {
           res.setHeader('Access-Control-Allow-Origin', '*');
           res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
           res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -2596,7 +2555,11 @@ export default defineConfig({
             return;
           }
           if (req.method !== 'POST') return next();
-          const key = new URL(req.url ?? '', 'http://x').searchParams.get('key') ?? '';
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { user } = auth;
+          const rawKey = new URL(req.url ?? '', 'http://x').searchParams.get('key') ?? '';
+          const key = `${user.username}:${rawKey}`;
           const now = Date.now();
           for (const [k, t] of cueClaims) if (now - t > 30000) cueClaims.delete(k);
           const granted = !cueClaims.has(key);
@@ -2605,21 +2568,17 @@ export default defineConfig({
           res.end(JSON.stringify({ granted }));
         });
 
-        // Liveness stamp for a running focus session. Every open window refreshes
-        // it every few seconds; it lives on disk so it survives the machine being
-        // switched off. On the next launch a stale stamp is how the app knows the
-        // session died with the PC, and exactly when — see focusRecoveryFor().
-        // Written straight (no backup rotation): it's disposable, high-frequency
-        // state, not user data.
         server.middlewares.use('/api/focus-heartbeat', async (req, res, next) => {
+          if (req.method !== 'GET' && req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
           const fs = await import('fs/promises');
-          const path = await import('path');
-          const beatPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-heartbeat.json');
 
           if (req.method === 'GET') {
             try {
               res.setHeader('Content-Type', 'application/json');
-              res.end(await fs.readFile(beatPath, 'utf-8'));
+              res.end(await fs.readFile(userPaths.beatPath, 'utf-8'));
             } catch (_) {
               res.setHeader('Content-Type', 'application/json');
               res.end('null');
@@ -2631,7 +2590,7 @@ export default defineConfig({
               try {
                 const parsed = JSON.parse(body || 'null');
                 if (!parsed || typeof parsed !== 'object') throw new Error('bad body');
-                await fs.writeFile(beatPath, JSON.stringify({
+                await fs.writeFile(userPaths.beatPath, JSON.stringify({
                   at: typeof parsed.at === 'string' ? parsed.at : new Date().toISOString(),
                   sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
                   elapsedSeconds: Math.max(0, Number(parsed.elapsedSeconds) || 0),
@@ -2644,19 +2603,20 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Failed to write focus heartbeat' }));
               }
             });
-          } else {
-            next();
           }
         });
 
         // ---------------------------------------------------------------
         // ESP32 focus-timer controller bridge.
         //
-        // The firmware holds no logic: it posts raw events (button pressed,
-        // desk occupied) and renders whatever display state it is handed. The
-        // app consumes the events and drives the session through its own
-        // existing start/pause/terminate code, so a hardware button and an
-        // on-screen button cannot ever behave differently.
+        // The firmware holds no logic at all: it posts raw button edges and
+        // raw ultrasonic centimetres, and renders whatever display state it is
+        // handed. Presence is decided here, by the shared filter in
+        // src/lib/sensorFilter.ts -- on the PC, where the analysis can be as
+        // involved as it needs to be and can be tested without a board on the
+        // desk. The windows then consume presence events and drive the session
+        // through the app's own start/pause/terminate code, so a hardware
+        // button and an on-screen button cannot ever behave differently.
         //
         // All of this is live, disposable state regenerated every second, so
         // it stays in memory -- writing it to disk would just churn the file
@@ -2687,21 +2647,30 @@ export default defineConfig({
         // filter parameters can be changed without plugging the ESP32 into the
         // PC to reflash it. Defaults match the firmware's own fallbacks.
         let hwConfig: Record<string, unknown> = {
-          enterCm: 48, exitCm: 52, sampleIntervalMs: 100, medianWindow: 5,
-          presentConfirmMs: 2000, absentConfirmMs: 5000, calibrating: false,
-          announceOnConnect: true, maxValidCm: 100, glitchHoldMs: 10000,
-          glitchIgnoreAlways: false,
+          ...coerceSensorFilterConfig(null),
+          sampleIntervalMs: 100, calibrating: false, announceOnConnect: true,
         };
 
-        // Live distance, streamed by the board only while calibrating.
+        // The presence filter itself. One instance for the whole server: it is
+        // a property of the desk, not of a browser window, so it survives
+        // reloads and hand-offs between the main window and the widget, and
+        // both of them see exactly the same verdict.
+        const hwFilter = createPresenceFilter();
+
+        // Latest readout, for the settings page. Every number here comes out
+        // of the filter rather than off the wire, so what the page shows is
+        // what the decision was actually made on.
         let hwLiveDistance: number | null = null;
+        let hwLiveRaw: number | null = null;
         let hwLivePresent = false;
+        let hwLiveDiagnostics: Record<string, unknown> = {};
         let hwLiveBtnA = 1;
         let hwLiveBtnB = 1;
         let hwLiveEdgesA = 0;
         let hwLiveEdgesB = 0;
         let hwLiveDiag: Record<string, unknown> = {};
         let hwLiveAt = 0;
+        let hwLastAnnounceAt = 0;
 
         // A short trail of what the controller actually decided and why. Two
         // bugs here were diagnosed by guesswork and the guesses were wrong;
@@ -2724,8 +2693,15 @@ export default defineConfig({
         // timeout sat frozen until the window was clicked. Delivery of a network
         // message is not throttled that way, so the beat comes from here
         // instead and the page merely reacts to it.
-        server.middlewares.use('/api/hardware/tick', (req, res, next) => {
+        server.middlewares.use('/api/hardware/tick', async (req, res, next) => {
           if (req.method !== 'GET') return next();
+          const { users } = await loadAccessConfig(rootDir);
+          const authUser = getAuthUser(req, users);
+          if (!authUser || authUser.username !== users[0]?.username) {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.end();
+            return;
+          }
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache, no-transform',
@@ -2768,11 +2744,65 @@ export default defineConfig({
               const type = String(parsed?.type ?? '');
               if (!type) throw new Error('missing type');
 
-              // Calibration samples are a live readout, not a queued event --
-              // they arrive several times a second and only the latest matters.
-              if (type === 'distance') {
-                hwLiveDistance = Number(parsed?.distanceCm);
-                hwLivePresent = Boolean(parsed?.present);
+              // A batch of raw pings. Not queued as events: the queue is for
+              // decisions, and these are the evidence a decision gets made
+              // from. They go straight into the filter, which is the only
+              // thing on either side of the link that knows what they mean.
+              if (type === 'samples') {
+                const now = Date.now();
+                const dt = Math.max(20, Math.min(5000, Number(parsed?.dt) || 100));
+                const raw: unknown[] = Array.isArray(parsed?.cm) ? parsed.cm : [];
+
+                // Timestamps are reconstructed backwards from arrival rather
+                // than taken from the board's millis(): the two clocks share no
+                // epoch, and the board's would have to be re-synchronised after
+                // every reset. Network jitter shifts the whole batch by a few
+                // ms, which no dwell time here can notice.
+                let snap = hwFilter.snapshot;
+                const n = raw.length;
+                for (let i = 0; i < n; i++) {
+                  const v = Number(raw[i]);
+                  const at = now - (n - 1 - i) * dt;
+                  snap = hwFilter.push(Number.isFinite(v) && v > 0 ? v : null, at);
+                  // Emitted from inside the loop so a change that happened
+                  // three samples into the batch is reported at the moment it
+                  // happened, not at the end of the batch.
+                  if (snap.changed && snap.ready) {
+                    hwEvents.push({
+                      id: ++hwEventSeq,
+                      type: 'presence',
+                      present: snap.present,
+                      distanceCm: snap.distanceCm ?? undefined,
+                      at,
+                    });
+                    while (hwEvents.length > 50) hwEvents.shift();
+                  }
+                }
+
+                if (n > 0) {
+                  hwLiveDistance = snap.distanceCm;
+                  hwLiveRaw = snap.rawCm;
+                  hwLivePresent = snap.present;
+                  hwLiveDiagnostics = {
+                    ready: snap.ready,
+                    rawKind: snap.rawKind,
+                    support: Math.round(snap.support * 100) / 100,
+                    spreadCm: Math.round(snap.spreadCm * 10) / 10,
+                    nearRatio: Math.round(snap.nearRatio * 100) / 100,
+                    overRatio: Math.round(snap.overRatio * 100) / 100,
+                    masked: snap.masked,
+                    holding: snap.holding,
+                    holdingMs: Math.round(snap.holdingMs),
+                    awayProgressMs: Math.round(snap.awayProgressMs),
+                    awayNeedsMs: Math.round(snap.awayNeedsMs),
+                    arriveProgressMs: Math.round(snap.arriveProgressMs),
+                    arriveNeedsMs: Math.round(snap.arriveNeedsMs),
+                    windowCount: snap.windowCount,
+                    everEchoed: snap.everEchoed,
+                    forced: snap.forced,
+                  };
+                }
+
                 hwLiveBtnA = Number(parsed?.btnA);
                 hwLiveBtnB = Number(parsed?.btnB);
                 hwLiveEdgesA = Number(parsed?.edgesA);
@@ -2783,7 +2813,7 @@ export default defineConfig({
                   uiMode: String(parsed?.uiMode ?? ''),
                   uiValid: Boolean(parsed?.uiValid),
                 };
-                hwLiveAt = Date.now();
+                hwLiveAt = now;
                 json({ success: true });
                 return;
               }
@@ -2807,8 +2837,35 @@ export default defineConfig({
 
           // --- app -> server: drain events newer than the last one seen ---
           if (route === '/events' && req.method === 'GET') {
+            const { users } = await loadAccessConfig(rootDir);
+            const authUser = getAuthUser(req, users);
+            if (!authUser || authUser.username !== users[0]?.username) {
+              json({ events: [], latest: 0 });
+              return;
+            }
             const since = Number(url.searchParams.get('since') ?? 0) || 0;
             json({ events: hwEvents.filter(e => e.id > since), latest: hwEventSeq });
+
+            // since=0 is a window opening for the first time. It deliberately
+            // does not replay the backlog (acting on a ten-minute-old presence
+            // change would pause a session that is running fine), so a desk
+            // that was already occupied before the PC finished booting would
+            // otherwise start nothing until you got up and sat back down.
+            // Queued *after* responding, so the newcomer picks it up on its
+            // next poll rather than in the batch it is about to discard.
+            const announce = Boolean(hwConfig.announceOnConnect);
+            const nowAt = Date.now();
+            if (since === 0 && announce && hwFilter.snapshot.ready && nowAt - hwLastAnnounceAt > 10000) {
+              hwLastAnnounceAt = nowAt;
+              hwEvents.push({
+                id: ++hwEventSeq,
+                type: 'presence',
+                present: hwFilter.snapshot.present,
+                distanceCm: hwFilter.snapshot.distanceCm ?? undefined,
+                at: nowAt,
+              });
+              while (hwEvents.length > 50) hwEvents.shift();
+            }
             return;
           }
 
@@ -2854,19 +2911,17 @@ export default defineConfig({
               // Already validated and clamped by coerceHardwareSettings before
               // being sent; stored as-is so the firmware sees exactly what the
               // settings page shows.
+              const filterCfg = coerceSensorFilterConfig(parsed);
               hwConfig = {
-                enterCm: Number(parsed?.enterCm) || 48,
-                exitCm: Number(parsed?.exitCm) || 52,
-                sampleIntervalMs: Number(parsed?.sampleIntervalMs) || 100,
-                medianWindow: Number(parsed?.medianWindow) || 5,
-                presentConfirmMs: Number(parsed?.presentConfirmMs) || 0,
-                absentConfirmMs: Number(parsed?.absentConfirmMs) || 0,
+                ...filterCfg,
+                sampleIntervalMs: Math.max(40, Math.min(2000, Number(parsed?.sampleIntervalMs) || 100)),
                 calibrating: Boolean(parsed?.calibrating),
                 announceOnConnect: Boolean(parsed?.announceOnConnect),
-                maxValidCm: Number(parsed?.maxValidCm) || 100,
-                glitchHoldMs: Number(parsed?.glitchHoldMs) || 0,
-                glitchIgnoreAlways: Boolean(parsed?.glitchIgnoreAlways),
               };
+              // Applied live. The readings already in the window stay -- they
+              // are still true -- but every dwell timer restarts, since a timer
+              // part-way to expiry was counting against a rule that has gone.
+              hwFilter.configure(filterCfg);
               json({ success: true });
             } catch (_) {
               res.statusCode = 400;
@@ -2879,8 +2934,15 @@ export default defineConfig({
           if (route === '/live' && req.method === 'GET') {
             const fresh = Date.now() - hwLiveAt < 4000;
             json({
+              // The believed distance, i.e. the dominant cluster's centre --
+              // this is the number the decision was actually made on. rawCm is
+              // the last unprocessed ping alongside it, so a placement problem
+              // (the raw number thrashing) reads differently from a threshold
+              // problem (a steady raw number on the wrong side of the line).
               distanceCm: fresh ? hwLiveDistance : null,
+              rawCm: fresh ? hwLiveRaw : null,
               present: fresh ? hwLivePresent : null,
+              filter: fresh ? hwLiveDiagnostics : null,
               btnA: fresh ? hwLiveBtnA : null,
               btnB: fresh ? hwLiveBtnB : null,
               edgesA: fresh ? hwLiveEdgesA : null,
@@ -2941,6 +3003,12 @@ export default defineConfig({
 
           // --- app: which window owns the controller right now? ---
           if (route === '/claim' && req.method === 'POST') {
+            const { users } = await loadAccessConfig(rootDir);
+            const authUser = getAuthUser(req, users);
+            if (!authUser || authUser.username !== users[0]?.username) {
+              json({ owner: false });
+              return;
+            }
             const key = url.searchParams.get('key') ?? '';
             const now = Date.now();
             if (!hwOwner || hwOwner === key || now - hwOwnerAt > HW_LEASE_MS) {
@@ -2958,6 +3026,10 @@ export default defineConfig({
 
         server.middlewares.use('/api/focus-timer/toggle', async (req, res, next) => {
           if (req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
+
           const nowMs = Date.now();
           if (nowMs - lastToggleAt < TOGGLE_DEBOUNCE_MS) {
             res.setHeader('Content-Type', 'application/json');
@@ -2966,11 +3038,6 @@ export default defineConfig({
           }
           lastToggleAt = nowMs;
 
-          // A countdown the sensor started has to be callable off from the
-          // system-wide hotkey. Pressed during those seconds it means "not this
-          // one" -- previously it started the session immediately instead, and
-          // since the countdown belongs to no window there was no other way to
-          // stop it short of standing up and walking away.
           const armingUntil = hwController.armingUntil;
           if (typeof armingUntil === 'number' && Number.isFinite(armingUntil) && armingUntil > nowMs) {
             hwController = { ...hwController, armingUntil: null, stoppedByHand: true };
@@ -2982,13 +3049,10 @@ export default defineConfig({
           }
 
           const fs = await import('fs/promises');
-          const path = await import('path');
-          const timerPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-timer.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
           try {
             let timer: Record<string, unknown> = { plannedSeconds: 3600, accumulatedSeconds: 0, isRunning: false, lastStartedAt: null, sessionStartedAt: null, lastPausedAt: null };
             try {
-              const parsed = JSON.parse(await fs.readFile(timerPath, 'utf-8'));
+              const parsed = JSON.parse(await fs.readFile(userPaths.timerPath, 'utf-8'));
               if (parsed && typeof parsed === 'object') {
                 timer = {
                   plannedSeconds: Number(parsed.plannedSeconds) || 3600,
@@ -2997,10 +3061,6 @@ export default defineConfig({
                   lastStartedAt: typeof parsed.lastStartedAt === 'string' ? parsed.lastStartedAt : null,
                   sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
                   lastPausedAt: typeof parsed.lastPausedAt === 'string' ? parsed.lastPausedAt : null,
-                  // Seconds of this session already written into a day total by a
-                  // manual edit. Dropping it here (this rebuilds the object field
-                  // by field) would make the hotkey un-bank them, and the session
-                  // would be counted twice on the day it belongs to.
                   creditedSeconds: Math.max(0, Number(parsed.creditedSeconds) || 0),
                 };
               }
@@ -3008,9 +3068,6 @@ export default defineConfig({
 
             const nowIso = new Date().toISOString();
             if (timer.isRunning) {
-              // Pause: bank the time run so far, exactly like pauseFocus() in the app.
-              // lastPausedAt stamps this particular pause so its cue is not taken
-              // for a repeat of an earlier one.
               const ran = timer.lastStartedAt
                 ? Math.max(0, Math.floor((Date.now() - new Date(timer.lastStartedAt as string).getTime()) / 1000))
                 : 0;
@@ -3019,7 +3076,7 @@ export default defineConfig({
               timer = { ...timer, isRunning: true, lastStartedAt: nowIso, sessionStartedAt: timer.sessionStartedAt || nowIso, lastPausedAt: null };
             }
 
-            await safeWriteJsonFile({ filePath: timerPath, backupDir, baseName: 'focus-timer', body: JSON.stringify(timer), kind: 'object', force: true });
+            await safeWriteJsonFile({ filePath: userPaths.timerPath, backupDir: userPaths.backupDir, baseName: 'focus-timer', body: JSON.stringify(timer), kind: 'object', force: true });
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ success: true, isRunning: timer.isRunning, timer }));
           } catch (err) {
@@ -3032,14 +3089,15 @@ export default defineConfig({
         // Shared running-timer state so the main window and the side widget reflect
         // the same live focus session (localStorage events don't cross windows).
         server.middlewares.use('/api/focus-timer', async (req, res, next) => {
+          if (req.method !== 'GET' && req.method !== 'POST') return next();
+          const auth = await requireAuth(req, res);
+          if (!auth) return;
+          const { userPaths } = auth;
           const fs = await import('fs/promises');
-          const path = await import('path');
-          const timerPath = path.resolve(import.meta.dirname, '..', '..', 'database', 'focus-timer.json');
-          const backupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
 
           if (req.method === 'GET') {
             try {
-              const data = await fs.readFile(timerPath, 'utf-8');
+              const data = await fs.readFile(userPaths.timerPath, 'utf-8');
               res.setHeader('Content-Type', 'application/json');
               res.end(data);
             } catch (err) {
@@ -3052,7 +3110,7 @@ export default defineConfig({
             req.on('end', async () => {
               try {
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const result = await safeWriteJsonFile({ filePath: timerPath, backupDir, baseName: 'focus-timer', body, kind: 'object', force });
+                const result = await safeWriteJsonFile({ filePath: userPaths.timerPath, backupDir: userPaths.backupDir, baseName: 'focus-timer', body, kind: 'object', force });
                 res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
                   res.statusCode = result.status;
@@ -3066,8 +3124,6 @@ export default defineConfig({
                 res.end(JSON.stringify({ error: 'Failed to write focus timer file' }));
               }
             });
-          } else {
-            next();
           }
         });
 

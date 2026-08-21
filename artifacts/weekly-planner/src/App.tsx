@@ -13,9 +13,29 @@ import { lazy, Suspense, useEffect } from 'react';
 // and the browser caches them by hash from then on.
 const Settings = lazy(() => import('@/pages/settings'));
 const Widget = lazy(() => import('@/pages/widget'));
+import LoginPage from '@/pages/login';
+import { AuthProvider, useAuth } from '@/lib/auth';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 
 const queryClient = new QueryClient();
+
+function AuthenticatedApp() {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen w-full bg-[#0a0b0d] flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  return <Router />;
+}
 
 function Router() {
   const [location] = useLocation();
@@ -110,10 +130,12 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
-          <Router />
-        </WouterRouter>
-        <Toaster />
+        <AuthProvider>
+          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+            <AuthenticatedApp />
+          </WouterRouter>
+          <Toaster />
+        </AuthProvider>
       </TooltipProvider>
     </QueryClientProvider>
   );

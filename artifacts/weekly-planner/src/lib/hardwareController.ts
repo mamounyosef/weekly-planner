@@ -2,11 +2,11 @@
 // ESP32 focus-timer controller.
 //
 // An ESP32 on the desk drives a 16x2 LCD, two buttons and an ultrasonic
-// presence sensor. The firmware is deliberately dumb: it posts raw events
-// ("button A pressed", "someone is at the desk") and renders whatever numbers
-// it is handed. Everything below turns those raw events into the same
-// start/pause/terminate calls the on-screen buttons make, so hardware and UI
-// can never diverge in behaviour.
+// presence sensor. The firmware is deliberately dumb: it posts raw button
+// edges and raw centimetres, and renders whatever numbers it is handed. The
+// dev server turns the distance stream into presence (see sensorFilter.ts),
+// and everything below turns those events into the same start/pause/terminate
+// calls the on-screen buttons make, so hardware and UI can never diverge.
 //
 // The decision logic is a pure reducer. Both windows run it, but only the one
 // holding the server lease acts on the result -- see useHardwareController.
@@ -14,7 +14,16 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-export interface HardwareSettings {
+import { coerceSensorFilterConfig, DEFAULT_SENSOR_FILTER_CONFIG, type SensorFilterConfig } from './sensorFilter';
+
+/**
+ * The tuning the presence filter reads. Listed here as a type rather than
+ * duplicated, so adding a knob in sensorFilter.ts cannot leave the settings
+ * page and the dev server disagreeing about what exists.
+ */
+export type HardwareSensorSettings = SensorFilterConfig;
+
+export interface HardwareSettings extends HardwareSensorSettings {
   /** Master switch. Off = the ESP32 is ignored entirely. */
   enabled: boolean;
   /** Physical buttons may control the session. */
@@ -36,53 +45,34 @@ export interface HardwareSettings {
   awayTerminateSeconds: number;
 
   // ── Sensor tuning ──────────────────────────────────────────────────────────
-  // These live here rather than in the firmware so the board never has to be
-  // plugged into the PC to be re-tuned. The ESP32 fetches them periodically and
-  // applies them at runtime.
+  // Everything the presence filter reads is inherited from SensorFilterConfig
+  // above. It lives in the app's settings rather than the firmware because the
+  // firmware no longer decides anything: it pings and posts raw centimetres,
+  // and the dev server turns the stream into presence (see sensorFilter.ts).
 
-  /** Absent → present once the median distance drops below this (cm). */
-  enterCm: number;
-  /** Present → absent once the median rises above this (cm). Must exceed
-   *  enterCm: the gap between the two is the hysteresis that stops a reading
-   *  sitting on the boundary from rattling the state back and forth. */
-  exitCm: number;
-  /** Milliseconds between ultrasonic pings. */
+  /** Milliseconds between ultrasonic pings. The one number the board itself
+   *  still needs, since it is the thing doing the pinging. */
   sampleIntervalMs: number;
-  /** How many samples the median is taken over. Odd values only, so there is
-   *  always a true middle element. Capped by the firmware's buffer. */
-  medianWindow: number;
-  /** Sustained time before arriving is believed (ms). */
-  presentConfirmMs: number;
-  /** Sustained time before leaving is believed (ms). Normally longer than
-   *  presentConfirmMs so leaning out of the beam is not read as walking away. */
-  absentConfirmMs: number;
-  /** Readings beyond this are treated as sensor glitches and dropped, rather
-   *  than fed to the filter. Cheap ultrasonic modules occasionally spray
-   *  maximum-range values for a second or two. NOT the same as ignoring them
-   *  outright: see glitchHoldMs. */
-  maxValidCm: number;
-  /** How long a run of over-range readings may be discarded before it is
-   *  believed. Without this, discarding them would be indistinguishable from
-   *  the desk genuinely being empty with nothing in the beam, and leaving would
-   *  never be detected at all. */
-  glitchHoldMs: number;
-  /** When true, readings beyond maxValidCm are always discarded and never passed
-   *  to the filter, regardless of how long they persist. */
-  glitchIgnoreAlways: boolean;
-  /** While true the board streams live distance readings for calibration. */
+  /** While true the settings page polls the live readout quickly. */
   calibrating: boolean;
   /** Re-announce presence when an app window first becomes reachable. The
    *  board is usually up long before the PC has finished booting, so without
    *  this, sitting at an already-occupied desk starts nothing until you get up
-   *  and sit back down. Evaluated on the board, since it is the thing that
-   *  knows when the link came back. */
+   *  and sit back down. */
   announceOnConnect: boolean;
 }
 
-/** Matches MEDIAN_WINDOW_MAX in the firmware's config.h. */
-export const MEDIAN_WINDOW_MAX = 15;
+/** The subset of settings the presence filter is configured from. */
+export const SENSOR_FILTER_KEYS = Object.keys(DEFAULT_SENSOR_FILTER_CONFIG) as Array<keyof SensorFilterConfig>;
+
+export function sensorFilterConfigOf(s: HardwareSettings): SensorFilterConfig {
+  const out: Record<string, unknown> = {};
+  for (const k of SENSOR_FILTER_KEYS) out[k] = s[k];
+  return out as unknown as SensorFilterConfig;
+}
 
 export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
+  ...DEFAULT_SENSOR_FILTER_CONFIG,
   enabled: true,
   buttonsEnabled: true,
   sensorEnabled: true,
@@ -91,18 +81,7 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   autoRestartEnabled: true,
   autoRestartArmSeconds: 0,
   awayTerminateSeconds: 120,
-  // Measured on this desk: seated reads 30-39 cm, empty chair 57-59 cm.
-  enterCm: 48,
-  exitCm: 52,
   sampleIntervalMs: 100,
-  medianWindow: 5,
-  presentConfirmMs: 2000,
-  absentConfirmMs: 5000,
-  // There is a wall behind this desk, so nothing can legitimately read beyond
-  // about a metre; anything further is the module misfiring.
-  maxValidCm: 100,
-  glitchHoldMs: 10000,
-  glitchIgnoreAlways: false,
   calibrating: false,
   announceOnConnect: true,
 };
@@ -129,33 +108,14 @@ export function coerceHardwareSettings(raw: unknown): HardwareSettings {
 
   if (typeof r.calibrating === 'boolean') s.calibrating = r.calibrating;
   if (typeof r.announceOnConnect === 'boolean') s.announceOnConnect = r.announceOnConnect;
-  if (typeof r.glitchIgnoreAlways === 'boolean') s.glitchIgnoreAlways = r.glitchIgnoreAlways;
-  if (Number.isFinite(Number(r.enterCm))) s.enterCm = Math.max(2, Math.min(400, Number(r.enterCm)));
-  if (Number.isFinite(Number(r.exitCm))) s.exitCm = Math.max(2, Math.min(400, Number(r.exitCm)));
   if (Number.isFinite(Number(r.sampleIntervalMs))) {
     s.sampleIntervalMs = Math.max(40, Math.min(2000, Math.round(Number(r.sampleIntervalMs))));
   }
-  if (Number.isFinite(Number(r.medianWindow))) {
-    const w = Math.max(1, Math.min(MEDIAN_WINDOW_MAX, Math.round(Number(r.medianWindow))));
-    s.medianWindow = w % 2 === 0 ? w - 1 : w;  // even windows have no true middle
-  }
-  if (Number.isFinite(Number(r.presentConfirmMs))) {
-    s.presentConfirmMs = Math.max(0, Math.min(60000, Math.round(Number(r.presentConfirmMs))));
-  }
-  if (Number.isFinite(Number(r.absentConfirmMs))) {
-    s.absentConfirmMs = Math.max(0, Math.min(60000, Math.round(Number(r.absentConfirmMs))));
-  }
-  if (Number.isFinite(Number(r.maxValidCm))) {
-    s.maxValidCm = Math.max(20, Math.min(400, Math.round(Number(r.maxValidCm))));
-  }
-  if (Number.isFinite(Number(r.glitchHoldMs))) {
-    s.glitchHoldMs = Math.max(0, Math.min(60000, Math.round(Number(r.glitchHoldMs))));
-  }
 
-  // Hysteresis only works if leaving needs a strictly larger distance than
-  // arriving. An inverted pair would make the state flip on every sample, so it
-  // is corrected here rather than trusted.
-  if (s.exitCm <= s.enterCm) s.exitCm = s.enterCm + 4;
+  // Every filter knob is clamped by the filter's own coercion, so the rules
+  // that keep the thresholds coherent (hysteresis, the implausibility line
+  // sitting outside both) live in exactly one place.
+  Object.assign(s, coerceSensorFilterConfig(r as Partial<SensorFilterConfig>));
 
   return s;
 }
@@ -718,20 +678,14 @@ export function useHardwareController(opts: HardwareControllerOptions): {
         }
       }
 
-      // --- publish sensor tuning for the board to pick up ---
-      // Only when it actually changes: the board polls this, and rewriting it
-      // every tick would be pure churn.
+      // --- publish sensor tuning ---
+      // The dev server configures the presence filter from this, and the board
+      // reads its ping rate out of it. Only written when it actually changes:
+      // both of them poll it, and rewriting it every tick would be pure churn.
       if (isOwnerRef.current) {
         const cfg = {
-          enterCm: o.settings.enterCm,
-          exitCm: o.settings.exitCm,
+          ...sensorFilterConfigOf(o.settings),
           sampleIntervalMs: o.settings.sampleIntervalMs,
-          medianWindow: o.settings.medianWindow,
-          presentConfirmMs: o.settings.presentConfirmMs,
-          absentConfirmMs: o.settings.absentConfirmMs,
-          maxValidCm: o.settings.maxValidCm,
-          glitchHoldMs: o.settings.glitchHoldMs,
-          glitchIgnoreAlways: o.settings.glitchIgnoreAlways,
           calibrating: o.settings.calibrating,
           announceOnConnect: o.settings.announceOnConnect,
         };

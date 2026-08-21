@@ -21,7 +21,8 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { Filter, ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag } from 'lucide-react';
+import { Filter, ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
+import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -144,6 +145,7 @@ import {
   canonicalFilters,
   coerceTasks,
   composeTaskNotes,
+  currentOpenOccurrence,
   deleteTaskScoped,
   dueDateOf,
   editTaskSeries,
@@ -676,7 +678,8 @@ function RecurrenceEditor({ recur, anchorWeekday, onChange, theme }: {
 }
 
 // â”€â”€â”€ Main Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export default function WeeklyPlanner() {
+export default function DailyPlanner() {
+  const { user, logout } = useAuth();
   // Initialize state from local settings cache for instant display
   const initialSettings = useRef(loadSettingsLocal()).current;
 
@@ -798,6 +801,7 @@ export default function WeeklyPlanner() {
   const isCompact = vp.isPhone || vp.isTablet;
   const [mobileTab, setMobileTab] = useState<'calendar' | 'tasks' | 'focus'>('calendar');
   useEffect(() => { isPhoneRef.current = isPhone; }, [isPhone]);
+  useEffect(() => { isTouchRef.current = isTouch; }, [isTouch]);
   // The overflow ("⋯") sheet on the phone header, holding everything that
   // doesn't fit: interval, undo/redo, zoom, theme, widget, backup.
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -828,6 +832,7 @@ export default function WeeklyPlanner() {
   const prayerPanelRef                        = useRef<HTMLDivElement>(null);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<any>(initialSettings.taskCheckboxShape ?? 'circle');
   const [taskFilters, setTaskFilters]         = useState<TaskFilter[]>(canonicalFilters(initialSettings.taskFilters));
+  const [autoRollRecurringTasks, setAutoRollRecurringTasks] = useState<boolean>(initialSettings.autoRollRecurringTasks ?? true);
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [taskMenuId, setTaskMenuId]   = useState<string | null>(null);
   const [taskMenuPos, setTaskMenuPos] = useState<{ x: number; y: number } | null>(null);
@@ -1092,7 +1097,11 @@ export default function WeeklyPlanner() {
   // comes with you, swipe and the day scrolls as normal. Nothing is committed
   // until the hold succeeds, so an aborted press leaves the plan untouched.
   const LONG_PRESS_MS = 250;
-  const LONG_PRESS_SLOP = 20; // px of movement tolerance for thumb contact on mobile
+  // 10px, not 20: a browser will have committed the gesture to a scroll well
+  // inside 20px of travel, and arming after that point gives you a block that
+  // follows the finger while the day scrolls underneath it — the "funky" drag.
+  // 10px still absorbs the wobble of a thumb resting on glass.
+  const LONG_PRESS_SLOP = 10;
   /** Pending hold: filled on touch-down, cleared when it arms, moves or lifts. */
   const pendingTouchRef = useRef<{
     timer: number; x: number; y: number;
@@ -1121,6 +1130,12 @@ export default function WeeklyPlanner() {
     if (touchDragArmedRef.current) {
       touchDragArmedRef.current = false;
       setTouchDragging(false);
+      // Belt and braces. `didDragRef` suppresses the click that trails a drag,
+      // and every commit branch clears it — but a gesture the OS or a second
+      // finger steals reaches none of those branches, and a flag left stuck on
+      // silently swallows every later tap on the grid: blocks stop opening,
+      // empty space stops creating. Clearing it here covers all of them.
+      window.setTimeout(() => { didDragRef.current = false; }, 120);
     }
   }, [cancelPendingTouch]);
 
@@ -1129,6 +1144,7 @@ export default function WeeklyPlanner() {
   // closing it). Clamps into the viewport so the whole (comprehensive) popup
   // stays reachable; the popup itself scrolls if it's taller than the screen.
   const isPhoneRef = useRef(false);
+  const isTouchRef = useRef(false);
   const repositionMenu = useCallback(() => {
     const menuEl = menuRef.current;
     const id = menuIdRef.current;
@@ -1205,6 +1221,15 @@ export default function WeeklyPlanner() {
   const handleMainScroll = useCallback(() => {
     repositionMenu();
     updateScrollState();
+    // The grid moved, so whatever the finger is resting on, this gesture is a
+    // scroll. Drop any hold still ripening — otherwise it arms a few hundred
+    // pixels into the swipe and yanks a block out of the day you scrolled past.
+    if (pendingTouchRef.current) {
+      cancelPendingTouch();
+      dragRef.current = null;
+      batchDragRef.current = null;
+      createDragRef.current = null;
+    }
     if (isUnmountingRef.current || isRestoringScrollRef.current) return;
     if (mainRef.current) {
       if (scrollSaveTimeoutRef.current) window.clearTimeout(scrollSaveTimeoutRef.current);
@@ -1219,7 +1244,7 @@ export default function WeeklyPlanner() {
         } catch (_) {}
       }, 250);
     }
-  }, [repositionMenu, updateScrollState]);
+  }, [repositionMenu, updateScrollState, cancelPendingTouch]);
 
   useLayoutEffect(() => {
     let t1: number, t2: number, t3: number;
@@ -2066,7 +2091,7 @@ export default function WeeklyPlanner() {
       customAnchor: true,
       focusDayStartHour: true, focusChime: true, focusCues: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
-      taskColor: true, taskCheckboxShape: true, taskFilters: true, googleSyncEnabled: true, googleTasksSync: true,
+      taskColor: true, taskCheckboxShape: true, taskFilters: true, autoRollRecurringTasks: true, googleSyncEnabled: true, googleTasksSync: true,
       stickyAllDayMain: true, stickyTasksMain: true, stickyAllDayWidget: true, stickyTasksWidget: true,
       gcalPushEnabled: true, gcalPushTarget: true, gcalPushOtherCalendars: true,
       gcalPullDailyEdits: true, gcalPullDailyNew: true, gcalPullOtherCalendars: true,
@@ -2090,6 +2115,7 @@ export default function WeeklyPlanner() {
     setTaskColor(s.taskColor);
     setTaskCheckboxShape(s.taskCheckboxShape);
     setTaskFilters(canonicalFilters(s.taskFilters));
+    if (typeof s.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(s.autoRollRecurringTasks);
     setGoogleTasksSync(s.googleTasksSync);
     setPrayer(s.prayer);
     setHardware(s.hardware);
@@ -2139,6 +2165,7 @@ export default function WeeklyPlanner() {
       taskColor,
       taskCheckboxShape,
       taskFilters,
+      autoRollRecurringTasks,
       googleSyncEnabled: initialSettings.googleSyncEnabled,
       googleTasksSync,
       gcalPushEnabled: initialSettings.gcalPushEnabled,
@@ -2154,7 +2181,7 @@ export default function WeeklyPlanner() {
       categories,
       taskLists,
     });
-  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, googleTasksSync, prayer, hardware, categories, taskLists, initialSettings]);
+  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, autoRollRecurringTasks, googleTasksSync, prayer, hardware, categories, taskLists, initialSettings]);
 
   // ── This device's own settings ───────────────────────────────────────────
   // Everything the shared file no longer speaks for: which view fits this
@@ -2527,8 +2554,8 @@ export default function WeeklyPlanner() {
   }, [writeTasks]);
 
   const handleToggleTaskDone = useCallback((occId: string) => {
-    writeTasks(toggleTaskDone(tasksRef.current, occId));
-  }, [writeTasks]);
+    writeTasks(toggleTaskDone(tasksRef.current, occId, { autoRollRecurring: autoRollRecurringTasks }));
+  }, [writeTasks, autoRollRecurringTasks]);
 
   // ── Task lists ─────────────────────────────────────────────────────────────
   const handleActiveTaskListChange = useCallback((id: string | null) => {
@@ -2581,12 +2608,15 @@ export default function WeeklyPlanner() {
     const today = todayYmd();
     let n = 0;
     for (const t of Object.values(tasks)) {
-      if (t.parentId) continue; // counted through their parent
-      const due = dueDateOf(t);
+      if (t.parentId || t.deleted) continue; // counted through their parent
+      if (!t.weekKey) continue;
+      const due = t.recur
+        ? currentOpenOccurrence(t, today, autoRollRecurringTasks)
+        : dueDateOf(t);
       if (due && due <= today && !isTaskDone(t, due)) n++;
     }
     return n;
-  }, [tasks]);
+  }, [tasks, autoRollRecurringTasks]);
 
   const handleTasksPanelResize = useCallback((w: number) => setTasksPanelWidth(clampPanelWidth(w)), []);
   const closeTasksPanel = useCallback(() => setTasksPanelOpen(false), []);
@@ -3970,7 +4000,7 @@ export default function WeeklyPlanner() {
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backup, null, 2));
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `weekly-planner-backup-${new Date().toISOString().split('T')[0]}.json`);
+    downloadAnchor.setAttribute("download", `daily-planner-backup-${new Date().toISOString().split('T')[0]}.json`);
     document.body.appendChild(downloadAnchor);
     downloadAnchor.click();
     downloadAnchor.remove();
@@ -4140,17 +4170,38 @@ export default function WeeklyPlanner() {
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
+  /**
+   * Pointer coordinates arrive in VIEWPORT pixels; the grid's own geometry
+   * (minToY/yToMin, topBandsHeight, the transform used to drag a block) is in
+   * the grid's LOCAL pixels. Those are the same thing only while nothing above
+   * the grid is scaled — but the phone pinch-zoom writes `zoom` onto <main> and
+   * the desktop zoom writes it onto the root, and then a viewport delta is off
+   * by exactly the zoom factor. That is the drag jumping to the wrong hour and
+   * the wrong day the moment you pinch. Measuring the element against itself
+   * recovers the factor whichever ancestor applied it.
+   */
+  const gridScale = () => {
+    const el = daysGridRef.current;
+    if (!el) return 1;
+    const h = el.offsetHeight;
+    if (!h) return 1;
+    const s = el.getBoundingClientRect().height / h;
+    return Number.isFinite(s) && s > 0.01 ? s : 1;
+  };
+
   const getGridCoords = useCallback((clientX: number, clientY: number) => {
     const el = daysGridRef.current;
     if (!el) return null;
     const rect     = el.getBoundingClientRect();
+    const scale    = (el.offsetHeight && rect.height / el.offsetHeight > 0.01) ? rect.height / el.offsetHeight : 1;
     // Map the cursor to a VISIBLE slot, then back to the real week dayIndex —
     // in day view there is only one slot but it may stand for any day 0–6.
     const cols     = visibleColsRef.current;
     const colW     = rect.width / cols.length;
     const slot     = clamp(Math.floor((clientX - rect.left) / colW), 0, cols.length - 1);
     const dayIndex = cols[slot];
-    const snapped  = clamp(yToMin(Math.max(0, clientY - rect.top - topBandsHeight), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
+    const localY   = (clientY - rect.top) / scale - topBandsHeight;
+    const snapped  = clamp(yToMin(Math.max(0, localY), interval, dayStartH), dayStartMin, dayEndMin - POSITION_SNAP);
     return { dayIndex, slot, snappedMin: snapped };
   }, [interval, dayStartMin, dayEndMin, topBandsHeight]);
 
@@ -4383,7 +4434,10 @@ export default function WeeklyPlanner() {
     const gridDelta = (e: MouseEvent, initGX: number, initGY: number, initX: number, initY: number) => {
       const gr = daysGridRef.current?.getBoundingClientRect();
       if (!gr) return { x: e.clientX - initX, y: e.clientY - initY };
-      return { x: (e.clientX - gr.left) - initGX, y: (e.clientY - gr.top) - initGY };
+      // The delta becomes a CSS transform on a block INSIDE the grid, so it has
+      // to be expressed in the grid's own pixels, not the viewport's.
+      const k = gridScale();
+      return { x: ((e.clientX - gr.left) - initGX) / k, y: ((e.clientY - gr.top) - initGY) / k };
     };
     const processMove = (e: MouseEvent) => {
       autoScrollLastPosRef.current = { clientX: e.clientX, clientY: e.clientY };
@@ -4410,7 +4464,20 @@ export default function WeeklyPlanner() {
         const nearTop = e.clientY < topEdge && scroller.scrollTop > 0;
         const nearBottom = e.clientY > bottomEdge && scroller.scrollTop < scroller.scrollHeight - scroller.clientHeight - 1;
 
-        if (nearTop || nearBottom) {
+        /**
+         * The phone shows a week as a strip that scrolls SIDEWAYS (see
+         * `scrollsSideways`), so most of the week is off-screen while you drag.
+         * Without this, an item could only ever be moved between the two or
+         * three days that happened to be visible when the drag started.
+         */
+        const hScroller = gridCardRef.current;
+        const hScrollable = !!hScroller && hScroller.scrollWidth > hScroller.clientWidth + 1;
+        const hRect = hScrollable && hScroller ? hScroller.getBoundingClientRect() : null;
+        const nearLeft = !!hRect && e.clientX < hRect.left + EDGE_ZONE && (hScroller?.scrollLeft ?? 0) > 0;
+        const nearRight = !!hRect && e.clientX > hRect.right - EDGE_ZONE
+          && !!hScroller && hScroller.scrollLeft < hScroller.scrollWidth - hScroller.clientWidth - 1;
+
+        if (nearTop || nearBottom || nearLeft || nearRight) {
           if (!autoScrollTimerRef.current) {
             // Driven by requestAnimationFrame, not a 16ms setInterval. A timer
             // ticking every 16ms is a 62Hz signal: on a 120Hz screen it lands
@@ -4459,11 +4526,35 @@ export default function WeeklyPlanner() {
                 pxPerSecond = SLOW_PX_S + (FAST_PX_S - SLOW_PX_S) * depth;
               }
 
-              if (pxPerSecond === 0) { stop(); return; }
+              // Sideways, over the week strip, on the same ramp.
+              let hPxPerSecond = 0;
+              const curH = gridCardRef.current;
+              const curHScrollable = !!curH && curH.scrollWidth > curH.clientWidth + 1;
+              if (curH && curHScrollable) {
+                const hr = curH.getBoundingClientRect();
+                if (clientX < hr.left + EDGE_ZONE && curH.scrollLeft > 0) {
+                  const depth = Math.max(0, Math.min(1, (hr.left + EDGE_ZONE - clientX) / EDGE_ZONE));
+                  hPxPerSecond = -(SLOW_PX_S + (FAST_PX_S - SLOW_PX_S) * depth);
+                } else if (clientX > hr.right - EDGE_ZONE && curH.scrollLeft < curH.scrollWidth - curH.clientWidth - 1) {
+                  const depth = Math.max(0, Math.min(1, (clientX - (hr.right - EDGE_ZONE)) / EDGE_ZONE));
+                  hPxPerSecond = SLOW_PX_S + (FAST_PX_S - SLOW_PX_S) * depth;
+                }
+              }
 
-              const before = curScroller.scrollTop;
-              curScroller.scrollTop = before + (pxPerSecond * dt) / 1000;
-              if (curScroller.scrollTop === before) { stop(); return; } // hit the end
+              if (pxPerSecond === 0 && hPxPerSecond === 0) { stop(); return; }
+
+              let moved = false;
+              if (pxPerSecond !== 0) {
+                const before = curScroller.scrollTop;
+                curScroller.scrollTop = before + (pxPerSecond * dt) / 1000;
+                if (curScroller.scrollTop !== before) moved = true;
+              }
+              if (hPxPerSecond !== 0 && curH) {
+                const beforeX = curH.scrollLeft;
+                curH.scrollLeft = beforeX + (hPxPerSecond * dt) / 1000;
+                if (curH.scrollLeft !== beforeX) moved = true;
+              }
+              if (!moved) { stop(); return; } // hit the end on every live axis
 
               const fakeEvent = { clientX, clientY, preventDefault: () => {} } as any as MouseEvent;
               flushSync(() => processMove(fakeEvent));
@@ -4530,8 +4621,9 @@ export default function WeeklyPlanner() {
       if (sr) {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const curX = e.clientX - rect.left;
-        const curY = e.clientY - rect.top - topBandsHeight;
+        const k = gridScale();
+        const curX = (e.clientX - rect.left) / k;
+        const curY = (e.clientY - rect.top) / k - topBandsHeight;
         const left = Math.min(sr.startX, curX);
         const top = Math.min(sr.startY, curY);
         const width = Math.abs(curX - sr.startX);
@@ -4545,14 +4637,14 @@ export default function WeeklyPlanner() {
       if (cr) {
         const rect = daysGridRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const curY = e.clientY - rect.top - topBandsHeight;
+        const curY = (e.clientY - rect.top) / gridScale() - topBandsHeight;
         const topPx = Math.min(cr.startY, curY);
         const heightPx = Math.abs(curY - cr.startY);
         if (heightPx >= DRAG_THRESHOLD) { cr.moved = true; didDragRef.current = true; }
         if (cr.moved) {
           // Position against the VISIBLE slot, not the week dayIndex (day view).
           const cols = visibleColsRef.current;
-          const colW = rect.width / cols.length;
+          const colW = rect.width / gridScale() / cols.length;
           const slot = Math.max(0, cols.indexOf(cr.col));
           setSelRect({ left: slot * colW + 4, top: topPx, width: colW - 8, height: heightPx });
           // Mirror the exact snapping the commit will use, so the numbers shown
@@ -4688,6 +4780,21 @@ export default function WeeklyPlanner() {
      * tracking is silky smooth even when pointermove is throttled by mobile OS.
      */
     const onTouchMove = (e: TouchEvent) => {
+      // A browser that has decided the gesture is a scroll stops sending
+      // pointermove (it sends pointercancel instead), so the slop check that
+      // abandons the hold has to live here too — otherwise the hold ripens
+      // mid-scroll and the block tears loose halfway down the day.
+      const pending = pendingTouchRef.current;
+      if (pending && e.touches.length > 0) {
+        const t = e.touches[0];
+        if (Math.hypot(t.clientX - pending.x, t.clientY - pending.y) > LONG_PRESS_SLOP) {
+          cancelPendingTouch();
+          dragRef.current = null;
+          batchDragRef.current = null;
+          createDragRef.current = null;
+        }
+        return;
+      }
       if (touchDragArmedRef.current || dragRef.current?.active || batchDragRef.current?.active || resizeRef.current) {
         if (e.cancelable) e.preventDefault();
         if (e.touches.length > 0) {
@@ -4762,7 +4869,7 @@ export default function WeeklyPlanner() {
         if (cr.moved) {
           const rect = daysGridRef.current?.getBoundingClientRect();
           if (rect) {
-            const curY = e.clientY - rect.top - topBandsHeight;
+            const curY = (e.clientY - rect.top) / gridScale() - topBandsHeight;
             let startMin = yToMin(Math.max(0, Math.min(cr.startY, curY)), interval, dayStartH);
             let endMin   = yToMin(Math.max(0, Math.max(cr.startY, curY)), interval, dayStartH);
             startMin = clamp(startMin, dayStartMin, dayEndMin - POSITION_SNAP);
@@ -4974,10 +5081,16 @@ export default function WeeklyPlanner() {
     // across empty grid constantly, and a stray tap that spawns a 30-minute
     // block is the single most annoying thing a touch calendar can do. Touch
     // creates on a deliberate hold (see the column's pointer-down) or the + button.
+    //
+    // Gated on the DEVICE, not on the click's pointerType: a `click` synthesised
+    // from a tap reports pointerType 'touch' in Chrome but '' in Firefox and
+    // isn't a PointerEvent at all in Safari — so on those browsers every stray
+    // tap on the grid was silently spawning a block.
+    if (isTouchRef.current) return;
     if ((e.nativeEvent as PointerEvent).pointerType === 'touch') return;
     setSelectedIds(new Set());
     const rect     = e.currentTarget.getBoundingClientRect();
-    const startMin = clamp(yToMin(Math.max(0, e.clientY - rect.top), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
+    const startMin = clamp(yToMin(Math.max(0, (e.clientY - rect.top) / gridScale()), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
     const dur      = Math.min(DEFAULT_EVENT_MIN, dayEndMin - startMin);
     const start24  = startMin >= 1440 ? startMin - 1440 : startMin;
     const end24    = (start24 + dur) % 1440;
@@ -5110,16 +5223,26 @@ export default function WeeklyPlanner() {
 
   const handleResizeMouseDown = (e: React.MouseEvent | React.PointerEvent, ev: PlannerEvent, edge: 'top' | 'bottom', segKind?: 'normal' | 'tail' | 'head') => {
     const pointerType = (e as React.PointerEvent).pointerType;
-    // A resize grip is a deliberate target you have to aim at, so unlike the
-    // body of the block it arms immediately — no hold required. The grips are
-    // grown to a finger's width on touch (see the segment renderer).
+    // A mouse aims at a 10px grip deliberately, so it resizes on contact. A
+    // finger cannot aim that precisely and is usually just scrolling past, so
+    // touch goes through the SAME hold as the body drag: swipe and the day
+    // scrolls, hold and the edge is yours. Arming on contact (what this used to
+    // do) meant every swipe that clipped a block's edge stretched it instead.
     if (pointerType === 'touch' || pointerType === 'pen') {
-      touchDragArmedRef.current = true;
-      setTouchDragging(true);
-      haptic(10);
-    } else {
-      e.preventDefault();
+      e.stopPropagation();
+      const synthetic = {
+        clientX: e.clientX, clientY: e.clientY,
+        ctrlKey: false, metaKey: false, button: 0,
+        preventDefault: () => {}, stopPropagation: () => {},
+      } as unknown as React.MouseEvent;
+      setTouchHoldingId(ev.id);
+      armTouchHold(e as React.PointerEvent, 'event', () => {
+        setTouchHoldingId(null);
+        handleResizeMouseDown(synthetic, ev, edge, segKind);
+      });
+      return;
     }
+    e.preventDefault();
     e.stopPropagation();
     const startMin = normalizeMin(timeToMin(ev.startTime), dayStartH);
     let endMin     = normalizeMin(timeToMin(ev.endTime), dayStartH);
@@ -5340,10 +5463,18 @@ export default function WeeklyPlanner() {
     const target = card.querySelector<HTMLElement>(`[data-col-index="${nowColIdx}"]`);
     if (!target) return;
     const id = requestAnimationFrame(() => {
+      // offsetLeft is measured from the day grid, which itself starts after the
+      // sticky hour gutter — so scrolling to it raw lands the strip a gutter's
+      // width short and you get the tail of yesterday instead of today. Measure
+      // against the card the scroll actually happens on.
+      const cardX = card.getBoundingClientRect().left;
+      const colX = target.getBoundingClientRect().left;
+      const colLeft = colX - cardX + card.scrollLeft;
       card.scrollTo({
-        // Half a column of lead-in, so the day reads as part of a week rather
-        // than as the left wall of the screen.
-        left: Math.max(0, target.offsetLeft - MIN_TOUCH_COL_W * 0.4),
+        // The gutter floats over the strip, so clear it first, then half a
+        // column of lead-in so the day reads as part of a week rather than as
+        // the left wall of the screen.
+        left: Math.max(0, colLeft - timeAxisW - MIN_TOUCH_COL_W * 0.4),
         behavior: 'smooth',
       });
     });
@@ -5369,10 +5500,20 @@ export default function WeeklyPlanner() {
       if (e.touches.length !== 2) return;
       // A second finger arriving mid-drag means "zoom", not "drag": abandon the
       // grab so the block doesn't fly across the grid as the fingers spread.
-      cancelPendingTouch();
+      // endTouchDrag (not just cancelPendingTouch) so an ALREADY-armed drag is
+      // torn down too, instead of leaving the grid pinned at touch-action:none.
+      endTouchDrag();
+      setDragDisp(null);
+      setDragDelta(null);
       dragRef.current = null;
       batchDragRef.current = null;
       createDragRef.current = null;
+      resizeRef.current = null;
+      selDragRef.current = null;
+      setResizeDisp(null);
+      setSelRect(null);
+      setBatchDisp(null);
+      batchDispRef.current = null;
       setCreateDisp(null);
       pinchRef.current = {
         startDist: dist(e.touches),
@@ -5404,7 +5545,7 @@ export default function WeeklyPlanner() {
       window.removeEventListener('touchend', onEnd);
       window.removeEventListener('touchcancel', onEnd);
     };
-  }, [isTouch, cancelPendingTouch]);
+  }, [isTouch, endTouchDrag]);
 
   // Keep the editable field in sync when zoom changes elsewhere. Zoom itself is
   // persisted per device (see deviceSettings) — the phone and the desktop each
@@ -5449,7 +5590,11 @@ export default function WeeklyPlanner() {
     return { dayIndex: ev.dayIndex, startMin: timeToMin(ev.startTime), endMin: timeToMin(ev.endTime) };
   };
 
-  const isDraggingAnything = !!(dragDisp || batchDisp);
+  // `touchDragging` is in here on purpose: it flips the instant the hold arms,
+  // one frame BEFORE dragDisp exists. Without it the column still has its
+  // containment (and content-visibility's implied paint clip) for the first
+  // frame of the drag, which is exactly the frame the block is lifted in.
+  const isDraggingAnything = !!(dragDisp || batchDisp) || touchDragging;
   const isResizingAnything = !!resizeDisp;
   const globalCursor = isDraggingAnything ? 'grabbing' : isResizingAnything ? 'ns-resize' : undefined;
   // Anything that means "the user is in the middle of something" — a pushed
@@ -5603,7 +5748,9 @@ export default function WeeklyPlanner() {
                       ? format(currentDate, 'yyyy')
                       : calendarView === 'week'
                         ? `Week ${weekOfMonth}`
-                        : ''}
+                        : calendarView === 'custom'
+                          ? `${colCount} day${colCount === 1 ? '' : 's'} · ${customAnchor === 'day' ? 'Today based' : 'Week based'}`
+                          : ''}
                   </div>
                 </button>
               )}
@@ -5693,7 +5840,7 @@ export default function WeeklyPlanner() {
                 style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
                 title="Change view"
               >
-                {showFocusAnalysis ? analysisTab : calendarView}
+                {showFocusAnalysis ? analysisTab : calendarView === 'custom' ? `Custom (${colCount}d)` : calendarView}
                 <ChevronDown size={14} style={{ color: headerInactive }} />
               </button>
 
@@ -6135,6 +6282,15 @@ export default function WeeklyPlanner() {
             </button>
             <button onClick={() => navigateToSettings()} title="Settings" className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <Settings size={14}/>
+            </button>
+            <button
+              onClick={() => navigateToSettings('account')}
+              title={`Logged in as ${user?.name || user?.username || 'User'} (@${user?.username || ''}) • Click for Account & Security`}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium transition-colors hover:bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+              style={{ background: surfaceBg }}
+            >
+              <UserIcon size={13} className="text-emerald-400 flex-shrink-0" />
+              <span className="text-[11px] font-semibold hidden md:inline truncate max-w-[100px]">{user?.name || user?.username}</span>
             </button>
           </div>
         </div>
@@ -6648,13 +6804,18 @@ export default function WeeklyPlanner() {
               transition={{ x: { type: 'spring', stiffness: 2200, damping: 65, mass: 0.2 }, opacity: { duration: 0.04 } }}
               ref={gridCardRef}
               className={`flex border border-border/60 rounded-xl shadow-md relative z-10 ${
-                scrollsSideways ? 'overflow-x-auto overflow-y-visible no-scrollbar touch-scroll' : 'overflow-clip'
+                scrollsSideways ? 'overflow-x-auto overflow-y-visible no-scrollbar touch-scroll-x' : 'overflow-clip'
               }`}
               style={{
                 background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
                 // Snap each day column under the finger when the week scrolls
                 // sideways, so a swipe lands on a day rather than between two.
                 scrollSnapType: scrollsSideways ? 'x proximity' : undefined,
+                // The hour gutter is sticky, so it floats OVER the columns. Without
+                // this a snap landed the day flush at scroll offset 0 — i.e. hidden
+                // underneath the gutter — and the day you swiped to was the one you
+                // couldn't read.
+                scrollPaddingLeft: scrollsSideways ? timeAxisW : undefined,
               }}
             >
               {/* Loading skeleton — a few shimmering placeholder blocks so the first
@@ -7094,7 +7255,12 @@ export default function WeeklyPlanner() {
                                       key={t.id}
                                       data-task="1"
                                       data-task-chip={t.id}
-                                      draggable
+                                      // HTML5 drag-and-drop does not exist on a touch
+                                      // screen. Advertising it there (grab cursor, a
+                                      // "drag to…" tooltip) promised a gesture that
+                                      // could never happen; the editor's date field is
+                                      // how a phone moves a task.
+                                      draggable={!isTouch}
                                       onDragStart={(e) => {
                                         setTaskDragId(t.id);
                                         e.dataTransfer.effectAllowed = 'move';
@@ -7103,7 +7269,7 @@ export default function WeeklyPlanner() {
                                       onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
                                       onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
                                       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
-                                      className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity cursor-grab active:cursor-grabbing"
+                                      className={`flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                       style={{
                                         height: TASK_CHIP_H,
                                         background: c.bg,
@@ -7111,7 +7277,7 @@ export default function WeeklyPlanner() {
                                         opacity: taskDragId === t.id ? 0.4 : done ? 0.5 : 1,
                                         filter: done ? 'saturate(0.4)' : 'none',
                                       }}
-                                      title={`${t.title} — drag to another day, or up and down to reorder`}
+                                      title={isTouch ? t.title : `${t.title} — drag to another day, or up and down to reorder`}
                                     >
                                       <span
                                         role="button"
@@ -7120,7 +7286,11 @@ export default function WeeklyPlanner() {
                                         className="flex-shrink-0 flex items-center justify-center"
                                         style={{ color: c.text }}
                                       >
-                                        {done ? <CheckSquare size={10} /> : <Square size={10} />}
+                                        {done ? (
+                                          taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />
+                                        ) : (
+                                          taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />
+                                        )}
                                       </span>
                                       <span
                                         className="text-[10.5px] font-medium truncate leading-none"
@@ -7236,7 +7406,7 @@ export default function WeeklyPlanner() {
                           if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
                           if (e.button !== 0) return;
                           const rect = e.currentTarget.getBoundingClientRect();
-                          const y = e.clientY - rect.top;
+                          const y = (e.clientY - rect.top) / gridScale();
                           // Touch: a tap on empty grid must stay a tap (the day
                           // has to be scrollable and nothing should appear by
                           // accident). Holding still for a moment is what asks
@@ -7258,8 +7428,9 @@ export default function WeeklyPlanner() {
                           if (e.ctrlKey || e.metaKey) {
                             const gr = daysGridRef.current?.getBoundingClientRect();
                             if (gr) {
-                              const sx = e.clientX - gr.left;
-                              const sy = e.clientY - gr.top - topBandsHeight;
+                              const k = gridScale();
+                              const sx = (e.clientX - gr.left) / k;
+                              const sy = (e.clientY - gr.top) / k - topBandsHeight;
                               selDragRef.current = { startX: sx, startY: sy };
                               setSelRect({ left: sx, top: sy, width: 0, height: 0 });
                             }
@@ -7398,6 +7569,16 @@ export default function WeeklyPlanner() {
                           const isSelected = selectedIds.has(ev.id);
                           const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
                           const isPlaceholder = (ev as any).isPlaceholder;
+                          // A finger's resize grips have to be earned. They used to
+                          // be 22px bands hanging 4px OUTSIDE every block, pinned
+                          // with `touch-action: none`, arming a resize on contact —
+                          // so a swipe that started anywhere near a block's edge
+                          // could neither scroll the day nor move the block, it just
+                          // stretched whatever it landed on. Now they sit inside the
+                          // block, only on blocks with room to spare, and they arm on
+                          // the same hold the body drag uses.
+                          const gripH = isTouch ? 16 : (height < 34 ? 6 : 10);
+                          const gripsLive = !isTouch || height >= 44;
                           
                           // While actively dragging/resizing the block must track the cursor
                           // 1:1 (no easing, or it lags). The moment it settles, let its
@@ -7593,9 +7774,16 @@ export default function WeeklyPlanner() {
                                 </div>
                               )}
 
-                              {/* Top resize handle */}
-                              {segKind !== 'head' && (
-                                <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ top: isTouch ? -4 : 0, height: isTouch ? 22 : (height < 34 ? 6 : 10), cursor: 'n-resize', marginTop: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'top', segKind)}>
+                              {/* Top resize handle.
+                                  On touch this strip is 22px tall and spans the
+                                  whole block, and it arms a resize on contact with
+                                  no hold — so while it was always live, every block
+                                  wore two invisible bands that swallowed the swipe
+                                  (`touch-action: none`) and resized the item instead
+                                  of scrolling the day. A finger therefore only gets
+                                  the grips once the block is the active one. */}
+                              {segKind !== 'head' && (!isTouch || gripsLive) && (
+                                <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ top: 0, height: gripH, cursor: 'n-resize', marginTop: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: isTouch ? 'manipulation' : 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'top', segKind)}>
                                   <div className="rounded-full transition-opacity duration-150" style={{ width: height < 34 ? 20 : 28, height: height < 34 ? 2 : 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.6 : (height < 34 ? 0 : 0.25), pointerEvents: 'none' }} />
                                 </div>
                               )}
@@ -7828,9 +8016,9 @@ export default function WeeklyPlanner() {
                                 );
                               })()}
 
-                              {/* Bottom resize handle */}
-                              {segKind !== 'tail' && (
-                                <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ bottom: isTouch ? -4 : 0, height: isTouch ? 22 : (height < 34 ? 6 : 10), cursor: 's-resize', marginBottom: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'bottom', segKind)}>
+                              {/* Bottom resize handle — same touch rule as the top one. */}
+                              {segKind !== 'tail' && (!isTouch || gripsLive) && (
+                                <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ bottom: 0, height: gripH, cursor: 's-resize', marginBottom: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: isTouch ? 'manipulation' : 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'bottom', segKind)}>
                                   <div className="rounded-full transition-opacity duration-150" style={{ width: height < 34 ? 20 : 28, height: height < 34 ? 2 : 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.6 : (height < 34 ? 0 : 0.25), pointerEvents: 'none' }} />
                                 </div>
                               )}
@@ -7907,7 +8095,7 @@ export default function WeeklyPlanner() {
                               key={key}
                               data-task="1"
                               data-task-chip={t.id}
-                              draggable
+                              draggable={!isTouch}
                               onDragStart={(e) => {
                                 setTaskDragId(t.id);
                                 e.dataTransfer.effectAllowed = 'move';
@@ -7916,7 +8104,7 @@ export default function WeeklyPlanner() {
                               onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
                               onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
                               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
-                              className="absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow cursor-grab active:cursor-grabbing"
+                              className={`absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
                               style={{
                                 top, height: h,
                                 left:  `calc(${col * colW}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
@@ -7929,7 +8117,7 @@ export default function WeeklyPlanner() {
                                 opacity: taskDragId === t.id ? 0.4 : done ? 0.45 : 1,
                                 filter: done ? 'saturate(0.4)' : 'none',
                               }}
-                              title={`${t.title} — drag to top of day or another day`}
+                              title={isTouch ? t.title : `${t.title} — drag to top of day or another day`}
                             >
                               <div className="flex items-start gap-1 px-1.5 py-1">
                                 <span
@@ -7939,7 +8127,11 @@ export default function WeeklyPlanner() {
                                   className="flex-shrink-0 mt-[1px]"
                                   style={{ color: c.text }}
                                 >
-                                  {done ? <CheckSquare size={11} /> : <Square size={11} />}
+                                  {done ? (
+                                    taskCheckboxShape === 'square' ? <CheckSquare size={11} /> : <CheckCircle2 size={11} />
+                                  ) : (
+                                    taskCheckboxShape === 'square' ? <Square size={11} /> : <Circle size={11} />
+                                  )}
                                 </span>
                                 <span
                                   className="text-[11px] font-medium leading-tight break-words min-w-0"
@@ -8174,7 +8366,10 @@ export default function WeeklyPlanner() {
           className="rounded-xl border border-border/60 overflow-hidden shadow-md p-4 relative z-10"
           style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
         >
-          <div className="grid grid-cols-4 gap-3 items-start">
+          {/* Four months across a 390px screen leaves 57px of content per tile:
+              "September" overflows its own tile and the two-digit dates spill
+              into their neighbours. Two columns gives ~146px, which fits. */}
+          <div className={isPhone ? 'grid grid-cols-2 gap-2 items-start' : 'grid grid-cols-4 gap-3 items-start'}>
             {yearMatrix.map(m => (
               <button
                 key={m.monthStart.toISOString()}
@@ -8189,7 +8384,7 @@ export default function WeeklyPlanner() {
                 }}
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[11px] font-bold" style={{ color: m.isCurrent ? '#60a5fa' : menuText }}>
+                  <span className="text-[11px] font-bold truncate" style={{ color: m.isCurrent ? '#60a5fa' : menuText }}>
                     {format(m.monthStart, 'MMMM')}
                   </span>
                   {m.eventCount > 0 && (
@@ -8199,7 +8394,7 @@ export default function WeeklyPlanner() {
                 {/* Weekday initials */}
                 <div className="grid grid-cols-7 gap-[1px] mb-0.5">
                   {m.cells.slice(0, 7).map(c => (
-                    <span key={c.date.toISOString()} className="text-[6.5px] font-bold uppercase text-center" style={{ color: menuSub, opacity: 0.7 }}>
+                    <span key={c.date.toISOString()} className={`${isPhone ? 'text-[9px]' : 'text-[6.5px]'} font-bold uppercase text-center`} style={{ color: menuSub, opacity: 0.7 }}>
                       {format(c.date, 'EEEEE')}
                     </span>
                   ))}
@@ -8212,7 +8407,7 @@ export default function WeeklyPlanner() {
                     return (
                       <span
                         key={c.date.toISOString()}
-                        className="aspect-square flex items-center justify-center rounded-[2px] text-[7px] tabular-nums relative"
+                        className={`aspect-square flex items-center justify-center rounded-[2px] ${isPhone ? 'text-[10px]' : 'text-[7px]'} tabular-nums relative`}
                         style={{
                           color: isTodayCell ? '#fff' : dim ? menuSub : menuText,
                           opacity: dim ? 0.3 : 1,
@@ -8301,9 +8496,13 @@ export default function WeeklyPlanner() {
                       return (
                         <div
                           key={date.toISOString()}
-                          onClick={() => { setDirection(0); setCurrentDate(date); setCalendarView('week'); }}
+                          // A phone opens the DAY, not the week: week view on a
+                          // phone is the sideways-scrolling strip, so tapping a
+                          // date there landed you on a week you then had to swipe
+                          // back to the day you tapped.
+                          onClick={() => { setDirection(0); setCurrentDate(date); setCalendarView(isPhone ? 'day' : 'week'); }}
                           title={focusSecs > 0 ? `Open this week · ${formatFocusDuration(focusSecs)} focused` : 'Open this week'}
-                          className="min-h-[108px] p-1.5 border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1 transition-colors duration-200 relative"
+                          className={`${isPhone ? 'min-h-[64px] p-1' : 'min-h-[108px] p-1.5'} border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1 transition-colors duration-200 relative`}
                           style={{ background: baseBg, opacity: inMonth ? 1 : 0.4 }}
                           onMouseEnter={e => (e.currentTarget.style.background = hoverCellBg)}
                           onMouseLeave={e => (e.currentTarget.style.background = baseBg)}
@@ -8319,7 +8518,10 @@ export default function WeeklyPlanner() {
                               {format(date, 'd')}
                             </span>
                             <span className="flex items-center gap-1">
-                              {focusSecs > 0 && (
+                              {/* 54px of cell can't hold a date, a focus duration
+                                  AND a count. The cell is already tinted by focus,
+                                  so the label is what goes on a phone. */}
+                              {focusSecs > 0 && !isPhone && (
                                 <span className="text-[8px] font-bold tabular-nums flex items-center gap-0.5" style={{ color: '#60a5fa' }} title={`${formatFocusDuration(focusSecs)} focused`}>
                                   <Target size={7} />{formatFocusDuration(focusSecs)}
                                 </span>
@@ -8337,7 +8539,27 @@ export default function WeeklyPlanner() {
                             <div style={{ height: allDayRowCount * 22 }} className="flex-shrink-0" />
                           )}
 
-                          {/* Timed events list */}
+                          {/* Timed events list. At 41px of content width a text
+                              chip renders four characters of "10:30 AM Standup" —
+                              no information at all — so a phone gets dots. */}
+                          {isPhone ? (
+                            <div className="flex flex-wrap gap-[3px] items-center content-start">
+                              {timedEvents.slice(0, 6).map(ev => {
+                                const { accentBar, border } = chipColors(ev);
+                                return (
+                                  <span
+                                    key={ev.id}
+                                    className="rounded-full"
+                                    style={{ width: 5, height: 5, background: accentBar || border }}
+                                    title={ev.content}
+                                  />
+                                );
+                              })}
+                              {timedEvents.length > 6 && (
+                                <span className="text-[7px] tabular-nums leading-none" style={{ color: menuSub }}>+{timedEvents.length - 6}</span>
+                              )}
+                            </div>
+                          ) : (
                           <div className="flex flex-col gap-0.5 overflow-hidden">
                             {timedEvents.slice(0, 3).map(ev => {
                               const { bg, border, text, accentBar } = chipColors(ev);
@@ -8359,6 +8581,7 @@ export default function WeeklyPlanner() {
                             })}
                             {timedEvents.length > 3 && <span className="text-[8.5px] pl-1" style={{ color: menuSub }}>+{timedEvents.length - 3} more</span>}
                           </div>
+                          )}
                         </div>
                       );
                     })}
@@ -9039,6 +9262,7 @@ export default function WeeklyPlanner() {
           weekStartsOn={weekStartsOn}
           taskColor={taskColor}
           taskCheckboxShape={taskCheckboxShape}
+          autoRollRecurringTasks={autoRollRecurringTasks}
           theme={taskPanelTheme}
           lists={taskLists}
           activeListId={activeTaskListId}
@@ -9434,18 +9658,29 @@ export default function WeeklyPlanner() {
               <div className="flex flex-col gap-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>When The Session Ends</span>
-                  <button
-                    type="button"
-                    onClick={() => playFocusChime(focusChime)}
-                    className="text-[10px] font-semibold px-2 py-1 rounded-md transition-colors"
-                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
-                    onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                    onMouseLeave={e => (e.currentTarget.style.background = surfaceBg)}
-                  >
-                    Play
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => { setFocusChime(DEFAULT_FOCUS_CHIME); setFocusCues({ ...DEFAULT_FOCUS_CUES }); }}
+                      className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded transition-colors"
+                      style={{ color: menuSub, border: `1px solid ${surfaceBdr}` }}
+                      title="Reset focus chime and cues to defaults"
+                    >
+                      Reset all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => playFocusChime(focusChime)}
+                      className="text-[10px] font-semibold px-2 py-1 rounded-md transition-colors"
+                      style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                      onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                      onMouseLeave={e => (e.currentTarget.style.background = surfaceBg)}
+                    >
+                      Play
+                    </button>
+                  </div>
                 </div>
-                <div className="flex flex-col gap-1.5">
+                <div className="flex flex-col gap-1.5 max-h-[290px] overflow-y-auto pr-1">
                   {FOCUS_CHIMES.map(c => {
                     const active = focusChime === c.id;
                     return (
@@ -9463,8 +9698,16 @@ export default function WeeklyPlanner() {
                         onMouseLeave={e => { if (!active) e.currentTarget.style.background = surfaceBg; }}
                       >
                         <span className="min-w-0">
-                          <span className="block text-xs font-semibold truncate" style={{ color: active ? '#60a5fa' : menuText }}>{c.label}</span>
-                          <span className="block text-[10px] leading-snug" style={{ color: menuSub }}>{c.hint}</span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="block text-xs font-semibold truncate" style={{ color: active ? '#60a5fa' : menuText }}>{c.label}</span>
+                            <span
+                              className="text-[8.5px] font-medium px-1.5 py-0.2 rounded uppercase tracking-wider opacity-60"
+                              style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}
+                            >
+                              {c.category}
+                            </span>
+                          </span>
+                          <span className="block text-[10px] leading-snug mt-0.5" style={{ color: menuSub }}>{c.hint}</span>
                         </span>
                         <Volume2 size={13} style={{ color: active ? '#60a5fa' : menuSub, flexShrink: 0 }} />
                       </button>
@@ -10086,7 +10329,11 @@ export default function WeeklyPlanner() {
                 className="flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-[11.5px] font-semibold"
                 style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
               >
-                {menuTaskDone ? <Square size={12} /> : <CheckSquare size={12} />}
+                {taskCheckboxShape === 'square' ? (
+                  menuTaskDone ? <Square size={12} /> : <CheckSquare size={12} />
+                ) : (
+                  menuTaskDone ? <Circle size={12} /> : <CheckCircle2 size={12} />
+                )}
                 {menuTaskDone ? 'Mark undone' : 'Mark done'}
               </button>
               <button
@@ -10832,7 +11079,11 @@ export default function WeeklyPlanner() {
                       }}
                     >
                       <span className="flex-shrink-0 flex items-center" style={{ color: c.text }}>
-                        {done ? <CheckSquare size={13} /> : <Square size={13} />}
+                        {done ? (
+                          taskCheckboxShape === 'square' ? <CheckSquare size={13} /> : <CheckCircle2 size={13} />
+                        ) : (
+                          taskCheckboxShape === 'square' ? <Square size={13} /> : <Circle size={13} />
+                        )}
                       </span>
                       <span className={`break-words flex-1 leading-snug ${done ? 'line-through opacity-60' : ''}`}>
                         {t.title || 'Untitled task'}
@@ -10979,15 +11230,30 @@ export default function WeeklyPlanner() {
                   ] as const)
               ).map(opt => {
                 const active = showFocusAnalysis ? analysisTab === opt.id : calendarView === opt.id;
+                const hint = opt.id === 'custom' && !showFocusAnalysis
+                  ? (customAnchor === 'day'
+                      ? `Today ${Math.max(0, customDaysBefore) > 0 ? `-${Math.max(0, customDaysBefore)}d` : '0d'} / +${Math.max(0, customDaysAfter)}d (${colCount} days)`
+                      : `Week ${customDaysBefore > 0 ? `+${customDaysBefore}` : customDaysBefore}d / ${customDaysAfter > 0 ? `+${customDaysAfter}` : customDaysAfter}d (${colCount} days)`)
+                  : opt.hint;
                 return (
                   <button
                     key={opt.id}
                     onClick={() => {
                       haptic(8);
                       setDirection(0);
-                      if (showFocusAnalysis) setAnalysisTab(opt.id as 'week' | 'month' | 'year');
-                      else setCalendarView(opt.id as CalendarView);
-                      setMobileViewPickerOpen(false);
+                      if (showFocusAnalysis) {
+                        setAnalysisTab(opt.id as 'week' | 'month' | 'year');
+                        setMobileViewPickerOpen(false);
+                      } else if (opt.id === 'custom') {
+                        if (calendarView !== 'custom') {
+                          setCalendarView('custom');
+                        } else {
+                          setMobileViewPickerOpen(false);
+                        }
+                      } else {
+                        setCalendarView(opt.id as CalendarView);
+                        setMobileViewPickerOpen(false);
+                      }
                     }}
                     className="flex items-center gap-3 px-3.5 py-3 rounded-xl text-left active:scale-[0.98] transition-transform"
                     style={{
@@ -10997,44 +11263,51 @@ export default function WeeklyPlanner() {
                   >
                     <div className="flex-1 min-w-0">
                       <div className="text-[14px] font-bold" style={{ color: active ? '#3b82f6' : menuText }}>{opt.label}</div>
-                      <div className="text-[11px] mt-0.5" style={{ color: menuSub }}>{opt.hint}</div>
+                      <div className="text-[11px] mt-0.5" style={{ color: menuSub }}>{hint}</div>
                     </div>
                     {active && <Check size={18} style={{ color: '#3b82f6' }} />}
                   </button>
                 );
               })}
 
-              {/* Custom view's day counts, inline so the picker is the one place
-                  the shape of the view is decided. */}
+              {/* Custom view's day counts and anchor controls */}
               {!showFocusAnalysis && calendarView === 'custom' && (
-                <div className="mt-1 rounded-xl p-3 flex flex-col gap-2.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
-                  <div className="flex items-center justify-between pb-1 border-b border-border/10">
-                    <span className="text-[12px] font-semibold" style={{ color: menuText }}>Anchor</span>
-                    <div className="flex rounded-lg p-0.5" style={{ background: menuBg, border: `1px solid ${surfaceBdr}` }}>
-                      <button
-                        onClick={() => setCustomAnchor('day')}
-                        className="px-2.5 py-1 text-xs font-semibold rounded-md transition-smooth"
-                        style={{
-                          background: customAnchor === 'day' ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent',
-                          color: customAnchor === 'day' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
-                          boxShadow: customAnchor === 'day' ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
-                        }}
-                      >
-                        Today
-                      </button>
-                      <button
-                        onClick={() => setCustomAnchor('week')}
-                        className="px-2.5 py-1 text-xs font-semibold rounded-md transition-smooth"
-                        style={{
-                          background: customAnchor === 'week' ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent',
-                          color: customAnchor === 'week' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
-                          boxShadow: customAnchor === 'week' ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
-                        }}
-                      >
-                        Week
-                      </button>
+                <div className="mt-1 rounded-xl p-3 flex flex-col gap-3" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                  <div className="flex flex-col gap-1.5 pb-2 border-b border-border/10">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12px] font-bold" style={{ color: menuText }}>Anchor Basis</span>
+                      <div className="flex rounded-lg p-0.5" style={{ background: menuBg, border: `1px solid ${surfaceBdr}` }}>
+                        <button
+                          onClick={() => setCustomAnchor('day')}
+                          className="px-3 py-1 text-xs font-semibold rounded-md transition-smooth"
+                          style={{
+                            background: customAnchor === 'day' ? (darkMode ? 'rgba(255,255,255,0.16)' : '#fff') : 'transparent',
+                            color: customAnchor === 'day' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                            boxShadow: customAnchor === 'day' ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                          }}
+                        >
+                          Today
+                        </button>
+                        <button
+                          onClick={() => setCustomAnchor('week')}
+                          className="px-3 py-1 text-xs font-semibold rounded-md transition-smooth"
+                          style={{
+                            background: customAnchor === 'week' ? (darkMode ? 'rgba(255,255,255,0.16)' : '#fff') : 'transparent',
+                            color: customAnchor === 'week' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                            boxShadow: customAnchor === 'week' ? '0 1px 3px rgba(0,0,0,0.15)' : 'none',
+                          }}
+                        >
+                          Week
+                        </button>
+                      </div>
                     </div>
+                    <span className="text-[10.5px]" style={{ color: menuSub }}>
+                      {customAnchor === 'day'
+                        ? 'Counted before & after today (positive increments only)'
+                        : 'Offsets from start and end of week'}
+                    </span>
                   </div>
+
                   {([
                     {
                       label: 'Days before',
@@ -11042,6 +11315,9 @@ export default function WeeklyPlanner() {
                       min: customAnchor === 'day' ? 0 : CUSTOM_BEFORE_MIN,
                       max: CUSTOM_BEFORE_MAX,
                       set: setCustomDaysBefore,
+                      dayName: customAnchor === 'day'
+                        ? format(addDays(currentDate, -Math.max(0, customDaysBefore)), 'EEE, MMM d')
+                        : format(addDays(weekStart, customDaysBefore), 'EEE, MMM d'),
                     },
                     {
                       label: 'Days after',
@@ -11049,29 +11325,59 @@ export default function WeeklyPlanner() {
                       min: customAnchor === 'day' ? 0 : CUSTOM_AFTER_MIN,
                       max: CUSTOM_AFTER_MAX,
                       set: setCustomDaysAfter,
+                      dayName: customAnchor === 'day'
+                        ? format(addDays(currentDate, Math.max(0, customDaysAfter)), 'EEE, MMM d')
+                        : format(addDays(weekStart, 6 + customDaysAfter), 'EEE, MMM d'),
                     },
                   ] as const).map(row => (
-                    <div key={row.label} className="flex items-center justify-between py-1">
-                      <span className="text-[12.5px] font-semibold" style={{ color: menuText }}>{row.label}</span>
-                      <div className="flex items-center gap-1">
+                    <div key={row.label} className="flex items-center justify-between py-0.5">
+                      <div className="flex flex-col">
+                        <span className="text-[12.5px] font-semibold" style={{ color: menuText }}>{row.label}</span>
+                        <span className="text-[10px] font-medium" style={{ color: menuSub }}>{row.dayName}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
                         <button
                           onClick={() => row.set(v => Math.max(row.min, (customAnchor === 'day' ? Math.max(0, v) : v) - 1))}
                           disabled={row.value <= row.min}
-                          className="w-9 h-9 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                          className="w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
                           style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
-                        ><Minus size={15} /></button>
+                        ><Minus size={16} /></button>
                         <span className="w-9 text-center text-[13px] font-bold tabular-nums" style={{ color: menuText }}>
                           {customAnchor === 'day' ? row.value : (row.value > 0 ? `+${row.value}` : row.value)}
                         </span>
                         <button
                           onClick={() => row.set(v => Math.min(row.max, (customAnchor === 'day' ? Math.max(0, v) : v) + 1))}
                           disabled={row.value >= row.max}
-                          className="w-9 h-9 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                          className="w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
                           style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
-                        ><Plus size={15} /></button>
+                        ><Plus size={16} /></button>
                       </div>
                     </div>
                   ))}
+
+                  {/* Range visual preview pill */}
+                  <div
+                    className="flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold mt-1"
+                    style={{
+                      background: darkMode ? 'rgba(59,130,246,0.12)' : 'rgba(37,99,235,0.08)',
+                      color: '#3b82f6',
+                      border: '1px solid rgba(59,130,246,0.2)',
+                    }}
+                  >
+                    <span>Window</span>
+                    <span className="font-bold tabular-nums">
+                      {format(dayAt(customFrom), 'EEE, MMM d')} – {format(dayAt(customTo - 1), 'EEE, MMM d')} ({colCount}d)
+                    </span>
+                  </div>
+
+                  {/* Done button */}
+                  <button
+                    onClick={() => { haptic(6); setMobileViewPickerOpen(false); }}
+                    className="w-full py-2.5 rounded-xl text-xs font-bold text-white active:scale-[0.98] transition-transform shadow-sm"
+                    style={{ background: '#3b82f6' }}
+                  >
+                    Done
+                  </button>
                 </div>
               )}
             </div>
@@ -11549,8 +11855,12 @@ function MobileSheet({
               </button>
             </div>
 
+            {/* flex-1 + min-h-0: without them this body keeps its content height
+                inside a `flex-col` that is capped at 85dvh, so a tall sheet was
+                simply clipped by the wrapper's overflow-hidden and could not be
+                scrolled to its last control at all. */}
             <div
-              className="px-4 pt-1 overflow-y-auto touch-scroll"
+              className="flex-1 min-h-0 px-4 pt-1 overflow-y-auto overscroll-contain touch-scroll"
               style={{ paddingBottom: 'calc(var(--safe-bottom) + 18px)' }}
             >
               {children}
