@@ -1,4 +1,4 @@
-import { addDays, differenceInDays, format, startOfWeek } from 'date-fns';
+import { addDays, addYears, differenceInDays, format, startOfWeek } from 'date-fns';
 import {
   editSeries,
   makeOccId,
@@ -121,13 +121,18 @@ export function addMinutesToTime(hhmm: string, minutes: number): string {
  * they have no anchor, and `resolveWeek` would otherwise resolve them against
  * the year-0 sentinel.
  */
-export function resolveWeekTasks(raw: TaskData, viewedWeekKey: string, range?: { from: number; to: number }): TaskData {
+export function resolveWeekTasks(
+  raw: TaskData,
+  viewedWeekKey: string,
+  range?: { from: number; to: number },
+  weekStartsOn: WeekStartsOn = 0,
+): TaskData {
   const scheduled: TaskData = {};
   for (const t of Object.values(raw)) {
     if (!t.weekKey || t.deleted) continue;
     scheduled[t.id] = t;
   }
-  return resolveWeek<Task>(scheduled, viewedWeekKey, range);
+  return resolveWeek<Task>(scheduled, viewedWeekKey, range, weekStartsOn);
 }
 
 export interface ExpandTaskRangeOptions {
@@ -528,6 +533,9 @@ export function deleteTaskScoped(raw: TaskData, occId: string, mode: DeleteMode)
     if (!occDate) return dropOrTombstone();
     const anchor = dueDateOf(master);
     if (anchor && occDate <= anchor) return dropOrTombstone();
+    const anchorDate = parseYmd(anchor || master.weekKey || todayYmd());
+    const firstOccs = occurrenceStarts(master, anchorDate, addYears(anchorDate, 5));
+    if (firstOccs.length === 0 || occDate <= ymd(firstOccs[0])) return dropOrTombstone();
     const until = ymd(addDays(parseYmd(occDate), -1));
     const exdates = (master.exdates ?? []).filter(d => d < occDate);
     return { ...raw, [masterId]: { ...master, recur: { ...master.recur, end: { until } }, exdates, updatedAt: now } };

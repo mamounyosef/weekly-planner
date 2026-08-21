@@ -1,0 +1,38 @@
+name: CI Test Suite
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Run Automated Tests & Build Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck TypeScript
+        run: npx tsc -p artifacts/weekly-planner/tsconfig.json --noEmit
+
+      - name: Run Core Test Suites (Recurrence, Focus Timer, Ultrasonic Simulation, Hardware Controller)
+        run: npm --prefix artifacts/weekly-planner test
+
+      - name: Production Bundle Build
+        run: npm --prefix artifacts/weekly-planner run build

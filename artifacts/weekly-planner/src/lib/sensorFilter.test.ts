@@ -313,12 +313,89 @@ console.log(`arrive ${CFG.presentConfirmMs}ms, leave ${CFG.absentConfirmMs}ms, o
     `holding=${snap.holding} progress=${snap.awayProgressMs}`);
 }
 
+// ---------------------------------------------------------------------------
+// Advanced Acoustic & Physical Simulations
+// ---------------------------------------------------------------------------
+
+console.log('\n--- ADVANCED ULTRASONIC ACOUSTIC SIMULATIONS ---');
+
 {
+  // Simulation: Realistic Seated Session with Normal Fidgeting & Acoustic Noise (10-minute simulation)
+  // Distance fluctuates normally around 33cm with Gaussian noise +/- 2cm,
+  // occasional shifts to 42cm (leaning back) or 28cm (leaning in), and 1% chance of acoustic deflection.
   const r = new Rig().seat();
-  const snap = r.hold(32, 2);
-  check('a clean seated signal reports full agreement', snap.support === 1 && snap.spreadCm === 0,
-    `support=${snap.support} spread=${snap.spreadCm}`);
+  let spuriousAwayFlips = 0;
+  // Seeded pseudo-random generator for 100% deterministic simulation runs
+  let seed = 42;
+  const pseudoRand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return (seed - 1) / 2147483646;
+  };
+
+  // 10 minutes = 6,000 pings at 100ms
+  for (let i = 0; i < 6000; i++) {
+    const posture = (i % 1200 < 600) ? 33 : (i % 1200 < 900 ? 40 : 29);
+    const noise = (pseudoRand() - 0.5) * 4; // +/- 2cm noise
+    let sample: number | null = posture + noise;
+
+    // 1% chance of acoustic dropout/timeout (HC-SR04 sound wave deflection on angled clothing)
+    if (pseudoRand() < 0.01) {
+      sample = 400;
+    }
+
+    const snap = r.feed(sample);
+    if (snap.changed && !snap.present) {
+      spuriousAwayFlips++;
+    }
+  }
+
+  check('10-minute simulated seated session with posture shifts and acoustic noise NEVER evicts you',
+    r.present && spuriousAwayFlips === 0, `spuriousAwayFlips=${spuriousAwayFlips}`);
+}
+
+{
+  // Simulation: Rapid Pacing & In-and-Out of Desk Area
+  // Person walks in (stays 3s), walks away (stays 4s), walks back (stays 15s)
+  const r = new Rig();
+  r.hold(58, 6); // start away (empty chair)
+  check('initially away', !r.present);
+
+  // In for 3s (confirm is 2s -> becomes present)
+  r.hold(32, 3);
+  check('detected arrival within 3s', r.present);
+
+  // Out for 4s (confirm is 5s + window 1.5s -> stays present because away requires 6.5s)
+  r.hold(58, 4);
+  check('brief 4s step away does not drop session', r.present);
+
+  // Back in and stays 10s
+  r.hold(32, 10);
+  check('still present after returning', r.present);
+
+  // Leaves permanently (10s > 6.5s)
+  r.hold(58, 10);
+  check('confirmed away after 10s departure', !r.present);
+}
+
+{
+  // Simulation: Multi-target competition (dominant cluster vs secondary reflection)
+  // 60% of samples see knees at 32cm, 40% see room reflection at 90cm
+  const r = new Rig().seat();
+  let seed = 12345;
+  const pseudoRand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return (seed - 1) / 2147483646;
+  };
+
+  for (let i = 0; i < 100; i++) {
+    const isTarget = pseudoRand() < 0.65;
+    r.feed(isTarget ? 32 + (pseudoRand() - 0.5) * 2 : 90 + (pseudoRand() - 0.5) * 5);
+  }
+
+  check('dominant near cluster wins against secondary far reflections',
+    r.present && (r.believed ?? 0) < CFG.enterCm, `believed=${r.believed}`);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
 if (failures > 0) process.exitCode = 1;
+

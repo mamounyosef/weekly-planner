@@ -609,7 +609,7 @@ export default function Widget() {
   // Resolve raw storage into the items visible in the current (real) week, so the
   // widget honours single-week items, recurring versions and per-week overrides.
   const viewedWeekKey = weekKeyOf(today, weekStartsOn);
-  const rawWeekEvents = useMemo(() => resolveWeek(events, viewedWeekKey), [events, viewedWeekKey]);
+  const rawWeekEvents = useMemo(() => resolveWeek(events, viewedWeekKey, undefined, weekStartsOn), [events, viewedWeekKey, weekStartsOn]);
   const weekEvents = useMemo(() => {
     const hiddenCatIds = new Set(categories.filter(c => c.showInWidget === false).map(c => c.id));
     if (hiddenCatIds.size === 0) return rawWeekEvents;
@@ -814,27 +814,17 @@ export default function Widget() {
     scrollAnimFrame.current = requestAnimationFrame(step);
   }, [normNowMin, interval, dayStartH]);
 
-  const handleScroll = () => {
+  const handleScroll = useCallback(() => {
     if (isProgrammaticScroll.current) {
       isProgrammaticScroll.current = false;
       return;
     }
-    
-    // Check if the live line is visible in the container
-    const container = scrollContainerRef.current;
-    if (container) {
-      const stickyHeaderH = getStickyHeaderHeight(container);
-      const gridOffset = timelineGridRef.current?.offsetTop ?? 0;
-      const lineTop = gridOffset + minToY(normNowMin, interval, dayStartH);
-      const isVisible = lineTop >= container.scrollTop + stickyHeaderH && lineTop <= container.scrollTop + container.clientHeight;
-      setShowLiveBtn(!isVisible);
-    }
-    
+    checkLiveVisibility();
     // If the user scrolls away, pause live tracking
     if (isTrackingLive.current) {
       isTrackingLive.current = false;
     }
-  };
+  }, [checkLiveVisibility]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -842,7 +832,7 @@ export default function Widget() {
     container.addEventListener('scroll', handleScroll);
     checkLiveVisibility();
     return () => container.removeEventListener('scroll', handleScroll);
-  }, [checkLiveVisibility]);
+  }, [handleScroll, checkLiveVisibility]);
 
   // Keep centering dynamically if the user resizes the widget window
   useEffect(() => {
@@ -883,6 +873,12 @@ export default function Widget() {
     requestAnimationFrame(scrollInitial);
   }, [slots, dayStartH, interval, centerScrollOnLive]);
 
+  const scrollToLive = useCallback(() => {
+    isTrackingLive.current = true;
+    setShowLiveBtn(false);
+    centerScrollOnLive(true);
+  }, [centerScrollOnLive]);
+
   // On first launch, act as though Go Live was pressed.
   const didInitialLive = useRef(false);
   useEffect(() => {
@@ -897,7 +893,7 @@ export default function Widget() {
       }, delay),
     );
     return () => timers.forEach(window.clearTimeout);
-  }, [slots.length, events]);
+  }, [slots.length, events, scrollToLive]);
 
   // Keep centering dynamically every time the live time updates
   const lastCenteringMin = useRef(-1);
@@ -910,12 +906,6 @@ export default function Widget() {
       centerScrollOnLive(true);
     }
   }, [nowTick, normNowMin, centerScrollOnLive]);
-
-  const scrollToLive = useCallback(() => {
-    isTrackingLive.current = true;
-    setShowLiveBtn(false);
-    centerScrollOnLive(true);
-  }, [centerScrollOnLive]);
 
   const minimizeWidget = () => {
     if ((window as any).pywebview?.api?.minimize) {
@@ -1164,7 +1154,7 @@ export default function Widget() {
     claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue), {
       playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000,
     });
-  }, [focusTimer, focusRemainingSeconds]);
+  }, [focusTimer]);
 
   const startFocus = () => {
     const startedAt = new Date().toISOString();
@@ -1478,7 +1468,7 @@ export default function Widget() {
               {format(today, 'EEEE, MMMM d')}
             </span>
             <span className="text-[10.5px] font-medium tabular-nums mt-[3px]" style={{ color: menuSub }}>
-              {format(today, 'h:mm:ss a')}
+              {timeFormat === '24h' ? format(today, 'HH:mm:ss') : format(today, 'h:mm:ss a')}
             </span>
           </div>
         </div>
@@ -1687,9 +1677,7 @@ export default function Widget() {
           // Calculate height of sticky All-Day row so sticky Tasks row positions accurately right below it
           const allDayRowH = todayAllDay.length === 0 ? 0 : (visibleAllDay.length * 28 + (hasMoreAllDay ? 24 : 0) + 12);
 
-          const weekStart = startOfWeek(today, { weekStartsOn });
-          const viewedWeekKey = weekKeyOf(weekStart, weekStartsOn);
-          const res = resolveWeekTasks(tasks, viewedWeekKey);
+          const res = resolveWeekTasks(tasks, viewedWeekKey, undefined, weekStartsOn);
           const targetDayIdx = Math.max(0, Math.min(6, differenceInDays(startOfDay(today), startOfDay(weekStart))));
           const todayTasks = Object.values(res).filter(t => {
             if (t.deleted || t.startTime) return false;
@@ -2039,9 +2027,7 @@ export default function Widget() {
               : segKind === 'head'
                 ? fullEndMin - normNowMin
                 : eNormEv - normNowMin);
-            const durationMin  = Math.max(0, spansBoundary
-              ? fullEndMin - fullStartMin
-              : eNormEv - sNormEv);
+            const durationMin  = Math.max(0, eNormEv - sNormEv);
             const durationLabel = durationMin < 60
               ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
               : durationMin % 60 === 0

@@ -65,6 +65,8 @@ import {
 import {
   SHORTCUT_DEFS,
   DEFAULT_SHORTCUTS,
+  FOCUS_TIMER_TOGGLE_DEFAULT,
+  SHORTCUT_DEFAULTS_VERSION,
   ShortcutAction,
   ShortcutMap,
   loadShortcuts,
@@ -94,6 +96,7 @@ import { NumberField } from '@/components/NumberField';
 import { useViewport } from '@/hooks/use-mobile';
 import {
   DEVICE_SCOPED_KEYS,
+  FilterViewKey,
   coerceDeviceSettings,
   fetchDeviceSettings,
   loadDeviceSettingsLocal,
@@ -974,14 +977,22 @@ export default function SettingsPage() {
     deviceExtrasRef.current = {
       appZoom: d.appZoom, analysisTab: d.analysisTab, mobileTab: d.mobileTab,
       hiddenCategoryIds: d.hiddenCategoryIds ?? [],
+      hiddenCategoriesByView: d.hiddenCategoriesByView ?? { day: [], week: [], month: [], year: [] },
     };
   }, []);
   /** Device-only values this page has no control for, carried through untouched. */
-  const deviceExtrasRef = useRef({
+  const deviceExtrasRef = useRef<{
+    appZoom: number;
+    analysisTab: 'week' | 'month' | 'year';
+    mobileTab: 'calendar' | 'tasks' | 'focus';
+    hiddenCategoryIds: string[];
+    hiddenCategoriesByView: Record<FilterViewKey, string[]>;
+  }>({
     appZoom: 1,
-    analysisTab: 'week' as const as 'week' | 'month' | 'year',
-    mobileTab: 'calendar' as const as 'calendar' | 'tasks' | 'focus',
-    hiddenCategoryIds: [] as string[],
+    analysisTab: 'week',
+    mobileTab: 'calendar',
+    hiddenCategoryIds: [],
+    hiddenCategoriesByView: { day: [], week: [], month: [], year: [] },
   });
   const deviceReady = useRef(false);
 
@@ -1141,6 +1152,7 @@ export default function SettingsPage() {
       focusDayStartHour,
       focusChime,
       focusCues,
+      shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,
       shortcuts,
       autoBackup,
       taskFilters,
@@ -1237,6 +1249,7 @@ export default function SettingsPage() {
     focusDayStartHour,
     focusChime,
     focusCues,
+    shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,
     shortcuts,
     autoBackup,
     tasksPanelOpen,
@@ -3616,6 +3629,30 @@ export default function SettingsPage() {
                     >
                       <RotateCcw size={14} />
                       <span>Reset Defaults</span>
+                    </button>
+                  </div>
+
+                  <div
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-3.5 py-3"
+                    style={{ background: darkMode ? 'rgba(59,130,246,0.08)' : 'rgba(59,130,246,0.06)', borderColor: accentColor }}
+                  >
+                    <div>
+                      <p className="text-xs font-semibold" style={{ color: textPrimary }}>Focus timer default</p>
+                      <p className="mt-0.5 text-[10px]" style={{ color: textSecondary }}>
+                        Assigns Start / pause timer without relying on the browser capturing the Windows key.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShortcuts(prev => ({ ...prev, toggleTimer: FOCUS_TIMER_TOGGLE_DEFAULT }));
+                        setRecordingAction(null);
+                        showToast(`Start / pause timer is set to ${formatCombo(FOCUS_TIMER_TOGGLE_DEFAULT)}.`, 'success');
+                      }}
+                      className="touch-target flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-smooth"
+                      style={{ background: accentColor, borderColor: accentColor, color: '#ffffff' }}
+                      title="Set Start / pause timer to Win + Shift + F1"
+                    >
+                      Use {formatCombo(FOCUS_TIMER_TOGGLE_DEFAULT)}
                     </button>
                   </div>
 

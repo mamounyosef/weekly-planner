@@ -17,6 +17,10 @@ export interface PublicAccessConfig {
 
 const SESSION_SECRET = 'weekly-planner-multi-user-secure-secret-2026';
 export const SESSION_COOKIE = 'planner_session';
+// A persistent local-browser login should survive app/server restarts, but not
+// live indefinitely if a browser fails to discard an expired cookie.
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
+const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 
 export function sanitizeUsername(raw: string): string {
   return (raw || '').trim().toLowerCase().replace(/[^a-z0-9_\-\.]/g, '_');
@@ -110,19 +114,21 @@ export async function ensureUserDb(rootDir: string, username: string) {
 export async function migrateLegacyDatabase(rootDir: string) {
   try {
     const legacyDbPath = path.resolve(rootDir, 'database', 'database.json');
-    const mamounDir = path.resolve(rootDir, 'database', 'users', 'mamoun');
-    const mamounDbPath = path.join(mamounDir, 'database.json');
+    const { users } = await loadAccessConfig(rootDir);
+    const targetUser = users.length > 0 ? users[0].username : 'mamoun';
+    const targetDir = path.resolve(rootDir, 'database', 'users', targetUser);
+    const targetDbPath = path.join(targetDir, 'database.json');
 
     const hasLegacy = await fsp.stat(legacyDbPath).then(() => true).catch(() => false);
-    const hasMigrated = await fsp.stat(mamounDbPath).then(() => true).catch(() => false);
+    const hasMigrated = await fsp.stat(targetDbPath).then(() => true).catch(() => false);
 
     if (hasLegacy && !hasMigrated) {
-      await fsp.mkdir(mamounDir, { recursive: true });
+      await fsp.mkdir(targetDir, { recursive: true });
       const rootDbDir = path.resolve(rootDir, 'database');
       const files = await fsp.readdir(rootDbDir, { withFileTypes: true });
       for (const file of files) {
         if (file.isDirectory() && file.name === 'backups') {
-          const destBackup = path.join(mamounDir, 'backups');
+          const destBackup = path.join(targetDir, 'backups');
           await fsp.mkdir(destBackup, { recursive: true });
           const backupFiles = await fsp.readdir(path.join(rootDbDir, 'backups')).catch(() => []);
           for (const bf of backupFiles) {
@@ -130,10 +136,10 @@ export async function migrateLegacyDatabase(rootDir: string) {
           }
         } else if (file.isFile()) {
           if (file.name === 'users.json' || file.name === 'public-access.json' || file.name === 'prayer-times.json') continue;
-          await fsp.copyFile(path.join(rootDbDir, file.name), path.join(mamounDir, file.name)).catch(() => {});
+          await fsp.copyFile(path.join(rootDbDir, file.name), path.join(targetDir, file.name)).catch(() => {});
         }
       }
-      console.log('[auth] Successfully migrated legacy database to database/users/mamoun/');
+      console.log(`[auth] Successfully migrated legacy database to database/users/${targetUser}/`);
     }
   } catch (err) {
     console.warn('[auth] Migration check notice:', err);
@@ -142,26 +148,34 @@ export async function migrateLegacyDatabase(rootDir: string) {
 
 export function createSessionToken(username: string, password: string): string {
   const safeName = sanitizeUsername(username);
+  const expiresAt = Date.now() + SESSION_MAX_AGE_MS;
   const sig = crypto.createHmac('sha256', SESSION_SECRET)
-    .update(`${safeName}:${password}`)
+    .update(`${safeName}:${expiresAt}:${password}`)
     .digest('hex');
-  return `${safeName}:${sig}`;
+  return `${safeName}:${expiresAt}:${sig}`;
 }
 
 export function verifySessionToken(tokenStr: string, users: AppUser[]): AppUser | null {
   if (!tokenStr || typeof tokenStr !== 'string') return null;
-  const colon = tokenStr.indexOf(':');
-  if (colon <= 0) return null;
-  const rawUser = tokenStr.slice(0, colon);
-  const sig = tokenStr.slice(colon + 1);
+  const parts = tokenStr.split(':');
+  if (parts.length !== 2 && parts.length !== 3) return null;
+  const [rawUser, expiryOrSignature, maybeSignature] = parts;
   const safeName = sanitizeUsername(rawUser);
   const found = users.find(u => u.username === safeName);
   if (!found) return null;
-  const expected = crypto.createHmac('sha256', SESSION_SECRET)
-    .update(`${safeName}:${found.password}`)
-    .digest('hex');
-  if (sig === expected) return found;
-  return null;
+
+  // Cookies issued before this upgrade have no signed expiry. Keep them valid
+  // until their existing browser expiry so users are not unexpectedly signed
+  // out once, while all newly-issued sessions are server-expiring as well.
+  const expiresAt = maybeSignature ? Number(expiryOrSignature) : null;
+  if (maybeSignature && (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now())) return null;
+  const signature = maybeSignature || expiryOrSignature;
+  const payload = maybeSignature
+    ? `${safeName}:${expiresAt}:${found.password}`
+    : `${safeName}:${found.password}`;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  if (signature.length !== expected.length) return null;
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)) ? found : null;
 }
 
 export function isLocalAddress(raw: string): boolean {

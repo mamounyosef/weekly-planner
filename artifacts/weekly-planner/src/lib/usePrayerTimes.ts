@@ -53,8 +53,9 @@ export function usePrayerTimes(settings: PrayerSettings, visibleDates: Date[]) {
     const keyAtStart = queryKey;
 
     for (const ym of neededSig ? neededSig.split(',') : []) {
-      if (months[ym] || inFlight.current.has(ym)) continue;
-      inFlight.current.add(ym);
+      const flightKey = `${keyAtStart}:${ym}`;
+      if (months[ym] || inFlight.current.has(flightKey)) continue;
+      inFlight.current.add(flightKey);
       const [y, m] = ym.split('-').map(Number);
       fetch(prayerMonthUrl(settings, y, m))
         .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
@@ -64,7 +65,7 @@ export function usePrayerTimes(settings: PrayerSettings, visibleDates: Date[]) {
           if (data?.stale) setStale(true);
         })
         .catch(err => console.error('Prayer times fetch failed:', err))
-        .finally(() => { inFlight.current.delete(ym); });
+        .finally(() => { inFlight.current.delete(flightKey); });
     }
     // `months` is intentionally read but not a dependency: adding it would re-run
     // this on every successful load and re-check months already in hand.

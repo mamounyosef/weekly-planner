@@ -17,15 +17,22 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 # 127.0.0.1, not "localhost": the name resolves to ::1 first on Windows and the
 # failed IPv6 attempt adds a fixed ~200ms to every request.
 BASE_URL = "http://127.0.0.1:5173"
 TOGGLE_URL = BASE_URL + "/api/focus-timer/toggle"
 SETTINGS_URL = BASE_URL + "/api/settings"
+ROOT = Path(__file__).resolve().parent
+LOCAL_USERS_PATH = ROOT / "database" / "users.json"
 
-# Used until the dev server tells us what the user configured.
-FALLBACK_COMBO = "alt+shift+f1"
+# Used until the dev server tells us what the user configured. It must match
+# FOCUS_TIMER_TOGGLE_DEFAULT in src/lib/shortcuts.ts exactly (case is immaterial
+# to RegisterHotKey).
+FALLBACK_COMBO = "win+shift+f1"
+LEGACY_FALLBACK_COMBO = "alt+shift+f1"
+SHORTCUT_DEFAULTS_VERSION = 2
 
 # Modifier bits for RegisterHotKey.
 MOD_ALT = 0x0001
@@ -84,12 +91,15 @@ def already_running():
     """
     ERROR_ALREADY_EXISTS = 183
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW(None, False, "Global\\PlannerFocusHotkey")
+    # Version the mutex name with the binding migration. A previously-installed
+    # helper can remain alive while an update is being applied; it must not stop
+    # this version from registering the corrected Win+Shift+F1 binding.
+    kernel32.CreateMutexW(None, False, "Global\\PlannerFocusHotkeyV2")
     return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
 
 
 def parse_combo(combo):
-    """'Alt+Shift+F1' -> (modifier bits, virtual key code), or None if unusable."""
+    """'Win+Shift+F1' -> (modifier bits, virtual key code), or None if unusable."""
     mods = 0
     vk = None
     for part in str(combo).lower().split("+"):
@@ -119,15 +129,52 @@ def get_json(url):
         return None
 
 
-def configured_combo():
-    """The 'Start / pause timer' binding from the app's Settings, if reachable."""
-    data = get_json(SETTINGS_URL)
+def read_json_file(path):
+    """Read a local JSON file without turning a missing/corrupt file into a crash."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+    except (OSError, ValueError):
+        return None
+
+
+def combo_from_settings(data):
+    """Return the configured timer combo from one settings object, if present."""
     if isinstance(data, dict):
         shortcuts = data.get("shortcuts")
         if isinstance(shortcuts, dict):
             combo = shortcuts.get("toggleTimer")
             if isinstance(combo, str) and combo.strip():
+                # Settings written before shortcut-default version 2 used the
+                # old Alt binding. Upgrade only that historical default; an
+                # explicit Alt+Shift+F1 selection in a version-2 file remains
+                # a valid custom binding.
+                version = data.get("shortcutDefaultsVersion", 1)
+                if (
+                    (not isinstance(version, (int, float)) or version < SHORTCUT_DEFAULTS_VERSION)
+                    and combo.strip().lower() == LEGACY_FALLBACK_COMBO
+                ):
+                    return FALLBACK_COMBO
                 return combo.strip()
+    return None
+
+
+def configured_combo():
+    """The 'Start / pause timer' binding, including before web auth is ready."""
+    combo = combo_from_settings(get_json(SETTINGS_URL))
+    if combo:
+        return combo
+
+    # The helper starts before Chrome has necessarily restored its session, and
+    # an authenticated /api/settings response is not guaranteed at that point.
+    # Its original loopback fallback already targeted the first local profile;
+    # read that same profile directly so global shortcuts remain configurable on
+    # a cold launch too. No credential is read or stored here.
+    access = read_json_file(LOCAL_USERS_PATH)
+    users = access.get("users") if isinstance(access, dict) else None
+    first = users[0] if isinstance(users, list) and users else None
+    username = first.get("username") if isinstance(first, dict) else None
+    if isinstance(username, str) and username and all(c.isalnum() or c in "_-" for c in username):
+        return combo_from_settings(read_json_file(ROOT / "database" / "users" / username / "settings.json"))
     return None
 
 

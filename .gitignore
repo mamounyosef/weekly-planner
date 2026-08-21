@@ -66,3 +66,4 @@ __pycache__/
 # ESP32 firmware
 firmware/.pio/
 firmware/src/secrets.h
+.agents

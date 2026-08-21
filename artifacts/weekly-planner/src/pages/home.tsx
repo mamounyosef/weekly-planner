@@ -21,7 +21,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { Filter, ChevronLeft, ChevronRight, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
+import { Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -119,7 +119,7 @@ import {
 import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColor';
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
-import { DEFAULT_CATEGORIES, UNCATEGORISED, resolveEventColor, type EventCategory } from '@/lib/categories';
+import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
 import {
@@ -179,6 +179,8 @@ import {
   saveDeviceSettings,
   seedDeviceSettings,
   subscribeDeviceSettings,
+  getFilterViewKey,
+  type FilterViewKey,
   type DeviceSettings,
 } from '@/lib/deviceSettings';
 
@@ -655,7 +657,7 @@ function RecurrenceEditor({ recur, anchorWeekday, onChange, theme }: {
               const v = e.target.value;
               if (v === 'never') patch({ end: undefined });
               else if (v === 'count') patch({ end: { count: 10 } });
-              else patch({ end: { until: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) } });
+              else patch({ end: { until: format(addDays(new Date(), 30), 'yyyy-MM-dd') } });
             }} style={field}>
               <option value="never">Never</option>
               <option value="until">On date</option>
@@ -895,7 +897,33 @@ export default function DailyPlanner() {
    * UNCATEGORISED for items that belong to no category. Per device, so the
    * phone can show only what matters on the go without changing the PC.
    */
-  const [hiddenCategoryIds, setHiddenCategoryIds] = useState<string[]>([]);
+  const [hiddenCategoriesByView, setHiddenCategoriesByView] = useState<Record<FilterViewKey, string[]>>(() => {
+    try {
+      const local = loadDeviceSettingsLocal() as any;
+      if (local && local.hiddenCategoriesByView && typeof local.hiddenCategoriesByView === 'object') {
+        return {
+          day: Array.isArray(local.hiddenCategoriesByView.day) ? local.hiddenCategoriesByView.day : [],
+          week: Array.isArray(local.hiddenCategoriesByView.week) ? local.hiddenCategoriesByView.week : [],
+          month: Array.isArray(local.hiddenCategoriesByView.month) ? local.hiddenCategoriesByView.month : [],
+          year: Array.isArray(local.hiddenCategoriesByView.year) ? local.hiddenCategoriesByView.year : [],
+        };
+      }
+      if (local && Array.isArray(local.hiddenCategoryIds)) {
+        return {
+          day: local.hiddenCategoryIds,
+          week: local.hiddenCategoryIds,
+          month: local.hiddenCategoryIds,
+          year: local.hiddenCategoryIds,
+        };
+      }
+    } catch (_) {}
+    return { day: [], week: [], month: [], year: [] };
+  });
+  const currentFilterKey = getFilterViewKey(calendarView);
+  const hiddenCategoryIds = useMemo(
+    () => hiddenCategoriesByView[currentFilterKey] ?? [],
+    [hiddenCategoriesByView, currentFilterKey],
+  );
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [filterMenuPos, setFilterMenuPos] = useState<{ x: number; y: number } | null>(null);
   const filterBtnRef = useRef<HTMLButtonElement | null>(null);
@@ -1748,7 +1776,7 @@ export default function DailyPlanner() {
   const currentRealWeekKey = weekKeyOf(new Date(nowTick), weekStartsOn);
   const isPastWeek        = viewedWeekKey < currentRealWeekKey;
   // Items visible in the viewed week, keyed by the storage id actually shown.
-  const weekEventsAll = useMemo(() => resolveWeek(events, viewedWeekKey, viewRange), [events, viewedWeekKey, viewRange]);
+  const weekEventsAll = useMemo(() => resolveWeek(events, viewedWeekKey, viewRange, weekStartsOn), [events, viewedWeekKey, viewRange, weekStartsOn]);
   // Category filter. Applied here, once, rather than at each of the dozen
   // places that read the week: hidden items then simply do not exist for
   // layout, overlap packing, counts or hit-testing.
@@ -1801,7 +1829,7 @@ export default function DailyPlanner() {
   // Tasks visible in the viewed week, split by kind. Unlike all-day events a task
   // never spans days, so the dated band needs no packing layout — each chip sits
   // in its own day column.
-  const weekTasks = useMemo(() => resolveWeekTasks(tasks, viewedWeekKey, viewRange), [tasks, viewedWeekKey, viewRange]);
+  const weekTasks = useMemo(() => resolveWeekTasks(tasks, viewedWeekKey, viewRange, weekStartsOn), [tasks, viewedWeekKey, viewRange, weekStartsOn]);
   // Keyed by column OFFSET rather than a fixed 0-6 array, so the custom view's
   // out-of-week columns get their tasks too.
   const bucketTasks = useCallback((timed: boolean) => {
@@ -1949,15 +1977,17 @@ export default function DailyPlanner() {
     const gridEnd   = endOfWeek(endOfMonth(currentDate), { weekStartsOn });
     const allDays   = eachDayOfInterval({ start: gridStart, end: gridEnd });
     const weeks: Array<{ weekKey: string; cells: Array<{ date: Date; events: PlannerEvent[] }> }> = [];
+    const hiddenSet = new Set(hiddenCategoryIds);
     for (let i = 0; i < allDays.length; i += 7) {
       const chunk = allDays.slice(i, i + 7);
       const wkey = weekKeyOf(chunk[0], weekStartsOn);
-      const resolved = resolveWeek(events, wkey);
+      const resolved = resolveWeek(events, wkey, undefined, weekStartsOn);
       const weekStartDate = parseDate(wkey);
       const cells = chunk.map((date, col) => ({
         date,
         events: Object.values(resolved)
           .filter(e => {
+            if (hiddenCategoryIds.length && hiddenSet.has(e.categoryId || UNCATEGORISED)) return false;
             if (e.allDay) {
               const overlap = getEventWeekOverlap(e, weekStartDate);
               return overlap && col >= overlap.dayIndex && col < overlap.dayIndex + overlap.daysSpan;
@@ -1969,7 +1999,7 @@ export default function DailyPlanner() {
       weeks.push({ weekKey: wkey, cells });
     }
     return weeks;
-  }, [calendarView, currentDate, weekStartsOn, events]);
+  }, [calendarView, currentDate, weekStartsOn, events, hiddenCategoryIds]);
 
   // Year overview: 12 mini months. Resolving every week of the year is the
   // expensive bit, so each week is resolved once and shared across its days.
@@ -1977,10 +2007,11 @@ export default function DailyPlanner() {
     if (calendarView !== 'year') {
       return [] as Array<{ monthStart: Date; isCurrent: boolean; eventCount: number; cells: Array<{ date: Date; count: number }> }>;
     }
+    const hiddenSet = new Set(hiddenCategoryIds);
     const weekCache = new Map<string, PlannerData>();
     const resolveCached = (wkey: string) => {
       let r = weekCache.get(wkey);
-      if (!r) { r = resolveWeek(events, wkey); weekCache.set(wkey, r); }
+      if (!r) { r = resolveWeek(events, wkey, undefined, weekStartsOn); weekCache.set(wkey, r); }
       return r;
     };
     return Array.from({ length: 12 }, (_, m) => {
@@ -1992,6 +2023,7 @@ export default function DailyPlanner() {
         const wkey = weekKeyOf(date, weekStartsOn);
         const col = (date.getDay() - weekStartsOn + 7) % 7;
         const count = Object.values(resolveCached(wkey)).filter(e => {
+          if (hiddenCategoryIds.length && hiddenSet.has(e.categoryId || UNCATEGORISED)) return false;
           if (e.allDay) {
             const overlap = getEventWeekOverlap(e, parseDate(wkey));
             return overlap && col >= overlap.dayIndex && col < overlap.dayIndex + overlap.daysSpan;
@@ -2003,7 +2035,7 @@ export default function DailyPlanner() {
       });
       return { monthStart, isCurrent: isSameMonth(monthStart, new Date()), eventCount, cells };
     });
-  }, [calendarView, currentDate, weekStartsOn, events]);
+  }, [calendarView, currentDate, weekStartsOn, events, hiddenCategoryIds]);
 
   const weekEventsRef = useRef<PlannerData>({});
   useEffect(() => { weekEventsRef.current = weekEvents; }, [weekEvents]);
@@ -2089,7 +2121,7 @@ export default function DailyPlanner() {
       sidebarStyle: true, timeFormat: true, weekStartsOn: true, dayStartH: true,
       dayEndH: true, calendarView: true, customDaysBefore: true, customDaysAfter: true,
       customAnchor: true,
-      focusDayStartHour: true, focusChime: true, focusCues: true, shortcuts: true,
+      focusDayStartHour: true, focusChime: true, focusCues: true, shortcutDefaultsVersion: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
       taskColor: true, taskCheckboxShape: true, taskFilters: true, autoRollRecurringTasks: true, googleSyncEnabled: true, googleTasksSync: true,
       stickyAllDayMain: true, stickyTasksMain: true, stickyAllDayWidget: true, stickyTasksWidget: true,
@@ -2210,10 +2242,11 @@ export default function DailyPlanner() {
     analysisTab,
     mobileTab,
     hiddenCategoryIds,
+    hiddenCategoriesByView,
   }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
-       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds]);
+       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds, hiddenCategoriesByView]);
 
   /** Adopt a stored device snapshot into the live state. */
   const applyDeviceSettings = useCallback((d: DeviceSettings) => {
@@ -2238,7 +2271,16 @@ export default function DailyPlanner() {
     if (typeof d.mobileContentZoom === 'number') setMobileContentZoom(clampZoom(d.mobileContentZoom));
     if (typeof d.mobileUiZoom === 'number') setMobileUiZoom(clampZoom(d.mobileUiZoom));
     setAnalysisTab(d.analysisTab);
-    if (Array.isArray(d.hiddenCategoryIds)) setHiddenCategoryIds(d.hiddenCategoryIds);
+    if (d.hiddenCategoriesByView && typeof d.hiddenCategoriesByView === 'object') {
+      setHiddenCategoriesByView(d.hiddenCategoriesByView);
+    } else if (Array.isArray(d.hiddenCategoryIds)) {
+      setHiddenCategoriesByView({
+        day: d.hiddenCategoryIds,
+        week: d.hiddenCategoryIds,
+        month: d.hiddenCategoryIds,
+        year: d.hiddenCategoryIds,
+      });
+    }
     // `mobileTab` is deliberately NOT restored. It is where you happened to be,
     // not a preference — and opening the planner into a modal Tasks sheet
     // covering the calendar is a strange way to start the day. The calendar is
@@ -2355,11 +2397,23 @@ export default function DailyPlanner() {
   // ── Category visibility filter ──────────────────────────────────────────────
   const anyFilterActive = hiddenCategoryIds.length > 0;
   const toggleCategoryVisible = useCallback((id: string) => {
-    setHiddenCategoryIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id],
-    );
-  }, []);
-  const showAllCategories = useCallback(() => setHiddenCategoryIds([]), []);
+    setHiddenCategoriesByView(prev => {
+      const activeKey = getFilterViewKey(calendarView);
+      const list = prev[activeKey] ?? [];
+      const nextList = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
+      return {
+        ...prev,
+        [activeKey]: nextList,
+      };
+    });
+  }, [calendarView]);
+  const showAllCategories = useCallback(() => {
+    const activeKey = getFilterViewKey(calendarView);
+    setHiddenCategoriesByView(prev => ({
+      ...prev,
+      [activeKey]: [],
+    }));
+  }, [calendarView]);
   /** Every filterable row: the real categories plus the catch-all for the rest. */
   const filterRows = useMemo(
     () => [
@@ -2372,13 +2426,68 @@ export default function DailyPlanner() {
   // hiding one would actually cost.
   const filterCounts = useMemo(() => {
     const counts: Record<string, number> = {};
+    if (calendarView === 'day') {
+      for (const ev of Object.values(weekEventsAll)) {
+        if (ev.deleted) continue;
+        if (ev.allDay) {
+          const overlap = getEventWeekOverlap(ev, weekStart, viewRange);
+          if (!overlap) continue;
+        } else if (ev.dayIndex !== dayViewColIdx) {
+          continue;
+        }
+        const key = ev.categoryId || UNCATEGORISED;
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return counts;
+    }
+    if (calendarView === 'month') {
+      const seen = new Set<string>();
+      for (const week of monthMatrix) {
+        for (const cell of week.cells) {
+          if (!isSameMonth(cell.date, currentDate)) continue;
+          for (const ev of cell.events) {
+            if (ev.deleted || seen.has(ev.id)) continue;
+            seen.add(ev.id);
+            const key = ev.categoryId || UNCATEGORISED;
+            counts[key] = (counts[key] || 0) + 1;
+          }
+        }
+      }
+      return counts;
+    }
+    if (calendarView === 'year') {
+      for (const ev of Object.values(events)) {
+        if (ev.deleted) continue;
+        const key = ev.categoryId || UNCATEGORISED;
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      return counts;
+    }
     for (const ev of Object.values(weekEventsAll)) {
       if (ev.deleted) continue;
       const key = ev.categoryId || UNCATEGORISED;
       counts[key] = (counts[key] || 0) + 1;
     }
     return counts;
-  }, [weekEventsAll]);
+  }, [calendarView, weekEventsAll, weekStart, viewRange, dayViewColIdx, monthMatrix, currentDate, events]);
+
+  const handleSaveCategory = useCallback((cat: EventCategory) => {
+    setCategories(prev => {
+      const idx = prev.findIndex(c => c.id === cat.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = cat;
+        return next;
+      }
+      return [...prev, cat];
+    });
+    showToast(`Category "${cat.name}" saved`, 'success');
+  }, [showToast]);
+
+  const handleDeleteCategory = useCallback((catId: string) => {
+    setCategories(prev => prev.filter(c => c.id !== catId));
+    showToast('Category deleted', 'info');
+  }, [showToast]);
 
   // ── Linked items ────────────────────────────────────────────────────────────
   // A link group is a plain shared id. Membership is resolved against what is
@@ -8453,7 +8562,8 @@ export default function DailyPlanner() {
             {/* Week rows */}
             {monthMatrix.map(week => {
               const weekStartDate = parseDate(week.weekKey);
-              const rawAllDays = Object.values(resolveWeek(events, week.weekKey)).filter(ev => ev.allDay && !ev.deleted);
+              const rawAllDays = Object.values(resolveWeek(events, week.weekKey, undefined, weekStartsOn))
+                .filter(ev => ev.allDay && !ev.deleted && (!hiddenCategoryIds.length || !hiddenCategoryIds.includes(ev.categoryId || UNCATEGORISED)));
               const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
               for (const ev of rawAllDays) {
                 const overlap = getEventWeekOverlap(ev, weekStartDate);
@@ -10316,7 +10426,7 @@ export default function DailyPlanner() {
               <div style={{ borderTop: `1px solid ${menuBdr}`, paddingTop: 8 }}>
                 <RecurrenceEditor
                   recur={menuTask.recur}
-                  anchorWeekday={((menuTask.dayIndex ?? 0) + weekStartsOn) % 7 as Weekday}
+                  anchorWeekday={(((menuTask.dayIndex ?? 0) + weekStartsOn) % 7 + 7) % 7 as Weekday}
                   onChange={r => editTask(taskMenuId!, { recur: r })}
                   theme={{ text: menuText, sub: menuSub, bdr: menuBdr, hover: hoverBg, accent: taskColor, accentBg: `${taskColor}22`, fieldBg: surfaceBg }}
                 />
@@ -11660,7 +11770,10 @@ export default function DailyPlanner() {
             hidden={hiddenCategoryIds}
             onToggle={id => { haptic(6); toggleCategoryVisible(id); }}
             onShowAll={showAllCategories}
-            theme={{ menuText, menuSub, surfaceBg, surfaceBdr, hoverBg }}
+            categories={categories}
+            onSaveCategory={handleSaveCategory}
+            onDeleteCategory={handleDeleteCategory}
+            theme={{ darkMode, menuBg, menuText, menuSub, surfaceBg, surfaceBdr, hoverBg, isTouch: true }}
           />
         </MobileSheet>
       ) : filterMenuOpen && filterMenuPos ? createPortal(
@@ -11669,24 +11782,26 @@ export default function DailyPlanner() {
           <div
             className="fixed z-[151] rounded-xl shadow-xl overflow-hidden"
             style={{
-              left: Math.min(filterMenuPos.x, Math.max(8, window.innerWidth - 288)),
+              left: Math.min(filterMenuPos.x, Math.max(8, window.innerWidth - 300)),
               top: filterMenuPos.y,
-              width: 272,
+              width: 290,
               background: menuBg,
               border: `1px solid ${menuBdr}`,
+              maxHeight: 'calc(100vh - 80px)',
+              overflowY: 'auto',
             }}
           >
-            <div className="px-3 py-2 text-[11px] font-bold uppercase tracking-wide" style={{ color: menuSub, borderBottom: `1px solid ${menuBdr}` }}>
-              Show categories
-            </div>
-            <div className="p-2">
+            <div className="p-2.5">
               <CategoryFilterList
                 rows={filterRows}
                 counts={filterCounts}
                 hidden={hiddenCategoryIds}
                 onToggle={toggleCategoryVisible}
                 onShowAll={showAllCategories}
-                theme={{ menuText, menuSub, surfaceBg, surfaceBdr, hoverBg }}
+                categories={categories}
+                onSaveCategory={handleSaveCategory}
+                onDeleteCategory={handleDeleteCategory}
+                theme={{ darkMode, menuBg, menuText, menuSub, surfaceBg, surfaceBdr, hoverBg, isTouch: false }}
               />
             </div>
           </div>
@@ -11697,61 +11812,453 @@ export default function DailyPlanner() {
   );
 }
 
-/** The checkbox list behind the header's Filter button, shared by both shells. */
+/** The checkbox list behind the header's Filter button, shared by both shells, with complete category creation & customization. */
 function CategoryFilterList({
-  rows, counts, hidden, onToggle, onShowAll, theme,
+  rows, counts, hidden, onToggle, onShowAll, categories, onSaveCategory, onDeleteCategory, theme,
 }: {
   rows: Array<{ id: string; name: string; color: string }>;
   counts: Record<string, number>;
   hidden: string[];
   onToggle: (id: string) => void;
   onShowAll: () => void;
-  theme: { menuText: string; menuSub: string; surfaceBg: string; surfaceBdr: string; hoverBg: string };
+  categories: EventCategory[];
+  onSaveCategory: (cat: EventCategory) => void;
+  onDeleteCategory: (catId: string) => void;
+  theme: { darkMode: boolean; menuBg: string; menuText: string; menuSub: string; surfaceBg: string; surfaceBdr: string; hoverBg: string; isTouch?: boolean };
 }) {
+  const [mode, setMode] = useState<'list' | 'create' | 'edit'>('list');
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+  const [showMore, setShowMore] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [formState, setFormState] = useState<{
+    name: string;
+    color: string;
+    defaultDurationMin: number;
+    defaultAllDay: boolean;
+    defaultNoCheckbox: boolean;
+    showInWidget: boolean;
+    description: string;
+  }>({
+    name: '',
+    color: PRESET_CATEGORY_COLORS[0].hex,
+    defaultDurationMin: 30,
+    defaultAllDay: false,
+    defaultNoCheckbox: false,
+    showInWidget: true,
+    description: '',
+  });
+
+  const handleOpenCreate = () => {
+    setEditingCatId(null);
+    setDeleteConfirm(false);
+    setShowMore(false);
+    setFormState({
+      name: '',
+      color: PRESET_CATEGORY_COLORS[categories.length % PRESET_CATEGORY_COLORS.length].hex,
+      defaultDurationMin: 30,
+      defaultAllDay: false,
+      defaultNoCheckbox: false,
+      showInWidget: true,
+      description: '',
+    });
+    setMode('create');
+    setTimeout(() => nameInputRef.current?.focus(), 50);
+  };
+
+  const handleOpenEdit = (cat: EventCategory) => {
+    setEditingCatId(cat.id);
+    setDeleteConfirm(false);
+    setShowMore(Boolean(cat.description || cat.defaultAllDay || cat.defaultNoCheckbox || (cat.defaultDurationMin && cat.defaultDurationMin !== 30)));
+    setFormState({
+      name: cat.name,
+      color: cat.color,
+      defaultDurationMin: cat.defaultDurationMin ?? 30,
+      defaultAllDay: cat.defaultAllDay ?? false,
+      defaultNoCheckbox: cat.defaultNoCheckbox ?? false,
+      showInWidget: cat.showInWidget ?? true,
+      description: cat.description ?? '',
+    });
+    setMode('edit');
+    setTimeout(() => nameInputRef.current?.focus(), 50);
+  };
+
+  const handleSave = () => {
+    const trimmed = formState.name.trim();
+    if (!trimmed) return;
+
+    if (mode === 'create') {
+      const slug = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '') || 'category';
+      const id = `cat-${slug}-${Math.random().toString(36).slice(2, 6)}`;
+      onSaveCategory({
+        id,
+        name: trimmed,
+        color: formState.color || '#22c55e',
+        defaultDurationMin: formState.defaultDurationMin,
+        defaultAllDay: formState.defaultAllDay,
+        defaultNoCheckbox: formState.defaultNoCheckbox,
+        showInWidget: formState.showInWidget,
+        description: formState.description.trim(),
+      });
+      setMode('list');
+    } else if (mode === 'edit' && editingCatId) {
+      onSaveCategory({
+        id: editingCatId,
+        name: trimmed,
+        color: formState.color || '#22c55e',
+        defaultDurationMin: formState.defaultDurationMin,
+        defaultAllDay: formState.defaultAllDay,
+        defaultNoCheckbox: formState.defaultNoCheckbox,
+        showInWidget: formState.showInWidget,
+        description: formState.description.trim(),
+      });
+      setMode('list');
+    }
+  };
+
+  if (mode === 'create' || mode === 'edit') {
+    return (
+      <div className="flex flex-col gap-2.5 p-1 text-left">
+        {/* Header */}
+        <div className="flex items-center justify-between pb-2 border-b" style={{ borderColor: theme.surfaceBdr }}>
+          <button
+            type="button"
+            onClick={() => setMode('list')}
+            className="flex items-center gap-1.5 text-xs font-semibold px-1.5 py-1 rounded-md transition-opacity hover:opacity-75"
+            style={{ color: theme.menuSub }}
+          >
+            <ArrowLeft size={13} strokeWidth={2.5} />
+            <span>Categories</span>
+          </button>
+          <span className="text-xs font-bold" style={{ color: theme.menuText }}>
+            {mode === 'create' ? 'New Category' : 'Edit Category'}
+          </span>
+          <div className="w-8" />
+        </div>
+
+        {/* Name input */}
+        <div className="flex flex-col gap-1">
+          <label className="text-[10px] font-bold uppercase tracking-wider opacity-75" style={{ color: theme.menuSub }}>
+            Category Name
+          </label>
+          <input
+            ref={nameInputRef}
+            type="text"
+            value={formState.name}
+            onChange={e => setFormState(prev => ({ ...prev, name: e.target.value }))}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleSave();
+              }
+            }}
+            placeholder="e.g. Work, Gym, Study"
+            className="w-full px-2.5 py-1.5 rounded-lg border text-xs outline-none transition-colors"
+            style={{
+              background: theme.surfaceBg,
+              borderColor: theme.surfaceBdr,
+              color: theme.menuText,
+            }}
+          />
+        </div>
+
+        {/* Color presets & picker */}
+        <div className="flex flex-col gap-1.5">
+          <label className="text-[10px] font-bold uppercase tracking-wider opacity-75" style={{ color: theme.menuSub }}>
+            Color
+          </label>
+          <div className="grid grid-cols-6 gap-1.5">
+            {PRESET_CATEGORY_COLORS.map(pc => {
+              const isSelected = formState.color.toLowerCase() === pc.hex.toLowerCase();
+              return (
+                <button
+                  key={pc.hex}
+                  type="button"
+                  title={pc.label}
+                  onClick={() => setFormState(prev => ({ ...prev, color: pc.hex }))}
+                  className="h-6 rounded-md flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
+                  style={{
+                    backgroundColor: pc.hex,
+                    boxShadow: isSelected ? `0 0 0 2px ${theme.menuBg}, 0 0 0 3.5px ${pc.hex}` : 'none',
+                  }}
+                >
+                  {isSelected && <Check size={12} className="text-white drop-shadow" strokeWidth={3} />}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Custom color hex */}
+          <div className="flex items-center gap-2 pt-0.5">
+            <input
+              type="color"
+              value={formState.color}
+              onChange={e => setFormState(prev => ({ ...prev, color: e.target.value }))}
+              className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent p-0 flex-shrink-0"
+              title="Pick custom color"
+            />
+            <div
+              className="flex items-center gap-1 flex-1 px-2 py-1 rounded-md border text-[11px] font-mono"
+              style={{ borderColor: theme.surfaceBdr, background: theme.surfaceBg }}
+            >
+              <span className="opacity-40" style={{ color: theme.menuSub }}>#</span>
+              <input
+                type="text"
+                value={formState.color.replace(/^#/, '')}
+                onChange={e => {
+                  const val = e.target.value.trim().replace(/^#/, '');
+                  if (/^[0-9a-fA-F]{0,6}$/.test(val)) {
+                    setFormState(prev => ({ ...prev, color: `#${val}` }));
+                  }
+                }}
+                placeholder="22c55e"
+                className="bg-transparent text-[11px] font-mono outline-none flex-1"
+                style={{ color: theme.menuText }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Collapsible settings */}
+        <div className="border-t pt-1.5" style={{ borderColor: theme.surfaceBdr }}>
+          <button
+            type="button"
+            onClick={() => setShowMore(!showMore)}
+            className="flex items-center justify-between w-full py-1 text-[11px] font-semibold opacity-75 hover:opacity-100 transition-opacity"
+            style={{ color: theme.menuSub }}
+          >
+            <span>Defaults & options</span>
+            {showMore ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+
+          {showMore && (
+            <div className="flex flex-col gap-2 pt-2 mt-1">
+              {/* Default duration */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] font-medium opacity-70" style={{ color: theme.menuSub }}>
+                  Default Duration
+                </label>
+                <div className="flex flex-wrap gap-1">
+                  {[15, 30, 45, 60, 90, 120].map(mins => (
+                    <button
+                      key={mins}
+                      type="button"
+                      onClick={() => setFormState(prev => ({ ...prev, defaultDurationMin: mins }))}
+                      className="px-2 py-0.5 rounded text-[10px] font-semibold transition-colors"
+                      style={{
+                        background: formState.defaultDurationMin === mins ? formState.color : theme.surfaceBg,
+                        color: formState.defaultDurationMin === mins ? '#ffffff' : theme.menuText,
+                        border: `1px solid ${formState.defaultDurationMin === mins ? formState.color : theme.surfaceBdr}`,
+                      }}
+                    >
+                      {mins}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Toggles */}
+              <label className="flex items-center gap-2 text-[11px] cursor-pointer" style={{ color: theme.menuText }}>
+                <input
+                  type="checkbox"
+                  checked={formState.defaultAllDay}
+                  onChange={e => setFormState(prev => ({ ...prev, defaultAllDay: e.target.checked }))}
+                  className="rounded"
+                />
+                <span>Default to All-Day</span>
+              </label>
+
+              <label className="flex items-center gap-2 text-[11px] cursor-pointer" style={{ color: theme.menuText }}>
+                <input
+                  type="checkbox"
+                  checked={formState.defaultNoCheckbox}
+                  onChange={e => setFormState(prev => ({ ...prev, defaultNoCheckbox: e.target.checked }))}
+                  className="rounded"
+                />
+                <span>Hide completion checkbox</span>
+              </label>
+
+              <label className="flex items-center gap-2 text-[11px] cursor-pointer" style={{ color: theme.menuText }}>
+                <input
+                  type="checkbox"
+                  checked={formState.showInWidget}
+                  onChange={e => setFormState(prev => ({ ...prev, showInWidget: e.target.checked }))}
+                  className="rounded"
+                />
+                <span>Show in side widget</span>
+              </label>
+
+              {/* Description */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] font-medium opacity-70" style={{ color: theme.menuSub }}>
+                  Notes / Description
+                </label>
+                <input
+                  type="text"
+                  value={formState.description}
+                  onChange={e => setFormState(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="Optional description"
+                  className="w-full px-2 py-1 rounded border text-[11px] outline-none"
+                  style={{ background: theme.surfaceBg, borderColor: theme.surfaceBdr, color: theme.menuText }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center gap-2 pt-2 border-t" style={{ borderColor: theme.surfaceBdr }}>
+          {mode === 'edit' && editingCatId && (
+            deleteConfirm ? (
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteCategory(editingCatId);
+                  setMode('list');
+                }}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-red-600 text-white transition-colors hover:bg-red-700"
+              >
+                Confirm Delete
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(true)}
+                className="px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors hover:bg-red-500/10"
+                style={{ color: '#ef4444' }}
+                title="Delete category"
+              >
+                <Trash2 size={13} />
+              </button>
+            )
+          )}
+          <button
+            type="button"
+            onClick={() => setMode('list')}
+            className="flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+            style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}`, color: theme.menuText }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!formState.name.trim()}
+            className="flex-1 py-1.5 rounded-lg text-xs font-semibold text-white transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-110 active:scale-98"
+            style={{ background: formState.color || '#2563eb' }}
+          >
+            {mode === 'create' ? 'Create' : 'Save'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-1">
+      {/* Header with Title and Quick + New Button */}
+      <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b" style={{ borderColor: theme.surfaceBdr }}>
+        <span className="text-[11px] font-bold uppercase tracking-wider opacity-75" style={{ color: theme.menuSub }}>
+          Show categories
+        </span>
+        <button
+          type="button"
+          onClick={handleOpenCreate}
+          className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold transition-all hover:scale-105 active:scale-95 shadow-sm"
+          style={{
+            background: theme.darkMode ? 'rgba(59,130,246,0.2)' : 'rgba(37,99,235,0.1)',
+            color: theme.darkMode ? '#60a5fa' : '#2563eb',
+            border: `1px solid ${theme.darkMode ? 'rgba(59,130,246,0.35)' : 'rgba(37,99,235,0.25)'}`,
+          }}
+          title="Create new category"
+        >
+          <Plus size={12} strokeWidth={2.5} />
+          <span>New</span>
+        </button>
+      </div>
+
+      {/* Category List */}
       {rows.map(row => {
         const isHidden = hidden.includes(row.id);
         const count = counts[row.id] || 0;
+        const matchingCat = categories.find(c => c.id === row.id);
+
         return (
-          <button
+          <div
             key={row.id}
-            onClick={() => onToggle(row.id)}
-            className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors"
-            style={{ background: 'transparent', color: theme.menuText }}
+            className="group flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors"
+            style={{ color: theme.menuText }}
             onMouseEnter={e => (e.currentTarget.style.background = theme.hoverBg)}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
-            {/* The checkbox is filled with the category's own colour, so the
-                menu doubles as the colour legend for the calendar. */}
-            <span
-              className="w-[18px] h-[18px] rounded-[5px] flex items-center justify-center flex-shrink-0 transition-colors"
-              style={{
-                background: isHidden ? 'transparent' : row.color,
-                border: `1.5px solid ${isHidden ? theme.surfaceBdr : row.color}`,
-                color: '#ffffff',
-              }}
+            <button
+              type="button"
+              onClick={() => onToggle(row.id)}
+              className="flex-1 flex items-center gap-2.5 min-w-0 text-left"
             >
-              {!isHidden && <Check size={12} strokeWidth={3} />}
-            </span>
-            <span className="flex-1 min-w-0 truncate text-[13px] font-medium" style={{ opacity: isHidden ? 0.5 : 1 }}>
-              {row.name}
-            </span>
+              {/* Checkbox filled with category color */}
+              <span
+                className="w-[18px] h-[18px] rounded-[5px] flex items-center justify-center flex-shrink-0 transition-colors"
+                style={{
+                  background: isHidden ? 'transparent' : row.color,
+                  border: `1.5px solid ${isHidden ? theme.surfaceBdr : row.color}`,
+                  color: '#ffffff',
+                }}
+              >
+                {!isHidden && <Check size={12} strokeWidth={3} />}
+              </span>
+              <span className="flex-1 min-w-0 truncate text-[13px] font-medium" style={{ opacity: isHidden ? 0.5 : 1 }}>
+                {row.name}
+              </span>
+            </button>
+
+            {/* Edit button for real categories */}
+            {matchingCat && (
+              <button
+                type="button"
+                onClick={() => handleOpenEdit(matchingCat)}
+                className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
+                style={{ color: theme.menuSub }}
+                title={`Edit "${row.name}"`}
+              >
+                <Pencil size={12} />
+              </button>
+            )}
+
             <span className="text-[11px] tabular-nums flex-shrink-0" style={{ color: theme.menuSub }}>
               {count}
             </span>
-          </button>
+          </div>
         );
       })}
+
+      {/* Show all button when any hidden */}
       {hidden.length > 0 && (
         <button
+          type="button"
           onClick={onShowAll}
-          className="mt-1 w-full py-2 rounded-lg text-[12px] font-semibold transition-colors"
+          className="mt-1 w-full py-1.5 rounded-lg text-[12px] font-semibold transition-colors"
           style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}`, color: theme.menuText }}
         >
           Show all
         </button>
       )}
+
+      {/* Add category button at bottom */}
+      <button
+        type="button"
+        onClick={handleOpenCreate}
+        className="mt-2 w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all hover:brightness-105 active:scale-98 shadow-sm"
+        style={{
+          background: theme.darkMode ? 'rgba(59,130,246,0.15)' : 'rgba(37,99,235,0.08)',
+          border: `1px dashed ${theme.darkMode ? 'rgba(59,130,246,0.4)' : 'rgba(37,99,235,0.3)'}`,
+          color: theme.darkMode ? '#60a5fa' : '#2563eb',
+        }}
+      >
+        <Plus size={14} strokeWidth={2.5} />
+        <span>Create new category</span>
+      </button>
     </div>
   );
 }

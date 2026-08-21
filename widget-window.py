@@ -1,4 +1,5 @@
 import os
+import secrets
 
 # Must be set before webview (and therefore WebView2) starts. WebView2 is Chromium
 # and throttles timers in a window it thinks nobody is looking at, down to about
@@ -22,6 +23,13 @@ _resizing = False
 _old_wndproc = None
 _new_wndproc = None
 _always_on_top_enabled = True
+
+# WebView2 and the Chrome-based main app have separate cookie stores. This is a
+# random pairing capability for this *window*, not an authentication token: the
+# local server will only attach it to an account after the signed-in main app
+# explicitly approves it. Keeping the real session out of this command line and
+# URL avoids duplicating credentials between the two browser engines.
+WIDGET_PAIRING_ID = secrets.token_hex(32)
 
 
 class MONITORINFO(ctypes.Structure):
@@ -266,7 +274,9 @@ class Api:
         chrome_path1 = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         chrome_path2 = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
         edge_path = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        url = "http://127.0.0.1:5173"
+        # This opens the main browser app. Keep it on its canonical hostname so
+        # Chrome reuses the persistent planner_session cookie from the launcher.
+        url = "http://localhost:5173"
         user_data = r"D:\My Projects\weekly-planner\.chrome-profile"
         
         if os.path.exists(chrome_path1):
@@ -466,7 +476,7 @@ if __name__ == '__main__':
     # Create a standard window (not frameless), which we then border-strip in on_shown
     window = webview.create_window(
         title="Today's Schedule",
-        url='http://127.0.0.1:5173/widget',
+        url=f'http://127.0.0.1:5173/widget?widgetSession={WIDGET_PAIRING_ID}',
         width=340,
         height=720,
         frameless=False,  # Set to False so OS creates standard window and enables resize borders

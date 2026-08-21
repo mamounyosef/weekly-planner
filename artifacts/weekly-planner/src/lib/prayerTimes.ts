@@ -227,14 +227,15 @@ export function buildPrayerDay(
     if (!base) continue;
     if (key === 'sunrise' && !settings.showSunrise) continue;
     if (settings.hidden.includes(key)) continue;
-    const minutes = prayerTimeToMinutes(base) + (settings.offsets[key] ?? 0);
-    const time = minutesToPrayerTime(minutes);
+    const rawMinutes = prayerTimeToMinutes(base) + (settings.offsets[key] ?? 0);
+    const clampedMinutes = Math.max(0, Math.min(1439, rawMinutes));
+    const time = minutesToPrayerTime(clampedMinutes);
     out.push({
       key,
       label: PRAYER_LABELS[key],
       arabic: PRAYER_ARABIC[key],
       time,
-      minutes: prayerTimeToMinutes(time),
+      minutes: clampedMinutes,
       dateStr,
       id: prayerOccId(dateStr, key),
     });

@@ -1,5 +1,6 @@
 import path from 'path';
 import fsp from 'fs/promises';
+import crypto from 'crypto';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
@@ -20,8 +21,16 @@ import {
   autoBackupPaths,
   sanitizeUsername,
   SESSION_COOKIE,
+  SESSION_MAX_AGE_SECONDS,
   type AppUser,
 } from './server-user-db';
+
+// Keep the persisted shortcut migration in step with src/lib/shortcuts.ts.
+// This server-side copy also lets the windowless Windows hotkey helper see the
+// corrected binding before a browser page has finished loading.
+const SHORTCUT_DEFAULTS_VERSION = 2;
+const LEGACY_FOCUS_TIMER_TOGGLE_DEFAULT = 'Alt+Shift+F1';
+const FOCUS_TIMER_TOGGLE_DEFAULT = 'Win+Shift+F1';
 
 // ─── File-database safety net ──────────────────────────────────────────────
 // Guards against a save silently wiping real data (e.g. a stale/empty client
@@ -40,8 +49,12 @@ function isEmptyJsonValue(text: string, kind: 'object' | 'array'): boolean {
 
 async function pruneBackups(backupDir: string, baseName: string, keep = 30) {
   try {
-    const files = (await fsp.readdir(backupDir)).filter(f => f.startsWith(`${baseName}.`));
-    files.sort();
+    const files = (await fsp.readdir(backupDir)).filter(f => f.startsWith(`${baseName}.`) && f.endsWith('.json'));
+    files.sort((a, b) => {
+      const numA = Number(a.replace(`${baseName}.`, '').replace('.json', '')) || 0;
+      const numB = Number(b.replace(`${baseName}.`, '').replace('.json', '')) || 0;
+      return numA - numB;
+    });
     const excess = files.length - keep;
     for (let i = 0; i < excess; i++) {
       await fsp.unlink(path.join(backupDir, files[i])).catch(() => {});
@@ -132,8 +145,29 @@ async function safeWriteJsonFile(opts: {
     return { ok: false, status: 409, error: `Refused to overwrite non-empty ${baseName} with an empty save. Retry with ?force=1 if this is intentional.` };
   }
 
-  await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  await fsp.writeFile(filePath, body, 'utf-8');
+  // Rolling pre-write backup of whatever was on disk before writing
+  if (existing !== null && !existingIsEmpty && backupDir) {
+    try {
+      await fsp.mkdir(backupDir, { recursive: true });
+      const stamp = Date.now();
+      const backupPath = path.join(backupDir, `${baseName}.${stamp}.json`);
+      await fsp.writeFile(backupPath, existing, 'utf-8');
+      await pruneBackups(backupDir, baseName, 30);
+    } catch (e) {
+      console.warn(`[safeWriteJsonFile] Failed to create backup for ${baseName}:`, e);
+    }
+  }
+
+  const dir = path.dirname(filePath);
+  await fsp.mkdir(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
+  try {
+    await fsp.writeFile(tmpPath, body, 'utf-8');
+    await fsp.rename(tmpPath, filePath);
+  } catch (err) {
+    await fsp.unlink(tmpPath).catch(() => {});
+    throw err;
+  }
   return { ok: true };
 }
 
@@ -165,6 +199,40 @@ async function readJsonSafe(filePath: string, fallback: unknown) {
   }
 }
 
+async function readJsonStrict<T>(filePath: string, expectedKind: 'object' | 'array', fallback: T): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
+  let raw: string;
+  try {
+    raw = await fsp.readFile(filePath, 'utf-8');
+  } catch (err: any) {
+    if (err && err.code === 'ENOENT') {
+      return { ok: true, data: fallback };
+    }
+    return { ok: false, error: `Could not read ${path.basename(filePath)}: ${err?.message || err}` };
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: true, data: fallback };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err: any) {
+    return { ok: false, error: `Corrupt JSON in ${path.basename(filePath)}: ${err?.message || err}` };
+  }
+
+  if (expectedKind === 'array') {
+    if (!Array.isArray(parsed)) return { ok: false, error: `Expected array in ${path.basename(filePath)}` };
+  } else {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, error: `Expected object in ${path.basename(filePath)}` };
+    }
+  }
+
+  return { ok: true, data: parsed as T };
+}
+
 const AUTO_BACKUP_PREFIX = 'planner-backup.';
 
 async function pruneAutoBackups(outDir: string, keep: number) {
@@ -182,9 +250,23 @@ async function pruneAutoBackups(outDir: string, keep: number) {
 
 async function writeAutoBackup(rootDir: string, username: string, reason: 'scheduled' | 'manual') {
   const p = autoBackupPaths(rootDir, username);
-  const settings = await readJsonSafe(p.settingsPath, {});
-  const cfg = coerceAutoBackupCfg((settings as Record<string, unknown>).autoBackup);
-  const events = await readJsonSafe(p.dbPath, {});
+  const settingsRes = await readJsonStrict(p.settingsPath, 'object', {});
+  const eventsRes = await readJsonStrict(p.dbPath, 'object', {});
+  const sessionsRes = await readJsonStrict(p.sessionsPath, 'array', []);
+  const tasksRes = await readJsonStrict(p.tasksPath, 'object', {});
+
+  if (!settingsRes.ok || !eventsRes.ok || !sessionsRes.ok || !tasksRes.ok) {
+    const err = [settingsRes, eventsRes, sessionsRes, tasksRes].find(r => !r.ok)?.error || 'Corrupted source file';
+    console.warn(`[autoBackup] Aborting backup for user "${username}" due to corrupt source file: ${err}`);
+    return { ok: false as const, error: err, reason: err };
+  }
+
+  const settings = settingsRes.data as Record<string, unknown>;
+  const events = eventsRes.data as Record<string, unknown>;
+  const focusSessions = sessionsRes.data as unknown[];
+  const tasks = tasksRes.data as Record<string, unknown>;
+
+  const cfg = coerceAutoBackupCfg(settings.autoBackup);
 
   // A planner can have no events and still have settings/history worth backing up.
   const eventCount = events && typeof events === 'object' && !Array.isArray(events)
@@ -199,8 +281,8 @@ async function writeAutoBackup(rootDir: string, username: string, reason: 'sched
     source: reason,
     events,
     settings,
-    focusSessions: await readJsonSafe(p.sessionsPath, []),
-    tasks: await readJsonSafe(p.tasksPath, {}),
+    focusSessions,
+    tasks,
   };
 
   await fsp.mkdir(p.outDir, { recursive: true });
@@ -267,6 +349,98 @@ export default defineConfig({
             return h;
           }
 
+          // The desktop widget is rendered by WebView2 while the main app is
+          // rendered by Chrome. Those engines deliberately keep separate cookie
+          // jars, so a normal browser session cannot be shared between them.
+          //
+          // A widget therefore registers a 256-bit, process-local pairing id.
+          // Once the signed-in main app sees that registration, it assigns the
+          // current account to it. The widget then receives a separate cookie
+          // that is valid only while its pairing registration stays alive. No
+          // password or main-session token is ever put in the widget URL or on
+          // a process command line.
+          const WIDGET_SESSION_COOKIE = 'planner_widget_session';
+          const WIDGET_ID_RE = /^[a-f0-9]{64}$/;
+          const WIDGET_REGISTRATION_TTL_MS = 30_000;
+          const BROWSER_HANDOFF_TTL_MS = 30_000;
+          type WidgetRegistration = {
+            username?: string;
+            expiresAt: number;
+          };
+          const widgetRegistrations = new Map<string, WidgetRegistration>();
+          const browserHostHandoffs = new Map<string, { username: string; expiresAt: number }>();
+
+          const persistentCookie = (name: string, value: string) => {
+            // This server deliberately uses HTTP on loopback, so `Secure` would
+            // make the browser discard the cookie. It is otherwise host-only,
+            // HttpOnly and SameSite=Lax; both Max-Age and Expires are supplied
+            // so Chrome/WebView2 persist the login reliably across restarts.
+            const expires = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000).toUTCString();
+            return `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}; Expires=${expires}; HttpOnly; SameSite=Lax`;
+          };
+
+          const expiredCookie = (name: string) =>
+            `${name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax`;
+
+          const isLocalDesktopRequest = (req: any) => {
+            // Do not trust an X-Forwarded-For value supplied by a browser. The
+            // pairing bridge is intentionally available only to the desktop
+            // processes connected directly to this computer's loopback server.
+            if (req.headers?.['x-forwarded-for']) return false;
+            const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+            return remote === '127.0.0.1' || remote === '::1';
+          };
+
+          const pruneWidgetRegistrations = () => {
+            const now = Date.now();
+            for (const [id, registration] of widgetRegistrations) {
+              if (registration.expiresAt <= now) widgetRegistrations.delete(id);
+            }
+            for (const [ticket, handoff] of browserHostHandoffs) {
+              if (handoff.expiresAt <= now) browserHostHandoffs.delete(ticket);
+            }
+          };
+
+          const readJsonBody = (req: any): Promise<any> => new Promise((resolve, reject) => {
+            let body = '';
+            req.on('data', (chunk: Buffer | string) => { body += chunk; });
+            req.on('end', () => {
+              try {
+                resolve(JSON.parse(body || '{}'));
+              } catch (error) {
+                reject(error);
+              }
+            });
+            req.on('error', reject);
+          });
+
+          const readCookie = (req: any, name: string): string | null => {
+            const cookieHeader = String(req.headers?.cookie || '');
+            const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+            if (!match) return null;
+            try {
+              return decodeURIComponent(match[1]);
+            } catch (_) {
+              return null;
+            }
+          };
+
+          const getRequestUser = (req: any, users: AppUser[]): AppUser | null => {
+            const regularUser = getAuthUser(req, users);
+            if (regularUser) return regularUser;
+
+            pruneWidgetRegistrations();
+            const widgetId = readCookie(req, WIDGET_SESSION_COOKIE);
+            const username = widgetId && widgetRegistrations.get(widgetId)?.username;
+            return username ? users.find(user => user.username === username) || null : null;
+          };
+
+          const clearWidgetPairingsFor = (username: string) => {
+            for (const registration of widgetRegistrations.values()) {
+              if (registration.username === username) delete registration.username;
+            }
+          };
+
           // ── Multi-User Session Authentication Endpoints ──────────────────
           server.middlewares.use('/api/auth/me', async (req, res) => {
             res.setHeader('Content-Type', 'application/json');
@@ -276,10 +450,21 @@ export default defineConfig({
               return;
             }
             const { users } = await loadAccessConfig(rootDir);
-            const user = getAuthUser(req, users);
+            const user = getRequestUser(req, users);
             if (!user) {
               res.end(JSON.stringify({ authenticated: false }));
               return;
+            }
+            // Renew a normal browser session when the app is opened. This
+            // upgrades older pre-expiry tokens without prompting again and
+            // keeps an actively used desktop profile remembered for another
+            // year. Widget cookies are deliberately excluded: their lifetime
+            // is governed by the live desktop-pairing registration instead.
+            if (readCookie(req, SESSION_COOKIE)) {
+              res.setHeader('Set-Cookie', persistentCookie(
+                SESSION_COOKIE,
+                createSessionToken(user.username, user.password),
+              ));
             }
             res.end(JSON.stringify({
               authenticated: true,
@@ -298,7 +483,7 @@ export default defineConfig({
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
               try {
-                const { username, password } = JSON.parse(body || '{}');
+                const { username, password, widgetId } = JSON.parse(body || '{}');
                 const cleanUser = sanitizeUsername(username);
                 const { users } = await loadAccessConfig(rootDir);
                 const matched = users.find(u => u.username === cleanUser && u.password === password);
@@ -308,11 +493,28 @@ export default defineConfig({
                   return;
                 }
                 await ensureUserDb(rootDir, matched.username);
-                const sessionToken = createSessionToken(matched.username, matched.password);
-                res.setHeader(
-                  'Set-Cookie',
-                  `${SESSION_COOKIE}=${encodeURIComponent(sessionToken)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`,
-                );
+                pruneWidgetRegistrations();
+                const validWidgetId = typeof widgetId === 'string' && WIDGET_ID_RE.test(widgetId)
+                  ? widgetId
+                  : null;
+                const widgetRegistration = validWidgetId && isLocalDesktopRequest(req)
+                  ? widgetRegistrations.get(validWidgetId) || { expiresAt: 0 }
+                  : undefined;
+                if (validWidgetId && widgetRegistration) {
+                  widgetRegistration.username = matched.username;
+                  widgetRegistration.expiresAt = Date.now() + WIDGET_REGISTRATION_TTL_MS;
+                  widgetRegistrations.set(validWidgetId, widgetRegistration);
+                  res.setHeader(
+                    'Set-Cookie',
+                    persistentCookie(WIDGET_SESSION_COOKIE, validWidgetId),
+                  );
+                } else {
+                  const sessionToken = createSessionToken(matched.username, matched.password);
+                  res.setHeader(
+                    'Set-Cookie',
+                    persistentCookie(SESSION_COOKIE, sessionToken),
+                  );
+                }
                 res.end(JSON.stringify({
                   success: true,
                   user: { username: matched.username, name: matched.name || matched.username },
@@ -331,16 +533,91 @@ export default defineConfig({
               res.end(JSON.stringify({ error: 'Method not allowed' }));
               return;
             }
-            res.setHeader(
-              'Set-Cookie',
-              `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`,
-            );
+            const { users } = await loadAccessConfig(rootDir);
+            const user = getRequestUser(req, users);
+            if (user) clearWidgetPairingsFor(user.username);
+            res.setHeader('Set-Cookie', [
+              expiredCookie(SESSION_COOKIE),
+              expiredCookie(WIDGET_SESSION_COOKIE),
+            ]);
             res.end(JSON.stringify({ success: true }));
+          });
+
+          // `localhost` and `127.0.0.1` have independent cookie jars in every
+          // browser. This one-time bridge lets an already signed-in legacy
+          // 127.0.0.1 page move to the canonical localhost address without
+          // revealing or putting its existing HttpOnly cookie in JavaScript.
+          server.middlewares.use('/api/auth/host-handoff', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'GET') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            if (!isLocalDesktopRequest(req)) {
+              res.statusCode = 403;
+              res.end(JSON.stringify({ error: 'Browser handoff is local only' }));
+              return;
+            }
+            const { users } = await loadAccessConfig(rootDir);
+            const user = getRequestUser(req, users);
+            if (!user) {
+              res.statusCode = 401;
+              res.end(JSON.stringify({ authenticated: false }));
+              return;
+            }
+            pruneWidgetRegistrations();
+            const ticket = crypto.randomBytes(32).toString('hex');
+            browserHostHandoffs.set(ticket, {
+              username: user.username,
+              expiresAt: Date.now() + BROWSER_HANDOFF_TTL_MS,
+            });
+            res.end(JSON.stringify({ ticket }));
+          });
+
+          server.middlewares.use('/api/auth/claim-host-handoff', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            if (!isLocalDesktopRequest(req)) {
+              res.statusCode = 403;
+              res.end(JSON.stringify({ error: 'Browser handoff is local only' }));
+              return;
+            }
+            try {
+              const { ticket } = await readJsonBody(req);
+              pruneWidgetRegistrations();
+              const handoff = typeof ticket === 'string' ? browserHostHandoffs.get(ticket) : undefined;
+              // Consume before responding: each random ticket is single-use,
+              // even if a duplicate request races this one.
+              if (typeof ticket === 'string') browserHostHandoffs.delete(ticket);
+              const { users } = await loadAccessConfig(rootDir);
+              const user = handoff ? users.find(candidate => candidate.username === handoff.username) : null;
+              if (!user) {
+                res.statusCode = 401;
+                res.end(JSON.stringify({ authenticated: false }));
+                return;
+              }
+              res.setHeader('Set-Cookie', persistentCookie(
+                SESSION_COOKIE,
+                createSessionToken(user.username, user.password),
+              ));
+              res.end(JSON.stringify({
+                authenticated: true,
+                user: { username: user.username, name: user.name || user.username },
+              }));
+            } catch (_) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'Invalid handoff payload' }));
+            }
           });
 
           async function requireAuth(req: any, res: any) {
             const { users } = await loadAccessConfig(rootDir);
-            const user = getAuthUser(req, users);
+            const user = getRequestUser(req, users);
             if (!user) {
               res.statusCode = 401;
               res.setHeader('Content-Type', 'application/json');
@@ -351,6 +628,104 @@ export default defineConfig({
             const syncHealth = getUserSyncHealth(user.username);
             return { user, userPaths, syncHealth };
           }
+
+          // Register, pair and claim make up the desktop-only cookie bridge.
+          // They are deliberately separate: the unauthenticated widget can only
+          // register its random id; only an already authenticated local main app
+          // can assign a user to that id.
+          server.middlewares.use('/api/widget-auth/register', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            if (!isLocalDesktopRequest(req)) {
+              res.statusCode = 403;
+              res.end(JSON.stringify({ error: 'Desktop pairing is local only' }));
+              return;
+            }
+            try {
+              const { widgetId } = await readJsonBody(req);
+              if (typeof widgetId !== 'string' || !WIDGET_ID_RE.test(widgetId)) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'Invalid widget pairing id' }));
+                return;
+              }
+              pruneWidgetRegistrations();
+              const registration = widgetRegistrations.get(widgetId) || { expiresAt: 0 };
+              registration.expiresAt = Date.now() + WIDGET_REGISTRATION_TTL_MS;
+              widgetRegistrations.set(widgetId, registration);
+              res.end(JSON.stringify({ registered: true, paired: Boolean(registration.username) }));
+            } catch (_) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'Invalid registration payload' }));
+            }
+          });
+
+          server.middlewares.use('/api/widget-auth/activate', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            if (!isLocalDesktopRequest(req)) {
+              res.statusCode = 403;
+              res.end(JSON.stringify({ error: 'Desktop pairing is local only' }));
+              return;
+            }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            pruneWidgetRegistrations();
+            let paired = 0;
+            for (const registration of widgetRegistrations.values()) {
+              registration.username = auth.user.username;
+              paired++;
+            }
+            res.end(JSON.stringify({ success: true, paired }));
+          });
+
+          server.middlewares.use('/api/widget-auth/claim', async (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Method not allowed' }));
+              return;
+            }
+            if (!isLocalDesktopRequest(req)) {
+              res.statusCode = 403;
+              res.end(JSON.stringify({ error: 'Desktop pairing is local only' }));
+              return;
+            }
+            try {
+              const { widgetId } = await readJsonBody(req);
+              pruneWidgetRegistrations();
+              const registration = typeof widgetId === 'string' && WIDGET_ID_RE.test(widgetId)
+                ? widgetRegistrations.get(widgetId)
+                : undefined;
+              const { users } = await loadAccessConfig(rootDir);
+              const user = registration?.username
+                ? users.find(candidate => candidate.username === registration.username)
+                : null;
+              if (!user) {
+                res.statusCode = 401;
+                res.end(JSON.stringify({ authenticated: false }));
+                return;
+              }
+              res.setHeader(
+                'Set-Cookie',
+                persistentCookie(WIDGET_SESSION_COOKIE, widgetId),
+              );
+              res.end(JSON.stringify({
+                authenticated: true,
+                user: { username: user.username, name: user.name || user.username },
+              }));
+            } catch (_) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'Invalid claim payload' }));
+            }
+          });
 
           // ── Crash-proof "open in editor" ─────────────────────────────────
           // Vite 7's launchEditor calls onErrorCallback() on its Windows UNC-path
@@ -698,7 +1073,9 @@ export default defineConfig({
               const [sh, sm] = (ev.startTime || '00:00').split(':').map(Number);
               const [eh, em] = (ev.endTime || ev.startTime || '00:30').split(':').map(Number);
               const startDate = new Date(eventDate); startDate.setHours(sh, sm, 0, 0);
-              const endDate = new Date(eventDate); endDate.setHours(eh, em, 0, 0);
+              const isOvernight = eh < sh || (eh === sh && em <= sm);
+              const endDay = isOvernight ? addDays(new Date(eventDate), 1) : new Date(eventDate);
+              const endDate = new Date(endDay); endDate.setHours(eh, em, 0, 0);
               const body: any = {
                 summary: ev.content || 'Untitled',
                 start: { dateTime: startDate.toISOString(), timeZone: tz },
@@ -741,19 +1118,20 @@ export default defineConfig({
           //     occurrence — which the roll-forward pass advances.
           const TASK_LIST_TITLE = 'Daily Tasks';
           const TASKS_API = 'https://tasks.googleapis.com/tasks/v1';
-          let isTasksSyncing = false;
+          const userTasksSyncing = new Set<string>();
 
           async function runGoogleTasksSync(userPaths: any, syncHealth: any, clientTasks: any, todayYmdOpt: any, weekStartsOnOpt = 0) {
+            const userName = userPaths.safeName || 'default';
             const tokensPath = userPaths.tokensPath;
             const backupDir = userPaths.backupDir;
             const getGoogleToken = (force = false) => getGoogleTokenForUser(userPaths, syncHealth, force);
             const gfetch = (url: string, init: any = {}, opts: any = {}) => gfetchForUser(userPaths, syncHealth, url, init, opts);
 
-            if (isTasksSyncing) {
+            if (userTasksSyncing.has(userName)) {
               syncHealth.tasks.skipped = 'A tasks sync was already running';
               return clientTasks;
             }
-            isTasksSyncing = true;
+            userTasksSyncing.add(userName);
             syncHealth.tasks.lastRunAt = Date.now();
             syncHealth.tasks.error = null;
             syncHealth.tasks.skipped = null;
@@ -1161,13 +1539,14 @@ export default defineConfig({
               console.error('Google Tasks sync failed:', err);
               return clientTasks;
             } finally {
-              isTasksSyncing = false;
+              userTasksSyncing.delete(userName);
             }
           }
 
           // Main sync logic
-          let isSyncing = false;
+          const userCalendarSyncing = new Set<string>();
           async function runGoogleSync(userPaths: any, syncHealth: any, clientEvents: any, weekStartsOnOpt = 0, policyOpts: any = null) {
+            const userName = userPaths.safeName || 'default';
             const tokensPath = userPaths.tokensPath;
             const settingsPath = userPaths.settingsPath;
             const dbPath = userPaths.dbPath;
@@ -1175,11 +1554,11 @@ export default defineConfig({
             const getGoogleToken = (force = false) => getGoogleTokenForUser(userPaths, syncHealth, force);
             const gfetch = (url: string, init: any = {}, opts: any = {}) => gfetchForUser(userPaths, syncHealth, url, init, opts);
 
-            if (isSyncing) {
-              console.log('Sync already in progress. Skipping concurrent run.');
+            if (userCalendarSyncing.has(userName)) {
+              console.log(`Sync already in progress for ${userName}. Skipping concurrent run.`);
               return clientEvents;
             }
-            isSyncing = true;
+            userCalendarSyncing.add(userName);
             syncHealth.calendar.lastRunAt = Date.now();
             syncHealth.calendar.error = null;
             let pushed = 0;
@@ -1629,7 +2008,7 @@ export default defineConfig({
               syncHealth.calendar.error = err && err.message ? err.message : String(err);
               throw err;
             } finally {
-              isSyncing = false;
+              userCalendarSyncing.delete(userName);
             }
           }
 
@@ -1932,8 +2311,17 @@ export default defineConfig({
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
+              let parsedPayload: any;
               try {
-                const { events: clientEvents, weekStartsOn: weekStartsOnOpt, settings: clientSettings } = JSON.parse(body);
+                parsedPayload = JSON.parse(body);
+              } catch (parseErr) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: `Invalid JSON body: ${(parseErr as Error)?.message || parseErr}` }));
+                return;
+              }
+
+              try {
+                const { events: clientEvents, weekStartsOn: weekStartsOnOpt, settings: clientSettings } = parsedPayload;
                 const synced = await runGoogleSync(userPaths, syncHealth, clientEvents, weekStartsOnOpt || 0, clientSettings);
 
                 if (synced !== clientEvents) {
@@ -1976,8 +2364,17 @@ export default defineConfig({
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
+              let parsedPayload: any;
               try {
-                const { tasks: clientTasks, today, weekStartsOn: wso } = JSON.parse(body);
+                parsedPayload = JSON.parse(body);
+              } catch (parseErr) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: `Invalid JSON body: ${(parseErr as Error)?.message || parseErr}` }));
+                return;
+              }
+
+              try {
+                const { tasks: clientTasks, today, weekStartsOn: wso } = parsedPayload;
                 const synced = await runGoogleTasksSync(userPaths, syncHealth, clientTasks || {}, today, wso || 0);
 
                 if (synced !== clientTasks) {
@@ -2166,12 +2563,15 @@ export default defineConfig({
             if (!Object.keys(days).length) throw new Error('Aladhan returned nothing usable');
 
             cache[key] = { fetchedAt: now, days };
-            try {
-              await fs.mkdir(path.dirname(cachePath), { recursive: true });
-              await fs.writeFile(cachePath, JSON.stringify(cache, null, 2), 'utf-8');
-            } catch (err) {
-              console.error('[prayer] failed to write cache:', err);
-            }
+            const prayerBackupDir = path.resolve(import.meta.dirname, '..', '..', 'database', 'backups');
+            await safeWriteJsonFile({
+              filePath: cachePath,
+              backupDir: prayerBackupDir,
+              baseName: 'prayer-times',
+              body: JSON.stringify(cache, null, 2),
+              kind: 'object',
+              force: true,
+            });
             res.end(JSON.stringify({ days, fetchedAt: now }));
           } catch (err) {
             // Offline or the API is down: an old cache still beats a blank grid.
@@ -2234,7 +2634,42 @@ export default defineConfig({
 
           if (req.method === 'GET') {
             try {
-              const data = await fs.readFile(userPaths.settingsPath, 'utf-8');
+              let data = await fs.readFile(userPaths.settingsPath, 'utf-8');
+              // Migrate the one historical focus-timer default at the source of
+              // truth. This is intentionally done before responding: the
+              // windowless RegisterHotKey helper reads this endpoint before the
+              // browser has mounted, so a client-only migration leaves a window
+              // where the old global shortcut is still active.
+              try {
+                const parsed = JSON.parse(data);
+                const shortcuts = parsed?.shortcuts;
+                const version = parsed?.shortcutDefaultsVersion;
+                const isCurrent = typeof version === 'number'
+                  && Number.isFinite(version)
+                  && version >= SHORTCUT_DEFAULTS_VERSION;
+                if (!isCurrent && shortcuts && typeof shortcuts === 'object' && !Array.isArray(shortcuts)) {
+                  const oldToggle = (shortcuts as Record<string, unknown>).toggleTimer;
+                  if (
+                    typeof oldToggle === 'string'
+                    && oldToggle.toLowerCase() === LEGACY_FOCUS_TIMER_TOGGLE_DEFAULT.toLowerCase()
+                  ) {
+                    (shortcuts as Record<string, unknown>).toggleTimer = FOCUS_TIMER_TOGGLE_DEFAULT;
+                  }
+                  parsed.shortcutDefaultsVersion = SHORTCUT_DEFAULTS_VERSION;
+                  data = JSON.stringify(parsed);
+                  await safeWriteJsonFile({
+                    filePath: userPaths.settingsPath,
+                    backupDir: userPaths.backupDir,
+                    baseName: 'settings',
+                    body: data,
+                    kind: 'object',
+                    force: true,
+                  });
+                }
+              } catch (_) {
+                // Preserve the established GET behaviour for malformed legacy
+                // settings; the client will still surface its normal recovery.
+              }
               res.setHeader('Content-Type', 'application/json');
               res.end(data);
             } catch (err) {
@@ -2287,7 +2722,7 @@ export default defineConfig({
             if (!entry && kind) {
               const sameKind = Object.values(all)
                 .filter((e: any) => e && e.kind === kind)
-                .sort((a: any, b: any) => (b.updatedAt || 0) - (a[1]?.updatedAt || 0));
+                .sort((a: any, b: any) => (b.updatedAt || 0) - (a.updatedAt || 0));
               if (sameKind.length) entry = { ...sameKind[0], inherited: true };
             }
             res.setHeader('Content-Type', 'application/json');
@@ -2318,8 +2753,19 @@ export default defineConfig({
                 const entries = Object.entries(all)
                   .sort((a: any, b: any) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0))
                   .slice(0, 24);
-                await fsp.mkdir(path.dirname(userPaths.devicePath), { recursive: true });
-                await fsp.writeFile(userPaths.devicePath, JSON.stringify(Object.fromEntries(entries), null, 2), 'utf-8');
+                const writeRes = await safeWriteJsonFile({
+                  filePath: userPaths.devicePath,
+                  backupDir: userPaths.backupDir,
+                  baseName: 'device-settings',
+                  body: JSON.stringify(Object.fromEntries(entries), null, 2),
+                  kind: 'object',
+                  force: true,
+                });
+                if (!writeRes.ok) {
+                  res.statusCode = writeRes.status;
+                  res.end(JSON.stringify({ error: writeRes.error }));
+                  return;
+                }
                 res.end(JSON.stringify({ success: true }));
               } catch (err) {
                 res.statusCode = 500;
@@ -2420,6 +2866,15 @@ export default defineConfig({
           }
         });
 
+        // Helper for formatting SSE data payload as single-line JSON without mangling internal newlines
+        function formatSsePayload(data: string): string {
+          try {
+            return JSON.stringify(JSON.parse(data));
+          } catch {
+            return data.split('\n').join('\ndata: ');
+          }
+        }
+
         // Live push for everything else in the file database (events, settings,
         // focus sessions). The widget used to poll these every 5s, which is why a
         // change made in the main window took seconds to show up there.
@@ -2428,7 +2883,7 @@ export default defineConfig({
           const fs = await import('fs');
           const fsp = await import('fs/promises');
           const { users } = await loadAccessConfig(rootDir);
-          const user = getAuthUser(req, users);
+          const user = getRequestUser(req, users);
           if (!user) {
             res.statusCode = 401;
             res.end('Unauthorized');
@@ -2456,7 +2911,7 @@ export default defineConfig({
               const data = await fsp.readFile(path.join(userPaths.dbDir, file), 'utf-8');
               if (data === lastSent[name]) return;
               lastSent[name] = data;
-              res.write(`event: ${name}\ndata: ${data.replace(/\s*\n\s*/g, ' ')}\n\n`);
+              res.write(`event: ${name}\ndata: ${formatSsePayload(data)}\n\n`);
             } catch (_) { /* not written yet */ }
           };
 
@@ -2480,11 +2935,19 @@ export default defineConfig({
           }, 250);
 
           const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
-          req.on('close', () => {
+          let isClosed = false;
+          const cleanup = () => {
+            if (isClosed) return;
+            isClosed = true;
             clearInterval(ping);
             clearInterval(sweep);
             if (watcher) try { watcher.close(); } catch (_) {}
-          });
+          };
+          req.on('close', cleanup);
+          req.on('error', cleanup);
+          res.on('close', cleanup);
+          res.on('error', cleanup);
+          res.on('finish', cleanup);
         });
 
         // Live push of the shared timer state.
@@ -2493,7 +2956,7 @@ export default defineConfig({
           const fs = await import('fs');
           const fsp = await import('fs/promises');
           const { users } = await loadAccessConfig(rootDir);
-          const user = getAuthUser(req, users);
+          const user = getRequestUser(req, users);
           if (!user) {
             res.statusCode = 401;
             res.end('Unauthorized');
@@ -2513,7 +2976,7 @@ export default defineConfig({
               const data = await fsp.readFile(userPaths.timerPath, 'utf-8');
               if (data === lastSent) return;
               lastSent = data;
-              res.write(`data: ${data.replace(/\s*\n\s*/g, ' ')}\n\n`);
+              res.write(`data: ${formatSsePayload(data)}\n\n`);
             } catch (_) { /* file not written yet */ }
           };
           await send();
@@ -2533,11 +2996,19 @@ export default defineConfig({
           const sweep = setInterval(send, 200);
 
           const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 25000);
-          req.on('close', () => {
+          let isClosed = false;
+          const cleanup = () => {
+            if (isClosed) return;
+            isClosed = true;
             clearInterval(ping);
             clearInterval(sweep);
             if (watcher) try { watcher.close(); } catch (_) {}
-          });
+          };
+          req.on('close', cleanup);
+          req.on('error', cleanup);
+          res.on('close', cleanup);
+          res.on('error', cleanup);
+          res.on('finish', cleanup);
         });
 
         let lastToggleAt = 0;
@@ -2696,8 +3167,8 @@ export default defineConfig({
         server.middlewares.use('/api/hardware/tick', async (req, res, next) => {
           if (req.method !== 'GET') return next();
           const { users } = await loadAccessConfig(rootDir);
-          const authUser = getAuthUser(req, users);
-          if (!authUser || authUser.username !== users[0]?.username) {
+          const authUser = getRequestUser(req, users);
+          if (!authUser) {
             res.writeHead(200, { 'Content-Type': 'text/event-stream' });
             res.end();
             return;
@@ -2838,8 +3309,8 @@ export default defineConfig({
           // --- app -> server: drain events newer than the last one seen ---
           if (route === '/events' && req.method === 'GET') {
             const { users } = await loadAccessConfig(rootDir);
-            const authUser = getAuthUser(req, users);
-            if (!authUser || authUser.username !== users[0]?.username) {
+            const authUser = getRequestUser(req, users);
+            if (!authUser) {
               json({ events: [], latest: 0 });
               return;
             }
@@ -3004,8 +3475,8 @@ export default defineConfig({
           // --- app: which window owns the controller right now? ---
           if (route === '/claim' && req.method === 'POST') {
             const { users } = await loadAccessConfig(rootDir);
-            const authUser = getAuthUser(req, users);
-            if (!authUser || authUser.username !== users[0]?.username) {
+            const authUser = getRequestUser(req, users);
+            if (!authUser) {
               json({ owner: false });
               return;
             }
@@ -3129,6 +3600,8 @@ export default defineConfig({
 
         server.middlewares.use('/api/launch-widget', async (req, res, next) => {
           if (req.method === 'POST') {
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
             const { spawn } = await import('child_process');
             const path = await import('path');
             const fs = await import('fs/promises');

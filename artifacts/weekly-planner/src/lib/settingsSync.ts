@@ -140,8 +140,8 @@ export const LIGHT_PRESETS: Array<{ id: LightPreset; label: string; desc: string
     rootBg: '#fff0ed', cardBg: '#fff9f7', surfaceBg: '#fff9f7', surfaceBdr: 'rgba(220,38,38,0.09)' },
 ];
 
-const DARK_PRESET_IDS = DARK_PRESETS.map(p => p.id) as string[];
-const LIGHT_PRESET_IDS = LIGHT_PRESETS.map(p => p.id) as string[];
+export const DARK_PRESET_IDS = DARK_PRESETS.map(p => p.id) as string[];
+export const LIGHT_PRESET_IDS = LIGHT_PRESETS.map(p => p.id) as string[];
 
 /** Resolve the palette a window should paint, falling back to the default preset. */
 export function themePalette(dark: boolean, darkId: DarkPreset, lightId: LightPreset): ThemePalette {
@@ -213,6 +213,7 @@ export interface AppSettings {
   prayer: PrayerSettings;
   // ── ESP32 desk controller ──────────────────────────────────────────────────
   hardware: HardwareSettings;
+  shortcutDefaultsVersion?: number;
   // ── Categories ─────────────────────────────────────────────────────────────
   categories: EventCategory[];
   /** Sections of the Tasks page. Always contains General. */
@@ -315,6 +316,9 @@ export function coerceSettings(raw: unknown): AppSettings {
   }
   if (typeof r.dayStartH === 'number') s.dayStartH = Math.max(0, Math.min(23, Math.round(r.dayStartH)));
   if (typeof r.dayEndH === 'number') s.dayEndH = Math.max(1, Math.min(48, Math.round(r.dayEndH)));
+  if (s.dayEndH <= s.dayStartH) {
+    s.dayEndH = Math.min(48, s.dayStartH + 1);
+  }
   if (typeof r.calendarView === 'string') s.calendarView = r.calendarView;
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(-14, Math.min(14, Math.round(r.customDaysBefore)));
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(-14, Math.min(14, Math.round(r.customDaysAfter)));
@@ -368,10 +372,10 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.gcalPullOtherCalendars === 'boolean') s.gcalPullOtherCalendars = r.gcalPullOtherCalendars;
   if (typeof r.gcalMirrorLocalDeletions === 'boolean') s.gcalMirrorLocalDeletions = r.gcalMirrorLocalDeletions;
   if (typeof r.gcalMirrorGoogleDeletions === 'boolean') s.gcalMirrorGoogleDeletions = r.gcalMirrorGoogleDeletions;
-  s.prayer = coercePrayerSettings(r.prayer);
-  s.hardware = coerceHardwareSettings(r.hardware);
-  s.categories = coerceCategories(r.categories);
-  s.taskLists = coerceTaskLists(r.taskLists);
+  if (r.prayer != null) s.prayer = coercePrayerSettings(r.prayer);
+  if (r.hardware != null) s.hardware = coerceHardwareSettings(r.hardware);
+  if (r.categories != null) s.categories = coerceCategories(r.categories);
+  if (r.taskLists != null) s.taskLists = coerceTaskLists(r.taskLists);
   return s;
 }
 

@@ -1117,12 +1117,12 @@ export function dateKey(value: Date | string): string {
 // calendar day. dayStartHour = 0 reproduces plain calendar-day bucketing.
 // The returned key is the calendar date of the day the moment belongs to.
 export function focusDayKey(value: Date | string, dayStartHour = 0): string {
-  const d = typeof value === 'string' ? new Date(value) : new Date(value);
+  const d = typeof value === 'string' ? new Date(value) : value;
   // Use the local wall-clock hour directly: anything before the cutoff belongs to
   // the previous calendar day. setDate() rolls month/year over and is DST-safe
   // (it operates on the local calendar, not a fixed millisecond offset).
   const shifted = new Date(d);
-  if (d.getHours() < dayStartHour) {
+  if (shifted.getHours() < dayStartHour) {
     shifted.setDate(shifted.getDate() - 1);
   }
   return dateKey(shifted);
@@ -1186,8 +1186,9 @@ export function saveLocalFocusExcludedDates(excluded: string[]): void {
 export function coerceFocusTimer(parsed: unknown): FocusTimerState {
   if (!parsed || typeof parsed !== 'object') return DEFAULT_FOCUS_TIMER;
   const p = parsed as Partial<FocusTimerState>;
+  const parsedPlanned = Number(p.plannedSeconds);
   return {
-    plannedSeconds: Number(p.plannedSeconds) || DEFAULT_FOCUS_TIMER.plannedSeconds,
+    plannedSeconds: parsedPlanned > 0 ? parsedPlanned : DEFAULT_FOCUS_TIMER.plannedSeconds,
     accumulatedSeconds: Math.max(0, Number(p.accumulatedSeconds) || 0),
     isRunning: Boolean(p.isRunning),
     lastStartedAt: typeof p.lastStartedAt === 'string' ? p.lastStartedAt : null,

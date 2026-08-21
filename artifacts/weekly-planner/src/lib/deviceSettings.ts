@@ -20,9 +20,10 @@
  * nothing about the existing sync contract changes, and an older window that
  * knows nothing about devices keeps working exactly as before.
  */
-import type {
-  AppSettings, DarkPreset, LightPreset, IntervalMin,
-  EventCardStyle, SidebarStyle,
+import {
+  type AppSettings, type DarkPreset, type LightPreset, type IntervalMin,
+  type EventCardStyle, type SidebarStyle,
+  DARK_PRESET_IDS, LIGHT_PRESET_IDS,
 } from './settingsSync';
 
 // ── Device identity ─────────────────────────────────────────────────────────
@@ -123,6 +124,16 @@ export const APP_ZOOM_MIN  = 0.5;
 export const APP_ZOOM_MAX  = 2.0;
 export const APP_ZOOM_STEP = 0.05;
 
+export type FilterViewKey = 'day' | 'week' | 'month' | 'year';
+
+export function getFilterViewKey(view: string | undefined | null): FilterViewKey {
+  if (view === 'day' || view === 'week' || view === 'month' || view === 'year') {
+    return view;
+  }
+  // 'custom' and any others map to 'week'
+  return 'week';
+}
+
 export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
   /** App zoom (not browser zoom). Has no shared counterpart — always per device. */
   appZoom: number;
@@ -140,6 +151,11 @@ export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
    * on the desk PC. `null` inside the list means the "no category" items.
    */
   hiddenCategoryIds: string[];
+  /**
+   * Remembered category filter per calendar view setting (Day, Week, Month, Year).
+   * Custom view shares the Week filter.
+   */
+  hiddenCategoriesByView: Record<FilterViewKey, string[]>;
 }
 
 const clampNum = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -162,6 +178,12 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
     eventColorStyle: base.eventColorStyle, sidebarStyle: base.sidebarStyle,
     dayStartH: base.dayStartH, dayEndH: base.dayEndH,
   };
+  const emptyFiltersByView: Record<FilterViewKey, string[]> = {
+    day: [],
+    week: [],
+    month: [],
+    year: [],
+  };
   if (kind === 'phone') {
     return {
       ...shared,
@@ -174,12 +196,13 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
       analysisTab: 'week',
       mobileTab: 'calendar',
       hiddenCategoryIds: [],
+      hiddenCategoriesByView: { ...emptyFiltersByView },
     };
   }
   if (kind === 'tablet') {
-    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [] };
+    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView } };
   }
-  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [] };
+  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView } };
 }
 
 /** Validate a stored/served blob, filling anything missing from `base`. */
@@ -203,8 +226,8 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   if (typeof r.stickyAllDayMain === 'boolean') s.stickyAllDayMain = r.stickyAllDayMain;
   if (typeof r.stickyTasksMain === 'boolean') s.stickyTasksMain = r.stickyTasksMain;
   if (typeof r.darkMode === 'boolean') s.darkMode = r.darkMode;
-  if (typeof r.darkPreset === 'string') s.darkPreset = r.darkPreset as DarkPreset;
-  if (typeof r.lightPreset === 'string') s.lightPreset = r.lightPreset as LightPreset;
+  if (typeof r.darkPreset === 'string' && DARK_PRESET_IDS.includes(r.darkPreset)) s.darkPreset = r.darkPreset as DarkPreset;
+  if (typeof r.lightPreset === 'string' && LIGHT_PRESET_IDS.includes(r.lightPreset)) s.lightPreset = r.lightPreset as LightPreset;
   if (['tinted', 'solid', 'minimal', 'glowing'].includes(r.eventColorStyle as string)) {
     s.eventColorStyle = r.eventColorStyle as EventCardStyle;
   }
@@ -213,6 +236,9 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   }
   if (typeof r.dayStartH === 'number') s.dayStartH = clampNum(Math.round(r.dayStartH), 0, 23);
   if (typeof r.dayEndH === 'number') s.dayEndH = clampNum(Math.round(r.dayEndH), 1, 48);
+  if (s.dayEndH <= s.dayStartH) {
+    s.dayEndH = Math.min(48, s.dayStartH + 1);
+  }
   if (typeof r.appZoom === 'number' && Number.isFinite(r.appZoom)) {
     s.appZoom = clampNum(Math.round(r.appZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
   }
@@ -224,9 +250,32 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   }
   if (r.analysisTab === 'week' || r.analysisTab === 'month' || r.analysisTab === 'year') s.analysisTab = r.analysisTab;
   if (r.mobileTab === 'calendar' || r.mobileTab === 'tasks' || r.mobileTab === 'focus') s.mobileTab = r.mobileTab;
-  if (Array.isArray(r.hiddenCategoryIds)) {
-    s.hiddenCategoryIds = r.hiddenCategoryIds.filter((v): v is string => typeof v === 'string');
-  }
+
+  const rawByView = (r.hiddenCategoriesByView && typeof r.hiddenCategoriesByView === 'object')
+    ? (r.hiddenCategoriesByView as Record<string, unknown>)
+    : null;
+
+  const fallbackHidden = Array.isArray(r.hiddenCategoryIds)
+    ? r.hiddenCategoryIds.filter((v): v is string => typeof v === 'string')
+    : [];
+
+  const sanitizeList = (val: unknown, fb: string[]): string[] => {
+    if (Array.isArray(val)) {
+      return val.filter((v): v is string => typeof v === 'string');
+    }
+    return fb;
+  };
+
+  s.hiddenCategoriesByView = {
+    day: sanitizeList(rawByView?.day, fallbackHidden),
+    week: sanitizeList(rawByView?.week, fallbackHidden),
+    month: sanitizeList(rawByView?.month, fallbackHidden),
+    year: sanitizeList(rawByView?.year, fallbackHidden),
+  };
+
+  const activeKey = getFilterViewKey(s.calendarView);
+  s.hiddenCategoryIds = s.hiddenCategoriesByView[activeKey] ?? fallbackHidden;
+
   return s;
 }
 

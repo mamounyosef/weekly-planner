@@ -58,6 +58,20 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
 
 export type ShortcutMap = Record<ShortcutAction, string>;
 
+/**
+ * `Win + Shift + F1` is deliberately handled by the small Windows hotkey
+ * helper as well as by the focused page. Keeping the canonical string here
+ * prevents the UI, settings migration and helper from quietly drifting apart.
+ */
+export const FOCUS_TIMER_TOGGLE_DEFAULT = 'Win+Shift+F1';
+
+/**
+ * A persisted settings file records which set of defaults it was created
+ * against. Version 1 shipped with Alt+Shift+F1 for the focus timer.
+ */
+export const SHORTCUT_DEFAULTS_VERSION = 2;
+export const LEGACY_FOCUS_TIMER_TOGGLE_DEFAULT = 'Alt+Shift+F1';
+
 export const DEFAULT_SHORTCUTS: ShortcutMap = {
   // Bare letters are safe here: the handler ignores shortcuts while a text field
   // has focus, so typing is never intercepted.
@@ -76,7 +90,7 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   copy:          'Ctrl+C',
   paste:         'Ctrl+V',
   delete:        'Delete',
-  toggleTimer:   'Alt+Shift+F1',
+  toggleTimer:   FOCUS_TIMER_TOGGLE_DEFAULT,
   widgetMinus:   'A',
   widgetPlus:    'D',
   widgetStart:   'W',
@@ -154,12 +168,23 @@ export function formatCombo(binding: string): string {
     .join(' + ');
 }
 
-export function coerceShortcuts(raw: unknown): ShortcutMap {
+export function coerceShortcuts(raw: unknown, defaultsVersion = SHORTCUT_DEFAULTS_VERSION): ShortcutMap {
   const out: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   if (!raw || typeof raw !== 'object') return out;
   const rawObj = raw as Record<string, unknown>;
   for (const def of SHORTCUT_DEFS) {
     let value = rawObj[def.action];
+    // Upgrade the old shipped default, but only for settings that predate this
+    // default set. Someone who explicitly chooses Alt+Shift+F1 after upgrading
+    // keeps that choice; the settings version makes the two cases distinct.
+    if (
+      def.action === 'toggleTimer'
+      && defaultsVersion < SHORTCUT_DEFAULTS_VERSION
+      && typeof value === 'string'
+      && value.toLowerCase() === LEGACY_FOCUS_TIMER_TOGGLE_DEFAULT.toLowerCase()
+    ) {
+      value = FOCUS_TIMER_TOGGLE_DEFAULT;
+    }
     // Migration: Old default for widgetStart was 'S', which conflicts with goToLive ('S').
     // Upgrade old 'S' binding for widgetStart to the new default 'W'.
     if (def.action === 'widgetStart' && value === 'S') {
@@ -182,11 +207,14 @@ export function loadShortcuts(): ShortcutMap {
   }
 }
 
-/** Actions currently bound to the same combo as `action` (for conflict warnings). */
+const WIDGET_ACTIONS = new Set<ShortcutAction>(['widgetMinus', 'widgetPlus', 'widgetStart']);
+
+/** Actions currently bound to the same combo as `action` within the same window scope (for conflict warnings). */
 export function findConflicts(map: ShortcutMap, action: ShortcutAction): ShortcutAction[] {
   const combo = map[action];
   if (!combo) return [];
+  const isWidget = WIDGET_ACTIONS.has(action);
   return SHORTCUT_DEFS
     .map(d => d.action)
-    .filter(a => a !== action && map[a] === combo);
+    .filter(a => a !== action && WIDGET_ACTIONS.has(a) === isWidget && map[a] === combo);
 }

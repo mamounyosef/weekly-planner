@@ -118,7 +118,7 @@ const anchorOf = (ev: RecurFields): Date => addDays(parseDate(ev.weekKey ?? FAR_
 
 // Occurrence START dates of `master` that fall within [rangeStart, rangeEnd).
 // Honours interval, weekly BYDAY, end (until/count) and exclusions (exdates).
-export function occurrenceStarts(master: RecurFields, rangeStart: Date, rangeEnd: Date): Date[] {
+export function occurrenceStarts(master: RecurFields, rangeStart: Date, rangeEnd: Date, weekStartsOn: WeekStartsOn = 0): Date[] {
   const anchor = anchorOf(master);
   const r = master.recur;
   if (!r) {
@@ -145,17 +145,19 @@ export function occurrenceStarts(master: RecurFields, rangeStart: Date, rangeEnd
   };
 
   if (r.freq === 'weekly') {
-    const byday = (r.byWeekday && r.byWeekday.length ? [...r.byWeekday] : [anchor.getDay() as Weekday]).sort((a, b) => a - b);
-    const anchorSunday = addDays(anchor, -anchor.getDay());
+    const rawByday = r.byWeekday && r.byWeekday.length ? [...r.byWeekday] : [anchor.getDay() as Weekday];
+    const byday = rawByday.sort((a, b) => (((a - weekStartsOn) % 7 + 7) % 7) - (((b - weekStartsOn) % 7 + 7) % 7));
+    const anchorWeekStart = startOfWeek(anchor, { weekStartsOn });
     for (let k = 0; k < CAP; k++) {
-      const weekSunday = addDays(anchorSunday, k * 7);
+      const weekStart = addDays(anchorWeekStart, k * 7);
       if (k % interval !== 0) continue;
       let stop = false;
       for (const wd of byday) {
-        if (!consider(addDays(weekSunday, wd))) { stop = true; break; }
+        const dayOffset = ((wd - weekStartsOn) % 7 + 7) % 7;
+        if (!consider(addDays(weekStart, dayOffset))) { stop = true; break; }
       }
       if (stop) break;
-      if (weekSunday >= rangeEnd && count == null && until == null) break;
+      if (weekStart >= rangeEnd && count == null && until == null) break;
     }
   } else {
     for (let k = 0; k < CAP; k++) {
@@ -233,6 +235,7 @@ export function resolveWeek<T extends RecurFields>(
   raw: Record<string, T>,
   viewedWeekKey: string,
   range?: { from: number; to: number },
+  weekStartsOn: WeekStartsOn = 0,
 ): Record<string, T> {
   const anchorWeekStart = parseDate(viewedWeekKey);
   const fromOff = range ? range.from : 0;
@@ -291,7 +294,7 @@ export function resolveWeek<T extends RecurFields>(
     const scanStart = master.allDay
       ? addDays(weekStart, -(Math.max(1, master.daysSpan ?? 1) - 1))
       : addDays(weekStart, -1);
-    for (const d of occurrenceStarts(master, scanStart, weekEnd)) {
+    for (const d of occurrenceStarts(master, scanStart, weekEnd, weekStartsOn)) {
       const occDate = ymd(d);
       const occId = makeOccId(master.id, occDate);
       out[occId] = {
@@ -433,7 +436,18 @@ function editWholeSeries<T extends RecurFields>(
     const weekStart = parseDate(targetWeekKey);
     const newDate = addDays(weekStart, p.dayIndex);
     const rec = master.recur;
-    const oldDate = occDate ? parseDate(occDate) : anchorOf(master);
+    let oldDate: Date;
+    if (occDate) {
+      oldDate = parseDate(occDate);
+    } else {
+      const vws = parseDate(viewedWeekKey);
+      const weekOccs = occurrenceStarts(master, vws, addDays(vws, 7), weekStartsOn);
+      if (weekOccs.length > 0) {
+        oldDate = weekOccs[0];
+      } else {
+        oldDate = addDays(vws, master.dayIndex ?? 0);
+      }
+    }
     const delta = differenceInDays(newDate, oldDate); // whole days moved
 
     if (rec.freq === 'weekly') {
@@ -495,8 +509,11 @@ export function deleteScoped<T extends RecurFields>(raw: Record<string, T>, occI
 
   if (mode === 'following') {
     if (!occDate) return dropOrTombstone();
-    // Deleting from the anchor onward removes everything → same as 'all'.
-    if (occDate <= ymd(anchorOf(master))) return dropOrTombstone();
+    // Deleting from the anchor or first active occurrence onward removes everything → same as 'all'.
+    const anchor = anchorOf(master);
+    if (occDate <= ymd(anchor)) return dropOrTombstone();
+    const firstOccs = occurrenceStarts(master, anchor, addYears(anchor, 5));
+    if (firstOccs.length === 0 || occDate <= ymd(firstOccs[0])) return dropOrTombstone();
     const until = ymd(addDays(parseDate(occDate), -1));
     const exdates = (master.exdates ?? []).filter(d => d < occDate);
     return { ...raw, [masterId]: { ...master, recur: { ...master.recur, end: { until } }, exdates, updatedAt: Date.now() } };
@@ -552,6 +569,27 @@ export function buildGoogleRecurrence(master: RecurFields, tz: string): string[]
   return arr;
 }
 
+function parseRfcDateOrUtc(token: string): string {
+  const t = token.trim();
+  const utcMatch = t.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/i);
+  if (utcMatch) {
+    const [, y, m, d, hh, mm, ss] = utcMatch;
+    const dt = new Date(Date.UTC(+y, +m - 1, +d, +hh, +mm, +ss));
+    return format(dt, 'yyyy-MM-dd');
+  }
+  if (t.includes('T') && (t.endsWith('Z') || t.endsWith('z'))) {
+    const dt = new Date(t);
+    if (!isNaN(dt.getTime())) {
+      return format(dt, 'yyyy-MM-dd');
+    }
+  }
+  const clean = t.replace(/-/g, '');
+  if (clean.length >= 8) {
+    return `${clean.slice(0, 4)}-${clean.slice(4, 6)}-${clean.slice(6, 8)}`;
+  }
+  return t;
+}
+
 // Parse a Google recurrence array back into { recur, exdates } for pull-side sync.
 export function parseGoogleRecurrence(recurrence: string[] | undefined): { recur?: Recurrence; exdates?: string[] } {
   if (!recurrence || !recurrence.length) return {};
@@ -569,16 +607,17 @@ export function parseGoogleRecurrence(recurrence: string[] | undefined): { recur
       if (freq === 'weekly' && parts.BYDAY) recur.byWeekday = parts.BYDAY.split(',').map(c => codeToWd[c.trim().slice(-2).toUpperCase()]).filter(w => w != null) as Weekday[];
       if (parts.COUNT) recur.end = { count: parseInt(parts.COUNT, 10) };
       else if (parts.UNTIL) {
-        const u = parts.UNTIL;
-        const y = u.slice(0, 4), m = u.slice(4, 6), d = u.slice(6, 8);
-        recur.end = { until: `${y}-${m}-${d}` };
+        recur.end = { until: parseRfcDateOrUtc(parts.UNTIL) };
       }
     } else if (line.startsWith('EXDATE')) {
       const idx = line.indexOf(':');
       if (idx !== -1) {
         for (const raw of line.slice(idx + 1).split(',')) {
           const v = raw.trim();
-          if (v.length >= 8) exdates.push(`${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`);
+          if (v) {
+            const parsed = parseRfcDateOrUtc(v);
+            if (parsed) exdates.push(parsed);
+          }
         }
       }
     }
