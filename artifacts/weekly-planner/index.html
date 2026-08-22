@@ -30,25 +30,58 @@
     <meta name="apple-mobile-web-app-title" content="Planner" />
     <meta name="format-detection" content="telephone=no" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="shortcut icon" href="/favicon-v4.ico" />
-    <link rel="icon" type="image/png" href="/app-icon-v4.png" />
-    <link rel="apple-touch-icon" href="/app-icon-v4.png" />
+    <!-- Icons are sized for the slot that actually uses them. The old set sent a
+         129 KB .ico and an 87 KB 256px PNG on every cold open, before a single
+         pixel of the app existed; these are the same artwork at 1-8 KB. -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- Inter is loaded without blocking first paint. A stylesheet in <head> is
+         render-blocking, so on a weak phone connection the whole app waited on
+         two extra DNS+TLS handshakes to Google before showing anything. Loading
+         it as `media=print` makes it non-blocking; the onload flip applies it the
+         moment it lands, and `display=swap` means text is readable meanwhile. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"></noscript>
   </head>
   <body>
     <div id="root"></div>
-    <!-- Registering a (deliberately pass-through) service worker is what makes
-         Chrome offer a real "Install app" instead of a shortcut that reopens in
-         a browser tab with the address bar. Secure contexts only, which covers
-         localhost and the public https address. -->
+    <!-- The service worker makes Chrome offer a real "Install app" (its own
+         window, no address bar) and, more importantly on a weak connection,
+         serves the shell and the hashed bundle straight from the device.
+         Secure contexts only, which covers localhost and the public https
+         address.
+
+         The reload below closes the one gap in cache-first: the worker checks
+         the shell in the background, and if the build changed it says so. The
+         page reloads itself once — but only in the first seconds after opening
+         and only while nothing is being typed, so a new build is never dropped
+         on top of someone mid-edit. -->
     <script>
-      if ('serviceWorker' in navigator && window.isSecureContext) {
+      (function () {
+        if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+        var openedAt = Date.now();
+        var reloaded = false;
+        navigator.serviceWorker.addEventListener('message', function (event) {
+          if (!event.data || event.data.type !== 'planner-shell-updated') return;
+          if (reloaded || Date.now() - openedAt > 10000) return;
+          var active = document.activeElement;
+          var typing = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+          if (typing) return;
+          reloaded = true;
+          window.location.reload();
+        });
         window.addEventListener('load', function () {
           navigator.serviceWorker.register('/sw.js').catch(function () {});
         });
-      }
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

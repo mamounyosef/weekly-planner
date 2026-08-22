@@ -5,7 +5,6 @@ import {
   endOfWeek,
   eachDayOfInterval,
   isToday,
-  subDays,
   addDays,
   isSameDay,
   differenceInDays,
@@ -54,6 +53,7 @@ import {
   playFocusCue,
   claimFocusCue,
   focusCueKey,
+  isFocusCueFresh,
   coerceFocusCue,
   DEFAULT_FOCUS_CUES,
   type FocusCueId,
@@ -105,6 +105,7 @@ interface PlannerEvent {
   categoryId?: string;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
+  noDuration?: boolean; // when true, this event has no duration (point in time / deadline)
   allDay?: boolean;     // when true, this is an all-day event
   daysSpan?: number;    // for all-day events, the number of days it spans (1 to 7)
   gCalId?: string;
@@ -121,6 +122,7 @@ interface PlannerEvent {
   deleted?: boolean;
   masterId?: string;
   occDate?: string;
+  locked?: boolean;
 }
 
 type PlannerData = Record<string, PlannerEvent>;
@@ -301,7 +303,7 @@ export default function Widget() {
   const lastFocusSessionsJsonRef = useRef<string | null>(null);
   /** True once the sessions have been read from the server at least once. */
   const [focusSessionsHydrated, setFocusSessionsHydrated] = useState(false);
-  const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
+  const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(() => loadLocalFocusTimer());
   const [focusDayStartHour, setFocusDayStartHour] = useState(3);
   const [hardware, setHardware] = useState<HardwareSettings>(DEFAULT_HARDWARE_SETTINGS);
   const focusChimeRef = useRef<FocusChimeId>(DEFAULT_FOCUS_CHIME);
@@ -496,6 +498,7 @@ export default function Widget() {
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
       const incoming = coerceFocusTimer(data);
       const json = focusTimerIdentity(incoming);
+      const isFirstHydration = !timerHydratedRef.current;
       timerHydratedRef.current = true;
       if (json === lastTimerJsonRef.current) return;
       // Older than our own last write ⇒ it IS our own write, broadcast back late.
@@ -508,6 +511,10 @@ export default function Widget() {
       lastTimerJsonRef.current = json;
       lastTimerPushKeyRef.current = focusTimerPushKey(incoming);
       lastTransitionKeyRef.current = focusTimerTransitionKey(incoming);
+      if (isFirstHydration) {
+        prevRunningRef.current = incoming.isRunning;
+        prevSessionRef.current = incoming.sessionStartedAt ?? null;
+      }
       setFocusTimer(incoming);
     };
     const pullTimer = () => {
@@ -603,8 +610,7 @@ export default function Widget() {
   const dayStartMin = dayStartH * 60;
   const dayEndMin = dayEndH * 60;
   const nowMin = today.getHours() * 60 + today.getMinutes();
-  const nowOwnerDate = nowMin < dayStartMin ? subDays(today, 1) : today;
-  const todayColIdx = days.findIndex(d => isSameDay(d, nowOwnerDate));
+  const todayColIdx = days.findIndex(d => isSameDay(d, today));
 
   // Resolve raw storage into the items visible in the current (real) week, so the
   // widget honours single-week items, recurring versions and per-week overrides.
@@ -640,9 +646,9 @@ export default function Widget() {
     () => (prayer.showInWidget ? prayer : { ...prayer, enabled: false }),
     [prayer],
   );
-  // Keyed off the date STRING: `nowOwnerDate` is rebuilt every tick, and a fresh
+  // Keyed off the date STRING: `today` is rebuilt every tick, and a fresh
   // Date object every second would re-run the loader forever.
-  const prayerDayStr = prayerDateKey(nowOwnerDate);
+  const prayerDayStr = prayerDateKey(today);
   const prayerDates = useMemo(() => {
     const d = new Date(`${prayerDayStr}T00:00:00`);
     return [d, addDays(d, 1)];
@@ -700,10 +706,11 @@ export default function Widget() {
     const items: Array<{ ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' }> = [];
     for (const ev of Object.values(weekEvents)) {
       if (ev.allDay) continue; // Skip all-day events in the timeline scroll area
+      const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
       const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
-      let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
-      if (e <= s) e += 1440;
-      const isSpanning = s < dayStartMin + 1440 && e > dayStartMin + 1440;
+      let e = isNoDur ? s + 10 : normalizeMin(timeToMin(ev.endTime), dayStartH);
+      if (!isNoDur && e <= s) e += 1440;
+      const isSpanning = !isNoDur && s < dayStartMin + 1440 && e > dayStartMin + 1440;
 
       if (isSpanning) {
         if (ev.dayIndex === todayColIdx) {
@@ -1127,7 +1134,7 @@ export default function Widget() {
     const prevSession = prevSessionRef.current;
     prevRunningRef.current = running;
     prevSessionRef.current = session;
-    if (prevRunning === null) return; // first render — nothing to compare against
+    if (prevRunning === null || !timerHydratedRef.current) return; // first render or unhydrated — nothing to compare against
 
     let slot: FocusCueSlot | null = null;
     if (running && !prevRunning) {
@@ -1145,6 +1152,9 @@ export default function Widget() {
     // matter where the toggle came from — this window's button, the main window,
     // or the system-wide hotkey.
     setFocusCollapsed(slot !== 'pause');
+
+    // Reject stale cues (e.g. widget opening while a session is already in progress)
+    if (!isFocusCueFresh(focusTimer, slot)) return;
 
     const cue = focusCuesRef.current[slot];
     if (cue === 'none') return;
@@ -1286,23 +1296,24 @@ export default function Widget() {
     const dateStr = format(todayDate, 'yyyy-MM-dd');
     // `id` may be an occurrence id ("master::date"); completion lives on the master.
     const { masterId } = parseOccId(id);
-    setEvents(prev => {
-      const ev = prev[masterId];
-      if (!ev) return prev;
-      const completedDates = ev.completedDates || [];
-      const updatedDates = completedDates.includes(dateStr)
-        ? completedDates.filter(d => d !== dateStr)
-        : [...completedDates, dateStr];
-      const updatedEvents = { ...prev, [masterId]: { ...ev, completedDates: updatedDates } };
-      
-      fetch('/api/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedEvents),
-      }).catch(err => console.error("Failed to save checkbox state from widget:", err));
-      
-      return updatedEvents;
-    });
+    const ev = events[masterId];
+    if (!ev) return;
+    const completedDates = ev.completedDates || [];
+    const updatedDates = completedDates.includes(dateStr)
+      ? completedDates.filter(d => d !== dateStr)
+      : [...completedDates, dateStr];
+    const updatedEvents = {
+      ...events,
+      [masterId]: { ...ev, completedDates: updatedDates, updatedAt: Date.now() },
+    };
+    setEvents(updatedEvents);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedEvents));
+    const url = Object.keys(updatedEvents).length === 0 ? '/api/events?force=1' : '/api/events';
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedEvents),
+    }).catch(err => console.error("Failed to save checkbox state from widget:", err));
   };
 
   const handleWindowMouseDown = (e: React.MouseEvent) => {
@@ -1782,11 +1793,12 @@ export default function Widget() {
                         <div
                           key={t.id}
                           onClick={() => {
-                            const occId = t.occDate ? `${t.masterId || t.id}:${t.occDate}` : t.id;
+                            const occId = t.occDate ? `${t.masterId || t.id}::${t.occDate}` : t.id;
                             const next = toggleTaskDoneHelper(tasks, occId);
                             setTasks(next);
                             localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(next));
-                            fetch('/api/tasks', {
+                            const url = Object.keys(next).length === 0 ? '/api/tasks?force=1' : '/api/tasks';
+                            fetch(url, {
                               method: 'POST',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify(next),
@@ -1975,21 +1987,25 @@ export default function Widget() {
             return (
               <div
                 key={p.id}
-                className="absolute left-0 right-0 z-20 pointer-events-none"
-                style={{ top, height: 0, opacity: done ? 0.45 : 1 }}
+                className="absolute left-0 right-0 z-20 pointer-events-none flex items-center"
+                style={{ top: top - 8, height: 16, opacity: done ? 0.45 : 1 }}
               >
-                <div className="absolute left-0 right-0" style={{ height: 0, borderTop: `1px dashed ${widgetPrayer.color}`, opacity: 0.85 }} />
+                <div
+                  className="flex-1 min-w-0"
+                  style={{ height: 0, borderTop: `1px solid ${widgetPrayer.color}`, opacity: 0.85 }}
+                />
                 <button
                   onClick={() => togglePrayerDone(p.dateStr, p.key)}
-                  className="absolute flex items-center gap-1 rounded-full pl-1 pr-1.5 pointer-events-auto"
+                  className="flex-shrink-0 flex items-center gap-1 rounded-full pl-1.5 pr-2 pointer-events-auto transition-transform active:scale-95 mx-1 cursor-pointer"
                   style={{
-                    left: 2, top: -7, height: 14,
-                    background: `${widgetPrayer.color}26`,
+                    height: 15,
+                    background: darkMode ? widgetTheme.cardBg : '#ffffff',
                     border: `1px solid ${widgetPrayer.color}80`,
+                    boxShadow: `0 1px 3px rgba(0,0,0,${darkMode ? '0.35' : '0.12'})`,
                   }}
                   title={`${label}${done ? ' · done' : ''}`}
                 >
-                  <span className="flex items-center" style={{ color: widgetPrayer.color }}>
+                  <span className="flex items-center flex-shrink-0" style={{ color: widgetPrayer.color }}>
                     {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
                   </span>
                   <span
@@ -2002,6 +2018,10 @@ export default function Widget() {
                     {formatTimeLabel(p.minutes, timeFormat)}
                   </span>
                 </button>
+                <div
+                  className="flex-1 min-w-0"
+                  style={{ height: 0, borderTop: `1px solid ${widgetPrayer.color}`, opacity: 0.85 }}
+                />
               </div>
             );
           })}
@@ -2028,6 +2048,10 @@ export default function Widget() {
                 ? fullEndMin - normNowMin
                 : eNormEv - normNowMin);
             const durationMin  = Math.max(0, eNormEv - sNormEv);
+            const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
+            const timeDisplayStr = isNoDur
+              ? formatTimeLabel(fullStartMin, timeFormat)
+              : `${formatTimeLabel(fullStartMin, timeFormat)} – ${formatTimeLabel(fullEndMin, timeFormat)}`;
             const durationLabel = durationMin < 60
               ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
               : durationMin % 60 === 0
@@ -2054,8 +2078,8 @@ export default function Widget() {
                   right: `calc(${rightPct}% + ${EDGE}px)`,
                   backgroundColor: bg,
                   borderColor: border,
-                  borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
-                  borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
+                  borderBottomStyle: 'solid',
+                  borderTopStyle: 'solid',
                   color: text,
                   boxShadow,
                 }}
@@ -2107,6 +2131,11 @@ export default function Widget() {
                               <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                                 {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
                               </span>
+                              {isNoDur && (
+                                <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
+                                  · {timeDisplayStr}
+                                </span>
+                              )}
                             </div>
                           );
                         }
@@ -2136,7 +2165,7 @@ export default function Widget() {
                                 {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
                               </span>
                               <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
-                                · {formatCompactRange(fullStartMin, fullEndMin, timeFormat)} ({durationMin < 60 ? `${durationMin}m` : durationLabel})
+                                · {timeDisplayStr}{isNoDur ? '' : ` (${durationMin < 60 ? `${durationMin}m` : durationLabel})`}
                               </span>
                             </div>
                           );
@@ -2169,13 +2198,13 @@ export default function Widget() {
                                 </span>
                               </div>
                               <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-85 leading-none mt-auto flex items-center gap-1 whitespace-nowrap" style={{ color: textMuted }}>
-                                {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                {timeDisplayStr}
                                 {isLive ? (
                                   <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                     <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                     {minutesLeft}m left
                                   </span>
-                                ) : (
+                                ) : isNoDur ? null : (
                                   <span>({durationLabel})</span>
                                 )}
                               </span>
@@ -2187,13 +2216,13 @@ export default function Widget() {
                           <>
                             {durationMin >= 60 && (
                               <span className="text-[10px] mb-0.5 font-semibold whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
-                                {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                {timeDisplayStr}
                                 {isLive ? (
                                   <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                     <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                     {formatTimeLeft(minutesLeft)}
                                   </span>
-                                ) : (
+                                ) : isNoDur ? null : (
                                   <span>({durationLabel})</span>
                                 )}
                               </span>
@@ -2353,16 +2382,17 @@ export default function Widget() {
 
                 {overflowModal.type === 'tasks' && overflowModal.items.map((t: any) => {
                   const occ = t.occDate ?? null;
+                  const occId = t.occDate ? `${t.masterId || t.id}::${t.occDate}` : t.id;
                   const done = isTaskDone(t, occ);
                   return (
                     <div
-                      key={t.id}
+                      key={occId}
                       onClick={() => {
-                        const occId = t.occDate ? `${t.masterId || t.id}:${t.occDate}` : t.id;
                         const next = toggleTaskDoneHelper(tasks, occId);
                         setTasks(next);
                         localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(next));
-                        fetch('/api/tasks', {
+                        const url = Object.keys(next).length === 0 ? '/api/tasks?force=1' : '/api/tasks';
+                        fetch(url, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify(next),

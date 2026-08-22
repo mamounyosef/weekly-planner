@@ -763,6 +763,7 @@ function TasksPanel({
                   editable
                   reorderable={lists.length > 1}
                   beingDragged={rail.dragId === l.id}
+                  dragDelta={rail.dragId === l.id ? rail.dragDelta : 0}
                   dragActive={!!draggingId}
                   dropActive={dragOverListId === l.id}
                   onPointerDownPill={e => rail.startDrag(e, l.id)}
@@ -780,7 +781,7 @@ function TasksPanel({
               className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
               style={{
                 background: listEditor === 'new' ? `${theme.accent}22` : 'transparent',
-                border: `1px dashed ${listEditor === 'new' ? theme.accent : theme.surfaceBdr}`,
+                border: `1px solid ${listEditor === 'new' ? theme.accent : theme.surfaceBdr}`,
                 color: listEditor === 'new' ? theme.accent : theme.menuSub,
               }}
               title="New list"
@@ -897,6 +898,7 @@ function TasksPanel({
                     <QuickPill
                       icon={<Sun size={12} />}
                       label="Today"
+                      title={`Today (${format(new Date(`${today}T00:00:00`), 'd/M/yyyy')})`}
                       active={composerDate === today}
                       theme={theme}
                       onClick={() => setComposerDate(today)}
@@ -904,6 +906,7 @@ function TasksPanel({
                     <QuickPill
                       icon={<ArrowRight size={12} />}
                       label="Tomorrow"
+                      title={`Tomorrow (${format(new Date(`${tomorrow}T00:00:00`), 'd/M/yyyy')})`}
                       active={composerDate === tomorrow}
                       theme={theme}
                       onClick={() => setComposerDate(tomorrow)}
@@ -1205,6 +1208,13 @@ function TasksPanel({
               <Section
                 key={name}
                 name={name}
+                label={
+                  name === 'Today'
+                    ? `Today (${format(new Date(`${today}T00:00:00`), 'd/M/yyyy')})`
+                    : name === 'Tomorrow'
+                    ? `Tomorrow (${format(new Date(`${tomorrow}T00:00:00`), 'd/M/yyyy')})`
+                    : name
+                }
                 count={list.length}
                 danger={name === 'Overdue'}
                 collapsed={!!collapsed[name]}
@@ -1302,79 +1312,82 @@ function TimePickerPopover({ value, timeFormat, theme, taskColor, onChange, onCl
   const setPart = (nextHour: string, nextMinute: string) => onChange(`${nextHour}:${nextMinute}`);
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: -4, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -4, scale: 0.98 }}
-      transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-      className="absolute left-0 top-full mt-2 z-50 w-56 rounded-xl border p-2 shadow-xl"
-      style={{
-        background: theme.menuBg,
-        borderColor: theme.surfaceBdr,
-        boxShadow: theme.darkMode ? '0 18px 40px rgba(0,0,0,0.45)' : '0 18px 40px rgba(15,23,42,0.16)',
-      }}
-      onMouseDown={e => e.stopPropagation()}
-    >
-      <div className="grid grid-cols-2 gap-1.5 mb-2">
-        {TIME_PRESETS.map(t => {
-          const active = value === t;
-          return (
-            <button
-              key={t}
-              type="button"
-              onClick={() => { onChange(t); onClose(); }}
-              className="px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
-              style={{
-                background: active ? `${taskColor}22` : theme.surfaceBg,
-                border: `1px solid ${active ? taskColor : theme.surfaceBdr}`,
-                color: active ? taskColor : theme.menuText,
-              }}
-            >
-              {fmtTime(t, timeFormat)}
-            </button>
-          );
-        })}
-      </div>
+    <>
+      <div className="fixed inset-0 z-40" onMouseDown={onClose} />
+      <motion.div
+        initial={{ opacity: 0, y: -4, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -4, scale: 0.98 }}
+        transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
+        className="absolute left-0 top-full mt-2 z-50 w-56 rounded-xl border p-2 shadow-xl"
+        style={{
+          background: theme.menuBg,
+          borderColor: theme.surfaceBdr,
+          boxShadow: theme.darkMode ? '0 18px 40px rgba(0,0,0,0.45)' : '0 18px 40px rgba(15,23,42,0.16)',
+        }}
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <div className="grid grid-cols-2 gap-1.5 mb-2">
+          {TIME_PRESETS.map(t => {
+            const active = value === t;
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => { onChange(t); onClose(); }}
+                className="px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-smooth hover:scale-[1.02] active:scale-95"
+                style={{
+                  background: active ? `${taskColor}22` : theme.surfaceBg,
+                  border: `1px solid ${active ? taskColor : theme.surfaceBdr}`,
+                  color: active ? taskColor : theme.menuText,
+                }}
+              >
+                {fmtTime(t, timeFormat)}
+              </button>
+            );
+          })}
+        </div>
 
-      <div className="flex items-center gap-2">
-        <select
-          value={hour}
-          onChange={e => setPart(e.target.value, minute)}
-          className="flex-1 rounded-lg px-2 py-1.5 text-xs outline-none"
-          style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
-        >
-          {hours.map(h => <option key={h} value={h}>{fmtTime(`${h}:00`, timeFormat).replace(':00', '')}</option>)}
-        </select>
-        <span className="text-xs font-bold" style={{ color: theme.menuSub }}>:</span>
-        <select
-          value={minute}
-          onChange={e => setPart(hour, e.target.value)}
-          className="w-20 rounded-lg px-2 py-1.5 text-xs outline-none"
-          style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
-        >
-          {minutes.map(m => <option key={m} value={m}>{m}</option>)}
-        </select>
-      </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={hour}
+            onChange={e => setPart(e.target.value, minute)}
+            className="flex-1 rounded-lg px-2 py-1.5 text-xs outline-none"
+            style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+          >
+            {hours.map(h => <option key={h} value={h}>{fmtTime(`${h}:00`, timeFormat).replace(':00', '')}</option>)}
+          </select>
+          <span className="text-xs font-bold" style={{ color: theme.menuSub }}>:</span>
+          <select
+            value={minute}
+            onChange={e => setPart(hour, e.target.value)}
+            className="w-20 rounded-lg px-2 py-1.5 text-xs outline-none"
+            style={{ background: theme.surfaceBg, color: theme.menuText, border: `1px solid ${theme.surfaceBdr}` }}
+          >
+            {minutes.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
 
-      <div className="flex items-center justify-between gap-2 pt-2 mt-2 border-t" style={{ borderColor: theme.surfaceBdr }}>
-        <button
-          type="button"
-          onClick={() => { onChange(null); onClose(); }}
-          className="px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors"
-          style={{ color: theme.menuSub }}
-        >
-          Clear
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          className="px-2.5 py-1 rounded-lg text-[11px] font-bold"
-          style={{ background: taskColor, color: theme.darkMode ? '#0b1220' : '#ffffff' }}
-        >
-          Done
-        </button>
-      </div>
-    </motion.div>
+        <div className="flex items-center justify-between gap-2 pt-2 mt-2 border-t" style={{ borderColor: theme.surfaceBdr }}>
+          <button
+            type="button"
+            onClick={() => { onChange(null); onClose(); }}
+            className="px-2 py-1 rounded-lg text-[11px] font-semibold transition-colors"
+            style={{ color: theme.menuSub }}
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-2.5 py-1 rounded-lg text-[11px] font-bold"
+            style={{ background: taskColor, color: theme.darkMode ? '#0b1220' : '#ffffff' }}
+          >
+            Done
+          </button>
+        </div>
+      </motion.div>
+    </>
   );
 }
 
@@ -1719,7 +1732,7 @@ function RepeatPickerPopover({
  * gesture on a desktop and on a phone.
  */
 function ListPill({
-  listId, label, icon, tone, active, count, theme, editable, reorderable, beingDragged,
+  listId, label, icon, tone, active, count, theme, editable, reorderable, beingDragged, dragDelta = 0,
   dragActive, dropActive,
   onPointerDownPill, onClick, onEdit, onDragOverList, onDragLeaveList, onDropTask,
 }: {
@@ -1733,6 +1746,7 @@ function ListPill({
   editable?: boolean;
   reorderable?: boolean;
   beingDragged?: boolean;
+  dragDelta?: number;
   dragActive?: boolean;
   dropActive?: boolean;
   onPointerDownPill?: (e: React.PointerEvent<HTMLElement>) => void;
@@ -1747,13 +1761,15 @@ function ListPill({
       data-list-drop={listId}
       data-reorder-id={reorderable ? listId : undefined}
       onPointerDown={onPointerDownPill}
-      className={`flex-shrink-0 flex items-center rounded-full transition-smooth ${reorderable ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      className={`flex-shrink-0 flex items-center rounded-full select-none ${reorderable ? 'cursor-grab active:cursor-grabbing' : ''}`}
       style={{
         background: dropActive ? `${tone}30` : active ? `${tone}20` : theme.surfaceBg,
-        border: `1px ${dropActive ? 'dashed' : 'solid'} ${dropActive || active ? tone : dragActive ? `${tone}55` : theme.surfaceBdr}`,
-        boxShadow: beingDragged ? `0 6px 18px rgba(0,0,0,0.35), 0 0 0 2px ${tone}` : dropActive ? `0 0 0 3px ${tone}25` : active ? `0 0 10px ${tone}22` : 'none',
-        transform: beingDragged ? 'scale(1.06)' : dropActive ? 'scale(1.04)' : 'none',
-        opacity: beingDragged ? 0.85 : 1,
+        border: `1px solid ${dropActive || active ? tone : dragActive ? `${tone}55` : theme.surfaceBdr}`,
+        boxShadow: beingDragged ? `0 8px 22px rgba(0,0,0,0.4), 0 0 0 2px ${tone}` : dropActive ? `0 0 0 3px ${tone}25` : active ? `0 0 10px ${tone}22` : 'none',
+        transform: beingDragged ? `translateX(${dragDelta}px) scale(1.06)` : dropActive ? 'scale(1.04)' : 'none',
+        zIndex: beingDragged ? 30 : 1,
+        transition: beingDragged ? 'none' : 'transform 180ms cubic-bezier(0.2, 0, 0, 1), box-shadow 180ms ease, opacity 180ms ease',
+        opacity: beingDragged ? 0.95 : 1,
       }}
       onDragOver={e => {
         if (!onDropTask) return;
@@ -2022,7 +2038,7 @@ function FilterChip({ label, count, active, danger, theme, onClick }: {
       {label}
       {count != null && count > 0 && (
         <span
-          className="tabular-nums px-1.5 py-0.2 rounded-full text-[10px] font-bold"
+          className="tabular-nums px-1.5 py-0.5 rounded-full text-[10px] font-bold"
           style={{ background: active ? tone : theme.surfaceBdr, color: active ? (theme.darkMode ? '#0b1220' : '#ffffff') : theme.menuSub }}
         >
           {count}
@@ -2033,14 +2049,15 @@ function FilterChip({ label, count, active, danger, theme, onClick }: {
 }
 
 // Quick Pill Component
-function QuickPill({ icon, label, active, disabled, theme, onClick }: {
-  icon: React.ReactNode; label: string; active: boolean; disabled?: boolean; theme: TaskTheme; onClick: () => void;
+function QuickPill({ icon, label, title, active, disabled, theme, onClick }: {
+  icon: React.ReactNode; label: string; title?: string; active: boolean; disabled?: boolean; theme: TaskTheme; onClick: () => void;
 }) {
   return (
     <button
       onMouseDown={e => e.preventDefault()}
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-smooth hover:scale-[1.02] active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
       style={{
         background: active ? `${theme.accent}22` : theme.surfaceBg,
@@ -2055,8 +2072,8 @@ function QuickPill({ icon, label, active, disabled, theme, onClick }: {
 }
 
 // Section Component
-function Section({ name, count, danger, collapsed, theme, onToggle, children }: {
-  name: string; count: number; danger?: boolean; collapsed: boolean; theme: TaskTheme;
+function Section({ name, label, count, danger, collapsed, theme, onToggle, children }: {
+  name: string; label?: string; count: number; danger?: boolean; collapsed: boolean; theme: TaskTheme;
   onToggle: () => void; children: React.ReactNode;
 }) {
   const dangerHue = theme.darkMode ? '#ff6b6b' : '#e5484d';
@@ -2074,7 +2091,7 @@ function Section({ name, count, danger, collapsed, theme, onToggle, children }: 
             className="text-[11px] font-bold uppercase tracking-wider"
             style={{ color: danger ? dangerHue : theme.menuSub }}
           >
-            {name}
+            {label || name}
           </span>
         </div>
         <span
@@ -2727,7 +2744,7 @@ function TaskRow({
           </span>
           {childProgress && (
             <span
-              className="text-[10px] font-bold tabular-nums px-1.5 py-0.2 rounded-md"
+              className="text-[10px] font-bold tabular-nums px-1.5 py-0.5 rounded-md"
               style={{ color: theme.menuSub, background: theme.surfaceBdr }}
             >
               {childProgress}

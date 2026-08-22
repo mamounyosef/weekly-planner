@@ -1,4 +1,3 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
@@ -16,8 +15,6 @@ const Widget = lazy(() => import('@/pages/widget'));
 import LoginPage from '@/pages/login';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
-
-const queryClient = new QueryClient();
 
 function AuthenticatedApp() {
   const { isAuthenticated, isLoading } = useAuth();
@@ -48,11 +45,11 @@ function Router() {
     );
   }
 
-  if (location !== '/' && location !== '/settings') {
+  if (location !== '/' && !location.startsWith('/settings')) {
     return <NotFound />;
   }
 
-  const isSettings = location === '/settings';
+  const isSettings = location === '/settings' || location.startsWith('/settings');
 
   useEffect(() => {
     if (!isSettings) return;
@@ -128,16 +125,14 @@ function App() {
   }, []);
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <AuthProvider>
-          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
-            <AuthenticatedApp />
-          </WouterRouter>
-          <Toaster />
-        </AuthProvider>
-      </TooltipProvider>
-    </QueryClientProvider>
+    <TooltipProvider>
+      <AuthProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+          <AuthenticatedApp />
+        </WouterRouter>
+        <Toaster />
+      </AuthProvider>
+    </TooltipProvider>
   );
 }
 

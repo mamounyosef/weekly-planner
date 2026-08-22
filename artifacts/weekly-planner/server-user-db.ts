@@ -15,6 +15,7 @@ export interface PublicAccessConfig {
   password?: string;
 }
 
+
 const SESSION_SECRET = 'weekly-planner-multi-user-secure-secret-2026';
 export const SESSION_COOKIE = 'planner_session';
 // A persistent local-browser login should survive app/server restarts, but not
@@ -118,6 +119,7 @@ export async function migrateLegacyDatabase(rootDir: string) {
     const targetUser = users.length > 0 ? users[0].username : 'mamoun';
     const targetDir = path.resolve(rootDir, 'database', 'users', targetUser);
     const targetDbPath = path.join(targetDir, 'database.json');
+    const destBackup = path.join(targetDir, 'backups');
 
     const hasLegacy = await fsp.stat(legacyDbPath).then(() => true).catch(() => false);
     const hasMigrated = await fsp.stat(targetDbPath).then(() => true).catch(() => false);
@@ -128,7 +130,6 @@ export async function migrateLegacyDatabase(rootDir: string) {
       const files = await fsp.readdir(rootDbDir, { withFileTypes: true });
       for (const file of files) {
         if (file.isDirectory() && file.name === 'backups') {
-          const destBackup = path.join(targetDir, 'backups');
           await fsp.mkdir(destBackup, { recursive: true });
           const backupFiles = await fsp.readdir(path.join(rootDbDir, 'backups')).catch(() => []);
           for (const bf of backupFiles) {
@@ -140,6 +141,25 @@ export async function migrateLegacyDatabase(rootDir: string) {
         }
       }
       console.log(`[auth] Successfully migrated legacy database to database/users/${targetUser}/`);
+    }
+
+    // Also migrate legacy root backups (<rootDir>/backups) if any exist
+    const rootBackupDir = path.resolve(rootDir, 'backups');
+    const rootBackups = await fsp.readdir(rootBackupDir).catch(() => []);
+    if (rootBackups.length > 0) {
+      await fsp.mkdir(destBackup, { recursive: true });
+      for (const bf of rootBackups) {
+        if (bf.startsWith('planner-backup.') && bf.endsWith('.json')) {
+          const destFile = path.join(destBackup, bf);
+          const exists = await fsp.stat(destFile).then(() => true).catch(() => false);
+          if (!exists) {
+            await fsp.copyFile(path.join(rootBackupDir, bf), destFile).catch(() => {});
+          }
+          await fsp.unlink(path.join(rootBackupDir, bf)).catch(() => {});
+        }
+      }
+      await fsp.rmdir(rootBackupDir).catch(() => {});
+      console.log(`[auth] Successfully migrated legacy root backups to database/users/${targetUser}/backups/`);
     }
   } catch (err) {
     console.warn('[auth] Migration check notice:', err);
@@ -217,8 +237,9 @@ export function getAuthUser(req: any, users: AppUser[]): AppUser | null {
   }
 
   // 4. Local loopback hotkey helper fallback
-  const urlPath = (req.url || '').split('?')[0];
-  const remote = req.socket?.remoteAddress || '';
+  const rawUrl = req.originalUrl || req.url || '';
+  const urlPath = rawUrl.split('?')[0].replace(/\/+$/, '') || '/';
+  const remote = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
   const proxied = Boolean(req.headers?.['x-forwarded-for']);
   if (!proxied && isLocalAddress(remote) && (urlPath === '/api/focus-timer/toggle' || urlPath === '/api/settings')) {
     if (users.length > 0) return users[0];

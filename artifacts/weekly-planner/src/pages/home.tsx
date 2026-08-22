@@ -21,7 +21,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
+import { Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -65,6 +65,7 @@ import {
   playFocusCue,
   claimFocusCue,
   focusCueKey,
+  isFocusCueFresh,
   coerceFocusCue,
   FOCUS_CUES,
   DEFAULT_FOCUS_CUES,
@@ -277,6 +278,7 @@ interface PlannerEvent {
   categoryId?: string;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
+  noDuration?: boolean; // when true, this event has no duration (point in time / deadline), taking 10-minute visual space with start time only
   allDay?: boolean;     // when true, this is an all-day event
   daysSpan?: number;    // for all-day events, the number of days it spans (1 to 7)
   gCalId?: string;
@@ -308,6 +310,8 @@ type PlannerData = Record<string, PlannerEvent>;
 // â”€â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STORAGE_KEY      = 'planner-v3';
 const INTERVAL_KEY     = 'planner-interval';
+/* Per-device: what the focus station collapses to once it scrolls away. */
+const FOCUS_MINI_MODE_KEY = 'planner-focus-mini-mode';
 const DARK_MODE_KEY    = 'planner-dark';
 const TIME_FORMAT_KEY  = 'planner-timefmt';
 const WEEK_START_KEY  = 'planner-weekstart';
@@ -726,7 +730,7 @@ export default function DailyPlanner() {
   // up long before these functions exist, so it calls through this ref instead.
   const navRef = useRef({
     prev: () => {}, next: () => {}, today: () => {}, goToLive: () => {},
-    toggleView: () => {}, toggleAnalysis: () => {}, toggleSettings: () => {},
+    toggleView: () => {}, customView: () => {}, monthView: () => {}, toggleAnalysis: () => {}, toggleSettings: () => {},
     openWidget: () => {}, newEvent: () => {}, toggleTimer: () => {}, toggleHelp: () => {},
   });
   // Lightweight toasts — replaces blocking window.alert() for import/export/sync
@@ -743,9 +747,79 @@ export default function DailyPlanner() {
   const [hoveredId, setHoveredId]     = useState<string | null>(null);
   const [menuId, setMenuId]           = useState<string | null>(null);
   const [menuPos, setMenuPos]         = useState<{ x: number; y: number } | null>(null);
+  const DEFAULT_MENU_WIDTH = 340;
+  const [menuSize, setMenuSize] = useState<{ width: number; height?: number }>(() => {
+    try {
+      const saved = localStorage.getItem('planner-event-menu-size');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed.width === 'number' && parsed.width >= 260 && parsed.width <= 900) {
+          return {
+            width: parsed.width,
+            height: typeof parsed.height === 'number' && parsed.height >= 200 ? parsed.height : undefined,
+          };
+        }
+      }
+    } catch (_) {}
+    return { width: DEFAULT_MENU_WIDTH };
+  });
+  const menuSizeRef = useRef(menuSize);
+  useEffect(() => { menuSizeRef.current = menuSize; }, [menuSize]);
   const [deleteExpanded, setDeleteExpanded] = useState(false); // "Delete more…" sub-options
   useEffect(() => { setDeleteExpanded(false); }, [menuId]);
-  // A brand-new item started from the dedicated "ï¼‹" button lives here as an
+
+  // ── Month grid resizable size ─────────────────────────────────────────────
+  // null = fill available space (default). { width, height } = user-pinned.
+  const MONTH_GRID_LS_KEY = 'planner-month-grid-size';
+  const [monthGridSize, setMonthGridSize] = useState<{ width: number; height: number } | null>(() => {
+    try {
+      const saved = localStorage.getItem(MONTH_GRID_LS_KEY);
+      if (saved) {
+        const p = JSON.parse(saved);
+        if (typeof p.width === 'number' && typeof p.height === 'number' && p.width >= 400 && p.height >= 250) {
+          return { width: p.width, height: p.height };
+        }
+      }
+    } catch (_) {}
+    return null;
+  });
+  const monthGridRef = useRef<HTMLDivElement>(null);
+  // ── Month view drag-to-select range ─────────────────────────────────────────
+  const [monthSelectionRange, setMonthSelectionRange] = useState<{ start: Date; end: Date } | null>(null);
+  const monthDragRef = useRef<{
+    startDay: Date;
+    currentDay: Date;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
+  const monthDragJustEndedRef = useRef(false);
+
+  // ── Month view item drag-to-move ────────────────────────────────────────────
+  const [monthItemDrag, setMonthItemDrag] = useState<{
+    event: PlannerEvent;
+    sourceDate: Date;
+    targetDate: Date;
+    x: number;
+    y: number;
+    width?: number;
+    height?: number;
+  } | null>(null);
+  const monthItemDragRef = useRef<{
+    event: PlannerEvent;
+    sourceDate: Date;
+    targetDate: Date;
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+    width?: number;
+    height?: number;
+    moved: boolean;
+  } | null>(null);
+  const monthItemDragJustEndedRef = useRef(false);
+
+  // A brand-new item started from the dedicated "＋" button lives here as an
   // uncommitted DRAFT — it is NOT in `events` and never touches the grid/Google
   // until the user presses Save. All popup field edits route into it (see applyEdit).
   const [draft, setDraft] = useState<PlannerEvent | null>(null);
@@ -761,7 +835,7 @@ export default function DailyPlanner() {
   const [location, setLocation] = useLocation();
   // The settings page is an overlay drawn on top of this one, which stays mounted.
   // While it is open the planner must not scroll or show its own scrollbar.
-  const settingsRouteOpen = location === '/settings';
+  const settingsRouteOpen = location === '/settings' || location.startsWith('/settings');
   const [direction, setDirection]     = useState(0);
 
   const [darkMode, setDarkMode]             = useState<boolean>(initialSettings.darkMode);
@@ -843,6 +917,16 @@ export default function DailyPlanner() {
   const [selRect, setSelRect]           = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [batchDisp, setBatchDisp]       = useState<{ [id: string]: { dayIndex: number; startMin: number } } | null>(null);
   const [isScrolled, setIsScrolled]     = useState(false);
+  /* ── Scrolled-away focus station ──────────────────────────────────────────
+     The full focus banner scrolls out of view with the rest of the page. Once
+     it is gone this decides what takes its place at the top of the grid:
+     'mini' pins a slim strip (countdown + transport + today/week totals),
+     'hidden' pins nothing but a small triangle tab to bring it back. Stored in
+     localStorage only, so it is remembered per device and never fights the
+     phone over the setting. */
+  const [focusMiniMode, setFocusMiniMode] = useState<'mini' | 'hidden'>(() => {
+    try { return localStorage.getItem(FOCUS_MINI_MODE_KEY) === 'hidden' ? 'hidden' : 'mini'; } catch { return 'mini'; }
+  });
   const [nowTick, setNowTick]           = useState(Date.now());
   const [dayStartH, setDayStartH]       = useState(initialSettings.dayStartH);
   const [dayEndH, setDayEndH]           = useState(initialSettings.dayEndH);
@@ -884,7 +968,7 @@ export default function DailyPlanner() {
       window.removeEventListener('keydown', unlock);
     };
   }, []);
-  const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(DEFAULT_FOCUS_TIMER);
+  const [focusTimer, setFocusTimer]       = useState<FocusTimerState>(() => loadLocalFocusTimer());
   const [editingFocusMinutes, setEditingFocusMinutes] = useState(false);
   const [focusMinutesDraft, setFocusMinutesDraft]     = useState('60');
   const focusCompleteRef = useRef(false);
@@ -1005,12 +1089,22 @@ export default function DailyPlanner() {
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
-  const handleHeaderCreateClick = (_e?: React.MouseEvent<HTMLButtonElement>) => {
+  const openCreateForRange = (
+    startDate: Date,
+    endDate: Date,
+    e?: React.MouseEvent | MouseEvent | { clientX?: number; clientY?: number; currentTarget?: any }
+  ) => {
     setSelectedIds(new Set());
     setMenuId(null);
 
-    // Default dayIndex matching today relative to weekStartsOn setting
-    const todayIdx = (new Date().getDay() - weekStartsOn + 7) % 7;
+    const s = startDate < endDate ? startDate : endDate;
+    const end = startDate < endDate ? endDate : startDate;
+    const isMultiDay = !isSameDay(s, end);
+    const span = Math.max(1, differenceInDays(end, s) + 1);
+
+    const ws = startOfWeek(s, { weekStartsOn });
+    const targetWeekKey = format(ws, 'yyyy-MM-dd');
+    const targetDayIdx = differenceInDays(s, ws);
 
     // Default hours clamped to calendar views (7:00 AM to 11:00 PM)
     const currentHour = new Date().getHours();
@@ -1019,38 +1113,335 @@ export default function DailyPlanner() {
     const endTime = minToTime((startHour + 1) * 60);
 
     const defaultCat = categories.find(c => c.isDefault);
-    const catDur = defaultCat?.defaultDurationMin ?? 60;
+    const isNoDuration = isMultiDay ? false : Boolean(defaultCat?.defaultNoDuration || defaultCat?.defaultDurationMin === 0);
+    const catDur = isNoDuration ? 0 : (defaultCat?.defaultDurationMin ?? 60);
     const endMinutes = Math.min(24 * 60, startHour * 60 + catDur);
     const catEndHour = Math.floor(endMinutes / 60) % 24;
     const catEndMin = endMinutes % 60;
-    const customEndTime = `${String(catEndHour).padStart(2, '0')}:${String(catEndMin).padStart(2, '0')}`;
+    const customEndTime = isNoDuration ? startTime : `${String(catEndHour).padStart(2, '0')}:${String(catEndMin).padStart(2, '0')}`;
 
-    // Build a fully-anchored DRAFT (stamped to the viewed week) but do NOT add it to
-    // `events` — it stays out of the grid/Google until the user presses Save.
+    // Build a fully-anchored event and immediately add it to events
+    // so it is instantly visible on the calendar grid.
     const base = stampNewItem(
       {
         id: uid(),
-        dayIndex: todayIdx,
+        dayIndex: targetDayIdx,
+        weekKey: targetWeekKey,
         startTime,
         endTime: defaultCat ? customEndTime : endTime,
         content: '',
         color: defaultCat ? defaultCat.color : 'sage',
         categoryId: defaultCat ? defaultCat.id : undefined,
         noCheckbox: defaultCat?.defaultNoCheckbox ?? false,
-        allDay: defaultCat?.defaultAllDay ?? false,
+        noDuration: isNoDuration,
+        allDay: isMultiDay ? true : (defaultCat?.defaultAllDay ?? false),
+        daysSpan: isMultiDay ? span : 1,
+        occDate: format(s, 'yyyy-MM-dd'),
       } as PlannerEvent,
-      editCtxRef.current.viewedWeekKey, editCtxRef.current.weekStartsOn,
+      targetWeekKey,
+      weekStartsOn,
     );
-    setDraft(base);
-    // Open the popup centred and pinned so it stays put (no event to anchor to yet).
-    const w = 300, h = 480;
+    writeEvents({ ...eventsRef.current, [base.id]: base });
+    setDraft(null);
+
+    const w = menuSizeRef.current.width || DEFAULT_MENU_WIDTH;
+    const h = 480;
     setMenuPinned(true);
     menuPinnedRef.current = true;
     setMenuId(base.id);
-    setMenuPos({
-      x: Math.max(8, Math.round((window.innerWidth - w) / 2)),
-      y: Math.max(8, Math.round((window.innerHeight - h) / 2)),
-    });
+
+    const clientX = e && 'clientX' in e ? (e.clientX as number) : undefined;
+    const clientY = e && 'clientY' in e ? (e.clientY as number) : undefined;
+
+    if (e && 'currentTarget' in e && (e as React.MouseEvent).currentTarget) {
+      const rect = ((e as React.MouseEvent).currentTarget as HTMLElement).getBoundingClientRect();
+      const margin = 8;
+      let x = rect.right + 6;
+      if (x + w > window.innerWidth - margin) x = rect.left - w - 6;
+      x = Math.max(margin, Math.min(x, window.innerWidth - w - margin));
+      let y = rect.top;
+      y = Math.max(margin, Math.min(y, window.innerHeight - h - margin));
+      setMenuPos({ x, y });
+    } else if (clientX !== undefined && clientY !== undefined) {
+      const margin = 8;
+      let x = clientX + 12;
+      if (x + w > window.innerWidth - margin) x = clientX - w - 12;
+      x = Math.max(margin, Math.min(x, window.innerWidth - w - margin));
+      let y = clientY - 40;
+      y = Math.max(margin, Math.min(y, window.innerHeight - h - margin));
+      setMenuPos({ x, y });
+    } else {
+      setMenuPos({
+        x: Math.max(8, Math.round((window.innerWidth - w) / 2)),
+        y: Math.max(8, Math.round((window.innerHeight - h) / 2)),
+      });
+    }
+  };
+
+  const openCreateForDate = (targetDate: Date, e?: React.MouseEvent) => {
+    openCreateForRange(targetDate, targetDate, e);
+  };
+
+  const handleMonthCellMouseDown = (date: Date, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('[data-event], button, input, [role="button"]')) return;
+
+    monthDragRef.current = {
+      startDay: date,
+      currentDay: date,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+    };
+
+    const handleWindowMouseMove = (moveEvent: MouseEvent) => {
+      if (!monthDragRef.current) return;
+      const targetEl = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      const cellEl = targetEl?.closest('[data-month-cell-date]');
+      const dateStr = cellEl?.getAttribute('data-month-cell-date');
+      const dist = Math.hypot(moveEvent.clientX - monthDragRef.current.startX, moveEvent.clientY - monthDragRef.current.startY);
+
+      if (dateStr) {
+        const hoveredDate = parseDate(dateStr);
+        if (!isSameDay(hoveredDate, monthDragRef.current.currentDay)) {
+          monthDragRef.current.currentDay = hoveredDate;
+          monthDragRef.current.moved = true;
+          setMonthSelectionRange({ start: monthDragRef.current.startDay, end: hoveredDate });
+        }
+      } else if (dist >= DRAG_THRESHOLD && !monthDragRef.current.moved) {
+        monthDragRef.current.moved = true;
+        setMonthSelectionRange({ start: monthDragRef.current.startDay, end: monthDragRef.current.currentDay });
+      }
+    };
+
+    const handleWindowMouseUp = (upEvent: MouseEvent) => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+
+      if (!monthDragRef.current) return;
+      const { startDay, currentDay, moved } = monthDragRef.current;
+      monthDragRef.current = null;
+      setMonthSelectionRange(null);
+
+      if (moved && !isSameDay(startDay, currentDay)) {
+        monthDragJustEndedRef.current = true;
+        setTimeout(() => { monthDragJustEndedRef.current = false; }, 120);
+        const s = startDay < currentDay ? startDay : currentDay;
+        const end = startDay < currentDay ? currentDay : startDay;
+        openCreateForRange(s, end, { clientX: upEvent.clientX, clientY: upEvent.clientY });
+      }
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+  };
+
+  const handleMonthCellTouchStart = (date: Date, e: React.TouchEvent) => {
+    if ((e.target as HTMLElement).closest('[data-event], button, input, [role="button"]')) return;
+    const touch = e.touches[0];
+    monthDragRef.current = {
+      startDay: date,
+      currentDay: date,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      moved: false,
+    };
+  };
+
+  const handleMonthCellTouchMove = (e: React.TouchEvent) => {
+    if (!monthDragRef.current) return;
+    const touch = e.touches[0];
+    const targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
+    const cellEl = targetEl?.closest('[data-month-cell-date]');
+    const dateStr = cellEl?.getAttribute('data-month-cell-date');
+    if (dateStr) {
+      const hoveredDate = parseDate(dateStr);
+      if (!isSameDay(hoveredDate, monthDragRef.current.currentDay)) {
+        monthDragRef.current.currentDay = hoveredDate;
+        monthDragRef.current.moved = true;
+        setMonthSelectionRange({ start: monthDragRef.current.startDay, end: hoveredDate });
+      }
+    }
+  };
+
+  const handleMonthCellTouchEnd = (e: React.TouchEvent) => {
+    if (!monthDragRef.current) return;
+    const { startDay, currentDay, moved } = monthDragRef.current;
+    monthDragRef.current = null;
+    setMonthSelectionRange(null);
+
+    if (moved && !isSameDay(startDay, currentDay)) {
+      monthDragJustEndedRef.current = true;
+      setTimeout(() => { monthDragJustEndedRef.current = false; }, 120);
+      const s = startDay < currentDay ? startDay : currentDay;
+      const end = startDay < currentDay ? currentDay : startDay;
+      const touch = e.changedTouches[0];
+      openCreateForRange(s, end, touch ? { clientX: touch.clientX, clientY: touch.clientY } : undefined);
+    }
+  };
+
+  const handleMonthItemMouseDown = (ev: PlannerEvent, sourceDate: Date, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+
+    monthItemDragRef.current = {
+      event: ev,
+      sourceDate,
+      targetDate: sourceDate,
+      startX: e.clientX,
+      startY: e.clientY,
+      currentX: e.clientX,
+      currentY: e.clientY,
+      width: rect.width,
+      height: rect.height,
+      moved: false,
+    };
+
+    const handleWindowMouseMove = (moveEvent: MouseEvent) => {
+      if (!monthItemDragRef.current) return;
+      const dist = Math.hypot(
+        moveEvent.clientX - monthItemDragRef.current.startX,
+        moveEvent.clientY - monthItemDragRef.current.startY
+      );
+      if (dist >= DRAG_THRESHOLD) {
+        monthItemDragRef.current.moved = true;
+      }
+      monthItemDragRef.current.currentX = moveEvent.clientX;
+      monthItemDragRef.current.currentY = moveEvent.clientY;
+
+      const targetEl = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      const cellEl = targetEl?.closest('[data-month-cell-date]');
+      const dateStr = cellEl?.getAttribute('data-month-cell-date');
+
+      if (dateStr) {
+        const hoveredDate = parseDate(dateStr);
+        monthItemDragRef.current.targetDate = hoveredDate;
+      }
+
+      if (monthItemDragRef.current.moved) {
+        setMonthItemDrag({
+          event: monthItemDragRef.current.event,
+          sourceDate: monthItemDragRef.current.sourceDate,
+          targetDate: monthItemDragRef.current.targetDate,
+          x: moveEvent.clientX,
+          y: moveEvent.clientY,
+          width: monthItemDragRef.current.width,
+          height: monthItemDragRef.current.height,
+        });
+      }
+    };
+
+    const handleWindowMouseUp = (_upEvent: MouseEvent) => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+
+      if (!monthItemDragRef.current) return;
+      const { event, sourceDate, targetDate, moved } = monthItemDragRef.current;
+      monthItemDragRef.current = null;
+      setMonthItemDrag(null);
+
+      if (moved && !isSameDay(sourceDate, targetDate)) {
+        monthItemDragJustEndedRef.current = true;
+        setTimeout(() => { monthItemDragJustEndedRef.current = false; }, 120);
+
+        const newWs = startOfWeek(targetDate, { weekStartsOn });
+        const newWeekKey = format(newWs, 'yyyy-MM-dd');
+        const newDayIndex = differenceInDays(targetDate, newWs);
+        const newOccDate = format(targetDate, 'yyyy-MM-dd');
+
+        applyEdit(event.id, {
+          weekKey: newWeekKey,
+          dayIndex: newDayIndex,
+          occDate: newOccDate,
+        });
+      }
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+  };
+
+  const handleMonthItemTouchStart = (ev: PlannerEvent, sourceDate: Date, e: React.TouchEvent) => {
+    e.stopPropagation();
+    const touch = e.touches[0];
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+
+    monthItemDragRef.current = {
+      event: ev,
+      sourceDate,
+      targetDate: sourceDate,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      currentX: touch.clientX,
+      currentY: touch.clientY,
+      width: rect.width,
+      height: rect.height,
+      moved: false,
+    };
+  };
+
+  const handleMonthItemTouchMove = (e: React.TouchEvent) => {
+    if (!monthItemDragRef.current) return;
+    const touch = e.touches[0];
+    const dist = Math.hypot(
+      touch.clientX - monthItemDragRef.current.startX,
+      touch.clientY - monthItemDragRef.current.startY
+    );
+    if (dist >= DRAG_THRESHOLD) {
+      monthItemDragRef.current.moved = true;
+    }
+    monthItemDragRef.current.currentX = touch.clientX;
+    monthItemDragRef.current.currentY = touch.clientY;
+
+    const targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
+    const cellEl = targetEl?.closest('[data-month-cell-date]');
+    const dateStr = cellEl?.getAttribute('data-month-cell-date');
+
+    if (dateStr) {
+      const hoveredDate = parseDate(dateStr);
+      monthItemDragRef.current.targetDate = hoveredDate;
+    }
+
+    if (monthItemDragRef.current.moved) {
+      setMonthItemDrag({
+        event: monthItemDragRef.current.event,
+        sourceDate: monthItemDragRef.current.sourceDate,
+        targetDate: monthItemDragRef.current.targetDate,
+        x: touch.clientX,
+        y: touch.clientY,
+        width: monthItemDragRef.current.width,
+        height: monthItemDragRef.current.height,
+      });
+    }
+  };
+
+  const handleMonthItemTouchEnd = (_e: React.TouchEvent) => {
+    if (!monthItemDragRef.current) return;
+    const { event, sourceDate, targetDate, moved } = monthItemDragRef.current;
+    monthItemDragRef.current = null;
+    setMonthItemDrag(null);
+
+    if (moved && !isSameDay(sourceDate, targetDate)) {
+      monthItemDragJustEndedRef.current = true;
+      setTimeout(() => { monthItemDragJustEndedRef.current = false; }, 120);
+
+      const newWs = startOfWeek(targetDate, { weekStartsOn });
+      const newWeekKey = format(newWs, 'yyyy-MM-dd');
+      const newDayIndex = differenceInDays(targetDate, newWs);
+      const newOccDate = format(targetDate, 'yyyy-MM-dd');
+
+      applyEdit(event.id, {
+        weekKey: newWeekKey,
+        dayIndex: newDayIndex,
+        occDate: newOccDate,
+      });
+    }
+  };
+
+  const handleHeaderCreateClick = (_e?: React.MouseEvent<HTMLButtonElement>) => {
+    openCreateForDate(new Date());
   };
 
   const dragRef = useRef<{
@@ -1182,7 +1573,7 @@ export default function DailyPlanner() {
     // on the first scroll.
     if (isPhoneRef.current) return;
     const margin = 8;
-    const mw = menuEl.offsetWidth || 200;
+    const mw = menuSizeRef.current.width || menuEl.offsetWidth || DEFAULT_MENU_WIDTH;
     const mh = menuEl.offsetHeight || 300;
     const anchor = document.querySelector(`[data-event-id="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`) as HTMLElement | null;
     let x: number, y: number;
@@ -1206,10 +1597,29 @@ export default function DailyPlanner() {
     menuEl.style.top = `${y}px`;
   }, []);
 
-  // â”€â”€ Scroll preservation across page navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Scroll preservation across page navigation & calendar views ──────────
   const HOME_SCROLL_KEY = 'planner-home-scroll-pos';
   const isUnmountingRef = useRef(false);
   const isRestoringScrollRef = useRef(false);
+  const isRestoringViewScrollRef = useRef(false);
+  const viewScrollMapRef = useRef<Record<string, { top: number; left: number }>>({});
+  const activeCalendarViewRef = useRef<CalendarView>(calendarView);
+
+  useEffect(() => {
+    activeCalendarViewRef.current = calendarView;
+  }, [calendarView]);
+
+  /** Smoothly switch calendar views while remembering the current view's scroll offset */
+  const switchCalendarView = useCallback((next: CalendarView | ((prev: CalendarView) => CalendarView)) => {
+    if (mainRef.current) {
+      viewScrollMapRef.current[activeCalendarViewRef.current] = {
+        top: mainRef.current.scrollTop,
+        left: mainRef.current.scrollLeft,
+      };
+    }
+    setDirection(0);
+    setCalendarView(next);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -1258,8 +1668,16 @@ export default function DailyPlanner() {
       batchDragRef.current = null;
       createDragRef.current = null;
     }
-    if (isUnmountingRef.current || isRestoringScrollRef.current) return;
+    if (isUnmountingRef.current || isRestoringScrollRef.current || isRestoringViewScrollRef.current) return;
     if (mainRef.current) {
+      const top = mainRef.current.scrollTop;
+      const left = mainRef.current.scrollLeft;
+
+      // Keep per-view scroll position recorded so returning to this view resumes exactly here
+      if (top > 0 || mainRef.current.scrollHeight > mainRef.current.clientHeight + 10) {
+        viewScrollMapRef.current[activeCalendarViewRef.current] = { top, left };
+      }
+
       if (scrollSaveTimeoutRef.current) window.clearTimeout(scrollSaveTimeoutRef.current);
       scrollSaveTimeoutRef.current = window.setTimeout(() => {
         if (!mainRef.current) return;
@@ -1359,6 +1777,9 @@ export default function DailyPlanner() {
     const dy = e.clientY - r.top;
     setMenuPinned(true);
     menuPinnedRef.current = true;
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+
     const onMove = (ev: MouseEvent) => {
       const margin = 8;
       const mw = menuEl.offsetWidth, mh = menuEl.offsetHeight;
@@ -1369,12 +1790,126 @@ export default function DailyPlanner() {
       menuPosRef.current = { x, y };
     };
     const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
       if (menuPosRef.current) setMenuPos(menuPosRef.current);
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     };
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+  };
+
+  // Resize the popup from its corner or edges.
+  const startMenuResize = (e: React.MouseEvent, direction: 'se' | 'e' | 's') => {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuEl = menuRef.current;
+    if (!menuEl) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startRect = menuEl.getBoundingClientRect();
+    const startW = startRect.width;
+    const startH = startRect.height;
+    const minW = 270;
+    const minH = 200;
+    const maxW = Math.min(750, window.innerWidth - startRect.left - 8);
+    const maxH = Math.min(window.innerHeight - startRect.top - 8, window.innerHeight - 16);
+
+    let curW = startW;
+    let curH = startH;
+
+    const cursorStyle = direction === 'se' ? 'nwse-resize' : direction === 'e' ? 'ew-resize' : 'ns-resize';
+    document.body.style.cursor = cursorStyle;
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (direction === 'se' || direction === 'e') {
+        const deltaX = ev.clientX - startX;
+        curW = Math.max(minW, Math.min(maxW, Math.round(startW + deltaX)));
+        menuEl.style.width = `${curW}px`;
+      }
+      if (direction === 'se' || direction === 's') {
+        const deltaY = ev.clientY - startY;
+        curH = Math.max(minH, Math.min(maxH, Math.round(startH + deltaY)));
+        menuEl.style.height = `${curH}px`;
+        menuEl.style.maxHeight = `${curH}px`;
+      }
+    };
+
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const nextSize = {
+        width: curW,
+        height: (direction === 'se' || direction === 's') ? curH : menuSizeRef.current.height,
+      };
+      setMenuSize(nextSize);
+      try {
+        localStorage.setItem('planner-event-menu-size', JSON.stringify(nextSize));
+      } catch (_) {}
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // Resize the month grid from its bottom-right corner.
+  const startMonthGridResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const el = monthGridRef.current;
+    if (!el) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startRect = el.getBoundingClientRect();
+    const startW = startRect.width;
+    const startH = startRect.height;
+    const minW = 400;
+    const minH = 250;
+
+    let curW = startW;
+    let curH = startH;
+
+    document.body.style.cursor = 'nwse-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      const deltaX = ev.clientX - startX;
+      const deltaY = ev.clientY - startY;
+      curW = Math.max(minW, Math.round(startW + deltaX));
+      curH = Math.max(minH, Math.round(startH + deltaY));
+      el.style.width = `${curW}px`;
+      el.style.height = `${curH}px`;
+      el.style.maxWidth = `${curW}px`;
+      el.style.maxHeight = `${curH}px`;
+    };
+
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const nextSize = { width: curW, height: curH };
+      setMonthGridSize(nextSize);
+      try { localStorage.setItem(MONTH_GRID_LS_KEY, JSON.stringify(nextSize)); } catch (_) {}
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  const resetMonthGridSize = () => {
+    setMonthGridSize(null);
+    try { localStorage.removeItem(MONTH_GRID_LS_KEY); } catch (_) {}
+    if (monthGridRef.current) {
+      monthGridRef.current.style.width = '';
+      monthGridRef.current.style.height = '';
+      monthGridRef.current.style.maxWidth = '';
+      monthGridRef.current.style.maxHeight = '';
+    }
   };
 
   // Google Calendar Integration Functions & Hooks
@@ -1711,6 +2246,56 @@ export default function DailyPlanner() {
   // Long-lived mouse handlers read the visible columns through a ref.
   const visibleColsRef = useRef<number[]>(visibleCols);
   visibleColsRef.current = visibleCols;
+
+  // Restore scroll position when transitioning between calendar views (e.g. Month <-> Custom preview)
+  const prevCalendarViewRef = useRef<CalendarView>(calendarView);
+  useLayoutEffect(() => {
+    const prevView = prevCalendarViewRef.current;
+    prevCalendarViewRef.current = calendarView;
+
+    const saved = viewScrollMapRef.current[calendarView];
+    if (!saved || typeof saved.top !== 'number' || saved.top <= 0) {
+      return undefined;
+    }
+
+    isRestoringViewScrollRef.current = true;
+    let frameCount = 0;
+    let rafId = 0;
+
+    const tryRestore = () => {
+      if (!mainRef.current) return;
+      const el = mainRef.current;
+      el.scrollTop = saved.top;
+      if (typeof saved.left === 'number') {
+        el.scrollLeft = saved.left;
+      }
+      updateScrollState();
+
+      // If the element hasn't gained full scrollable height yet, keep attempting until laid out
+      if (Math.abs(el.scrollTop - saved.top) > 5 && frameCount < 30) {
+        frameCount++;
+        rafId = requestAnimationFrame(tryRestore);
+      } else {
+        window.setTimeout(() => {
+          isRestoringViewScrollRef.current = false;
+        }, 60);
+      }
+    };
+
+    tryRestore();
+    rafId = requestAnimationFrame(tryRestore);
+    const t1 = window.setTimeout(tryRestore, 20);
+    const t2 = window.setTimeout(tryRestore, 60);
+    const t3 = window.setTimeout(tryRestore, 140);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+      isRestoringViewScrollRef.current = false;
+    };
+  }, [calendarView, customFrom, customTo, updateScrollState]);
   const slots       = useMemo(() => generateSlots(interval, dayStartH, dayEndH), [interval, dayStartH, dayEndH]);
   const sh          = SLOT_H[interval];
   const totalH      = slots.length * sh;
@@ -1965,6 +2550,13 @@ export default function DailyPlanner() {
   // When scrolled, compact the day header and hide empty all-day/tasks rows.
   const hasAnyAllDayEvents = maxAllDayRowIndex > 0;
   const hasAnyDatedTasks   = maxTasksInAnyCol > 0;
+  // The pinned mini focus strip lives ABOVE the day headers, so every sticky
+  // band in the grid is offset by its height. The offset does not depend on
+  // `isScrolled` — if it did, the whole header stack would jump 34px the moment
+  // the strip appeared. Phones already fold the banner into a one-row button,
+  // so the strip is desktop-only.
+  const focusMiniEnabled = isTimelineView && !isPhone;
+  const focusMiniBarH    = focusMiniEnabled && focusMiniMode === 'mini' ? 34 : 0;
   const stickyHeaderH  = isScrolled ? HEADER_COMPACT_PX : HEADER_PX;
   const stickyAllDayH  = isScrolled && !hasAnyAllDayEvents ? 0 : allDayHeight;
   const stickyTasksH   = isScrolled && !hasAnyDatedTasks ? 0 : taskRowHeight;
@@ -2755,13 +3347,13 @@ export default function DailyPlanner() {
   const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
-  // A day column spans dayStartH â†’ dayStartH+24 (e.g. 7am â†’ 7am). So between
+  // A day column spans dayStartH -> dayStartH+24 (e.g. 7am -> 7am). So between
   // midnight and the day-start hour, "now" belongs to the PREVIOUS calendar day's
   // column, not today's — otherwise the red line lands a whole day too far right.
-  const nowOwnerDate = nowMin < dayStartMin ? subDays(nowDate, 1) : nowDate;
+  const nowLineColumnDate = nowMin < dayStartMin ? subDays(nowDate, 1) : nowDate;
   // As a column OFFSET from the week start, so the custom view's out-of-week
   // columns can host the now-line too; -1 when "now" isn't on screen at all.
-  const nowOffset = differenceInDays(startOfDay(nowOwnerDate), weekStart);
+  const nowOffset = differenceInDays(startOfDay(nowLineColumnDate), weekStart);
   const nowColIdx = visibleCols.includes(nowOffset) ? nowOffset : -1;
   const liveLineOnScreen = nowColIdx >= 0 && nowInView;
 
@@ -2771,18 +3363,19 @@ export default function DailyPlanner() {
     const line = nowLineRef.current;
     if (!line) { setShowLiveBtn(false); return; }
     const lineRect = line.getBoundingClientRect();
-    // Fixed viewport bounds: below the sticky app header (~56px), above the bottom.
+    // Fixed viewport bounds: below the sticky app header (~56px), above the bottom (including mobile nav bar).
     const topBound = 96;
-    const bottomBound = window.innerHeight - 32;
+    const bottomNavH = isPhoneRef.current ? 90 : 36;
+    const bottomBound = window.innerHeight - bottomNavH;
     const visible = lineRect.top >= topBound && lineRect.top <= bottomBound;
     setShowLiveBtn(!visible);
   }, []);
 
-  // Away from "now" entirely â†’ the pill is the way back, so it should always be
+  // Away from "now" entirely -> the pill is the way back, so it should always be
   // offered (there's no now-line on screen to scroll to at all). Day view is away
   // whenever the shown day isn't today; week view whenever the week differs.
   const viewingAnotherWeek = calendarView === 'day'
-    ? !isSameDay(currentDate, nowOwnerDate)
+    ? !isSameDay(currentDate, nowDate)
     : viewedWeekKey !== currentRealWeekKey;
 
   useEffect(() => {
@@ -3219,6 +3812,7 @@ export default function DailyPlanner() {
       if (!data || typeof data !== 'object' || Object.keys(data).length === 0) { timerHydratedRef.current = true; return; }
       const incoming = coerceFocusTimer(data);
       const json = focusTimerIdentity(incoming);
+      const isFirstHydration = !timerHydratedRef.current;
       timerHydratedRef.current = true;
       if (json === lastTimerJsonRef.current) return; // our own echo / no change
       // Stamped before our own last write ⇒ it IS an earlier write of ours coming
@@ -3232,6 +3826,10 @@ export default function DailyPlanner() {
       lastTimerJsonRef.current = json;
       lastTimerPushKeyRef.current = focusTimerPushKey(incoming);
       lastTransitionKeyRef.current = focusTimerTransitionKey(incoming);
+      if (isFirstHydration) {
+        prevRunningRef.current = incoming.isRunning;
+        prevSessionRef.current = incoming.sessionStartedAt ?? null;
+      }
       setFocusTimer(incoming);
     };
 
@@ -3614,7 +4212,7 @@ export default function DailyPlanner() {
     const prevSession = prevSessionRef.current;
     prevRunningRef.current = running;
     prevSessionRef.current = session;
-    if (prevRunning === null) return; // first render — nothing to compare against
+    if (prevRunning === null || !timerHydratedRef.current) return; // first render or unhydrated — nothing to compare against
 
     let slot: FocusCueSlot | null = null;
     if (running && !prevRunning) {
@@ -3627,6 +4225,10 @@ export default function DailyPlanner() {
       else slot = 'pause';
     }
     if (!slot) return;
+
+    // Reject stale cues (e.g. mobile app opening or waking while a session is already in progress)
+    if (!isFocusCueFresh(focusTimer, slot)) return;
+
     const cue = focusCuesRef.current[slot];
     if (cue === 'none') return;
     // If the claim can't be reached (dev-server restart), only the window that
@@ -3635,7 +4237,7 @@ export default function DailyPlanner() {
     claimFocusCue(focusCueKey(slot, focusTimer), () => playFocusCue(cue), {
       playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000,
     });
-  }, [focusTimer, focusRemainingSeconds]);
+  }, [focusTimer]);
 
   const startFocus = () => {
     const startedAt = new Date().toISOString();
@@ -3969,9 +4571,11 @@ export default function DailyPlanner() {
       isInitialMount.current = false;
       return;
     }
+    if (!eventsLoadedRef.current) return;
 
     lastLocalEventsWriteRef.current = Date.now();
-    fetch('/api/events', {
+    const url = Object.keys(events).length === 0 ? '/api/events?force=1' : '/api/events';
+    fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(events),
@@ -3986,7 +4590,8 @@ export default function DailyPlanner() {
     if (!tasksLoadedRef.current) return;
     localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(tasks));
     lastLocalTasksWriteRef.current = Date.now();
-    fetch('/api/tasks', {
+    const url = Object.keys(tasks).length === 0 ? '/api/tasks?force=1' : '/api/tasks';
+    fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(tasks),
@@ -4212,6 +4817,7 @@ export default function DailyPlanner() {
         );
       });
   };
+  useEffect(() => { try { localStorage.setItem(FOCUS_MINI_MODE_KEY, focusMiniMode); } catch (_) {} }, [focusMiniMode]);
   useEffect(() => { localStorage.setItem(INTERVAL_KEY, String(interval)); }, [interval]);
   useEffect(() => { localStorage.setItem(DARK_MODE_KEY, String(darkMode)); }, [darkMode]);
   useEffect(() => { localStorage.setItem(TIME_FORMAT_KEY, timeFormat); }, [timeFormat]);
@@ -4349,6 +4955,8 @@ export default function DailyPlanner() {
           ['today',         () => navRef.current.today()],
           ['goToLive',      () => navRef.current.goToLive()],
           ['toggleView',    () => navRef.current.toggleView()],
+          ['customView',    () => navRef.current.customView()],
+          ['monthView',     () => navRef.current.monthView()],
           ['focusAnalysis', () => navRef.current.toggleAnalysis()],
           ['openSettings',  () => navRef.current.toggleSettings()],
           ['openWidget',    () => navRef.current.openWidget()],
@@ -5205,11 +5813,22 @@ export default function DailyPlanner() {
     const end24    = (start24 + dur) % 1440;
     const id       = uid();
     const defaultCat = categories.find(c => c.isDefault);
+    const isNoDur = Boolean(defaultCat?.defaultNoDuration || defaultCat?.defaultDurationMin === 0);
     const itemColor = defaultCat ? defaultCat.color : 'sage';
     const itemCatId = defaultCat ? defaultCat.id : undefined;
     const itemNoCheck = defaultCat?.defaultNoCheckbox ?? false;
     createStamped(
-      { id, dayIndex: dayIdx, startTime: minToTime(start24), endTime: minToTime(end24), content: '', color: itemColor, categoryId: itemCatId, noCheckbox: itemNoCheck },
+      {
+        id,
+        dayIndex: dayIdx,
+        startTime: minToTime(start24),
+        endTime: isNoDur ? minToTime(start24) : minToTime(end24),
+        content: '',
+        color: itemColor,
+        categoryId: itemCatId,
+        noCheckbox: itemNoCheck,
+        noDuration: isNoDur,
+      },
       { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } },
     );
   };
@@ -5389,8 +6008,14 @@ export default function DailyPlanner() {
     if (didDragRef.current) return;
     // Position popover to the right of the event block; fall back to left if near right edge
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const x    = rect.right + 6;
-    const y    = rect.top;
+    const mw = menuSizeRef.current.width || DEFAULT_MENU_WIDTH;
+    const margin = 8;
+    let x = rect.right + 6;
+    if (x + mw > window.innerWidth - margin) x = rect.left - mw - 6;
+    x = Math.max(margin, Math.min(x, window.innerWidth - mw - margin));
+    let y = rect.top;
+    const mh = 440;
+    y = Math.max(margin, Math.min(y, window.innerHeight - mh - margin));
     setMenuPinned(false);       // anchor to this event (until the user drags it)
     setMenuId(ev.id);
     setMenuPos({ x, y });
@@ -5408,13 +6033,8 @@ export default function DailyPlanner() {
     const updatedDates = completedDates.includes(dateStr)
       ? completedDates.filter(d => d !== dateStr)
       : [...completedDates, dateStr];
-    const updatedEvents = { ...prev, [masterId]: { ...ev, completedDates: updatedDates } };
+    const updatedEvents = { ...prev, [masterId]: { ...ev, completedDates: updatedDates, updatedAt: Date.now() } };
     writeEvents(updatedEvents);
-    fetch('/api/events', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedEvents),
-    }).catch(err => console.error("Failed to save checkbox state:", err));
   };
 
   const deleteEvent = (id: string) => {
@@ -5440,7 +6060,7 @@ export default function DailyPlanner() {
   // â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); setMenuId(null); };
   const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
-  const goToday = () => { setDirection(0);  setCurrentDate(nowOwnerDate);          setEditingId(null); setMenuId(null); };
+  const goToday = () => { setDirection(0);  setCurrentDate(nowDate);          setEditingId(null); setMenuId(null); };
   // View-aware prev/next: one unit of whatever is currently on screen.
   const navStep = (dir: -1 | 1) => {
     setDirection(dir);
@@ -5472,9 +6092,8 @@ export default function DailyPlanner() {
   const navPrev = () => (showFocusAnalysis ? analysisStep(-1) : navStep(-1));
   const navNext = () => (showFocusAnalysis ? analysisStep(1)  : navStep(1));
 
-  // Ctrl+wheel steps along day â†’ week â†’ month â†’ year (or week â†’ month â†’ year on analysis screen).
+  // Ctrl+wheel steps along day → week → month → year (or week → month → year on analysis screen).
   const stepCalendarZoom = useCallback((dir: -1 | 1) => {
-    setDirection(0);
     setEditingId(null);
     setMenuId(null);
     if (showFocusAnalysis) {
@@ -5484,12 +6103,12 @@ export default function DailyPlanner() {
         return tabs[clamp(i + dir, 0, tabs.length - 1)];
       });
     } else {
-      setCalendarView(v => {
+      switchCalendarView(v => {
         const i = CALENDAR_VIEWS.indexOf(v);
         return CALENDAR_VIEWS[clamp(i + dir, 0, CALENDAR_VIEWS.length - 1)];
       });
     }
-  }, [showFocusAnalysis]);
+  }, [showFocusAnalysis, switchCalendarView]);
 
   // Keep the shortcut runner pointed at the current closures.
   navRef.current = {
@@ -5506,11 +6125,21 @@ export default function DailyPlanner() {
     },
     goToLive: () => { setShowFocusAnalysis(false); scrollToLive(); },
     toggleView: () => {
-      setDirection(0);
       if (showFocusAnalysis) {
         setAnalysisTab(t => (t === 'week' ? 'month' : 'week'));
       } else {
-        setCalendarView(v => (v === 'week' ? 'month' : 'week'));
+        switchCalendarView(v => (v === 'week' ? 'month' : 'week'));
+      }
+    },
+    customView: () => {
+      setShowFocusAnalysis(false);
+      switchCalendarView('custom');
+    },
+    monthView: () => {
+      if (showFocusAnalysis) {
+        setAnalysisTab('month');
+      } else {
+        switchCalendarView('month');
       }
     },
     toggleAnalysis: () => setShowFocusAnalysis(v => !v),
@@ -5521,7 +6150,7 @@ export default function DailyPlanner() {
     toggleHelp: () => setShowShortcutHelp(v => !v),
   };
 
-  // â”€â”€ Ctrl+wheel = calendar zoom, Ctrl +/âˆ’ = app zoom â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Ctrl+wheel = calendar zoom, Ctrl +/− = app zoom ─────────────────────────
   // Both replace the browser's own page zoom, which is why every branch calls
   // preventDefault. Listeners are non-passive so preventDefault actually applies.
   const stepZoomRef = useRef(stepCalendarZoom);
@@ -5680,6 +6309,7 @@ export default function DailyPlanner() {
 
   // â”€â”€ Display props (override during drag/resize/batch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const normDuration = (ev: PlannerEvent) => {
+    if (ev.noDuration || ev.endTime === ev.startTime) return 10;
     const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
     let en = normalizeMin(timeToMin(ev.endTime), dayStartH);
     if (en <= s) en += 1440;
@@ -5849,7 +6479,9 @@ export default function DailyPlanner() {
                       : calendarView === 'year'
                         ? format(currentDate, 'yyyy')
                         : calendarView === 'custom'
-                          ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d')}`
+                          ? dayAt(customFrom).getFullYear() === dayAt(customTo - 1).getFullYear()
+                            ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
+                            : `${format(dayAt(customFrom), 'MMM d, yyyy')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
                           : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                   </div>
                   <div className="text-[10px] font-medium leading-tight" style={{ color: headerInactive }}>
@@ -5991,7 +6623,9 @@ export default function DailyPlanner() {
                     : calendarView === 'year'
                       ? format(currentDate, 'yyyy')
                       : calendarView === 'custom'
-                        ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d')}`
+                        ? dayAt(customFrom).getFullYear() === dayAt(customTo - 1).getFullYear()
+                          ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
+                          : `${format(dayAt(customFrom), 'MMM d, yyyy')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
                         : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                 </span>
                 {/* Which week of the shown month this is (week view only). */}
@@ -6010,12 +6644,32 @@ export default function DailyPlanner() {
                   <button onClick={navNext}  title={`Next ${calendarView} (${formatCombo(shortcuts.nextWeek)})`} className="p-1.5 rounded-md text-muted-foreground transition-colors" onMouseEnter={e=>(e.currentTarget.style.background=hoverBg)} onMouseLeave={e=>(e.currentTarget.style.background='transparent')}><ChevronRight size={15}/></button>
                 </div>
                 {/* Day / Week / Month / Year / Custom switch (Ctrl+wheel steps the first four) */}
-                <div className="flex rounded-lg p-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }} title="Ctrl + scroll to zoom between these">
+                <div className="flex rounded-lg p-0.5 shadow-sm relative" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }} title="Ctrl + scroll to zoom between these">
                   {CALENDAR_VIEW_BUTTONS.map(v => {
                     const active = calendarView === v;
+                    const shortcutHint = v === 'custom' ? shortcuts.customView : v === 'month' ? shortcuts.monthView : undefined;
+                    const title = shortcutHint ? `${v} (${formatCombo(shortcutHint)})` : undefined;
                     return (
-                      <button key={v} onClick={() => { setDirection(0); setCalendarView(v); }} className="px-2.5 py-1 text-xs font-semibold rounded-md transition-smooth duration-200 capitalize"
-                        style={{ background: active ? (darkMode ? 'rgba(255,255,255,0.14)' : '#fff') : 'transparent', color: active ? (darkMode ? '#f5f5f5' : menuText) : headerInactive, boxShadow: active ? '0 1px 3px rgba(0,0,0,0.15)' : 'none' }}>
+                      <button
+                        key={v}
+                        onClick={() => switchCalendarView(v)}
+                        className="relative px-2.5 py-1 text-xs font-semibold rounded-md transition-colors duration-150 capitalize z-10"
+                        title={title}
+                        style={{
+                          color: active ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
+                        }}
+                      >
+                        {active && (
+                          <motion.div
+                            layoutId="activeCalendarViewPill"
+                            className="absolute inset-0 rounded-md -z-10 pointer-events-none"
+                            style={{
+                              background: darkMode ? 'rgba(255,255,255,0.16)' : '#ffffff',
+                              boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+                            }}
+                            transition={{ type: 'spring', stiffness: 900, damping: 45 }}
+                          />
+                        )}
                         {v}
                       </button>
                     );
@@ -6118,7 +6772,7 @@ export default function DailyPlanner() {
             <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
-            {/* App zoom stepper — mirrors Ctrl +/âˆ’ (Ctrl+0 resets). */}
+            {/* App zoom stepper — mirrors Ctrl +/− (Ctrl+0 resets). */}
             <div className="flex items-center rounded-lg shadow-sm overflow-hidden" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }} title="Zoom (Ctrl + / Ctrl − , Ctrl 0 to reset)">
               <button
                 onClick={() => setAppZoom(z => clampZoom(z - ZOOM_STEP))}
@@ -6296,16 +6950,21 @@ export default function DailyPlanner() {
                               <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color, opacity: done ? 1 : 0.75 }}>
                                 {done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
                               </span>
-                              <span
-                                className="text-[12px] font-semibold flex-1"
-                                style={{
-                                  color: isNext ? prayer.color : menuText,
-                                  opacity: passed ? 0.5 : 1,
-                                  textDecoration: done ? 'line-through' : 'none',
-                                }}
-                              >
-                                {p.label}
-                              </span>
+                              <div className="flex-1 min-w-0 flex items-center gap-1.5">
+                                <span
+                                  className="text-[12px] font-semibold truncate"
+                                  style={{
+                                    color: isNext ? prayer.color : menuText,
+                                    opacity: passed ? 0.5 : 1,
+                                    textDecoration: done ? 'line-through' : 'none',
+                                  }}
+                                >
+                                  {p.label}
+                                </span>
+                                {isNext && (
+                                  <PrayerNextBadge minutes={p.minutes} color={prayer.color} />
+                                )}
+                              </div>
                               <span
                                 className="text-[12px] font-bold tabular-nums"
                                 style={{ color: isNext ? prayer.color : menuText, opacity: passed ? 0.5 : 0.9 }}
@@ -6409,7 +7068,7 @@ export default function DailyPlanner() {
       {/* â”€â”€ Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <main
         ref={mainRef}
-        className={`flex-1 min-h-0 touch-scroll ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'}`}
+        className={`flex-1 min-h-0 touch-scroll ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'} ${(calendarView === 'month' || calendarView === 'year') && !showFocusAnalysis ? 'flex flex-col' : ''}`}
         // Room for the phone's tab bar and the home indicator beneath it, so the
         // last event of the day isn't permanently hidden behind the Tasks button.
         style={{
@@ -6422,15 +7081,15 @@ export default function DailyPlanner() {
           {!showFocusAnalysis ? (
             <motion.div
               key="calendar-view-container"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.08, ease: 'easeOut' }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.05, ease: 'easeOut' }}
               // The 900px floor is a desktop guard against the toolbar wrapping
               // into a mess; on a phone it would simply force a sideways scroll
               // of the entire page, so a narrow screen drops it and tightens the
               // padding — every pixel of width is a pixel of the day.
-              className={isCompact ? 'w-full max-w-full px-1.5 py-2' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
+              className={isCompact ? 'w-full max-w-full px-1.5 py-2' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
             >
           {/* ── Focus banner ────────────────────────────────────────────────
               Expanded it is ~200px — a quarter of a phone screen spent before
@@ -6564,7 +7223,7 @@ export default function DailyPlanner() {
               <div className={`flex-1 min-w-0 items-end gap-2 h-20 ${isPhone ? 'hidden' : 'flex'}`}>
                 {focusStats.perDay.map(day => {
                   const pct = day.seconds > 0 ? Math.max(5, (day.seconds / focusStats.maxSeconds) * 100) : 0;
-                  const active = isSameDay(day.day, nowOwnerDate);
+                  const active = isSameDay(day.day, nowDate);
                   return (
                     <div key={day.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0 relative group">
                       {/* 3-dots day options menu on hover */}
@@ -6674,7 +7333,7 @@ export default function DailyPlanner() {
                               ? 'rgba(245,158,11,0.22)'
                               : (active ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.24)' : 'rgba(0,0,0,0.18)'),
                             border: day.isExcluded
-                              ? '1px dashed #f59e0b'
+                              ? '1px solid #f59e0b'
                               : `1px solid ${active ? 'rgba(96,165,250,0.70)' : surfaceBdr}`,
                           }}
                         />
@@ -6889,28 +7548,160 @@ export default function DailyPlanner() {
             </div>
           </section>
           )}
+
+          {/* -- Pinned mini focus station ------------------------------------
+              The full banner scrolls away with the page. Rather than leaving
+              nothing behind, a slim strip pins itself just above the day
+              headers once the banner is gone: countdown, transport, today and
+              this week. The chevron on its right folds it away to a small tab,
+              and that choice is remembered per device (localStorage). The
+              wrapper is a ZERO-HEIGHT sticky element with the bar absolutely
+              positioned inside it, so appearing and disappearing never shifts
+              the document -- the space it occupies is already reserved by the
+              `focusMiniBarH` offset baked into every sticky band below. */}
+          {focusMiniEnabled && (
+            <div className="sticky top-0 z-50" style={{ height: 0 }}>
+              <AnimatePresence initial={false}>
+                {isScrolled && focusMiniMode === 'mini' && (
+                  <motion.div
+                    key="focus-mini-bar"
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    transition={{ duration: 0.14, ease: 'easeOut' }}
+                    className="absolute left-0 right-0 top-0 flex items-center gap-3 px-3 rounded-t-xl border border-b-0 overflow-hidden"
+                    style={{
+                      height: focusMiniBarH,
+                      borderColor: surfaceBdr,
+                      background: darkMode
+                        ? 'linear-gradient(135deg, rgba(20,24,32,0.97), rgba(18,26,22,0.97))'
+                        : 'linear-gradient(135deg, rgba(243,247,255,0.98), rgba(240,250,244,0.98))',
+                      backdropFilter: 'blur(8px)',
+                    }}
+                  >
+                    <Target size={13} style={{ color: '#60a5fa', flexShrink: 0 }} />
+                    <span
+                      className="text-[15px] font-semibold tabular-nums leading-none flex-shrink-0"
+                      style={{ color: focusCelebrate ? '#4ade80' : focusTimer.isRunning ? '#60a5fa' : menuText }}
+                      title="Focus countdown"
+                    >
+                      {hardwareArmSeconds > 0 ? `${hardwareArmSeconds}s` : formatCountdown(focusRemainingSeconds)}
+                    </span>
+                    <div
+                      className="w-24 h-1.5 rounded-full overflow-hidden flex-shrink-0"
+                      style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}
+                    >
+                      <div
+                        className="h-full rounded-full transition-smooth duration-300"
+                        style={{
+                          width: `${focusProgressPct}%`,
+                          background: focusTimer.isRunning ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)',
+                        }}
+                      />
+                    </div>
+                    <button
+                      onClick={toggleFocus}
+                      className="h-6 px-2.5 rounded-md flex items-center justify-center gap-1 text-[11px] font-semibold transition-smooth active:scale-[0.98] flex-shrink-0"
+                      style={{
+                        background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
+                        border: `1px solid ${focusTimer.isRunning ? 'rgba(245,158,11,0.35)' : '#2563eb'}`,
+                        color: focusTimer.isRunning ? '#fbbf24' : '#ffffff',
+                      }}
+                    >
+                      {hardwareArmSeconds > 0 ? <X size={11} /> : focusTimer.isRunning ? <Pause size={11} /> : <Play size={11} />}
+                      {hardwareArmSeconds > 0 ? 'Cancel' : focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
+                    </button>
+                    <button
+                      onClick={stopFocusByHand}
+                      disabled={focusElapsedSeconds <= 0}
+                      className="h-6 px-2.5 rounded-md flex items-center justify-center text-[11px] font-semibold transition-smooth active:scale-[0.98] flex-shrink-0"
+                      title="Stop and log focus time"
+                      style={{
+                        background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
+                        border: `1px solid ${focusElapsedSeconds > 0 ? 'rgba(34,197,94,0.35)' : surfaceBdr}`,
+                        color: focusElapsedSeconds > 0 ? '#4ade80' : menuSub,
+                        opacity: focusElapsedSeconds <= 0 ? 0.4 : 1,
+                      }}
+                    >
+                      Stop
+                    </button>
+
+                    <div className="ml-auto flex items-center gap-3 min-w-0">
+                      <span className="flex items-baseline gap-1.5 whitespace-nowrap">
+                        <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Today</span>
+                        <span className="text-[12.5px] font-semibold tabular-nums" style={{ color: menuText }}>
+                          {formatFocusDuration(focusStats.todaySeconds)}
+                        </span>
+                      </span>
+                      <span className="flex items-baseline gap-1.5 whitespace-nowrap">
+                        <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Week</span>
+                        <span className="text-[12.5px] font-semibold tabular-nums" style={{ color: menuText }}>
+                          {formatFocusDuration(focusStats.weekSeconds)}
+                        </span>
+                      </span>
+                      <button
+                        onClick={() => setFocusMiniMode('hidden')}
+                        className="w-6 h-6 rounded-md flex items-center justify-center transition-colors flex-shrink-0"
+                        style={{ color: menuSub }}
+                        onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        title="Hide the mini focus bar"
+                      >
+                        <ChevronUp size={14} />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* Folded away: a small triangle tab, the only way back. */}
+                {isScrolled && focusMiniMode === 'hidden' && (
+                  <motion.button
+                    key="focus-mini-tab"
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={{ duration: 0.14, ease: 'easeOut' }}
+                    onClick={() => setFocusMiniMode('mini')}
+                    className="absolute right-3 top-0 h-[15px] w-9 flex items-center justify-center rounded-b-md border border-t-0 shadow-sm"
+                    style={{
+                      borderColor: surfaceBdr,
+                      color: menuSub,
+                      background: darkMode ? 'rgba(20,24,32,0.95)' : 'rgba(245,248,255,0.97)',
+                    }}
+                    title="Show the mini focus bar"
+                  >
+                    <ChevronDown size={12} />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
           <AnimatePresence mode="wait">
             {isTimelineView ? (
               <motion.div
                 key="week-view-wrapper"
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.08, ease: 'easeOut' }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.05, ease: 'easeOut' }}
               >
                 <AnimatePresence initial={false} custom={direction} mode="wait">
             <motion.div
-              // Day view slides per day; week view per week.
+              // Day view slides per day; week view per week; custom view per range.
               key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : isCustomView ? `c:${weekStart.toISOString()}:${customFrom}:${customTo}` : `w:${weekStart.toISOString()}`}
               custom={direction}
               variants={{
-                enter:  (d: number) => ({ x: d>0?10:d<0?-10:0, opacity: 0 }),
+                enter: (d: number) => (d !== 0 ? { x: d > 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
                 center: { x: 0, opacity: 1 },
-                exit:   (d: number) => ({ x: d<0?10:d>0?-10:0, opacity: 0 }),
+                exit: (d: number) => (d !== 0 ? { x: d < 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
               }}
-              initial="enter" animate="center" exit="exit"
-              // Snappy: holding the week keys should feel instant, not springy.
-              transition={{ x: { type: 'spring', stiffness: 2200, damping: 65, mass: 0.2 }, opacity: { duration: 0.04 } }}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{
+                x: { type: 'spring', stiffness: 2600, damping: 75, mass: 0.15 },
+                opacity: { duration: 0.04, ease: 'easeOut' },
+              }}
               ref={gridCardRef}
               className={`flex border border-border/60 rounded-xl shadow-md relative z-10 ${
                 scrollsSideways ? 'overflow-x-auto overflow-y-visible no-scrollbar touch-scroll-x' : 'overflow-clip'
@@ -6973,13 +7764,13 @@ export default function DailyPlanner() {
                 }}
               >
                 <div
-                  style={{ height: stickyHeaderH, background: darkMode ? currentDarkTheme.cardBg : '#ffffff', transition: 'height 0.15s ease' }}
-                  className="border-b border-border/50 sticky top-0 z-40"
+                  style={{ height: stickyHeaderH, top: focusMiniBarH, background: darkMode ? currentDarkTheme.cardBg : '#ffffff', transition: 'height 0.15s ease' }}
+                  className="border-b border-border/50 sticky z-40"
                 />
                 <div
                   style={{
                     height: stickyAllDayH,
-                    top: stickyAllDayMain ? stickyHeaderH : undefined,
+                    top: stickyAllDayMain ? focusMiniBarH + stickyHeaderH : undefined,
                     background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
                     overflow: 'hidden',
                     transition: 'height 0.15s ease',
@@ -6994,7 +7785,7 @@ export default function DailyPlanner() {
                   <div
                     style={{
                       height: stickyTasksH,
-                      top: stickyTasksMain ? stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
+                      top: stickyTasksMain ? focusMiniBarH + stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
                       background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
                       overflow: 'hidden',
                       transition: 'height 0.15s ease',
@@ -7034,7 +7825,7 @@ export default function DailyPlanner() {
               >
                 {visibleCols.map((colIdx, slotIdx) => {
                   const day       = dayAt(colIdx);
-                  const today     = isSameDay(day, nowOwnerDate);
+                  const today     = isSameDay(day, nowDate);
                   // The column that actually contains "now" (see nowColIdx: before the
                   // day-start hour that's yesterday's column, not today's).
                   const isNowCol  = colIdx === nowColIdx;
@@ -7166,7 +7957,7 @@ export default function DailyPlanner() {
                   const timedTaskItems = colTimedTasks.map(t => {
                     const s = normalizeMin(timeToMin(t.startTime!), dayStartH);
                     let e = normalizeMin(timeToMin(t.endTime || t.startTime!), dayStartH);
-                    if (e <= s) e = s + 30;
+                    if (e <= s) e = s + (t.endTime ? 30 : 10);
                     return { task: t, key: `task:${t.id}`, startMin: s, endMin: e };
                   });
 
@@ -7204,8 +7995,9 @@ export default function DailyPlanner() {
                       }}>
                       {/* Day header */}
                       <div
-                        className={`flex-shrink-0 flex items-center justify-center border-b relative sticky top-0 z-40 ${isScrolled ? 'gap-1.5' : 'flex-col'} ${today ? 'border-primary/40' : 'border-border/50'}`}
+                        className={`flex-shrink-0 flex items-center justify-center border-b relative sticky z-40 ${isScrolled ? 'gap-1.5' : 'flex-col'} ${today ? 'border-primary/40' : 'border-border/50'}`}
                         style={{
+                          top: focusMiniBarH,
                           height: stickyHeaderH,
                           transition: 'height 0.15s ease',
                           background: today
@@ -7268,7 +8060,7 @@ export default function DailyPlanner() {
                       <div
                         style={{
                           height: stickyAllDayH,
-                          top: stickyAllDayMain ? stickyHeaderH : undefined,
+                          top: stickyAllDayMain ? focusMiniBarH + stickyHeaderH : undefined,
                           background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
                           overflow: 'hidden',
                           transition: 'height 0.15s ease',
@@ -7307,9 +8099,9 @@ export default function DailyPlanner() {
                         <div
                           style={{
                             height: stickyTasksH,
-                            top: stickyTasksMain ? stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
+                            top: stickyTasksMain ? focusMiniBarH + stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
                             background: taskDropCol === colIdx ? `${taskColor}22` : (darkMode ? currentDarkTheme.cardBg : '#ffffff'),
-                            outline: taskDropCol === colIdx ? `1px dashed ${taskColor}` : undefined,
+                            outline: taskDropCol === colIdx ? `1px solid ${taskColor}` : undefined,
                             outlineOffset: -2,
                             overflow: 'hidden',
                             transition: 'height 0.15s ease',
@@ -7382,7 +8174,7 @@ export default function DailyPlanner() {
                                       style={{
                                         height: TASK_CHIP_H,
                                         background: c.bg,
-                                        border: `1px dashed ${c.border}`,
+                                        border: `1px solid ${c.border}`,
                                         opacity: taskDragId === t.id ? 0.4 : done ? 0.5 : 1,
                                         filter: done ? 'saturate(0.4)' : 'none',
                                       }}
@@ -7623,32 +8415,25 @@ export default function DailyPlanner() {
                           return (
                             <div
                               key={p.id}
-                              className="absolute left-0 right-0 z-20 pointer-events-none"
-                              style={{ top, height: 0, opacity: done ? 0.45 : 1 }}
+                              className="absolute left-0 right-0 z-20 pointer-events-none flex items-center"
+                              style={{ top: top - 8, height: 16, opacity: done ? 0.45 : 1 }}
                             >
                               <div
-                                className="absolute left-0 right-0"
-                                style={{ height: 0, borderTop: `1px dashed ${prayer.color}`, opacity: 0.85 }}
+                                className="flex-1 min-w-0"
+                                style={{ height: 0, borderTop: `1px solid ${prayer.color}`, opacity: 0.85 }}
                               />
                               <button
                                 onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
-                                className="absolute flex items-center gap-1 rounded-full pl-1 pr-1.5 pointer-events-auto"
+                                className="flex-shrink-0 flex items-center gap-1 rounded-full pl-1.5 pr-2 pointer-events-auto transition-transform active:scale-95 mx-1 cursor-pointer"
                                 style={{
-                                  left: 2, top: -7, height: 14,
-                                  // Was `backdropFilter: blur(2px)`. There is one of
-                                  // these per prayer per day column, and every
-                                  // backdrop-filter forces its own compositing layer
-                                  // plus a readback of whatever is behind it — ~35 of
-                                  // them re-rasterising on every frame of any width
-                                  // change. Behind this chip is a flat column and a
-                                  // grid line, so a 2px blur was invisible anyway; a
-                                  // slightly stronger fill looks the same for free.
-                                  background: `${prayer.color}33`,
+                                  height: 15,
+                                  background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
                                   border: `1px solid ${prayer.color}80`,
+                                  boxShadow: `0 1px 3px rgba(0,0,0,${darkMode ? '0.35' : '0.12'})`,
                                 }}
                                 title={`${label}${done ? ' · done' : ''}`}
                               >
-                                <span className="flex items-center" style={{ color: prayer.color }}>
+                                <span className="flex items-center flex-shrink-0" style={{ color: prayer.color }}>
                                   {done ? <CheckCircle2 size={9} /> : <Circle size={9} />}
                                 </span>
                                 <span
@@ -7661,6 +8446,10 @@ export default function DailyPlanner() {
                                   {formatTimeLabel(p.minutes, timeFormat)}
                                 </span>
                               </button>
+                              <div
+                                className="flex-1 min-w-0"
+                                style={{ height: 0, borderTop: `1px solid ${prayer.color}`, opacity: 0.85 }}
+                              />
                             </div>
                           );
                         })}
@@ -7678,32 +8467,16 @@ export default function DailyPlanner() {
                           const isSelected = selectedIds.has(ev.id);
                           const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
                           const isPlaceholder = (ev as any).isPlaceholder;
-                          // A finger's resize grips have to be earned. They used to
-                          // be 22px bands hanging 4px OUTSIDE every block, pinned
-                          // with `touch-action: none`, arming a resize on contact —
-                          // so a swipe that started anywhere near a block's edge
-                          // could neither scroll the day nor move the block, it just
-                          // stretched whatever it landed on. Now they sit inside the
-                          // block, only on blocks with room to spare, and they arm on
-                          // the same hold the body drag uses.
                           const gripH = isTouch ? 16 : (height < 34 ? 6 : 10);
                           const gripsLive = !isTouch || height >= 44;
                           
-                          // While actively dragging/resizing the block must track the cursor
-                          // 1:1 (no easing, or it lags). The moment it settles, let its
-                          // position/size glide to the snapped target for a smooth landing.
                           const isMoving = isDrag || isResize || isBatchDrag;
                           const blockTransition = isMoving
                             ? 'none'
                             : 'box-shadow 140ms ease, outline-color 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), filter 140ms ease';
                           const { bg, border, text, textMuted, boxShadow, accentBar } = chipColors(ev);
-                          // Whether a card has room for its footer (the start–end line,
-                          // and the colour swatches while editing). This is a PIXEL
-                          // threshold on purpose: keying it to the slot height meant a
-                          // 30-minute card lost its times at the 30m grid interval but
-                          // kept them at 5m — same card, same pixels, different result.
                           const tooShort = height < 60;
-                          // Duration always reflects the event's true full start–end, not just this segment.
+
                           const fullStartMin = timeToMin(ev.startTime);
                           const fullEndMin   = timeToMin(ev.endTime);
 
@@ -7732,12 +8505,8 @@ export default function DailyPlanner() {
                           if (eNormEv <= sNormEv) eNormEv += 1440;
                           const spansBoundary = sNormEv < dayStartMin + 1440 && eNormEv > dayStartMin + 1440;
 
-                          // "Live" is scoped to this segment's own on-screen range (each segment lives in a
-                          // different day column, so at most one of tail/head is ever the active one).
                           const isLive   = isNowCol && normNowMin >= item.startMin && normNowMin < item.endMin;
                           const minutesLeft = Math.max(0, isResize && resizeDisp
-                            // Dragging an edge moves the finish line — the countdown has
-                            // to follow it live, not the stored end time.
                             ? resizeDisp.endMin - normNowMin
                             : segKind === 'tail'
                               ? fullEndMin + 1440 - normNowMin
@@ -7750,6 +8519,11 @@ export default function DailyPlanner() {
                             : isResize && resizeDisp
                               ? resizeDisp.endMin - resizeDisp.startMin
                               : eNormEv - sNormEv);
+
+                          const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
+                          const timeDisplayStr = isNoDur
+                            ? formatTimeLabel(activeStart24, timeFormat)
+                            : `${formatTimeLabel(activeStart24, timeFormat)} – ${formatTimeLabel(activeEnd24, timeFormat)}`;
 
                           const durationLabel = durationMin < 60
                             ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
@@ -7774,7 +8548,7 @@ export default function DailyPlanner() {
                             return (
                               <div
                                 key={itemKey}
-                                className={`absolute rounded-lg border-2 border-dashed pointer-events-none z-0`}
+                                className={`absolute rounded-lg border-2 border-solid pointer-events-none z-0`}
                                 style={{
                                   top, height,
                                   left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
@@ -7812,8 +8586,8 @@ export default function DailyPlanner() {
                                 right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
                                 backgroundColor: bg,
                                 borderColor: border,
-                                borderBottomStyle: segKind === 'tail' ? 'dashed' : 'solid',
-                                borderTopStyle: segKind === 'head' ? 'dashed' : 'solid',
+                                borderBottomStyle: 'solid',
+                                borderTopStyle: 'solid',
                                 color: text,
                                 zIndex: isDrag ? 60 : isTouchHolding ? 55 : isEdit||isMenu ? 40 : isSelected ? 30 : 10,
                                 boxShadow: isDrag ? '0 14px 36px rgba(0,0,0,0.38)' : isTouchHolding ? '0 4px 16px rgba(0,0,0,0.24)' : (boxShadow || (lift ? '0 4px 14px rgba(0,0,0,0.18)' : undefined)),
@@ -7853,7 +8627,7 @@ export default function DailyPlanner() {
                               {isDrag && dragDisp && (
                                 <div className="absolute z-50 pointer-events-none" style={{ top: -24, left: '50%', transform: 'translateX(-50%)' }}>
                                   <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
-                                    {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)} ({durationLabel})
+                                    {timeDisplayStr}
                                   </div>
                                 </div>
                               )}
@@ -7871,7 +8645,7 @@ export default function DailyPlanner() {
                               {height < 44 && isHov && !isMoving && (
                                 <div className="absolute z-50 pointer-events-none" style={{ top: -24, left: '50%', transform: 'translateX(-50%)' }}>
                                   <div className="text-[10px] font-semibold px-2 py-0.5 rounded-md whitespace-nowrap shadow-md" style={{ background: text, color: bg, border: `1px solid ${border}` }}>
-                                    {ev.content || 'Untitled'} · {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)} ({durationLabel})
+                                    {ev.content || 'Untitled'} · {timeDisplayStr}
                                   </div>
                                 </div>
                               )}
@@ -7883,15 +8657,8 @@ export default function DailyPlanner() {
                                 </div>
                               )}
 
-                              {/* Top resize handle.
-                                  On touch this strip is 22px tall and spans the
-                                  whole block, and it arms a resize on contact with
-                                  no hold — so while it was always live, every block
-                                  wore two invisible bands that swallowed the swipe
-                                  (`touch-action: none`) and resized the item instead
-                                  of scrolling the day. A finger therefore only gets
-                                  the grips once the block is the active one. */}
-                              {segKind !== 'head' && (!isTouch || gripsLive) && (
+                              {/* Top resize handle. */}
+                              {!isNoDur && segKind !== 'head' && (!isTouch || gripsLive) && (
                                 <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ top: 0, height: gripH, cursor: 'n-resize', marginTop: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: isTouch ? 'manipulation' : 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'top', segKind)}>
                                   <div className="rounded-full transition-opacity duration-150" style={{ width: height < 34 ? 20 : 28, height: height < 34 ? 2 : 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.6 : (height < 34 ? 0 : 0.25), pointerEvents: 'none' }} />
                                 </div>
@@ -7910,10 +8677,6 @@ export default function DailyPlanner() {
                                 const isMicroCard   = height < 26;
                                 const isShortCard   = height >= 26 && height < 44;
                                 const isCompactCard = height >= 44 && height < 64;
-                                // A full card that is only just past the compact cut-off
-                                // (a 30-minute block at the 30m interval, say) keeps the
-                                // full-card layout but not its generous padding — that
-                                // padding ate two of the three lines the title needed.
                                 const isMediumCard  = height >= 64 && height < 104;
                                 return (
                                   <div
@@ -7987,6 +8750,11 @@ export default function DailyPlanner() {
                                             <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                                               {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
                                             </span>
+                                            {isNoDur && (
+                                              <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
+                                                · {timeDisplayStr}
+                                              </span>
+                                            )}
                                           </div>
                                         );
                                       }
@@ -8017,7 +8785,7 @@ export default function DailyPlanner() {
                                               {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
                                             </span>
                                             <span className="text-[10px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
-                                              · {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)}
+                                              · {timeDisplayStr}
                                             </span>
                                           </div>
                                         );
@@ -8051,13 +8819,13 @@ export default function DailyPlanner() {
                                               </span>
                                             </div>
                                             <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-85 leading-none mt-auto flex items-center gap-1 whitespace-nowrap" style={{ color: textMuted }}>
-                                              {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)}
+                                              {timeDisplayStr}
                                               {isLive ? (
                                                 <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                                   <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                                   {minutesLeft}m left
                                                 </span>
-                                              ) : (
+                                              ) : isNoDur ? null : (
                                                 <span>({durationLabel})</span>
                                               )}
                                             </span>
@@ -8071,13 +8839,13 @@ export default function DailyPlanner() {
                                           {/* Top time label */}
                                           {durationMin >= 60 && (
                                             <span className="text-[9.5px] font-semibold tabular-nums flex-shrink-0 mb-0.5 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
-                                              {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)}
+                                              {timeDisplayStr}
                                               {isLive ? (
                                                 <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                                   <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                                   {formatTimeLeft(minutesLeft)}
                                                 </span>
-                                              ) : (
+                                              ) : isNoDur ? null : (
                                                 <span>({durationLabel})</span>
                                               )}
                                             </span>
@@ -8107,13 +8875,13 @@ export default function DailyPlanner() {
                                           </div>
                                           {!tooShort && (
                                             <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: textMuted }}>
-                                              {formatTimeLabel(activeStart24, timeFormat)} – {formatTimeLabel(activeEnd24, timeFormat)}
+                                              {timeDisplayStr}
                                               {isLive ? (
                                                 <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                                   <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                                   {minutesLeft}m left
                                                 </span>
-                                              ) : (
+                                              ) : isNoDur ? null : (
                                                 <span>({durationLabel})</span>
                                               )}
                                             </span>
@@ -8126,7 +8894,7 @@ export default function DailyPlanner() {
                               })()}
 
                               {/* Bottom resize handle — same touch rule as the top one. */}
-                              {segKind !== 'tail' && (!isTouch || gripsLive) && (
+                              {!isNoDur && segKind !== 'tail' && (!isTouch || gripsLive) && (
                                 <div className="absolute left-0 right-0 z-20 flex items-center justify-center pointer-events-auto" style={{ bottom: 0, height: gripH, cursor: 's-resize', marginBottom: isTouch ? 0 : (height < 34 ? 0 : -2), touchAction: isTouch ? 'manipulation' : 'none' }} onPointerDown={(e) => handleResizeMouseDown(e, ev, 'bottom', segKind)}>
                                   <div className="rounded-full transition-opacity duration-150" style={{ width: height < 34 ? 20 : 28, height: height < 34 ? 2 : 3, backgroundColor: text, opacity: isHov||isEdit||isMenu ? 0.6 : (height < 34 ? 0 : 0.25), pointerEvents: 'none' }} />
                                 </div>
@@ -8221,7 +8989,7 @@ export default function DailyPlanner() {
                                 background: c.bg,
                                 // Dashed border + a solid left rail: the two cues that
                                 // survive every card style, including `minimal`.
-                                border: `1.5px dashed ${c.border}`,
+                                border: `1.5px solid ${c.border}`,
                                 borderLeft: `3px solid ${c.border}`,
                                 opacity: taskDragId === t.id ? 0.4 : done ? 0.45 : 1,
                                 filter: done ? 'saturate(0.4)' : 'none',
@@ -8272,7 +9040,7 @@ export default function DailyPlanner() {
                       style={{
                         gridColumn: '1 / -1',
                         gridRow: '1',
-                        top: stickyHeaderH,
+                        top: focusMiniBarH + stickyHeaderH,
                         marginTop: stickyAllDayMain ? stickyHeaderH : 0,
                         height: stickyAllDayH,
                         overflow: 'visible',
@@ -8445,7 +9213,7 @@ export default function DailyPlanner() {
                       style={{
                         top: topBandsHeight + 90,
                         transform: 'translateX(-50%)',
-                        border: `1px dashed ${surfaceBdr}`,
+                        border: `1px solid ${surfaceBdr}`,
                         background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.55)',
                       }}
                     >
@@ -8468,10 +9236,10 @@ export default function DailyPlanner() {
         return (
         <motion.div
           key="year-view-wrapper"
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -6 }}
-          transition={{ duration: 0.08, ease: 'easeOut' }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.05, ease: 'easeOut' }}
           className="rounded-xl border border-border/60 overflow-hidden shadow-md p-4 relative z-10"
           style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
         >
@@ -8482,7 +9250,7 @@ export default function DailyPlanner() {
             {yearMatrix.map(m => (
               <button
                 key={m.monthStart.toISOString()}
-                onClick={() => { setDirection(0); setCurrentDate(m.monthStart); setCalendarView('month'); }}
+                onClick={() => { setCurrentDate(m.monthStart); switchCalendarView('month'); }}
                 title={`Open ${format(m.monthStart, 'MMMM yyyy')}`}
                 // self-start so months with 5 week-rows don't float vertically
                 // centred next to months with 6.
@@ -8512,7 +9280,7 @@ export default function DailyPlanner() {
                 <div className="grid grid-cols-7 gap-[1px]">
                   {m.cells.map(c => {
                     const dim = !isSameMonth(c.date, m.monthStart);
-                    const isTodayCell = isSameDay(c.date, nowOwnerDate);
+                    const isTodayCell = isSameDay(c.date, nowDate);
                     return (
                       <span
                         key={c.date.toISOString()}
@@ -8541,230 +9309,414 @@ export default function DailyPlanner() {
         );
         })()
         ) : (
-        /* â”€â”€ Month overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
-        <motion.div
-          key="month-view-wrapper"
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -6 }}
-          transition={{ duration: 0.08, ease: 'easeOut' }}
-          className="rounded-xl border border-border/60 overflow-hidden shadow-md relative z-10"
-          style={{ background: darkMode ? currentDarkTheme.cardBg : '#ffffff' }}
-        >
-            {/* Weekday header row */}
-            <div className="grid grid-cols-7 border-b border-border/50">
-              {(monthMatrix[0]?.cells ?? []).map(({ date }) => (
-                <div key={date.toISOString()} className="py-2 text-center text-[10px] font-bold uppercase tracking-widest" style={{ color: headerLabel }}>
-                  {format(date, 'EEE')}
-                </div>
-              ))}
-            </div>
-            {/* Week rows */}
-            {monthMatrix.map(week => {
-              const weekStartDate = parseDate(week.weekKey);
-              const rawAllDays = Object.values(resolveWeek(events, week.weekKey, undefined, weekStartsOn))
-                .filter(ev => ev.allDay && !ev.deleted && (!hiddenCategoryIds.length || !hiddenCategoryIds.includes(ev.categoryId || UNCATEGORISED)));
-              const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
-              for (const ev of rawAllDays) {
-                const overlap = getEventWeekOverlap(ev, weekStartDate);
-                if (overlap) {
-                  weekAllDays.push({
-                    ...ev,
-                    visibleDayIndex: overlap.dayIndex,
-                    visibleDaysSpan: overlap.daysSpan,
-                  });
-                }
-              }
-              const allDayLayoutMap = layoutAllDay(weekAllDays);
-              let maxAllDayRow = -1;
-              for (const info of allDayLayoutMap.values()) {
-                if (info.row > maxAllDayRow) maxAllDayRow = info.row;
-              }
-              const allDayRowCount = maxAllDayRow + 1;
+        /* ── Month overview ─────────────────────────────────────────────── */
+        (() => {
+          const selRange = monthSelectionRange ? {
+            start: monthSelectionRange.start < monthSelectionRange.end ? startOfDay(monthSelectionRange.start) : startOfDay(monthSelectionRange.end),
+            end: monthSelectionRange.start < monthSelectionRange.end ? startOfDay(monthSelectionRange.end) : startOfDay(monthSelectionRange.start),
+            daysCount: differenceInDays(
+              monthSelectionRange.start < monthSelectionRange.end ? monthSelectionRange.end : monthSelectionRange.start,
+              monthSelectionRange.start < monthSelectionRange.end ? monthSelectionRange.start : monthSelectionRange.end,
+            ) + 1,
+          } : null;
 
-              return (
-                <div key={week.weekKey} className="relative border-b border-border/40 last:border-b-0">
-                  {/* 7 day cells in grid */}
-                  <div className="grid grid-cols-7">
-                    {week.cells.map(({ date, events: cellEvents }) => {
-                      const inMonth = isSameMonth(date, currentDate);
-                      const cellToday = isSameDay(date, nowOwnerDate);
-                      const focusSecs = focusAnalysis.byDaySeconds.get(dateKey(date)) ?? 0;
-                      const focusPct = focusSecs > 0 ? Math.min(1, focusSecs / Math.max(1, focusAnalysis.monthMaxSeconds)) : 0;
-                      const baseBg = cellToday
-                        ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
-                        : focusPct > 0
-                          ? `rgba(96,165,250,${(0.05 + 0.16 * focusPct).toFixed(3)})`
-                          : 'transparent';
-                      const hoverCellBg = cellToday
-                        ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)')
-                        : hoverBg;
-                      
-                      // Timed events for this cell
-                      const timedEvents = cellEvents.filter(e => !e.allDay);
-
-                      return (
-                        <div
-                          key={date.toISOString()}
-                          // A phone opens the DAY, not the week: week view on a
-                          // phone is the sideways-scrolling strip, so tapping a
-                          // date there landed you on a week you then had to swipe
-                          // back to the day you tapped.
-                          onClick={() => { setDirection(0); setCurrentDate(date); setCalendarView(isPhone ? 'day' : 'week'); }}
-                          title={focusSecs > 0 ? `Open this week · ${formatFocusDuration(focusSecs)} focused` : 'Open this week'}
-                          className={`${isPhone ? 'min-h-[64px] p-1' : 'min-h-[108px] p-1.5'} border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1 transition-colors duration-200 relative`}
-                          style={{ background: baseBg, opacity: inMonth ? 1 : 0.4 }}
-                          onMouseEnter={e => (e.currentTarget.style.background = hoverCellBg)}
-                          onMouseLeave={e => (e.currentTarget.style.background = baseBg)}
-                        >
-                          {cellToday && <span className="absolute left-0 top-0 bottom-0 w-[2.5px]" style={{ background: '#60a5fa' }} />}
-                          <div className="flex items-center justify-between">
-                            <span
-                              className={`text-[11px] font-semibold tabular-nums ${cellToday ? 'flex items-center justify-center rounded-full w-[18px] h-[18px]' : ''}`}
-                              style={cellToday
-                                ? { background: '#60a5fa', color: '#fff' }
-                                : { color: inMonth ? menuText : menuSub }}
-                            >
-                              {format(date, 'd')}
-                            </span>
-                            <span className="flex items-center gap-1">
-                              {/* 54px of cell can't hold a date, a focus duration
-                                  AND a count. The cell is already tinted by focus,
-                                  so the label is what goes on a phone. */}
-                              {focusSecs > 0 && !isPhone && (
-                                <span className="text-[8px] font-bold tabular-nums flex items-center gap-0.5" style={{ color: '#60a5fa' }} title={`${formatFocusDuration(focusSecs)} focused`}>
-                                  <Target size={7} />{formatFocusDuration(focusSecs)}
-                                </span>
-                              )}
-                              {(timedEvents.length > 0 || weekAllDays.length > 0) && (
-                                <span className="text-[8.5px] tabular-nums" style={{ color: menuSub }}>
-                                  {cellEvents.length}
-                                </span>
-                              )}
-                            </span>
-                          </div>
-
-                          {/* Reserve vertical space for all-day banner rows */}
-                          {allDayRowCount > 0 && (
-                            <div style={{ height: allDayRowCount * 22 }} className="flex-shrink-0" />
-                          )}
-
-                          {/* Timed events list. At 41px of content width a text
-                              chip renders four characters of "10:30 AM Standup" —
-                              no information at all — so a phone gets dots. */}
-                          {isPhone ? (
-                            <div className="flex flex-wrap gap-[3px] items-center content-start">
-                              {timedEvents.slice(0, 6).map(ev => {
-                                const { accentBar, border } = chipColors(ev);
-                                return (
-                                  <span
-                                    key={ev.id}
-                                    className="rounded-full"
-                                    style={{ width: 5, height: 5, background: accentBar || border }}
-                                    title={ev.content}
-                                  />
-                                );
-                              })}
-                              {timedEvents.length > 6 && (
-                                <span className="text-[7px] tabular-nums leading-none" style={{ color: menuSub }}>+{timedEvents.length - 6}</span>
-                              )}
-                            </div>
-                          ) : (
-                          <div className="flex flex-col gap-0.5 overflow-hidden">
-                            {timedEvents.slice(0, 3).map(ev => {
-                              const { bg, border, text, accentBar } = chipColors(ev);
-                              const label = formatTimeLabel(timeToMin(ev.startTime), timeFormat);
-                              return (
-                                <div
-                                  key={ev.id}
-                                  className="rounded px-1 py-0.5 truncate text-[9px] font-medium leading-tight transition-transform duration-150 hover:translate-x-[1px]"
-                                  style={{
-                                    background: bg,
-                                    borderLeft: `2px solid ${accentBar || border}`,
-                                    color: text,
-                                  }}
-                                  title={`${label} ${ev.content}`}
-                                >
-                                  <span className="tabular-nums opacity-80">{label}</span>{ev.content ? ` ${ev.content}` : ''}
-                                </div>
-                              );
-                            })}
-                            {timedEvents.length > 3 && <span className="text-[8.5px] pl-1" style={{ color: menuSub }}>+{timedEvents.length - 3} more</span>}
-                          </div>
-                          )}
-                        </div>
-                      );
-                    })}
+          return (
+            <motion.div
+              ref={monthGridRef}
+              key="month-view-wrapper"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.05, ease: 'easeOut' }}
+              onTouchMove={(e) => {
+                handleMonthCellTouchMove(e);
+                handleMonthItemTouchMove(e);
+              }}
+              onTouchEnd={(e) => {
+                handleMonthCellTouchEnd(e);
+                handleMonthItemTouchEnd(e);
+              }}
+              className={`rounded-lg border border-border/60 overflow-hidden shadow-md relative z-10 flex flex-col min-h-0 ${monthGridSize ? 'mx-auto' : 'flex-1'}`}
+              style={{
+                background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+                ...(monthGridSize ? {
+                  width: monthGridSize.width,
+                  height: monthGridSize.height,
+                  maxWidth: monthGridSize.width,
+                  maxHeight: monthGridSize.height,
+                } : {}),
+              }}
+            >
+              {/* Weekday header row */}
+              <div className="grid grid-cols-7 border-b border-border/50">
+                {(monthMatrix[0]?.cells ?? []).map(({ date }) => (
+                  <div key={date.toISOString()} className="py-2 text-center text-[11px] font-bold uppercase tracking-wider" style={{ color: headerLabel }}>
+                    {format(date, 'EEE')}
                   </div>
+                ))}
+              </div>
+              {/* Week rows */}
+              {monthMatrix.map(week => {
+                const weekStartDate = parseDate(week.weekKey);
+                const rawAllDays = Object.values(resolveWeek(events, week.weekKey, undefined, weekStartsOn))
+                  .filter(ev => ev.allDay && !ev.deleted && (!hiddenCategoryIds.length || !hiddenCategoryIds.includes(ev.categoryId || UNCATEGORISED)));
+                const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
+                for (const ev of rawAllDays) {
+                  const overlap = getEventWeekOverlap(ev, weekStartDate);
+                  if (overlap) {
+                    weekAllDays.push({
+                      ...ev,
+                      visibleDayIndex: overlap.dayIndex,
+                      visibleDaysSpan: overlap.daysSpan,
+                    });
+                  }
+                }
+                const allDayLayoutMap = layoutAllDay(weekAllDays);
+                let maxAllDayRow = -1;
+                for (const info of allDayLayoutMap.values()) {
+                  if (info.row > maxAllDayRow) maxAllDayRow = info.row;
+                }
+                const allDayRowCount = maxAllDayRow + 1;
 
-                  {/* Continuous All-Day Banners Overlay for this week row */}
-                  {weekAllDays.length > 0 && (
-                    <div className="absolute left-0 right-0 top-[28px] pointer-events-none z-20">
-                      {weekAllDays.map(ev => {
-                        const layoutInfo = allDayLayoutMap.get(ev.id);
-                        if (!layoutInfo) return null;
-                        const { row } = layoutInfo;
-                        const startIdx = ev.visibleDayIndex;
-                        const span = ev.visibleDaysSpan;
-                        const leftPct = (startIdx / 7) * 100;
-                        const widthPct = (span / 7) * 100;
-                        const { bg, border, text, accentBar } = chipColors(ev);
+                const selWeekOverlap = selRange ? getEventWeekOverlap({
+                  id: 'drag-preview',
+                  weekKey: format(startOfWeek(selRange.start, { weekStartsOn }), 'yyyy-MM-dd'),
+                  dayIndex: differenceInDays(selRange.start, startOfWeek(selRange.start, { weekStartsOn })),
+                  daysSpan: selRange.daysCount,
+                  allDay: true,
+                }, weekStartDate) : null;
 
-                        const startDayDate = addDays(weekStartDate, startIdx);
-                        const dateStr = format(startDayDate, 'yyyy-MM-dd');
-                        const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+                return (
+                  <div key={week.weekKey} className="relative border-b border-border/40 last:border-b-0 flex-1 flex flex-col min-h-0">
+                    {/* 7 day cells in grid */}
+                    <div className="grid grid-cols-7 flex-1">
+                      {week.cells.map(({ date, events: cellEvents }) => {
+                        const inMonth = isSameMonth(date, currentDate);
+                        const cellToday = isSameDay(date, nowDate);
+                        const curDayTime = startOfDay(date).getTime();
+                        const isRangeSelected = selRange ? (curDayTime >= selRange.start.getTime() && curDayTime <= selRange.end.getTime()) : false;
+                        const isRangeStart = selRange ? curDayTime === selRange.start.getTime() : false;
+                        const isRangeEnd = selRange ? curDayTime === selRange.end.getTime() : false;
+
+                        const isItemDropTarget = monthItemDrag ? (() => {
+                          if (monthItemDrag.event.allDay) {
+                            const s = startOfDay(monthItemDrag.targetDate);
+                            const span = Math.max(1, monthItemDrag.event.daysSpan || 1);
+                            const end = addDays(s, span - 1);
+                            const cTime = startOfDay(date).getTime();
+                            return cTime >= s.getTime() && cTime <= end.getTime();
+                          }
+                          return isSameDay(date, monthItemDrag.targetDate);
+                        })() : false;
+
+                        const baseBg = isItemDropTarget
+                          ? (darkMode ? 'rgba(59,130,246,0.22)' : 'rgba(59,130,246,0.14)')
+                          : isRangeSelected
+                            ? (darkMode ? 'rgba(59,130,246,0.20)' : 'rgba(59,130,246,0.12)')
+                            : cellToday
+                              ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
+                              : 'transparent';
+                        const hoverCellBg = isItemDropTarget
+                          ? (darkMode ? 'rgba(59,130,246,0.28)' : 'rgba(59,130,246,0.20)')
+                          : isRangeSelected
+                            ? (darkMode ? 'rgba(59,130,246,0.26)' : 'rgba(59,130,246,0.18)')
+                            : cellToday
+                              ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)')
+                              : hoverBg;
+                        
+                        // Timed events for this cell
+                        const timedEvents = cellEvents.filter(e => !e.allDay);
 
                         return (
                           <div
-                            key={ev.id}
-                            data-event="1"
-                            className="absolute rounded px-2 text-[10px] font-semibold flex items-center gap-1.5 pointer-events-auto hover:-translate-y-[1px] transition-transform shadow-sm cursor-pointer truncate"
-                            style={{
-                              top: row * 22,
-                              height: 19,
-                              left: `calc(${leftPct}% + 3px)`,
-                              width: `calc(${widthPct}% - 6px)`,
-                              backgroundColor: bg,
-                              borderColor: border,
-                              borderWidth: 1,
-                              borderStyle: 'solid',
-                              borderLeft: accentBar ? `3px solid ${accentBar}` : undefined,
-                              color: text,
-                            }}
+                            key={date.toISOString()}
+                            data-month-cell-date={format(date, 'yyyy-MM-dd')}
+                            onMouseDown={(e) => handleMonthCellMouseDown(date, e)}
+                            onTouchStart={(e) => handleMonthCellTouchStart(date, e)}
                             onClick={(e) => {
-                              e.stopPropagation();
-                              openMenu(e, ev);
+                              if (monthDragJustEndedRef.current || monthItemDragJustEndedRef.current) return;
+                              openCreateForDate(date, e);
                             }}
-                            title={`All day: ${ev.content || 'Untitled'}`}
+                            title={`Add event · ${format(date, 'MMM d')}`}
+                            className={`${isPhone ? 'min-h-[68px] p-1.5' : 'min-h-[112px] p-2'} border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1.5 transition-colors duration-150 relative select-none`}
+                            style={{
+                              background: baseBg,
+                              opacity: inMonth ? 1 : 0.4,
+                              boxShadow: isItemDropTarget
+                                ? (darkMode ? 'inset 0 0 0 2px #60a5fa, inset 0 0 16px rgba(96,165,250,0.18)' : 'inset 0 0 0 2px #2563eb, inset 0 0 14px rgba(37,99,235,0.12)')
+                                : isRangeSelected
+                                  ? (darkMode ? 'inset 0 0 0 1.5px rgba(96,165,250,0.7)' : 'inset 0 0 0 1.5px rgba(37,99,235,0.7)')
+                                  : undefined,
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.background = hoverCellBg)}
+                            onMouseLeave={e => (e.currentTarget.style.background = baseBg)}
                           >
-                            {!ev.noCheckbox && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleEventCompleted(ev.id, startDayDate);
-                                }}
-                                className="flex-shrink-0 w-2.5 h-2.5 rounded-full border transition-smooth flex items-center justify-center cursor-pointer"
-                                style={{
-                                  borderColor: isCompleted ? text : `${text}60`,
-                                  backgroundColor: isCompleted ? text : 'transparent',
-                                }}
+                            {cellToday && <span className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: '#60a5fa' }} />}
+                            <div className="flex items-center justify-between">
+                              <span
+                                className={`text-[12px] font-semibold tabular-nums ${(cellToday || isRangeStart || isRangeEnd) ? 'flex items-center justify-center rounded-full w-[22px] h-[22px] text-[12px] font-bold shadow-sm' : ''}`}
+                                style={
+                                  (isRangeStart || isRangeEnd)
+                                    ? { background: '#3b82f6', color: '#fff' }
+                                    : cellToday
+                                      ? { background: '#60a5fa', color: '#fff' }
+                                      : isRangeSelected || isItemDropTarget
+                                        ? { color: darkMode ? '#93c5fd' : '#1d4ed8', fontWeight: 700 }
+                                        : { color: inMonth ? menuText : menuSub }
+                                }
                               >
-                                {isCompleted && <div className="w-1 h-1 rounded-full" style={{ backgroundColor: bg }} />}
-                              </button>
+                                {format(date, 'd')}
+                              </span>
+                              <span className="flex items-center gap-1">
+                                {(timedEvents.length > 0 || weekAllDays.length > 0) && (
+                                  <span className="text-[9.5px] font-medium tabular-nums" style={{ color: menuSub }}>
+                                    {cellEvents.length}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+
+                            {/* Reserve vertical space for all-day banner rows */}
+                            {(allDayRowCount > 0 || (selWeekOverlap && selRange && selRange.daysCount > 1)) && (
+                              <div style={{ height: (allDayRowCount + (selWeekOverlap && selRange && selRange.daysCount > 1 ? 1 : 0)) * 25 }} className="flex-shrink-0" />
                             )}
-                            <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                              {ev.content || <span style={{ opacity: 0.4, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
-                            </span>
+
+                            {/* Timed events list */}
+                            {isPhone ? (
+                              <div className="flex flex-wrap gap-[3px] items-center content-start">
+                                {timedEvents.slice(0, 6).map(ev => {
+                                  const { accentBar, border } = chipColors(ev);
+                                  const isBeingDragged = monthItemDrag?.event.id === ev.id;
+                                  return (
+                                    <span
+                                      key={ev.id}
+                                      data-event="1"
+                                      className={`rounded-full cursor-grab active:cursor-grabbing ${isBeingDragged ? 'opacity-25' : ''}`}
+                                      style={{ width: 6, height: 6, background: accentBar || border }}
+                                      onMouseDown={(e) => handleMonthItemMouseDown(ev, date, e)}
+                                      onTouchStart={(e) => handleMonthItemTouchStart(ev, date, e)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (monthItemDragJustEndedRef.current) return;
+                                        openMenu(e, ev);
+                                      }}
+                                      title={ev.content}
+                                    />
+                                  );
+                                })}
+                                {timedEvents.length > 6 && (
+                                  <span className="text-[8px] tabular-nums leading-none" style={{ color: menuSub }}>+{timedEvents.length - 6}</span>
+                                )}
+                              </div>
+                            ) : (
+                            <div className="flex flex-col gap-1 overflow-hidden">
+                              {timedEvents.slice(0, 3).map(ev => {
+                                const { bg, border, text, accentBar } = chipColors(ev);
+                                const label = formatTimeLabel(timeToMin(ev.startTime), timeFormat);
+                                const isBeingDragged = monthItemDrag?.event.id === ev.id;
+                                return (
+                                  <div
+                                    key={ev.id}
+                                    data-event="1"
+                                    className={`rounded-lg px-2 py-1 truncate text-[10.5px] font-semibold leading-tight transition-all duration-150 hover:translate-x-[1px] cursor-grab active:cursor-grabbing shadow-xs ${
+                                      isBeingDragged ? 'opacity-25' : 'hover:shadow-sm'
+                                    }`}
+                                    style={{
+                                      background: bg,
+                                      borderLeft: `3.5px solid ${accentBar || border}`,
+                                      borderTop: `1px solid ${border}40`,
+                                      borderRight: `1px solid ${border}40`,
+                                      borderBottom: `1px solid ${border}40`,
+                                      color: text,
+                                      borderRadius: '7px',
+                                    }}
+                                    onMouseDown={(e) => handleMonthItemMouseDown(ev, date, e)}
+                                    onTouchStart={(e) => handleMonthItemTouchStart(ev, date, e)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (monthItemDragJustEndedRef.current) return;
+                                      openMenu(e, ev);
+                                    }}
+                                    title={`${label} ${ev.content}`}
+                                  >
+                                    <span className="tabular-nums opacity-85 font-bold mr-1">{label}</span>{ev.content ? <span>{ev.content}</span> : ''}
+                                  </div>
+                                );
+                              })}
+                              {timedEvents.length > 3 && <span className="text-[9.5px] pl-1 font-medium" style={{ color: menuSub }}>+{timedEvents.length - 3} more</span>}
+                            </div>
+                            )}
                           </div>
                         );
                       })}
                     </div>
-                  )}
+
+                    {/* Continuous All-Day Banners Overlay for this week row */}
+                    {(weekAllDays.length > 0 || (selWeekOverlap && selRange && selRange.daysCount > 1)) && (
+                      <div className="absolute left-0 right-0 top-[33px] pointer-events-none z-20">
+                        {weekAllDays.map(ev => {
+                          const layoutInfo = allDayLayoutMap.get(ev.id);
+                          if (!layoutInfo) return null;
+                          const { row } = layoutInfo;
+                          const startIdx = ev.visibleDayIndex;
+                          const span = ev.visibleDaysSpan;
+                          const leftPct = (startIdx / 7) * 100;
+                          const widthPct = (span / 7) * 100;
+                          const { bg, border, text, accentBar } = chipColors(ev);
+
+                          const startDayDate = addDays(weekStartDate, startIdx);
+                          const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                          const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+                          const isBeingDragged = monthItemDrag?.event.id === ev.id;
+
+                          return (
+                            <div
+                              key={ev.id}
+                              data-event="1"
+                              className={`absolute rounded-lg px-2.5 text-[11px] font-semibold flex items-center gap-1.5 pointer-events-auto hover:-translate-y-[0.5px] transition-all shadow-xs hover:shadow-sm cursor-grab active:cursor-grabbing truncate ${
+                                isBeingDragged ? 'opacity-25' : ''
+                              }`}
+                              style={{
+                                top: row * 25,
+                                height: 23,
+                                left: `calc(${leftPct}% + 3px)`,
+                                width: `calc(${widthPct}% - 6px)`,
+                                backgroundColor: bg,
+                                borderColor: border,
+                                borderWidth: 1,
+                                borderStyle: 'solid',
+                                borderLeft: accentBar ? `3.5px solid ${accentBar}` : undefined,
+                                color: text,
+                                borderRadius: '7px',
+                              }}
+                              onMouseDown={(e) => handleMonthItemMouseDown(ev, startDayDate, e)}
+                              onTouchStart={(e) => handleMonthItemTouchStart(ev, startDayDate, e)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (monthItemDragJustEndedRef.current) return;
+                                openMenu(e, ev);
+                              }}
+                              title={`All day: ${ev.content || 'Untitled'}`}
+                            >
+                              {!ev.noCheckbox && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleEventCompleted(ev.id, startDayDate);
+                                  }}
+                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-smooth flex items-center justify-center cursor-pointer"
+                                  style={{
+                                    borderColor: isCompleted ? text : `${text}60`,
+                                    backgroundColor: isCompleted ? text : 'transparent',
+                                  }}
+                                >
+                                  {isCompleted && <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />}
+                                </button>
+                              )}
+                              <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                {ev.content || <span style={{ opacity: 0.4, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                              </span>
+                            </div>
+                          );
+                        })}
+
+                        {/* Live Drag-Select Preview Banner for this week row */}
+                        {selWeekOverlap && selRange && selRange.daysCount > 1 && (
+                          <div
+                            className="absolute rounded-lg px-2.5 text-[11px] font-semibold flex items-center gap-1.5 pointer-events-none z-30 transition-all border border-solid shadow-sm"
+                            style={{
+                              top: allDayRowCount * 25,
+                              height: 23,
+                              left: `calc(${(selWeekOverlap.dayIndex / 7) * 100}% + 3px)`,
+                              width: `calc(${(selWeekOverlap.daysSpan / 7) * 100}% - 6px)`,
+                              backgroundColor: darkMode ? 'rgba(59,130,246,0.25)' : 'rgba(59,130,246,0.18)',
+                              borderColor: darkMode ? '#60a5fa' : '#2563eb',
+                              color: darkMode ? '#93c5fd' : '#1d4ed8',
+                              borderRadius: '7px',
+                            }}
+                          >
+                            <CalendarRange size={12} className="flex-shrink-0" />
+                            <span className="truncate">
+                              New All-Day ({selRange.daysCount} days)
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Floating item drag ghost preview */}
+              {monthItemDrag && (
+                <div
+                  className="fixed z-[300] pointer-events-none transform -translate-x-1/2 -translate-y-1/2 transition-none"
+                  style={{
+                    left: monthItemDrag.x,
+                    top: monthItemDrag.y,
+                    width: monthItemDrag.width ? `${monthItemDrag.width}px` : (monthItemDrag.event.allDay ? '210px' : 'auto'),
+                    minWidth: 170,
+                  }}
+                >
+                  {(() => {
+                    const { bg, border, text, accentBar } = chipColors(monthItemDrag.event);
+                    const label = !monthItemDrag.event.allDay ? formatTimeLabel(timeToMin(monthItemDrag.event.startTime), timeFormat) : null;
+                    return (
+                      <div
+                        className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold flex items-center gap-2 border backdrop-blur-md"
+                        style={{
+                          background: bg,
+                          borderColor: border,
+                          borderWidth: 1,
+                          borderStyle: 'solid',
+                          borderLeft: accentBar ? `4px solid ${accentBar}` : undefined,
+                          color: text,
+                          borderRadius: '8px',
+                          boxShadow: darkMode
+                            ? '0 16px 36px -4px rgba(0,0,0,0.75), 0 8px 18px -4px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.1)'
+                            : '0 16px 36px -4px rgba(0,0,0,0.25), 0 8px 18px -4px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06)',
+                          transform: 'scale(1.03) rotate(0.8deg)',
+                        }}
+                      >
+                        {label && <span className="tabular-nums font-bold opacity-90 mr-0.5">{label}</span>}
+                        <span className="truncate flex-1 font-semibold">{monthItemDrag.event.content || 'Untitled'}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
-              );
-            })}
+              )}
+
+              {/* Floating Selection Range Pill Indicator */}
+              {selRange && selRange.daysCount > 1 && (
+                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 bg-blue-600/95 text-white px-3.5 py-1.5 rounded-full text-xs font-semibold shadow-xl pointer-events-none flex items-center gap-2 backdrop-blur-sm animate-in fade-in zoom-in-95 duration-100">
+                  <CalendarRange size={13} />
+                  <span>{selRange.daysCount} days · {format(selRange.start, 'MMM d')} – {format(selRange.end, 'MMM d')}</span>
+                </div>
+              )}
+
+              {/* Bottom-right corner resize grip */}
+              {!isPhone && (
+                <div
+                  onMouseDown={startMonthGridResize}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    resetMonthGridSize();
+                  }}
+                  className="absolute bottom-0.5 right-0.5 w-5 h-5 flex items-center justify-center cursor-nwse-resize select-none opacity-0 hover:opacity-60 transition-opacity z-30"
+                  style={{ color: menuSub }}
+                  title={monthGridSize ? 'Drag to resize · Double-click to fill screen' : 'Drag to resize'}
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                    <circle cx="8.5" cy="8.5" r="1" />
+                    <circle cx="4.5" cy="8.5" r="1" />
+                    <circle cx="8.5" cy="4.5" r="1" />
+                  </svg>
+                </div>
+              )}
             </motion.div>
+          );
+        })()
           )}
         </AnimatePresence>
       </motion.div>
@@ -8904,7 +9856,7 @@ export default function DailyPlanner() {
                     <div className="flex items-end gap-2.5 h-44 mb-2">
                       {weekAnalysisLive.days.map(d => {
                         const pct = d.seconds > 0 ? Math.max(4, (d.seconds / weekAnalysisLive.maxSeconds) * 100) : 0;
-                        const isTodayCol = isSameDay(d.date, nowOwnerDate);
+                        const isTodayCol = isSameDay(d.date, nowDate);
                         const isBest = d.seconds > 0 && d.key === weekAnalysisLive.bestKey;
                         return (
                           <div key={d.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
@@ -8948,17 +9900,17 @@ export default function DailyPlanner() {
                           style={{
                             background: d.isExcluded
                               ? (darkMode ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.05)')
-                              : (isSameDay(d.date, nowOwnerDate)
+                              : (isSameDay(d.date, nowDate)
                                   ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
                                   : (i % 2 === 0 ? surfaceBg : 'transparent')),
                             borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
                           }}
                         >
                           <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-medium flex items-center gap-1.5" style={{ color: isSameDay(d.date, nowOwnerDate) ? '#60a5fa' : menuText }}>
+                            <span className="font-medium flex items-center gap-1.5" style={{ color: isSameDay(d.date, nowDate) ? '#60a5fa' : menuText }}>
                               <Clock size={11} style={{ opacity: 0.5 }} />
                               {format(d.date, 'EEEE, MMM d')}
-                              {isSameDay(d.date, nowOwnerDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
+                              {isSameDay(d.date, nowDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
                             </span>
                             {d.isExcluded && (
                               <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-500 border border-amber-500/30">
@@ -9057,7 +10009,7 @@ export default function DailyPlanner() {
                     </div>
 
                     {weekAnalysisLive.seconds === 0 && (
-                      <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px dashed ${surfaceBdr}` }}>
+                      <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px solid ${surfaceBdr}` }}>
                         <Target size={18} style={{ color: menuSub, opacity: 0.6 }} />
                         <span className="text-xs font-medium" style={{ color: menuText }}>No focus logged this week</span>
                         <span className="text-[10px]" style={{ color: menuSub }}>Run the timer and each day's exact hours show up here.</span>
@@ -9083,7 +10035,7 @@ export default function DailyPlanner() {
                         ['Total', formatFocusDuration(focusAnalysis.monthSeconds + monthLiveExtraSeconds)],
                         ['Sessions', `${focusAnalysis.monthSessions}`],
                         ['Active Days', `${focusAnalysis.monthActiveDays}`],
-                        ['Best Day', format(focusAnalysis.monthBestDay, 'MMM d')],
+                        ['Best Day', focusAnalysis.monthActiveDays > 0 ? format(focusAnalysis.monthBestDay, 'MMM d') : '—'],
                       ].map(([label, value]) => (
                         <div key={label} className="min-w-0">
                           <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
@@ -9112,7 +10064,7 @@ export default function DailyPlanner() {
                         const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
                         const inMonth = isSameMonth(d, analysisMonthCursor);
                         const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
-                        const todayCell = isSameDay(d, nowOwnerDate);
+                        const todayCell = isSameDay(d, nowDate);
                         const hot = secs > focusAnalysis.monthMaxSeconds * 0.45;
                         return (
                           <div
@@ -9123,7 +10075,7 @@ export default function DailyPlanner() {
                               background: isExcluded
                                 ? (darkMode ? 'rgba(245,158,11,0.12)' : 'rgba(245,158,11,0.08)')
                                 : (secs > 0 ? `rgba(96,165,250,${intensity})` : surfaceBg),
-                              border: `1px ${isExcluded ? 'dashed #f59e0b' : 'solid'} ${todayCell ? '#60a5fa' : surfaceBdr}`,
+                              border: `1px solid ${isExcluded ? '#f59e0b' : todayCell ? '#60a5fa' : surfaceBdr}`,
                               opacity: inMonth ? 1 : 0.35,
                             }}
                             onDoubleClick={(e) => {
@@ -9235,7 +10187,7 @@ export default function DailyPlanner() {
                       })}
                     </div>
                     {focusAnalysis.monthSessions === 0 && (
-                      <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px dashed ${surfaceBdr}` }}>
+                      <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px solid ${surfaceBdr}` }}>
                         <Target size={18} style={{ color: menuSub, opacity: 0.6 }} />
                         <span className="text-xs font-medium" style={{ color: menuText }}>No focus sessions in {format(analysisMonthCursor, 'MMMM')}</span>
                         <span className="text-[10px]" style={{ color: menuSub }}>Start the timer on the calendar and your days will light up here.</span>
@@ -9261,7 +10213,7 @@ export default function DailyPlanner() {
                         ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
                         ['Sessions', `${focusAnalysis.yearSessions}`],
                         ['Active Days', `${focusAnalysis.yearActiveDays}`],
-                        ['Best Month', format(focusAnalysis.yearBestMonth.month, 'MMM')],
+                        ['Best Month', focusAnalysis.yearActiveDays > 0 ? format(focusAnalysis.yearBestMonth.month, 'MMM') : '—'],
                       ].map(([label, value]) => (
                         <div key={label} className="min-w-0">
                           <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
@@ -9329,7 +10281,15 @@ export default function DailyPlanner() {
           {/* Floating "Go to Live" button — centered on the main schedule table */}
           <AnimatePresence>
             {showLiveBtn && isTimelineView && !settingsRouteOpen && (
-              <div className="absolute bottom-6 left-0 right-0 z-[120] pointer-events-none flex justify-center">
+              <div
+                className="absolute left-0 right-0 z-[120] pointer-events-none flex justify-center"
+                style={{
+                  bottom: isPhone
+                    ? `calc(${Math.round(BOTTOM_NAV_H * mobileUiZoom + 32)}px + var(--safe-bottom))`
+                    : '32px',
+                  ...(isPhone && mobileUiZoom !== 1 ? { zoom: mobileUiZoom } : {}),
+                }}
+              >
                 <div className={`w-full mx-auto px-4 flex justify-center pointer-events-none ${isCompact ? '' : 'min-w-[900px] max-w-[1400px]'}`}>
                   <motion.button
                     key="go-to-live"
@@ -9473,24 +10433,23 @@ export default function DailyPlanner() {
         document.body
       )}
 
-      {/* â”€â”€ Keyboard shortcut help overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <AnimatePresence>
-        {showShortcutHelp && (
-          <>
-            <motion.div
-              key="shortcut-help-backdrop"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              transition={{ duration: 0.18 }}
-              onClick={() => setShowShortcutHelp(false)}
-              className={`fixed inset-0 z-[280] ${isPhone ? '' : 'backdrop-blur-[6px]'}`}
-              style={{ background: darkMode ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.32)' }}
-            />
-            {/* Flex-centred wrapper: framer-motion drives `transform` on the panel
-                itself, so centring must not rely on a transform of our own. */}
-            <div
-              key="shortcut-help-wrap"
-              className="fixed inset-0 z-[290] flex items-center justify-center p-4 pointer-events-none"
-            >
+      {/* ── Keyboard shortcut help overlay ────────────────────────────────── */}
+      {showShortcutHelp && createPortal(
+        <AnimatePresence>
+          <motion.div
+            key="shortcut-help-backdrop"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            onClick={() => setShowShortcutHelp(false)}
+            className={`fixed inset-0 z-[280] ${isPhone ? '' : 'backdrop-blur-[6px]'}`}
+            style={{ background: darkMode ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.32)' }}
+          />
+          {/* Flex-centred wrapper: framer-motion drives `transform` on the panel
+              itself, so centring must not rely on a transform of our own. */}
+          <div
+            key="shortcut-help-wrap"
+            className="fixed inset-0 z-[290] flex items-center justify-center p-4 pointer-events-none"
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.96, y: 8 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -9528,50 +10487,53 @@ export default function DailyPlanner() {
                 ))}
                 <div className="col-span-2 pt-1 text-[10px] leading-relaxed" style={{ color: menuSub, borderTop: `1px solid ${menuBdr}` }}>
                   <span className="block pt-2.5">
-                    Rebind any of these in <span style={{ color: menuText }}>Settings â†’ Keyboard Shortcuts</span>.
+                    Rebind any of these in <span style={{ color: menuText }}>Settings → Keyboard Shortcuts</span>.
                     Always available: <kbd style={{ color: menuText }}>Esc</kbd> to close, <kbd style={{ color: menuText }}>Ctrl + drag</kbd> to box-select,
-                    <kbd style={{ color: menuText }}> drag empty space</kbd> to create.
+                    <kbd style={{ color: menuText }}>drag empty space</kbd> to create.
                   </span>
                 </div>
               </div>
             </motion.div>
-            </div>
-          </>
-        )}
-      </AnimatePresence>
+          </div>
+        </AnimatePresence>,
+        document.body
+      )}
 
-      {/* â”€â”€ Toasts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <div className="fixed bottom-5 right-5 z-[300] flex flex-col gap-2 items-end pointer-events-none">
-        <AnimatePresence initial={false}>
-          {toasts.map(t => {
-            const tone = t.tone === 'success'
-              ? { accent: '#4ade80', glow: 'rgba(74,222,128,0.30)' }
-              : t.tone === 'error'
-                ? { accent: '#f87171', glow: 'rgba(248,113,113,0.30)' }
-                : { accent: '#60a5fa', glow: 'rgba(96,165,250,0.30)' };
-            return (
-              <motion.div
-                key={t.id}
-                layout
-                initial={{ opacity: 0, x: 24, scale: 0.96 }}
-                animate={{ opacity: 1, x: 0, scale: 1 }}
-                exit={{ opacity: 0, x: 24, scale: 0.96 }}
-                transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-                className="pointer-events-auto flex items-center gap-2.5 pl-3 pr-4 py-2.5 rounded-xl text-[12px] font-medium max-w-[340px] backdrop-blur-md"
-                style={{
-                  background: darkMode ? 'rgba(30,32,34,0.92)' : 'rgba(255,255,255,0.94)',
-                  border: `1px solid ${menuBdr}`,
-                  color: menuText,
-                  boxShadow: `0 8px 28px rgba(0,0,0,${darkMode ? 0.45 : 0.14}), 0 0 0 1px ${tone.glow}`,
-                }}
-              >
-                <span className="w-1 self-stretch rounded-full flex-shrink-0" style={{ background: tone.accent }} />
-                <span className="leading-snug">{t.message}</span>
-              </motion.div>
-            );
-          })}
-        </AnimatePresence>
-      </div>
+      {/* ── Toasts ───────────────────────────────────────────────────────────── */}
+      {createPortal(
+        <div className="fixed bottom-5 right-5 z-[300] flex flex-col gap-2 items-end pointer-events-none">
+          <AnimatePresence initial={false}>
+            {toasts.map(t => {
+              const tone = t.tone === 'success'
+                ? { accent: '#4ade80', glow: 'rgba(74,222,128,0.30)' }
+                : t.tone === 'error'
+                  ? { accent: '#f87171', glow: 'rgba(248,113,113,0.30)' }
+                  : { accent: '#60a5fa', glow: 'rgba(96,165,250,0.30)' };
+              return (
+                <motion.div
+                  key={t.id}
+                  layout
+                  initial={{ opacity: 0, x: 24, scale: 0.96 }}
+                  animate={{ opacity: 1, x: 0, scale: 1 }}
+                  exit={{ opacity: 0, x: 24, scale: 0.96 }}
+                  transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                  className="pointer-events-auto flex items-center gap-2.5 pl-3 pr-4 py-2.5 rounded-xl text-[12px] font-medium max-w-[340px] backdrop-blur-md"
+                  style={{
+                    background: darkMode ? 'rgba(30,32,34,0.92)' : 'rgba(255,255,255,0.94)',
+                    border: `1px solid ${menuBdr}`,
+                    color: menuText,
+                    boxShadow: `0 8px 28px rgba(0,0,0,${darkMode ? 0.45 : 0.14}), 0 0 0 1px ${tone.glow}`,
+                  }}
+                >
+                  <span className="w-1 self-stretch rounded-full flex-shrink-0" style={{ background: tone.accent }} />
+                  <span className="leading-snug">{t.message}</span>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>,
+        document.body
+      )}
 
 
 
@@ -9811,7 +10773,7 @@ export default function DailyPlanner() {
                           <span className="flex items-center gap-1.5">
                             <span className="block text-xs font-semibold truncate" style={{ color: active ? '#60a5fa' : menuText }}>{c.label}</span>
                             <span
-                              className="text-[8.5px] font-medium px-1.5 py-0.2 rounded uppercase tracking-wider opacity-60"
+                              className="text-[8.5px] font-medium px-1.5 py-0.5 rounded uppercase tracking-wider opacity-60"
                               style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}
                             >
                               {c.category}
@@ -10335,7 +11297,7 @@ export default function DailyPlanner() {
               style={{ color: menuText, background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
             />
 
-            {/* Scheduling: no date (general) â†’ date only â†’ date + time. */}
+            {/* Scheduling: no date (general) → date only → date + time. */}
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => editTask(taskMenuId!, withDueDate(menuTask, null, weekStartsOn))}
@@ -10426,7 +11388,7 @@ export default function DailyPlanner() {
               <div style={{ borderTop: `1px solid ${menuBdr}`, paddingTop: 8 }}>
                 <RecurrenceEditor
                   recur={menuTask.recur}
-                  anchorWeekday={(((menuTask.dayIndex ?? 0) + weekStartsOn) % 7 + 7) % 7 as Weekday}
+                  anchorWeekday={(menuTaskDue ? parseDate(menuTaskDue).getDay() : (((menuTask.dayIndex ?? 0) + weekStartsOn) % 7 + 7) % 7) as Weekday}
                   onChange={r => editTask(taskMenuId!, { recur: r })}
                   theme={{ text: menuText, sub: menuSub, bdr: menuBdr, hover: hoverBg, accent: taskColor, accentBg: `${taskColor}22`, fieldBg: surfaceBg }}
                 />
@@ -10495,7 +11457,7 @@ export default function DailyPlanner() {
           transition={isPhone
             ? { type: 'spring', stiffness: 460, damping: 42 }
             : { duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-          className={`fixed z-[200] overflow-y-auto overflow-x-hidden touch-scroll ${isPhone ? '' : 'rounded-xl shadow-xl'}`}
+          className={`fixed z-[200] overflow-hidden flex flex-col touch-scroll ${isPhone ? '' : 'rounded-xl shadow-2xl'}`}
           style={isPhone ? {
             left: 0, right: 0, bottom: 0, top: 'auto',
             borderTopLeftRadius: 20,
@@ -10504,22 +11466,23 @@ export default function DailyPlanner() {
             paddingBottom: 'var(--safe-bottom)',
             background: menuBg,
             borderTop: `1px solid ${menuBdr}`,
-            // Tight shadow + own layer: a wide-blur shadow on a sheet that
-            // springs up from the bottom is re-rastered every frame.
             boxShadow: '0 -6px 18px rgba(0,0,0,0.34)',
             willChange: 'transform',
             contain: 'paint',
           } : {
             left: menuPos.x,
             top:  menuPos.y,
+            width: menuSize.width || DEFAULT_MENU_WIDTH,
+            height: menuSize.height ? `${menuSize.height}px` : undefined,
+            minWidth: 270,
+            maxWidth: 'calc(100vw - 16px)',
+            maxHeight: menuSize.height ? `${menuSize.height}px` : 'calc(100vh - 16px)',
             transformOrigin: 'top left',
-            minWidth: 260,
-            maxHeight: 'calc(100vh - 16px)',
             background: menuBg,
             border: `1px solid ${menuBdr}`,
             boxShadow: darkMode
-              ? '0 8px 32px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.06) inset'
-              : '0 8px 32px rgba(0,0,0,0.14), 0 1px 0 rgba(255,255,255,0.9) inset',
+              ? '0 12px 40px rgba(0,0,0,0.65), 0 1px 0 rgba(255,255,255,0.08) inset'
+              : '0 12px 40px rgba(0,0,0,0.18), 0 1px 0 rgba(255,255,255,0.9) inset',
           }}
           onMouseDown={e => e.stopPropagation()}
         >
@@ -10527,7 +11490,7 @@ export default function DailyPlanner() {
               handle, and a Done button — the sheet has nowhere to move to. */}
           {isPhone ? (
             <div
-              className="sticky top-0 z-10 flex items-center justify-end px-3 pt-3 pb-2 relative"
+              className="sticky top-0 z-10 flex items-center justify-end px-3 pt-3 pb-2 relative flex-shrink-0"
               style={{ background: menuBg, borderBottom: `1px solid ${menuBdr}` }}
             >
               <span
@@ -10545,593 +11508,951 @@ export default function DailyPlanner() {
           ) : (
             <div
               onMouseDown={startMenuDrag}
-              className="flex items-center justify-center gap-1 py-1 select-none"
-              style={{ cursor: 'grab', color: menuSub, borderBottom: `1px solid ${menuBdr}` }}
+              className="flex items-center justify-between px-3 py-2 select-none cursor-grab active:cursor-grabbing border-b transition-colors flex-shrink-0"
+              style={{ borderColor: menuBdr, background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)' }}
               title="Drag to move"
             >
-              <GripHorizontal size={14} style={{ opacity: 0.6 }} />
-            </div>
-          )}
-
-          {/* Title field (works for drafts, which have no grid block, and live items) */}
-          <div className="px-3 pt-2 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-            <input
-              type="text"
-              autoFocus={isDraft}
-              value={menuEvent.content}
-              placeholder="Add title"
-              onChange={(e) => applyEdit(menuEvent.id, { content: e.target.value })}
-              onKeyDown={(e) => { if (e.key === 'Enter' && isDraft) commitDraft(); }}
-              className="w-full text-[13px] font-semibold rounded-md px-2 py-1.5 outline-none"
-              style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
-            />
-          </div>
-
-          {/* Day-of-week picker (draft only — the dedicated create has no clicked day) */}
-          {isDraft && (
-            <div className="px-3 py-2 flex items-center gap-1" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-              {days.map((d, i) => {
-                const sel = menuEvent.dayIndex === i;
-                return (
-                  <button key={i} type="button"
-                    onClick={() => applyEdit(menuEvent.id, { dayIndex: i })}
-                    className="flex-1 text-[10px] font-semibold rounded-md py-1 transition-colors"
-                    style={{
-                      color: sel ? '#fff' : menuText,
-                      background: sel ? '#5b9d5b' : hoverBg,
-                      border: `1px solid ${menuBdr}`,
+              <div className="flex items-center gap-1.5">
+                <GripHorizontal size={13} style={{ opacity: 0.5 }} />
+                <span className="text-[10px] font-semibold tracking-wider uppercase" style={{ color: menuSub, opacity: 0.8 }}>
+                  {isDraft ? 'New Event' : 'Event Details'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                {(menuSize.width !== DEFAULT_MENU_WIDTH || menuSize.height) && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const reset = { width: DEFAULT_MENU_WIDTH };
+                      setMenuSize(reset);
+                      try { localStorage.setItem('planner-event-menu-size', JSON.stringify(reset)); } catch (_) {}
                     }}
+                    className="text-[10px] px-1.5 py-0.5 rounded transition-opacity hover:opacity-100 opacity-60 hover:bg-white/10"
+                    style={{ color: menuSub }}
+                    title="Reset window size"
                   >
-                    {format(d, 'EEEEE')}
+                    Reset size
                   </button>
-                );
-              })}
+                )}
+                <button
+                  type="button"
+                  onClick={() => { if (isDraft) commitDraft(); setMenuId(null); setMenuPos(null); }}
+                  className="w-5 h-5 rounded-md flex items-center justify-center transition-colors hover:bg-white/10 opacity-70 hover:opacity-100"
+                  style={{ color: menuSub }}
+                  title="Close (Esc)"
+                >
+                  <X size={12} />
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Precise start/end time editors */}
-          {!menuEvent.allDay && (
-            <div className="px-3 py-2.5 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-              {(['startTime', 'endTime'] as const).map((field, idx) => (
-                <div key={field} className="flex flex-col gap-1 flex-1">
-                  <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
-                    {idx === 0 ? 'Start' : 'End'}
-                  </span>
+          {/* Scrollable body content container */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar">
+            {/* Title field (works for drafts, which have no grid block, and live items) */}
+            <div className="px-3 pt-2.5 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              <input
+                type="text"
+                autoFocus={isDraft || !menuEvent.content}
+                value={menuEvent.content}
+                placeholder="Add title"
+                onChange={(e) => applyEdit(menuEvent.id, { content: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') { if (isDraft) commitDraft(); setMenuId(null); setMenuPos(null); } }}
+                className="w-full text-[13px] font-semibold rounded-lg px-2.5 py-1.5 outline-none transition-all focus:ring-1 focus:ring-primary/40"
+                style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+              />
+            </div>
+
+            {/* ─── Date Picker & Day Selector Section (New Items & Existing Events) ─── */}
+            {(() => {
+              const eventDate = menuEvent.occDate
+                ? parseDate(menuEvent.occDate)
+                : addDays(parseDate(menuEvent.weekKey || viewedWeekKey), menuEvent.dayIndex || 0);
+              const eventDateStr = format(eventDate, 'yyyy-MM-dd');
+              const isEventToday = isSameDay(eventDate, new Date());
+              const isEventTomorrow = isSameDay(eventDate, addDays(new Date(), 1));
+              const isEventYesterday = isSameDay(eventDate, addDays(new Date(), -1));
+              const relativeBadge = isEventToday
+                ? 'Today'
+                : isEventTomorrow
+                ? 'Tomorrow'
+                : isEventYesterday
+                ? 'Yesterday'
+                : format(eventDate, 'EEEE');
+
+              const currentWs = startOfWeek(eventDate, { weekStartsOn });
+              const weekDays = eachDayOfInterval({ start: currentWs, end: endOfWeek(currentWs, { weekStartsOn }) });
+
+              return (
+                <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
+                      <CalendarIcon size={10} /> Date
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                        style={{
+                          background: isEventToday ? 'rgba(34,197,94,0.15)' : (darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)'),
+                          color: isEventToday ? (darkMode ? '#4ade80' : '#16a34a') : menuSub,
+                        }}
+                      >
+                        {relativeBadge} · {format(eventDate, 'MMM d')}
+                      </span>
+                      {!isEventToday && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const today = new Date();
+                            const todayWs = startOfWeek(today, { weekStartsOn });
+                            applyEdit(menuEvent.id, {
+                              weekKey: format(todayWs, 'yyyy-MM-dd'),
+                              dayIndex: differenceInDays(today, todayWs),
+                              occDate: format(today, 'yyyy-MM-dd'),
+                            });
+                          }}
+                          className="text-[9px] font-semibold px-1.5 py-0.5 rounded border transition-colors hover:opacity-100 opacity-80 cursor-pointer"
+                          style={{ background: hoverBg, borderColor: menuBdr, color: menuText }}
+                          title="Jump to today"
+                        >
+                          Today
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Native date input */}
                   <input
-                    type="time"
-                    step={60}
-                    value={menuEvent[field]}
+                    type="date"
+                    value={eventDateStr}
                     onChange={(e) => {
                       const val = e.target.value;
                       if (!val) return;
-                      applyEdit(menuEvent.id, { [field]: val });
+                      const newDt = parseDate(val);
+                      const newWs = startOfWeek(newDt, { weekStartsOn });
+                      applyEdit(menuEvent.id, {
+                        weekKey: format(newWs, 'yyyy-MM-dd'),
+                        dayIndex: differenceInDays(newDt, newWs),
+                        occDate: val,
+                      });
                     }}
-                    className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none"
+                    className="w-full text-[11px] font-medium tabular-nums rounded-md px-2 py-1 outline-none cursor-pointer"
                     style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
                   />
-                </div>
-              ))}
-            </div>
-          )}
 
-          {/* All-day event toggle */}
-          <button
-            className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
-            style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
-            onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            onClick={() => {
-              const nextAllDay = !menuEvent.allDay;
-              const patches: Partial<PlannerEvent> = { allDay: nextAllDay };
-              if (!nextAllDay) {
-                patches.daysSpan = undefined;
-              }
-              applyEdit(menuEvent.id, patches);
-            }}
-          >
-            <span className="flex items-center gap-2.5">
-              <Clock size={13} style={{ opacity: 0.7 }} />
-              All-day event
-            </span>
-            <span
-              className="flex items-center rounded-full transition-colors"
-              style={{
-                width: 30, height: 17, padding: 2,
-                background: menuEvent.allDay ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
-                justifyContent: menuEvent.allDay ? 'flex-end' : 'flex-start',
-              }}
-            >
-              <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
-            </span>
-          </button>
-
-          {/* All-day date & span selectors */}
-          {menuEvent.allDay && (() => {
-            const currentSpan = Math.max(1, menuEvent.daysSpan || 1);
-            const startDt = menuEvent.occDate
-              ? parseDate(menuEvent.occDate)
-              : addDays(parseDate(menuEvent.weekKey || viewedWeekKey), menuEvent.dayIndex || 0);
-            const startDateStr = format(startDt, 'yyyy-MM-dd');
-            const endDt = addDays(startDt, currentSpan - 1);
-            const endDateStr = format(endDt, 'yyyy-MM-dd');
-
-            return (
-              <>
-                {/* Start Date & End Date pickers */}
-                <div className="px-3 py-2 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-                  <div className="flex flex-col gap-1 flex-1 min-w-0">
-                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
-                      Start Date
-                    </span>
-                    <input
-                      type="date"
-                      value={startDateStr}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (!val) return;
-                        const newStartDt = parseDate(val);
-                        const newWs = startOfWeek(newStartDt, { weekStartsOn });
-                        const newWeekKey = format(newWs, 'yyyy-MM-dd');
-                        const newDayIndex = differenceInDays(newStartDt, newWs);
-                        applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, occDate: val });
-                      }}
-                      className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
-                      style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
-                    />
+                  {/* Weekday quick strip [M] [T] [W] [T] [F] [S] [S] */}
+                  <div className="flex items-center gap-1 pt-0.5">
+                    {weekDays.map((d, i) => {
+                      const sel = menuEvent.dayIndex === i && (!menuEvent.weekKey || menuEvent.weekKey === format(currentWs, 'yyyy-MM-dd'));
+                      const dayIsToday = isSameDay(d, new Date());
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => {
+                            const targetDateStr = format(d, 'yyyy-MM-dd');
+                            applyEdit(menuEvent.id, {
+                              weekKey: format(currentWs, 'yyyy-MM-dd'),
+                              dayIndex: i,
+                              occDate: targetDateStr,
+                            });
+                          }}
+                          title={format(d, 'EEEE, MMM d')}
+                          className="flex-1 text-[10px] font-semibold rounded-md py-1 transition-all relative flex flex-col items-center justify-center cursor-pointer"
+                          style={{
+                            color: sel ? '#fff' : (dayIsToday ? (darkMode ? '#93c5fd' : '#2563eb') : menuText),
+                            background: sel ? '#5b9d5b' : hoverBg,
+                            border: `1px solid ${sel ? '#5b9d5b' : (dayIsToday ? (darkMode ? '#3b82f6' : '#60a5fa') : menuBdr)}`,
+                          }}
+                        >
+                          <span>{format(d, 'EEEEE')}</span>
+                          <span className="text-[8px] opacity-75 font-normal -mt-0.5">{format(d, 'd')}</span>
+                        </button>
+                      );
+                    })}
                   </div>
-                  <div className="flex flex-col gap-1 flex-1 min-w-0">
-                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
-                      End Date
-                    </span>
-                    <input
-                      type="date"
-                      value={endDateStr}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (!val) return;
-                        const newEndDt = parseDate(val);
-                        const diff = differenceInDays(newEndDt, startDt);
-                        if (diff >= 0) {
-                          applyEdit(menuEvent.id, { daysSpan: diff + 1 });
-                        } else {
-                          const newWs = startOfWeek(newEndDt, { weekStartsOn });
-                          const newWeekKey = format(newWs, 'yyyy-MM-dd');
-                          const newDayIndex = differenceInDays(newEndDt, newWs);
-                          applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, daysSpan: 1, occDate: val });
-                        }
-                      }}
-                      className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
-                      style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
-                    />
-                  </div>
-                </div>
-
-                {/* Duration (days) selector */}
-                <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-                  <span className="text-[11px] font-medium" style={{ color: menuText }}>Duration (days)</span>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (currentSpan > 1) {
-                          applyEdit(menuEvent.id, { daysSpan: currentSpan - 1 });
-                        }
-                      }}
-                      disabled={currentSpan <= 1}
-                      className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                      style={{ color: menuText, borderColor: menuBdr }}
-                      onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                      onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
-                    >
-                      -
-                    </button>
-                    <input
-                      type="number"
-                      min={1}
-                      max={90}
-                      value={currentSpan}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value, 10);
-                        if (!isNaN(val) && val >= 1 && val <= 90) {
-                          applyEdit(menuEvent.id, { daysSpan: val });
-                        }
-                      }}
-                      className="w-8 text-xs font-semibold text-center tabular-nums rounded outline-none border-none py-0.5"
-                      style={{ color: menuText, background: 'transparent' }}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (currentSpan < 90) {
-                          applyEdit(menuEvent.id, { daysSpan: currentSpan + 1 });
-                        }
-                      }}
-                      disabled={currentSpan >= 90}
-                      className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                      style={{ color: menuText, borderColor: menuBdr }}
-                      onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-                      onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-              </>
-            );
-          })()}
-
-          {/* Completion-checkbox toggle */}
-          <button
-            className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
-            style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
-            onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            onClick={() => applyEdit(menuEvent.id, { noCheckbox: !menuEvent.noCheckbox })}
-          >
-            <span className="flex items-center gap-2.5">
-              <CheckSquare size={13} style={{ opacity: 0.7 }} />
-              Completion checkbox
-            </span>
-            <span
-              className="flex items-center rounded-full transition-colors"
-              style={{
-                width: 30, height: 17, padding: 2,
-                background: !menuEvent.noCheckbox ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
-                justifyContent: !menuEvent.noCheckbox ? 'flex-end' : 'flex-start',
-              }}
-            >
-              <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
-            </span>
-          </button>
-
-          {/* Category Selection Section */}
-          <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-            <div className="flex items-center justify-between">
-              <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
-                <Tag size={10} /> Category
-              </span>
-              {menuEvent.categoryId && (() => {
-                const activeCat = categories.find(c => c.id === menuEvent.categoryId);
-                return activeCat ? (
-                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1" style={{ backgroundColor: `${activeCat.color}20`, color: activeCat.color }}>
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activeCat.color }} />
-                    {activeCat.name}
-                  </span>
-                ) : null;
-              })()}
-            </div>
-
-            {/* Category Pills Selector */}
-            <div className="flex items-center gap-1 flex-wrap pt-0.5">
-              {/* "None" option */}
-              <button
-                type="button"
-                onClick={() => {
-                  applyEdit(menuEvent.id, { categoryId: undefined });
-                }}
-                className={`px-2 py-1 rounded-lg text-[11px] font-medium border flex items-center gap-1 transition-smooth ${
-                  !menuEvent.categoryId
-                    ? 'border-primary font-bold shadow-sm'
-                    : 'hover:bg-white/5 opacity-70 hover:opacity-100'
-                }`}
-                style={{
-                  borderColor: !menuEvent.categoryId ? (darkMode ? '#60a5fa' : '#2563eb') : menuBdr,
-                  background: !menuEvent.categoryId ? (darkMode ? 'rgba(96,165,250,0.15)' : 'rgba(37,99,235,0.08)') : 'transparent',
-                  color: !menuEvent.categoryId ? (darkMode ? '#93c5fd' : '#2563eb') : menuText,
-                }}
-              >
-                <span>None (Custom)</span>
-              </button>
-
-              {/* All Defined Categories */}
-              {categories.map(cat => {
-                const isSelected = menuEvent.categoryId === cat.id;
-                return (
-                  <button
-                    key={cat.id}
-                    type="button"
-                    onClick={() => {
-                      applyEdit(menuEvent.id, { categoryId: cat.id, color: cat.color });
-                    }}
-                    className={`px-2 py-1 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth ${
-                      isSelected
-                        ? 'font-bold shadow-sm'
-                        : 'hover:bg-white/5 opacity-70 hover:opacity-100'
-                    }`}
-                    style={{
-                      borderColor: isSelected ? cat.color : menuBdr,
-                      background: isSelected ? `${cat.color}22` : 'transparent',
-                      color: isSelected ? cat.color : menuText,
-                    }}
-                  >
-                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
-                    <span className="truncate max-w-[120px]">{cat.name}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Color Section - shown when category is None or for Google Calendar info */}
-          <div className="px-3 py-2.5 flex flex-col gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-            <div className="flex items-center justify-between">
-              <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
-                {menuEvent.categoryId ? 'Category Color' : 'Color Options'}
-              </span>
-              {menuEvent.gCalHex ? (
-                <span className="text-[9px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1" style={{ background: darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(37,99,235,0.1)', color: darkMode ? '#93c5fd' : '#2563eb' }}>
-                  <Sparkles size={9} /> Google Calendar
-                </span>
-              ) : menuEvent.categoryId ? (() => {
-                const currentCat = categories.find(c => c.id === menuEvent.categoryId);
-                return currentCat ? (
-                  <span className="text-[9.5px] font-medium" style={{ color: currentCat.color }}>
-                    Synced with {currentCat.name}
-                  </span>
-                ) : null;
-              })() : null}
-            </div>
-
-            {/* If Category is set, explain color is managed by Category. Otherwise show swatches & custom RGB! */}
-            {menuEvent.categoryId ? (() => {
-              const currentCat = categories.find(c => c.id === menuEvent.categoryId);
-              return (
-                <div className="flex items-center justify-between p-2 rounded-xl border text-[11px]" style={{ borderColor: menuBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
-                  <div className="flex items-center gap-2">
-                    <span className="w-3.5 h-3.5 rounded-full border shadow-sm flex-shrink-0" style={{ backgroundColor: currentCat?.color || '#22c55e', borderColor: `${currentCat?.color || '#22c55e'}60` }} />
-                    <span style={{ color: menuText }}>
-                      Color is managed by <strong>{currentCat?.name || 'Category'}</strong>
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => applyEdit(menuEvent.id, { categoryId: undefined })}
-                    className="text-[10.5px] underline opacity-70 hover:opacity-100"
-                    style={{ color: menuSub }}
-                  >
-                    Custom Color
-                  </button>
                 </div>
               );
-            })() : (
+            })()}
+
+            {/* Precise start/end time editors with interactive duration stepper, number input, and presets */}
+            {!menuEvent.allDay && (
               <>
-                {/* 10 Preset Swatches Grid */}
-                <div className="grid grid-cols-5 gap-1.5 pt-0.5">
-                  {SWATCHES.map(c => {
-                    const sc = chipColors({ color: c } as PlannerEvent);
-                    const isCustomHex = menuEvent.color?.startsWith('#');
-                    const gcalPresetMatch = menuEvent.gCalHex ? matchPresetColor(menuEvent.gCalHex) : null;
-                    const isSelected = isCustomHex
-                      ? false
-                      : (menuEvent.gCalHex
-                        ? (gcalPresetMatch === c)
-                        : (menuEvent.color === c));
-                    return (
-                      <button key={c} type="button"
-                        title={c.charAt(0).toUpperCase() + c.slice(1)}
-                        onClick={() => applyEdit(menuEvent.id, { color: c })}
-                        className="h-4.5 rounded-full border transition-transform hover:scale-115 flex items-center justify-center cursor-pointer"
-                        style={{
-                          backgroundColor: sc.bg,
-                          borderColor: sc.border,
-                          outline: isSelected ? `2px solid ${sc.text}` : 'none',
-                          outlineOffset: 1,
+                <div className="px-3 py-2 flex flex-col gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                  {menuEvent.noDuration ? (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                        Time (Point in Time / Deadline)
+                      </span>
+                      <input
+                        type="time"
+                        step={60}
+                        value={menuEvent.startTime}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (!val) return;
+                          applyEdit(menuEvent.id, { startTime: val, endTime: val });
                         }}
+                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-2 py-1 outline-none cursor-pointer"
+                        style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
                       />
+                    </div>
+                  ) : (() => {
+                    const startMin = timeToMin(menuEvent.startTime);
+                    const endMin = timeToMin(menuEvent.endTime);
+                    const rawDur = endMin >= startMin ? (endMin - startMin) : (1440 - startMin + endMin);
+                    const curDurMin = rawDur > 0 ? rawDur : 30;
+
+                    const durHours = Math.floor(curDurMin / 60);
+                    const durMins = curDurMin % 60;
+                    const durFormatted = durHours > 0
+                      ? (durMins > 0 ? `${durHours}h ${durMins}m` : `${durHours}h`)
+                      : `${durMins}m`;
+
+                    const applyNewDuration = (newDur: number) => {
+                      const clampedDur = Math.max(5, Math.min(1440, newDur));
+                      const sMin = timeToMin(menuEvent.startTime);
+                      const eMin = (sMin + clampedDur) % 1440;
+                      applyEdit(menuEvent.id, { endTime: minToTime(eMin) });
+                    };
+
+                    const DURATION_PRESETS = [15, 30, 45, 60, 90, 120, 180];
+
+                    return (
+                      <>
+                        {/* Start and End time inputs */}
+                        <div className="flex items-center gap-2">
+                          <div className="flex flex-col gap-1 flex-1 min-w-0">
+                            <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                              Start
+                            </span>
+                            <input
+                              type="time"
+                              step={60}
+                              value={menuEvent.startTime}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (!val) return;
+                                const newSMin = timeToMin(val);
+                                const newEMin = (newSMin + curDurMin) % 1440;
+                                applyEdit(menuEvent.id, { startTime: val, endTime: minToTime(newEMin) });
+                              }}
+                              className="w-full text-[11px] font-medium tabular-nums rounded-md px-2 py-1 outline-none cursor-pointer"
+                              style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                            />
+                          </div>
+                          <div className="flex flex-col items-center justify-center pt-3 text-muted-foreground/50">
+                            →
+                          </div>
+                          <div className="flex flex-col gap-1 flex-1 min-w-0">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                                End
+                              </span>
+                              <span className="text-[9px] font-semibold px-1 rounded bg-muted/20 text-muted-foreground">
+                                {durFormatted}
+                              </span>
+                            </div>
+                            <input
+                              type="time"
+                              step={60}
+                              value={menuEvent.endTime}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (!val) return;
+                                applyEdit(menuEvent.id, { endTime: val });
+                              }}
+                              className="w-full text-[11px] font-medium tabular-nums rounded-md px-2 py-1 outline-none cursor-pointer"
+                              style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Duration Stepper & Direct Input with 5-minute default step size */}
+                        <div className="flex flex-col gap-1.5 pt-1 border-t" style={{ borderColor: menuBdr }}>
+                          <div className="flex items-center justify-between">
+                            <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
+                              <Timer size={10} /> Duration
+                            </span>
+                            <span className="text-[9.5px] font-bold" style={{ color: darkMode ? '#93c5fd' : '#2563eb' }}>
+                              {durFormatted} <span className="font-normal opacity-70">({curDurMin} min)</span>
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {/* Stepper Minus: -5 min */}
+                            <button
+                              type="button"
+                              onClick={() => applyNewDuration(Math.max(5, Math.floor((curDurMin - 1) / 5) * 5))}
+                              disabled={curDurMin <= 5}
+                              title="Decrease duration by 5 minutes"
+                              className="h-7 px-2.5 rounded-md border flex items-center justify-center font-bold text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                              style={{ background: hoverBg, borderColor: menuBdr, color: menuText }}
+                            >
+                              -5m
+                            </button>
+
+                            {/* Duration minute number input */}
+                            <div className="flex-1 relative flex items-center">
+                              <input
+                                type="number"
+                                min={5}
+                                max={1440}
+                                step={5}
+                                value={curDurMin}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10);
+                                  if (!isNaN(val) && val >= 1) {
+                                    applyNewDuration(val);
+                                  }
+                                }}
+                                className="w-full h-7 text-xs font-semibold text-center tabular-nums rounded-md outline-none pr-7 pl-2"
+                                style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                              />
+                              <span className="absolute right-2 text-[10px] pointer-events-none opacity-60 font-medium" style={{ color: menuSub }}>
+                                min
+                              </span>
+                            </div>
+
+                            {/* Stepper Plus: +5 min */}
+                            <button
+                              type="button"
+                              onClick={() => applyNewDuration(Math.min(1440, (Math.floor(curDurMin / 5) + 1) * 5))}
+                              disabled={curDurMin >= 1440}
+                              title="Increase duration by 5 minutes"
+                              className="h-7 px-2.5 rounded-md border flex items-center justify-center font-bold text-xs transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                              style={{ background: hoverBg, borderColor: menuBdr, color: menuText }}
+                            >
+                              +5m
+                            </button>
+                          </div>
+
+                          {/* Quick Duration Preset Pills */}
+                          <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                            {DURATION_PRESETS.map((p) => {
+                              const isSelected = curDurMin === p;
+                              const label = p >= 60 ? (p % 60 === 0 ? `${p / 60}h` : `${Math.floor(p / 60)}h${p % 60}m`) : `${p}m`;
+                              return (
+                                <button
+                                  key={p}
+                                  type="button"
+                                  onClick={() => applyNewDuration(p)}
+                                  className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-all cursor-pointer ${
+                                    isSelected ? 'shadow-xs' : 'hover:opacity-100 opacity-70'
+                                  }`}
+                                  style={{
+                                    background: isSelected ? '#5b9d5b' : hoverBg,
+                                    borderColor: isSelected ? '#5b9d5b' : menuBdr,
+                                    color: isSelected ? '#ffffff' : menuText,
+                                  }}
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </>
                     );
-                  })}
+                  })()}
                 </div>
 
-                {/* Custom / RGB Color Panel */}
-                <div className="flex items-center gap-2 pt-2 mt-1 border-t border-dashed" style={{ borderColor: menuBdr }}>
-                  <span className="text-[10px] font-medium" style={{ color: menuSub }}>Custom RGB:</span>
-                  <div className="flex items-center gap-1.5 flex-1">
-                    <input
-                      type="color"
-                      value={menuEvent.color?.startsWith('#') ? menuEvent.color : (menuEvent.gCalHex || '#3b82f6')}
-                      onChange={(e) => applyEdit(menuEvent.id, { color: e.target.value })}
-                      className="w-5 h-5 rounded cursor-pointer border-0 bg-transparent p-0"
-                      title="Choose custom RGB color"
-                    />
-                    <input
-                      type="text"
-                      value={menuEvent.color?.startsWith('#') ? menuEvent.color : (menuEvent.gCalHex && !matchPresetColor(menuEvent.gCalHex) ? menuEvent.gCalHex : '')}
-                      placeholder="#Hex (e.g. #3b82f6)"
-                      onChange={(e) => {
-                        const val = e.target.value.trim();
-                        if (/^#[0-9a-fA-F]{6}$/.test(val) || val === '') {
-                          applyEdit(menuEvent.id, { color: val || 'sage' });
-                        }
-                      }}
-                      className="px-2 py-0.5 rounded text-[10px] font-mono flex-1 bg-transparent border outline-none"
-                      style={{ color: menuText, borderColor: menuBdr }}
-                    />
-                  </div>
-                </div>
+                {/* Point-in-time / No-Duration toggle */}
+                <button
+                  className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors cursor-pointer"
+                  style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
+                  onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  onClick={() => {
+                    const nextNoDur = !menuEvent.noDuration;
+                    applyEdit(menuEvent.id, {
+                      noDuration: nextNoDur,
+                      endTime: nextNoDur ? menuEvent.startTime : minToTime(timeToMin(menuEvent.startTime) + 30),
+                    });
+                  }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Clock size={13} style={{ opacity: 0.7 }} />
+                    Point in time (no end time)
+                  </span>
+                  <span
+                    className="flex items-center rounded-full transition-colors"
+                    style={{
+                      width: 30, height: 17, padding: 2,
+                      background: menuEvent.noDuration ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                      justifyContent: menuEvent.noDuration ? 'flex-end' : 'flex-start',
+                    }}
+                  >
+                    <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
+                  </span>
+                </button>
               </>
             )}
-          </div>
 
-          {/* Repeat */}
-          <RecurrenceEditor
-            recur={menuEvent.recur}
-            anchorWeekday={new Date((menuEvent.occDate || viewedWeekKey) + 'T00:00:00').getDay() as Weekday}
-            onChange={(r) => applyEdit(menuEvent.id, { recur: r })}
-            theme={{ text: menuText, sub: menuSub, bdr: menuBdr, hover: hoverBg, accent: darkMode ? '#93c5fd' : '#2563eb', accentBg: darkMode ? 'rgba(96,165,250,0.18)' : 'rgba(37,99,235,0.10)', fieldBg: darkMode ? 'rgba(255,255,255,0.06)' : '#fff' }}
-          />
-
-          {/* Lock-to-series toggle (repeating items only). OFF (default): editing or
-              moving this occurrence detaches it into a free standalone item. ON: every
-              occurrence stays identical — changes apply to the whole series. */}
-          {!!menuEvent.recur && (
+            {/* All-day event toggle */}
             <button
               className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
               style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
               onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              onClick={() => applyEdit(menuEvent.id, { locked: !menuEvent.locked })}
-              title={menuEvent.locked
-                ? 'Changes apply to every occurrence in this series'
-                : 'Editing or moving this one detaches it from the series'}
+              onClick={() => {
+                const nextAllDay = !menuEvent.allDay;
+                const patches: Partial<PlannerEvent> = { allDay: nextAllDay };
+                if (!nextAllDay) {
+                  patches.daysSpan = undefined;
+                }
+                applyEdit(menuEvent.id, patches);
+              }}
             >
               <span className="flex items-center gap-2.5">
-                {menuEvent.locked ? <Link2 size={13} style={{ opacity: 0.7 }} /> : <Link2Off size={13} style={{ opacity: 0.7 }} />}
-                Lock to series
+                <CalendarIcon size={13} style={{ opacity: 0.7 }} />
+                All-day event
               </span>
               <span
                 className="flex items-center rounded-full transition-colors"
                 style={{
                   width: 30, height: 17, padding: 2,
-                  background: menuEvent.locked ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
-                  justifyContent: menuEvent.locked ? 'flex-end' : 'flex-start',
+                  background: menuEvent.allDay ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                  justifyContent: menuEvent.allDay ? 'flex-end' : 'flex-start',
                 }}
               >
                 <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
               </span>
             </button>
-          )}
 
-          {/* Linked items — couple this item to the one above or below it, like
-              train carriages. Coupled items move as one: dragging any of them, or
-              dragging this one's START edge, carries the rest along. */}
-          {!isDraft && !menuEvent.allDay && (() => {
-            const linkedNow = linkedIdsOf(menuEvent, menuEvent.id).filter(lid => lid !== menuEvent.id);
-            const above = linkNeighbour(menuEvent.id, 'prev');
-            const below = linkNeighbour(menuEvent.id, 'next');
-            return (
-              <div className="px-3 py-2.5 flex flex-col gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
-                <div className="flex items-center justify-between">
-                  <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Linked movement</span>
-                  {linkedNow.length > 0 && (
-                    <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'rgba(96,165,250,0.18)', color: '#93c5fd' }}>
-                      {linkedNow.length + 1} coupled
+            {/* All-day date & span selectors */}
+            {menuEvent.allDay && (() => {
+              const currentSpan = Math.max(1, menuEvent.daysSpan || 1);
+              const startDt = menuEvent.occDate
+                ? parseDate(menuEvent.occDate)
+                : addDays(parseDate(menuEvent.weekKey || viewedWeekKey), menuEvent.dayIndex || 0);
+              const startDateStr = format(startDt, 'yyyy-MM-dd');
+              const endDt = addDays(startDt, currentSpan - 1);
+              const endDateStr = format(endDt, 'yyyy-MM-dd');
+
+              return (
+                <>
+                  {/* Start Date & End Date pickers */}
+                  <div className="px-3 py-2 flex items-center gap-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                    <div className="flex flex-col gap-1 flex-1 min-w-0">
+                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                        Start Date
+                      </span>
+                      <input
+                        type="date"
+                        value={startDateStr}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (!val) return;
+                          const newStartDt = parseDate(val);
+                          const newWs = startOfWeek(newStartDt, { weekStartsOn });
+                          const newWeekKey = format(newWs, 'yyyy-MM-dd');
+                          const newDayIndex = differenceInDays(newStartDt, newWs);
+                          applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, occDate: val });
+                        }}
+                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
+                        style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1 flex-1 min-w-0">
+                      <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                        End Date
+                      </span>
+                      <input
+                        type="date"
+                        value={endDateStr}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (!val) return;
+                          const newEndDt = parseDate(val);
+                          const diff = differenceInDays(newEndDt, startDt);
+                          if (diff >= 0) {
+                            applyEdit(menuEvent.id, { daysSpan: diff + 1 });
+                          } else {
+                            const newWs = startOfWeek(newEndDt, { weekStartsOn });
+                            const newWeekKey = format(newWs, 'yyyy-MM-dd');
+                            const newDayIndex = differenceInDays(newEndDt, newWs);
+                            applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, daysSpan: 1, occDate: val });
+                          }
+                        }}
+                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
+                        style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Duration (days) selector */}
+                  <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                    <span className="text-[11px] font-medium" style={{ color: menuText }}>Duration (days)</span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (currentSpan > 1) {
+                            applyEdit(menuEvent.id, { daysSpan: currentSpan - 1 });
+                          }
+                        }}
+                        disabled={currentSpan <= 1}
+                        className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ color: menuText, borderColor: menuBdr }}
+                        onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
+                      >
+                        -
+                      </button>
+                      <input
+                        type="number"
+                        min={1}
+                        max={90}
+                        value={currentSpan}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          if (!isNaN(val) && val >= 1 && val <= 90) {
+                            applyEdit(menuEvent.id, { daysSpan: val });
+                          }
+                        }}
+                        className="w-8 text-xs font-semibold text-center tabular-nums rounded outline-none border-none py-0.5"
+                        style={{ color: menuText, background: 'transparent' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (currentSpan < 90) {
+                            applyEdit(menuEvent.id, { daysSpan: currentSpan + 1 });
+                          }
+                        }}
+                        disabled={currentSpan >= 90}
+                        className="w-5 h-5 rounded border flex items-center justify-center text-xs bg-muted/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ color: menuText, borderColor: menuBdr }}
+                        onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.03)')}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+
+            {/* Completion-checkbox toggle */}
+            <button
+              className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+              style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
+              onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              onClick={() => applyEdit(menuEvent.id, { noCheckbox: !menuEvent.noCheckbox })}
+            >
+              <span className="flex items-center gap-2.5">
+                <CheckSquare size={13} style={{ opacity: 0.7 }} />
+                Completion checkbox
+              </span>
+              <span
+                className="flex items-center rounded-full transition-colors"
+                style={{
+                  width: 30, height: 17, padding: 2,
+                  background: !menuEvent.noCheckbox ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                  justifyContent: !menuEvent.noCheckbox ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
+              </span>
+            </button>
+
+            {/* Category Selection Section */}
+            <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
+                  <Tag size={10} /> Category
+                </span>
+                {menuEvent.categoryId && (() => {
+                  const activeCat = categories.find(c => c.id === menuEvent.categoryId);
+                  return activeCat ? (
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1" style={{ backgroundColor: `${activeCat.color}20`, color: activeCat.color }}>
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activeCat.color }} />
+                      {activeCat.name}
                     </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={!above}
-                    onClick={() => linkToNeighbour(menuEvent.id, 'prev')}
-                    className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
-                    style={{
-                      background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText,
-                      opacity: above ? 1 : 0.4, cursor: above ? 'pointer' : 'default',
-                    }}
-                    title={above ? `Couple to “${above.ev.content || 'Untitled'}” above` : 'Nothing above this item today'}
-                  >
-                    <ChevronUp size={12} /> Link above
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!below}
-                    onClick={() => linkToNeighbour(menuEvent.id, 'next')}
-                    className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
-                    style={{
-                      background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText,
-                      opacity: below ? 1 : 0.4, cursor: below ? 'pointer' : 'default',
-                    }}
-                    title={below ? `Couple to “${below.ev.content || 'Untitled'}” below` : 'Nothing below this item today'}
-                  >
-                    <ChevronDown size={12} /> Link below
-                  </button>
-                </div>
-                {linkedNow.length > 0 && (
-                  <>
-                    <div className="flex flex-col gap-0.5">
-                      {linkedNow.map(lid => {
-                        const partner = weekEvents[lid] ?? events[lid];
-                        if (!partner) return null;
-                        return (
-                          <span key={lid} className="text-[10px] truncate flex items-center gap-1" style={{ color: menuSub }}>
-                            <Link2 size={9} style={{ opacity: 0.7, flexShrink: 0 }} />
-                            {partner.content || 'Untitled'} · {formatTimeLabel(timeToMin(partner.startTime), timeFormat)}
-                          </span>
-                        );
-                      })}
+                  ) : null;
+                })()}
+              </div>
+
+              {/* Category Pills Selector */}
+              <div className="flex items-center gap-1 flex-wrap pt-0.5 max-h-[115px] overflow-y-auto custom-scrollbar pr-0.5">
+                {/* "None" option */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    applyEdit(menuEvent.id, { categoryId: undefined });
+                  }}
+                  className={`px-2 py-0.5 rounded-md text-[11px] font-medium border flex items-center gap-1 transition-all ${
+                    !menuEvent.categoryId
+                      ? 'font-bold shadow-xs'
+                      : 'hover:bg-white/5 opacity-70 hover:opacity-100'
+                  }`}
+                  style={{
+                    borderColor: !menuEvent.categoryId ? (darkMode ? '#60a5fa' : '#2563eb') : menuBdr,
+                    background: !menuEvent.categoryId ? (darkMode ? 'rgba(96,165,250,0.15)' : 'rgba(37,99,235,0.08)') : 'transparent',
+                    color: !menuEvent.categoryId ? (darkMode ? '#93c5fd' : '#2563eb') : menuText,
+                  }}
+                >
+                  <span>None (Custom)</span>
+                </button>
+
+                {/* All Defined Categories */}
+                {categories.map(cat => {
+                  const isSelected = menuEvent.categoryId === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        const catIsNoDur = Boolean(cat.defaultNoDuration || cat.defaultDurationMin === 0);
+                        const patches: Partial<PlannerEvent> = {
+                          categoryId: cat.id,
+                          color: cat.color,
+                          noCheckbox: typeof cat.defaultNoCheckbox === 'boolean' ? cat.defaultNoCheckbox : menuEvent.noCheckbox,
+                          allDay: menuEvent.allDay ? true : (typeof cat.defaultAllDay === 'boolean' ? cat.defaultAllDay : menuEvent.allDay),
+                        };
+                        if (!menuEvent.allDay && catIsNoDur) {
+                          patches.noDuration = true;
+                          patches.endTime = menuEvent.startTime;
+                        }
+                        applyEdit(menuEvent.id, patches);
+                      }}
+                      className={`px-2 py-0.5 rounded-md text-[11px] font-medium border flex items-center gap-1.5 transition-all max-w-[150px] ${
+                        isSelected
+                          ? 'font-bold shadow-xs'
+                          : 'hover:bg-white/5 opacity-70 hover:opacity-100'
+                      }`}
+                      style={{
+                        borderColor: isSelected ? cat.color : menuBdr,
+                        background: isSelected ? `${cat.color}22` : 'transparent',
+                        color: isSelected ? cat.color : menuText,
+                      }}
+                    >
+                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
+                      <span className="truncate">{cat.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Color Section */}
+            <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
+                  {menuEvent.categoryId ? 'Category Color' : 'Color Options'}
+                </span>
+                {menuEvent.gCalHex ? (
+                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1" style={{ background: darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(37,99,235,0.1)', color: darkMode ? '#93c5fd' : '#2563eb' }}>
+                    <Sparkles size={9} /> Google Calendar
+                  </span>
+                ) : menuEvent.categoryId ? (() => {
+                  const currentCat = categories.find(c => c.id === menuEvent.categoryId);
+                  return currentCat ? (
+                    <span className="text-[9.5px] font-medium" style={{ color: currentCat.color }}>
+                      Synced with {currentCat.name}
+                    </span>
+                  ) : null;
+                })() : null}
+              </div>
+
+              {/* If Category is set, explain color is managed by Category. Otherwise show swatches & custom RGB! */}
+              {menuEvent.categoryId ? (() => {
+                const currentCat = categories.find(c => c.id === menuEvent.categoryId);
+                return (
+                  <div className="flex items-center justify-between p-2 rounded-lg border text-[11px]" style={{ borderColor: menuBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full border shadow-xs flex-shrink-0" style={{ backgroundColor: currentCat?.color || '#22c55e', borderColor: `${currentCat?.color || '#22c55e'}60` }} />
+                      <span style={{ color: menuText }}>
+                        Color from <strong>{currentCat?.name || 'Category'}</strong>
+                      </span>
                     </div>
                     <button
                       type="button"
-                      onClick={() => unlinkItem(menuEvent.id)}
-                      className="w-full flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
-                      style={{ background: 'transparent', border: `1px solid ${menuBdr}`, color: '#f87171' }}
-                      title="Uncouple this item; the rest stay linked to each other"
+                      onClick={() => applyEdit(menuEvent.id, { categoryId: undefined })}
+                      className="text-[10.5px] underline opacity-70 hover:opacity-100 cursor-pointer"
+                      style={{ color: menuSub }}
                     >
-                      <Link2Off size={12} /> Unlink this item
+                      Custom Color
                     </button>
-                  </>
-                )}
-              </div>
-            );
-          })()}
+                  </div>
+                );
+              })() : (
+                <>
+                  {/* 10 Preset Swatches Grid */}
+                  <div className="grid grid-cols-5 gap-1.5 pt-0.5">
+                    {SWATCHES.map(c => {
+                      const sc = chipColors({ color: c } as PlannerEvent);
+                      const isCustomHex = menuEvent.color?.startsWith('#');
+                      const gcalPresetMatch = menuEvent.gCalHex ? matchPresetColor(menuEvent.gCalHex) : null;
+                      const isSelected = isCustomHex
+                        ? false
+                        : (menuEvent.gCalHex
+                          ? (gcalPresetMatch === c)
+                          : (menuEvent.color === c));
+                      return (
+                        <button key={c} type="button"
+                          title={c.charAt(0).toUpperCase() + c.slice(1)}
+                          onClick={() => applyEdit(menuEvent.id, { color: c })}
+                          className="h-4.5 rounded-full border transition-transform hover:scale-110 flex items-center justify-center cursor-pointer"
+                          style={{
+                            backgroundColor: sc.bg,
+                            borderColor: sc.border,
+                            outline: isSelected ? `2px solid ${sc.text}` : 'none',
+                            outlineOffset: 1,
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
 
-          {/* Draft footer: commit or discard (dedicated create) */}
-          {isDraft && (
-            <div className="flex gap-2 px-3 py-2.5">
-              <button
-                onClick={() => { setMenuId(null); setMenuPos(null); }}
-                className="flex-1 py-1.5 text-[12px] font-semibold rounded-md transition-colors"
-                style={{ color: menuText, background: hoverBg, border: `1px solid ${menuBdr}` }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={commitDraft}
-                className="flex-1 py-1.5 text-[12px] font-semibold rounded-md text-white transition-colors"
-                style={{ background: '#5b9d5b' }}
-              >
-                Save
-              </button>
+                  {/* Custom / RGB Color Panel */}
+                  <div className="flex items-center gap-2 pt-1.5 mt-0.5 border-t" style={{ borderColor: menuBdr }}>
+                    <span className="text-[10px] font-medium" style={{ color: menuSub }}>Custom RGB:</span>
+                    <div className="flex items-center gap-1.5 flex-1">
+                      <input
+                        type="color"
+                        value={menuEvent.color?.startsWith('#') ? menuEvent.color : (menuEvent.gCalHex || '#3b82f6')}
+                        onChange={(e) => applyEdit(menuEvent.id, { color: e.target.value })}
+                        className="w-5 h-5 rounded cursor-pointer border-0 bg-transparent p-0"
+                        title="Choose custom RGB color"
+                      />
+                      <input
+                        type="text"
+                        value={menuEvent.color?.startsWith('#') ? menuEvent.color : (menuEvent.gCalHex && !matchPresetColor(menuEvent.gCalHex) ? menuEvent.gCalHex : '')}
+                        placeholder="#Hex (e.g. #3b82f6)"
+                        onChange={(e) => {
+                          const val = e.target.value.trim();
+                          if (/^#[0-9a-fA-F]{6}$/.test(val) || val === '') {
+                            applyEdit(menuEvent.id, { color: val || 'sage' });
+                          }
+                        }}
+                        className="px-2 py-0.5 rounded text-[10px] font-mono flex-1 bg-transparent border outline-none"
+                        style={{ color: menuText, borderColor: menuBdr }}
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
-          )}
 
-          {/* Actions (live items only — a draft isn't on the grid yet) */}
-          {!isDraft && [
-            { icon: <Pencil size={13}/>, label: 'Edit', action: () => { enterEdit(menuEvent.id); } },
-            { icon: <CalendarRange size={13}/>, label: 'Clone to whole week', action: () => cloneAcrossWeek(menuEvent) },
-          ].map(({ icon, label, action }) => (
-            <button
-              key={label}
-              className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
-              style={{ color: menuText }}
-              onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              onClick={action}
-            >
-              <span style={{ opacity: 0.7 }}>{icon}</span>
-              {label}
-            </button>
-          ))}
+            {/* Repeat */}
+            <RecurrenceEditor
+              recur={menuEvent.recur}
+              anchorWeekday={(menuEvent.occDate ? parseDate(menuEvent.occDate) : addDays(parseDate(menuEvent.weekKey || viewedWeekKey), menuEvent.dayIndex || 0)).getDay() as Weekday}
+              onChange={(r) => applyEdit(menuEvent.id, { recur: r })}
+              theme={{ text: menuText, sub: menuSub, bdr: menuBdr, hover: hoverBg, accent: darkMode ? '#93c5fd' : '#2563eb', accentBg: darkMode ? 'rgba(96,165,250,0.18)' : 'rgba(37,99,235,0.10)', fieldBg: darkMode ? 'rgba(255,255,255,0.06)' : '#fff' }}
+            />
 
-          {/* Delete — scoped for repeating items */}
-          {!isDraft && (() => {
-            const repeating = !!menuEvent.recur;
-            const del = (mode: DeleteMode) => { applyDelete(menuEvent.id, mode); if (editingId === menuEvent.id) setEditingId(null); setMenuId(null); setMenuPos(null); };
-            const row = (label: string, onClick: () => void, indent = false) => (
-              <button key={label}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
-                style={{ color: '#e05555', paddingLeft: indent ? 34 : undefined }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(224,85,85,0.10)')}
+            {/* Lock-to-series toggle (repeating items only) */}
+            {!!menuEvent.recur && (
+              <button
+                className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+                style={{ color: menuText, borderBottom: `1px solid ${menuBdr}` }}
+                onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                onClick={onClick}
+                onClick={() => applyEdit(menuEvent.id, { locked: !menuEvent.locked })}
+                title={menuEvent.locked
+                  ? 'Changes apply to every occurrence in this series'
+                  : 'Editing or moving this one detaches it from the series'}
               >
-                {!indent && <span style={{ opacity: 0.7 }}><Trash2 size={13}/></span>}
+                <span className="flex items-center gap-2.5">
+                  {menuEvent.locked ? <Link2 size={13} style={{ opacity: 0.7 }} /> : <Link2Off size={13} style={{ opacity: 0.7 }} />}
+                  Lock to series
+                </span>
+                <span
+                  className="flex items-center rounded-full transition-colors"
+                  style={{
+                    width: 30, height: 17, padding: 2,
+                    background: menuEvent.locked ? '#5b9d5b' : (darkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'),
+                    justifyContent: menuEvent.locked ? 'flex-end' : 'flex-start',
+                  }}
+                >
+                  <span style={{ width: 13, height: 13, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.3)' }} />
+                </span>
+              </button>
+            )}
+
+            {/* Linked items */}
+            {!isDraft && !menuEvent.allDay && (() => {
+              const linkedNow = linkedIdsOf(menuEvent, menuEvent.id).filter(lid => lid !== menuEvent.id);
+              const above = linkNeighbour(menuEvent.id, 'prev');
+              const below = linkNeighbour(menuEvent.id, 'next');
+              return (
+                <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Linked movement</span>
+                    {linkedNow.length > 0 && (
+                      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'rgba(96,165,250,0.18)', color: '#93c5fd' }}>
+                        {linkedNow.length + 1} coupled
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={!above}
+                      onClick={() => linkToNeighbour(menuEvent.id, 'prev')}
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
+                      style={{
+                        background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText,
+                        opacity: above ? 1 : 0.4, cursor: above ? 'pointer' : 'default',
+                      }}
+                      title={above ? `Couple to “${above.ev.content || 'Untitled'}” above` : 'Nothing above this item today'}
+                    >
+                      <ChevronUp size={12} /> Link above
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!below}
+                      onClick={() => linkToNeighbour(menuEvent.id, 'next')}
+                      className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-md text-[11px] font-semibold transition-colors"
+                      style={{
+                        background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText,
+                        opacity: below ? 1 : 0.4, cursor: below ? 'pointer' : 'default',
+                      }}
+                      title={below ? `Couple to “${below.ev.content || 'Untitled'}” below` : 'Nothing below this item today'}
+                    >
+                      <ChevronDown size={12} /> Link below
+                    </button>
+                  </div>
+                  {linkedNow.length > 0 && (
+                    <>
+                      <div className="flex flex-col gap-0.5 max-h-20 overflow-y-auto custom-scrollbar">
+                        {linkedNow.map(lid => {
+                          const partner = weekEvents[lid] ?? events[lid];
+                          if (!partner) return null;
+                          return (
+                            <span key={lid} className="text-[10px] truncate flex items-center gap-1" style={{ color: menuSub }}>
+                              <Link2 size={9} style={{ opacity: 0.7, flexShrink: 0 }} />
+                              {partner.content || 'Untitled'} · {formatTimeLabel(timeToMin(partner.startTime), timeFormat)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => unlinkItem(menuEvent.id)}
+                        className="w-full flex items-center justify-center gap-1 py-1 rounded-md text-[11px] font-semibold transition-colors"
+                        style={{ background: 'transparent', border: `1px solid ${menuBdr}`, color: '#f87171' }}
+                        title="Uncouple this item; the rest stay linked to each other"
+                      >
+                        <Link2Off size={12} /> Unlink this item
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Draft footer: commit or discard (dedicated create) */}
+            {isDraft && (
+              <div className="flex gap-2 px-3 py-2.5">
+                <button
+                  onClick={() => { setMenuId(null); setMenuPos(null); }}
+                  className="flex-1 py-1.5 text-[12px] font-semibold rounded-md transition-colors"
+                  style={{ color: menuText, background: hoverBg, border: `1px solid ${menuBdr}` }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={commitDraft}
+                  className="flex-1 py-1.5 text-[12px] font-semibold rounded-md text-white transition-colors shadow-xs"
+                  style={{ background: '#5b9d5b' }}
+                >
+                  Save
+                </button>
+              </div>
+            )}
+
+            {/* Actions (live items only — a draft isn't on the grid yet) */}
+            {!isDraft && [
+              { icon: <Pencil size={13}/>, label: 'Edit inline', action: () => { enterEdit(menuEvent.id); } },
+              { icon: <CalendarRange size={13}/>, label: 'Clone to whole week', action: () => cloneAcrossWeek(menuEvent) },
+            ].map(({ icon, label, action }) => (
+              <button
+                key={label}
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+                style={{ color: menuText }}
+                onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                onClick={action}
+              >
+                <span style={{ opacity: 0.7 }}>{icon}</span>
                 {label}
               </button>
-            );
-            if (!repeating) return row('Delete', () => del('all'));
-            return (
-              <>
-                {row('Delete', () => del('one'))}
-                {!deleteExpanded
-                  ? row('Delete more…', () => setDeleteExpanded(true))
-                  : (<>
-                      {row('This and following events', () => del('following'), true)}
-                      {row('All events', () => del('all'), true)}
-                    </>)}
-              </>
-            );
-          })()}
+            ))}
+
+            {/* Delete — scoped for repeating items */}
+            {!isDraft && (() => {
+              const repeating = !!menuEvent.recur;
+              const del = (mode: DeleteMode) => { applyDelete(menuEvent.id, mode); if (editingId === menuEvent.id) setEditingId(null); setMenuId(null); setMenuPos(null); };
+              const row = (label: string, onClick: () => void, indent = false) => (
+                <button key={label}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[12px] font-medium transition-colors"
+                  style={{ color: '#e05555', paddingLeft: indent ? 34 : undefined }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(224,85,85,0.10)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  onClick={onClick}
+                >
+                  {!indent && <span style={{ opacity: 0.7 }}><Trash2 size={13}/></span>}
+                  {label}
+                </button>
+              );
+              if (!repeating) return row('Delete', () => del('all'));
+              return (
+                <>
+                  {row('Delete', () => del('one'))}
+                  {!deleteExpanded
+                    ? row('Delete more…', () => setDeleteExpanded(true))
+                    : (<>
+                        {row('This and following events', () => del('following'), true)}
+                        {row('All events', () => del('all'), true)}
+                      </>)}
+                </>
+              );
+            })()}
+          </div>
+
+          {/* Desktop Resize Handles */}
+          {!isPhone && (
+            <>
+              {/* Right edge resize strip */}
+              <div
+                onMouseDown={(e) => startMenuResize(e, 'e')}
+                className="absolute top-0 right-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-primary/20 transition-colors z-20"
+                title="Drag to resize width"
+              />
+              {/* Bottom edge resize strip */}
+              <div
+                onMouseDown={(e) => startMenuResize(e, 's')}
+                className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize hover:bg-primary/20 transition-colors z-20"
+                title="Drag to resize height"
+              />
+              {/* Bottom-right corner resize grip */}
+              <div
+                onMouseDown={(e) => startMenuResize(e, 'se')}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  const reset = { width: DEFAULT_MENU_WIDTH };
+                  setMenuSize(reset);
+                  try { localStorage.setItem('planner-event-menu-size', JSON.stringify(reset)); } catch (_) {}
+                }}
+                className="absolute bottom-0.5 right-0.5 w-4 h-4 flex items-center justify-center cursor-nwse-resize select-none opacity-40 hover:opacity-100 transition-opacity z-30"
+                style={{ color: menuSub }}
+                title="Drag to resize (Double-click to reset size)"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                  <circle cx="8.5" cy="8.5" r="1" />
+                  <circle cx="4.5" cy="8.5" r="1" />
+                  <circle cx="8.5" cy="4.5" r="1" />
+                </svg>
+              </div>
+            </>
+          )}
         </motion.div>
       )}
       </AnimatePresence>
@@ -11139,8 +12460,8 @@ export default function DailyPlanner() {
 
 
       {/* Task Overflow Modal Pop-up */}
-      <AnimatePresence>
-        {taskOverflowModal && (
+      {taskOverflowModal && createPortal(
+        <AnimatePresence>
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -11174,12 +12495,12 @@ export default function DailyPlanner() {
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 pr-0.5 custom-scrollbar max-h-[60vh]">
                 {taskOverflowModal.tasks.map(t => {
                   const occ = t.occDate ?? null;
+                  const occId = t.recur && occ ? `${t.id}::${occ}` : t.id;
                   const done = isTaskDone(t, occ);
                   const c = taskChipColors(t.color || undefined);
                   return (
                     <div
-                      key={t.id}
-                      onClick={() => handleToggleTaskDone(t.id)}
+                      key={occId}
                       className="px-3 py-2 rounded-lg border text-xs font-medium flex items-center gap-2 shadow-2xs cursor-pointer transition-opacity"
                       style={{
                         background: c.bg,
@@ -11188,14 +12509,30 @@ export default function DailyPlanner() {
                         opacity: done ? 0.5 : 1,
                       }}
                     >
-                      <span className="flex-shrink-0 flex items-center" style={{ color: c.text }}>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleTaskDone(occId);
+                        }}
+                        className="flex-shrink-0 flex items-center cursor-pointer p-0.5 -m-0.5 rounded"
+                        style={{ color: c.text }}
+                        title={done ? 'Mark incomplete' : 'Mark complete'}
+                      >
                         {done ? (
                           taskCheckboxShape === 'square' ? <CheckSquare size={13} /> : <CheckCircle2 size={13} />
                         ) : (
                           taskCheckboxShape === 'square' ? <Square size={13} /> : <Circle size={13} />
                         )}
-                      </span>
-                      <span className={`break-words flex-1 leading-snug ${done ? 'line-through opacity-60' : ''}`}>
+                      </button>
+                      <span
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setTaskOverflowModal(null);
+                          openTaskMenu(occId, { x: e.clientX + 8, y: e.clientY });
+                        }}
+                        className={`break-words flex-1 leading-snug cursor-pointer hover:underline ${done ? 'line-through opacity-60' : ''}`}
+                      >
                         {t.title || 'Untitled task'}
                       </span>
                     </div>
@@ -11204,8 +12541,9 @@ export default function DailyPlanner() {
               </div>
             </motion.div>
           </motion.div>
-        )}
-      </AnimatePresence>
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* ══ Phone shell ═══════════════════════════════════════════════════════
           The bottom bar, the create button and the two sheets the compact
@@ -11350,18 +12688,17 @@ export default function DailyPlanner() {
                     key={opt.id}
                     onClick={() => {
                       haptic(8);
-                      setDirection(0);
                       if (showFocusAnalysis) {
+                        setDirection(0);
                         setAnalysisTab(opt.id as 'week' | 'month' | 'year');
                         setMobileViewPickerOpen(false);
                       } else if (opt.id === 'custom') {
                         if (calendarView !== 'custom') {
-                          setCalendarView('custom');
-                        } else {
-                          setMobileViewPickerOpen(false);
+                          switchCalendarView('custom');
                         }
+                        setMobileViewPickerOpen(false);
                       } else {
-                        setCalendarView(opt.id as CalendarView);
+                        switchCalendarView(opt.id as CalendarView);
                         setMobileViewPickerOpen(false);
                       }
                     }}
@@ -11546,12 +12883,7 @@ export default function DailyPlanner() {
                             {p.label}
                           </span>
                           {isNext && (
-                            <span
-                              className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md"
-                              style={{ background: `${prayer.color}26`, color: prayer.color }}
-                            >
-                              Next
-                            </span>
+                            <PrayerNextBadge minutes={p.minutes} color={prayer.color} />
                           )}
                         </div>
                         <span
@@ -11734,10 +13066,13 @@ export default function DailyPlanner() {
                           <span style={{ color: prayer.color }}>
                             {done ? <CheckCircle2 size={15} /> : <Circle size={15} />}
                           </span>
-                          <span
-                            className="flex-1 text-[13px] font-semibold"
-                            style={{ color: isNext ? prayer.color : menuText, textDecoration: done ? 'line-through' : 'none', opacity: done ? 0.55 : 1 }}
-                          >{p.label}</span>
+                          <div className="flex-1 min-w-0 flex items-center gap-2">
+                            <span
+                              className="text-[13px] font-semibold truncate"
+                              style={{ color: isNext ? prayer.color : menuText, textDecoration: done ? 'line-through' : 'none', opacity: done ? 0.55 : 1 }}
+                            >{p.label}</span>
+                            {isNext && <PrayerNextBadge minutes={p.minutes} color={prayer.color} />}
+                          </div>
                           <span className="text-[13px] font-bold tabular-nums" style={{ color: isNext ? prayer.color : menuText }}>
                             {formatTimeLabel(p.minutes, timeFormat)}
                           </span>
@@ -11836,6 +13171,7 @@ function CategoryFilterList({
     name: string;
     color: string;
     defaultDurationMin: number;
+    defaultNoDuration: boolean;
     defaultAllDay: boolean;
     defaultNoCheckbox: boolean;
     showInWidget: boolean;
@@ -11844,6 +13180,7 @@ function CategoryFilterList({
     name: '',
     color: PRESET_CATEGORY_COLORS[0].hex,
     defaultDurationMin: 30,
+    defaultNoDuration: false,
     defaultAllDay: false,
     defaultNoCheckbox: false,
     showInWidget: true,
@@ -11858,6 +13195,7 @@ function CategoryFilterList({
       name: '',
       color: PRESET_CATEGORY_COLORS[categories.length % PRESET_CATEGORY_COLORS.length].hex,
       defaultDurationMin: 30,
+      defaultNoDuration: false,
       defaultAllDay: false,
       defaultNoCheckbox: false,
       showInWidget: true,
@@ -11870,11 +13208,13 @@ function CategoryFilterList({
   const handleOpenEdit = (cat: EventCategory) => {
     setEditingCatId(cat.id);
     setDeleteConfirm(false);
-    setShowMore(Boolean(cat.description || cat.defaultAllDay || cat.defaultNoCheckbox || (cat.defaultDurationMin && cat.defaultDurationMin !== 30)));
+    const noDur = Boolean(cat.defaultNoDuration || cat.defaultDurationMin === 0);
+    setShowMore(Boolean(cat.description || cat.defaultAllDay || cat.defaultNoCheckbox || noDur || (cat.defaultDurationMin && cat.defaultDurationMin !== 30)));
     setFormState({
       name: cat.name,
       color: cat.color,
-      defaultDurationMin: cat.defaultDurationMin ?? 30,
+      defaultDurationMin: noDur ? 0 : (cat.defaultDurationMin ?? 30),
+      defaultNoDuration: noDur,
       defaultAllDay: cat.defaultAllDay ?? false,
       defaultNoCheckbox: cat.defaultNoCheckbox ?? false,
       showInWidget: cat.showInWidget ?? true,
@@ -11882,6 +13222,53 @@ function CategoryFilterList({
     });
     setMode('edit');
     setTimeout(() => nameInputRef.current?.focus(), 50);
+  };
+
+  const editStateRef = useRef({ mode, editingCatId, formState, onSaveCategory });
+  useEffect(() => {
+    editStateRef.current = { mode, editingCatId, formState, onSaveCategory };
+  });
+
+  useEffect(() => {
+    return () => {
+      const cur = editStateRef.current;
+      if (cur.mode === 'edit' && cur.editingCatId) {
+        const trimmed = cur.formState.name.trim();
+        if (trimmed) {
+          cur.onSaveCategory({
+            id: cur.editingCatId,
+            name: trimmed,
+            color: cur.formState.color || '#22c55e',
+            defaultDurationMin: cur.formState.defaultNoDuration ? 0 : cur.formState.defaultDurationMin,
+            defaultNoDuration: cur.formState.defaultNoDuration,
+            defaultAllDay: cur.formState.defaultAllDay,
+            defaultNoCheckbox: cur.formState.defaultNoCheckbox,
+            showInWidget: cur.formState.showInWidget,
+            description: cur.formState.description.trim(),
+          });
+        }
+      }
+    };
+  }, []);
+
+  const handleExit = () => {
+    if (mode === 'edit' && editingCatId) {
+      const trimmed = formState.name.trim();
+      if (trimmed) {
+        onSaveCategory({
+          id: editingCatId,
+          name: trimmed,
+          color: formState.color || '#22c55e',
+          defaultDurationMin: formState.defaultNoDuration ? 0 : formState.defaultDurationMin,
+          defaultNoDuration: formState.defaultNoDuration,
+          defaultAllDay: formState.defaultAllDay,
+          defaultNoCheckbox: formState.defaultNoCheckbox,
+          showInWidget: formState.showInWidget,
+          description: formState.description.trim(),
+        });
+      }
+    }
+    setMode('list');
   };
 
   const handleSave = () => {
@@ -11895,7 +13282,8 @@ function CategoryFilterList({
         id,
         name: trimmed,
         color: formState.color || '#22c55e',
-        defaultDurationMin: formState.defaultDurationMin,
+        defaultDurationMin: formState.defaultNoDuration ? 0 : formState.defaultDurationMin,
+        defaultNoDuration: formState.defaultNoDuration,
         defaultAllDay: formState.defaultAllDay,
         defaultNoCheckbox: formState.defaultNoCheckbox,
         showInWidget: formState.showInWidget,
@@ -11907,7 +13295,8 @@ function CategoryFilterList({
         id: editingCatId,
         name: trimmed,
         color: formState.color || '#22c55e',
-        defaultDurationMin: formState.defaultDurationMin,
+        defaultDurationMin: formState.defaultNoDuration ? 0 : formState.defaultDurationMin,
+        defaultNoDuration: formState.defaultNoDuration,
         defaultAllDay: formState.defaultAllDay,
         defaultNoCheckbox: formState.defaultNoCheckbox,
         showInWidget: formState.showInWidget,
@@ -11924,7 +13313,7 @@ function CategoryFilterList({
         <div className="flex items-center justify-between pb-2 border-b" style={{ borderColor: theme.surfaceBdr }}>
           <button
             type="button"
-            onClick={() => setMode('list')}
+            onClick={handleExit}
             className="flex items-center gap-1.5 text-xs font-semibold px-1.5 py-1 rounded-md transition-opacity hover:opacity-75"
             style={{ color: theme.menuSub }}
           >
@@ -12040,16 +13429,28 @@ function CategoryFilterList({
                   Default Duration
                 </label>
                 <div className="flex flex-wrap gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setFormState(prev => ({ ...prev, defaultNoDuration: true, defaultDurationMin: 0 }))}
+                    className="px-2 py-0.5 rounded text-[10px] font-semibold transition-colors"
+                    style={{
+                      background: formState.defaultNoDuration ? formState.color : theme.surfaceBg,
+                      color: formState.defaultNoDuration ? '#ffffff' : theme.menuText,
+                      border: `1px solid ${formState.defaultNoDuration ? formState.color : theme.surfaceBdr}`,
+                    }}
+                  >
+                    None (10m space)
+                  </button>
                   {[15, 30, 45, 60, 90, 120].map(mins => (
                     <button
                       key={mins}
                       type="button"
-                      onClick={() => setFormState(prev => ({ ...prev, defaultDurationMin: mins }))}
+                      onClick={() => setFormState(prev => ({ ...prev, defaultNoDuration: false, defaultDurationMin: mins }))}
                       className="px-2 py-0.5 rounded text-[10px] font-semibold transition-colors"
                       style={{
-                        background: formState.defaultDurationMin === mins ? formState.color : theme.surfaceBg,
-                        color: formState.defaultDurationMin === mins ? '#ffffff' : theme.menuText,
-                        border: `1px solid ${formState.defaultDurationMin === mins ? formState.color : theme.surfaceBdr}`,
+                        background: !formState.defaultNoDuration && formState.defaultDurationMin === mins ? formState.color : theme.surfaceBg,
+                        color: !formState.defaultNoDuration && formState.defaultDurationMin === mins ? '#ffffff' : theme.menuText,
+                        border: `1px solid ${!formState.defaultNoDuration && formState.defaultDurationMin === mins ? formState.color : theme.surfaceBdr}`,
                       }}
                     >
                       {mins}m
@@ -12059,6 +13460,20 @@ function CategoryFilterList({
               </div>
 
               {/* Toggles */}
+              <label className="flex items-center gap-2 text-[11px] cursor-pointer" style={{ color: theme.menuText }}>
+                <input
+                  type="checkbox"
+                  checked={formState.defaultNoDuration}
+                  onChange={e => setFormState(prev => ({
+                    ...prev,
+                    defaultNoDuration: e.target.checked,
+                    defaultDurationMin: e.target.checked ? 0 : (prev.defaultDurationMin || 30),
+                  }))}
+                  className="rounded"
+                />
+                <span>Point in time (no end time)</span>
+              </label>
+
               <label className="flex items-center gap-2 text-[11px] cursor-pointer" style={{ color: theme.menuText }}>
                 <input
                   type="checkbox"
@@ -12135,11 +13550,11 @@ function CategoryFilterList({
           )}
           <button
             type="button"
-            onClick={() => setMode('list')}
+            onClick={handleExit}
             className="flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors"
             style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}`, color: theme.menuText }}
           >
-            Cancel
+            {mode === 'edit' ? 'Close' : 'Cancel'}
           </button>
           <button
             type="button"
@@ -12252,7 +13667,7 @@ function CategoryFilterList({
         className="mt-2 w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all hover:brightness-105 active:scale-98 shadow-sm"
         style={{
           background: theme.darkMode ? 'rgba(59,130,246,0.15)' : 'rgba(37,99,235,0.08)',
-          border: `1px dashed ${theme.darkMode ? 'rgba(59,130,246,0.4)' : 'rgba(37,99,235,0.3)'}`,
+          border: `1px solid ${theme.darkMode ? 'rgba(59,130,246,0.4)' : 'rgba(37,99,235,0.3)'}`,
           color: theme.darkMode ? '#60a5fa' : '#2563eb',
         }}
       >
@@ -12379,3 +13794,50 @@ function MobileSheet({
     document.body,
   );
 }
+
+/**
+ * Live countdown badge for the next upcoming prayer.
+ * Ticks every second locally only while mounted.
+ */
+function PrayerNextBadge({ minutes, color }: { minutes: number; color: string }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const d = new Date(now);
+  const target = new Date(d);
+  target.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+
+  const diffSec = Math.max(0, Math.floor((target.getTime() - d.getTime()) / 1000));
+  if (diffSec <= 0) {
+    return (
+      <span
+        className="text-[9.5px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-md whitespace-nowrap tabular-nums flex-shrink-0"
+        style={{ background: `${color}26`, color }}
+      >
+        Now
+      </span>
+    );
+  }
+
+  const h = Math.floor(diffSec / 3600);
+  const m = Math.floor((diffSec % 3600) / 60);
+  const s = diffSec % 60;
+
+  const countdownText = h > 0
+    ? `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`
+    : `${m}m ${String(s).padStart(2, '0')}s`;
+
+  return (
+    <span
+      className="text-[10px] font-bold tracking-tight px-1.5 py-0.5 rounded-md whitespace-nowrap tabular-nums flex-shrink-0 flex items-center gap-1"
+      style={{ background: `${color}26`, color }}
+    >
+      <span>Next in {countdownText}</span>
+    </span>
+  );
+}
+

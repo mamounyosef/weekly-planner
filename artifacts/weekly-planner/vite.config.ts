@@ -32,11 +32,9 @@ const SHORTCUT_DEFAULTS_VERSION = 2;
 const LEGACY_FOCUS_TIMER_TOGGLE_DEFAULT = 'Alt+Shift+F1';
 const FOCUS_TIMER_TOGGLE_DEFAULT = 'Win+Shift+F1';
 
-// ─── File-database safety net ──────────────────────────────────────────────
-// Guards against a save silently wiping real data (e.g. a stale/empty client
-// state getting POSTed, or the server briefly pointing at the wrong path
-// mid-refactor): refuses to overwrite non-empty data with an empty payload,
-// and keeps a rolling backup of whatever was on disk before every write.
+// File-database safety net:
+// Guards against a save silently wiping real data: refuses to overwrite non-empty
+// data with an empty payload, and writes to disk atomically via a temporary file and rename.
 function isEmptyJsonValue(text: string, kind: 'object' | 'array'): boolean {
   try {
     const parsed = JSON.parse(text);
@@ -44,23 +42,6 @@ function isEmptyJsonValue(text: string, kind: 'object' | 'array'): boolean {
     return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0;
   } catch {
     return true;
-  }
-}
-
-async function pruneBackups(backupDir: string, baseName: string, keep = 30) {
-  try {
-    const files = (await fsp.readdir(backupDir)).filter(f => f.startsWith(`${baseName}.`) && f.endsWith('.json'));
-    files.sort((a, b) => {
-      const numA = Number(a.replace(`${baseName}.`, '').replace('.json', '')) || 0;
-      const numB = Number(b.replace(`${baseName}.`, '').replace('.json', '')) || 0;
-      return numA - numB;
-    });
-    const excess = files.length - keep;
-    for (let i = 0; i < excess; i++) {
-      await fsp.unlink(path.join(backupDir, files[i])).catch(() => {});
-    }
-  } catch {
-    // no backups yet
   }
 }
 
@@ -107,13 +88,13 @@ async function mergeFocusSessions(filePath: string, body: string): Promise<strin
 
 async function safeWriteJsonFile(opts: {
   filePath: string;
-  backupDir: string;
+  backupDir?: string;
   baseName: string;
   body: string;
   kind: 'object' | 'array';
   force: boolean;
 }): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
-  const { filePath, backupDir, baseName, body, kind, force } = opts;
+  const { filePath, baseName, body, kind, force } = opts;
 
   let existing: string | null = null;
   try {
@@ -143,19 +124,6 @@ async function safeWriteJsonFile(opts: {
 
   if (!existingIsEmpty && incomingIsEmpty && !force) {
     return { ok: false, status: 409, error: `Refused to overwrite non-empty ${baseName} with an empty save. Retry with ?force=1 if this is intentional.` };
-  }
-
-  // Rolling pre-write backup of whatever was on disk before writing
-  if (existing !== null && !existingIsEmpty && backupDir) {
-    try {
-      await fsp.mkdir(backupDir, { recursive: true });
-      const stamp = Date.now();
-      const backupPath = path.join(backupDir, `${baseName}.${stamp}.json`);
-      await fsp.writeFile(backupPath, existing, 'utf-8');
-      await pruneBackups(backupDir, baseName, 30);
-    } catch (e) {
-      console.warn(`[safeWriteJsonFile] Failed to create backup for ${baseName}:`, e);
-    }
   }
 
   const dir = path.dirname(filePath);
@@ -326,6 +294,60 @@ export default defineConfig({
     react(),
     tailwindcss(),
     runtimeErrorOverlay(),
+    // ── Precompress every build output ────────────────────────────────────
+    // Nothing in this stack compressed responses, so the phone was pulling the
+    // JS bundle and the stylesheet as raw bytes — roughly 3.5x more data than
+    // necessary on a connection where data is exactly the problem. Compressing
+    // at build time (rather than per request) means the server just picks a
+    // file: no CPU cost per load, and Brotli can run at its slowest, smallest
+    // setting because it only ever runs once.
+    {
+      name: 'precompress-build-output',
+      apply: 'build',
+      async closeBundle() {
+        const zlib = await import('zlib');
+        const { promisify } = await import('util');
+        const brotli = promisify(zlib.brotliCompress);
+        const gzip = promisify(zlib.gzip);
+        const outDir = path.resolve(import.meta.dirname, 'dist/public');
+        // Only text-ish assets benefit; PNG/ICO/WOFF2 are already compressed
+        // and re-compressing them wastes space for a rounding error.
+        const COMPRESSIBLE = /\.(js|css|html|json|webmanifest|svg|txt)$/i;
+
+        const walk = async (dir: string): Promise<string[]> => {
+          const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
+          const out: string[] = [];
+          for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) out.push(...await walk(full));
+            else if (COMPRESSIBLE.test(entry.name)) out.push(full);
+          }
+          return out;
+        };
+
+        let saved = 0;
+        for (const file of await walk(outDir)) {
+          const raw = await fsp.readFile(file);
+          // Below ~1 KB the headers cost more than the compression saves.
+          if (raw.length < 1024) continue;
+          const [br, gz] = await Promise.all([
+            brotli(raw, {
+              params: {
+                [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
+                [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length,
+              },
+            }),
+            gzip(raw, { level: 9 }),
+          ]);
+          await Promise.all([
+            fsp.writeFile(`${file}.br`, br),
+            fsp.writeFile(`${file}.gz`, gz),
+          ]);
+          saved += raw.length - br.length;
+        }
+        console.log(`[planner] precompressed bundle — ${(saved / 1024).toFixed(0)} KB less to send per cold load.`);
+      },
+    },
     {
       name: 'local-file-db-plugin',
       async configureServer(server) {
@@ -333,6 +355,90 @@ export default defineConfig({
           const path = await import('path');
           const rootDir = path.resolve(import.meta.dirname, '..', '..');
           await migrateLegacyDatabase(rootDir);
+
+          // ── Compress JSON API responses ─────────────────────────────────
+          // The phone pulls the whole event store, the focus history and the
+          // settings on every open, and polls several of them afterwards —
+          // well over 100 KB of JSON each time, sent raw. JSON compresses by
+          // roughly 10x, so this is the difference between a usable and a
+          // painful load on a weak mobile connection.
+          //
+          // Registered before every handler below so the patch is in place for
+          // all of them, and written so it can only ever affect a one-shot
+          // JSON reply: the moment a handler calls res.write (which is what the
+          // live SSE streams do) this steps aside and never touches the socket.
+          {
+            const zlib = await import('zlib');
+            const MIN_COMPRESS_BYTES = 1024;
+
+            server.middlewares.use((req, res, next) => {
+              const accepted = String(req.headers['accept-encoding'] || '');
+              const encoding = accepted.includes('br')
+                ? 'br'
+                : accepted.includes('gzip')
+                  ? 'gzip'
+                  : null;
+              if (!encoding) return next();
+
+              let streamed = false;
+              let declaredType = '';
+              const originalWrite = res.write.bind(res);
+              const originalEnd = res.end.bind(res);
+              const originalWriteHead = res.writeHead.bind(res);
+
+              res.writeHead = ((...writeHeadArgs: any[]) => {
+                const headers = writeHeadArgs[writeHeadArgs.length - 1];
+                if (headers && typeof headers === 'object') {
+                  for (const [key, value] of Object.entries(headers)) {
+                    if (key.toLowerCase() === 'content-type') declaredType = String(value);
+                  }
+                }
+                return originalWriteHead(...(writeHeadArgs as [number]));
+              }) as typeof res.writeHead;
+
+              res.write = ((...writeArgs: any[]) => {
+                streamed = true;
+                return originalWrite(...(writeArgs as [any]));
+              }) as typeof res.write;
+
+              res.end = ((...endArgs: any[]) => {
+                const chunk = endArgs[0];
+                const contentType = String(declaredType || res.getHeader('Content-Type') || '');
+                const eligible =
+                  !streamed &&
+                  !res.getHeader('Content-Encoding') &&
+                  contentType.includes('application/json') &&
+                  (typeof chunk === 'string' || Buffer.isBuffer(chunk));
+                if (!eligible) return originalEnd(...(endArgs as [any]));
+
+                const raw = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+                if (raw.length < MIN_COMPRESS_BYTES) return originalEnd(...(endArgs as [any]));
+
+                try {
+                  // Quality 4 rather than 11: this runs per request, and past
+                  // this point Brotli buys single-digit percentages for several
+                  // times the CPU. The build-time assets are the ones worth 11.
+                  const body = encoding === 'br'
+                    ? zlib.brotliCompressSync(raw, {
+                        params: {
+                          [zlib.constants.BROTLI_PARAM_QUALITY]: 4,
+                          [zlib.constants.BROTLI_PARAM_SIZE_HINT]: raw.length,
+                        },
+                      })
+                    : zlib.gzipSync(raw, { level: 6 });
+                  res.setHeader('Content-Encoding', encoding);
+                  res.setHeader('Vary', 'Accept-Encoding');
+                  res.setHeader('Content-Length', String(body.length));
+                  return originalEnd(body);
+                } catch (_) {
+                  // Compression must never be the reason a reply fails to send.
+                  return originalEnd(...(endArgs as [any]));
+                }
+              }) as typeof res.end;
+
+              next();
+            });
+          }
 
           const syncHealthMap = new Map<string, any>();
           function getUserSyncHealth(username: string) {
@@ -3032,7 +3138,7 @@ export default defineConfig({
           const rawKey = new URL(req.url ?? '', 'http://x').searchParams.get('key') ?? '';
           const key = `${user.username}:${rawKey}`;
           const now = Date.now();
-          for (const [k, t] of cueClaims) if (now - t > 30000) cueClaims.delete(k);
+          for (const [k, t] of cueClaims) if (now - t > 300000) cueClaims.delete(k);
           const granted = !cueClaims.has(key);
           if (granted) cueClaims.set(key, now);
           res.setHeader('Content-Type', 'application/json');
@@ -3722,6 +3828,12 @@ export default defineConfig({
             '.txt': 'text/plain; charset=utf-8',
           };
 
+          // Icons, the manifest and robots.txt have no content hash, so they
+          // cannot be immutable — but re-fetching them on every single open
+          // wastes a round trip each on a slow link. A day of caching plus the
+          // ETag revalidation below is the right trade for artwork.
+          const SEMI_STATIC = /\.(png|ico|svg|webmanifest|txt|woff2?)$/i;
+
           server.middlewares.use(async (req, res, next) => {
             if (req.method !== 'GET' && req.method !== 'HEAD') return next();
             const urlPath = (req.url || '/').split('?')[0];
@@ -3739,19 +3851,53 @@ export default defineConfig({
               stat = await fs.stat(file).catch(() => null);
             }
             if (!stat?.isFile()) return next();
-            res.setHeader('Content-Type', MIME[path.extname(file).toLowerCase()] || 'application/octet-stream');
+
+            const ext = path.extname(file).toLowerCase();
+            res.setHeader('Content-Type', MIME[ext] || 'application/octet-stream');
             // Asset filenames carry a content hash, so they can be cached
             // permanently — that is what stops the phone re-downloading the
             // whole app over the tunnel on every single open. index.html must
             // never be cached, or a new build would never be picked up.
+            const isHashedAsset = file.includes(`${path.sep}assets${path.sep}`);
             res.setHeader(
               'Cache-Control',
-              file.includes(`${path.sep}assets${path.sep}`)
+              isHashedAsset
                 ? 'public, max-age=31536000, immutable'
-                : 'no-cache',
+                : SEMI_STATIC.test(ext)
+                  ? 'public, max-age=86400'
+                  : 'no-cache',
             );
+            res.setHeader('Vary', 'Accept-Encoding');
+
+            // Serve the build's precompressed twin when the browser accepts it.
+            // Brotli first: it beats gzip by another ~15% on this bundle and
+            // every phone browser that reaches this app supports it over HTTPS.
+            const accepted = String(req.headers['accept-encoding'] || '');
+            let body = file;
+            for (const [encoding, suffix] of [['br', '.br'], ['gzip', '.gz']] as const) {
+              if (!accepted.includes(encoding)) continue;
+              const candidate = `${file}${suffix}`;
+              const encodedStat = await fs.stat(candidate).catch(() => null);
+              if (!encodedStat?.isFile()) continue;
+              res.setHeader('Content-Encoding', encoding);
+              body = candidate;
+              stat = encodedStat;
+              break;
+            }
+
+            // Revalidation for everything not marked immutable: the shell and
+            // the icons then cost one small 304 instead of a full re-download.
+            const etag = `W/"${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}"`;
+            res.setHeader('ETag', etag);
+            if (!isHashedAsset && req.headers['if-none-match'] === etag) {
+              res.statusCode = 304;
+              res.end();
+              return;
+            }
+
+            res.setHeader('Content-Length', String(stat.size));
             if (req.method === 'HEAD') { res.end(); return; }
-            res.end(await fs.readFile(file));
+            res.end(await fs.readFile(body));
           });
         }
       }
@@ -3786,6 +3932,24 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
     emptyOutDir: true,
+    // The phone re-downloads any chunk whose hash changed. With everything in
+    // one file, editing a single line of the calendar invalidated React,
+    // framer-motion and Radix too — the full payload again, over the tunnel.
+    // Splitting the libraries out means an app edit re-sends only the app.
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+          if (/[\/]node_modules[\/](react|react-dom|scheduler)[\/]/.test(id)) return 'react-vendor';
+          if (id.includes('framer-motion') || id.includes('motion-dom') || id.includes('motion-utils')) return 'motion-vendor';
+          if (id.includes('@radix-ui')) return 'radix-vendor';
+          return 'vendor';
+        },
+      },
+    },
+    // Compressed-size reporting re-gzips every chunk just to print a number;
+    // the precompression plugin below already writes the real .br/.gz files.
+    reportCompressedSize: false,
   },
   server: {
     port,

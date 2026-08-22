@@ -110,16 +110,18 @@ export function usePrayerTimes(settings: PrayerSettings, visibleDates: Date[]) {
     return () => window.clearInterval(id);
   }, [pullDone, settings.enabled]);
 
+  const doneRef = useRef(done);
+  doneRef.current = done;
+
   const toggleDone = useCallback((dateStr: string, key: PrayerKey) => {
-    setDone(prev => {
-      const next = togglePrayerDone(prev, dateStr, key);
-      fetch('/api/prayer-done', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(next),
-      }).catch(err => console.error('Failed to save prayer completion:', err));
-      return next;
-    });
+    const next = togglePrayerDone(doneRef.current, dateStr, key);
+    setDone(next);
+    const url = Object.keys(next).length === 0 ? '/api/prayer-done?force=1' : '/api/prayer-done';
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next),
+    }).catch(err => console.error('Failed to save prayer completion:', err));
   }, []);
 
   /** Prayers to draw on one day — empty when disabled or past the horizon. */

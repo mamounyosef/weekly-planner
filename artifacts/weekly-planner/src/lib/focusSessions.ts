@@ -1230,10 +1230,29 @@ export function focusTimerTransitionKey(timer: FocusTimerState): string {
  * the toggle, which gives exactly that — no time windows, no guessing.
  */
 export function focusCueKey(slot: FocusCueSlot, timer: FocusTimerState): string {
-  const rawStamp = timer.lastStartedAt || timer.lastPausedAt || timer.sessionStartedAt || '';
+  const rawStamp = (slot === 'pause' ? timer.lastPausedAt : timer.lastStartedAt) || timer.lastStartedAt || timer.lastPausedAt || timer.sessionStartedAt || '';
   const parsedMs = rawStamp ? Date.parse(rawStamp) : 0;
   const timeBucket = Number.isFinite(parsedMs) && parsedMs > 0 ? Math.floor(parsedMs / 4000) : 0;
   return `${slot}|${timer.sessionStartedAt ?? ''}|${timeBucket}`;
+}
+
+/**
+ * Guard against playing sound cues when a window loads/hydrates or catches up with
+ * an already-running or previously-paused session. A cue should ONLY sound if the
+ * transition timestamp (lastStartedAt / lastPausedAt) is fresh (within maxAgeMs).
+ */
+export function isFocusCueFresh(
+  timer: FocusTimerState,
+  slot: FocusCueSlot,
+  maxAgeMs = 5000,
+  now = Date.now(),
+): boolean {
+  const stamp = slot === 'pause' ? timer.lastPausedAt : timer.lastStartedAt;
+  if (!stamp) return false;
+  const parsed = Date.parse(stamp);
+  if (!Number.isFinite(parsed) || parsed <= 0) return false;
+  const age = now - parsed;
+  return age >= -maxAgeMs && age <= maxAgeMs;
 }
 
 export function loadLocalFocusTimer(): FocusTimerState {

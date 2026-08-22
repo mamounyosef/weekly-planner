@@ -14,6 +14,7 @@ import {
   focusTimerIdentity,
   focusTimerTransitionKey,
   focusCueKey,
+  isFocusCueFresh,
   checkpointFocusTimer,
   pauseFocusTimer,
   focusRecoveryFor,
@@ -252,6 +253,21 @@ const cueTimer3: FocusTimerState = { ...DEFAULT_FOCUS_TIMER, sessionStartedAt: '
 assertEqual(focusCueKey('start', cueTimer1), focusCueKey('start', cueTimer2), 'Cues within 4s bucket share key');
 assert(focusCueKey('start', cueTimer1) !== focusCueKey('start', cueTimer3), 'Cues > 4s apart have distinct keys');
 assert(focusCueKey('start', cueTimer1) !== focusCueKey('pause', cueTimer1), 'Different cue slots have distinct keys');
+
+// Cue Freshness tests (preventing sound on mobile/tab opening mid-session)
+const nowMs = Date.parse('2026-08-17T12:00:10.000Z');
+const freshStartTimer: FocusTimerState = { ...DEFAULT_FOCUS_TIMER, lastStartedAt: '2026-08-17T12:00:08.000Z' }; // 2s ago
+const staleStartTimer: FocusTimerState = { ...DEFAULT_FOCUS_TIMER, lastStartedAt: '2026-08-17T12:00:00.000Z' }; // 10s ago
+const freshPauseTimer: FocusTimerState = { ...DEFAULT_FOCUS_TIMER, lastPausedAt: '2026-08-17T12:00:09.000Z' }; // 1s ago
+const stalePauseTimer: FocusTimerState = { ...DEFAULT_FOCUS_TIMER, lastPausedAt: '2026-08-17T11:55:00.000Z' }; // 5m ago
+const noStampTimer: FocusTimerState = { ...DEFAULT_FOCUS_TIMER, lastStartedAt: null, lastPausedAt: null };
+
+assert(isFocusCueFresh(freshStartTimer, 'start', 5000, nowMs), 'Fresh start cue (2s old) is accepted');
+assert(isFocusCueFresh(freshStartTimer, 'resume', 5000, nowMs), 'Fresh resume cue (2s old) is accepted');
+assert(!isFocusCueFresh(staleStartTimer, 'start', 5000, nowMs), 'Stale start cue (10s old) is rejected');
+assert(isFocusCueFresh(freshPauseTimer, 'pause', 5000, nowMs), 'Fresh pause cue (1s old) is accepted');
+assert(!isFocusCueFresh(stalePauseTimer, 'pause', 5000, nowMs), 'Stale pause cue (5m old) is rejected');
+assert(!isFocusCueFresh(noStampTimer, 'start', 5000, nowMs), 'Missing timestamp cue is rejected');
 
 // Session deduplication
 const rawSessions: FocusSession[] = [

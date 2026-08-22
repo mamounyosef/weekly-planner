@@ -32,9 +32,12 @@
 - TypeScript Check: `npx tsc --noEmit`
 - Production Bundle: `npx vite build`
 - Unit Test Suites:
+  - `npx tsx src/lib/backup.test.ts`
   - `npx tsx src/lib/focusSessions.test.ts`
   - `npx tsx src/lib/hardwareController.test.ts`
   - `npx tsx src/lib/sensorFilter.test.ts`
+  - `npx tsx src/lib/recurrence.test.ts`
+  - `npx tsx src/lib/shortcuts.test.ts`
 
 ## Coverage Thresholds
 - Tier 1: Feature Coverage (all components and API endpoints)

@@ -5,7 +5,8 @@ export interface EventCategory {
   name: string;
   color: string; // hex code e.g. '#22c55e' or '#f97316'
   // Category-level default behaviors and settings:
-  defaultDurationMin?: number; // 15, 30, 45, 60, 90, 120, etc.
+  defaultDurationMin?: number; // 0, 15, 30, 45, 60, 90, 120, etc. (0 = no duration / deadline / point in time)
+  defaultNoDuration?: boolean; // Whether items created in this category default to no duration (point in time / deadline)
   defaultAllDay?: boolean;     // Whether items created in this category default to all-day
   defaultNoCheckbox?: boolean; // Whether items created in this category hide completion checkbox
   showInWidget?: boolean;     // Whether events of this category appear in the side widget (default true)
@@ -26,6 +27,7 @@ export const DEFAULT_CATEGORIES: EventCategory[] = [
     name: 'Personal',
     color: '#22c55e', // Vibrant green
     defaultDurationMin: 30,
+    defaultNoDuration: false,
     defaultAllDay: false,
     defaultNoCheckbox: false,
     showInWidget: true,
@@ -36,6 +38,7 @@ export const DEFAULT_CATEGORIES: EventCategory[] = [
     name: 'University Calender',
     color: '#f97316', // Vivid orange
     defaultDurationMin: 60,
+    defaultNoDuration: false,
     defaultAllDay: false,
     defaultNoCheckbox: false,
     showInWidget: true,
@@ -92,11 +95,16 @@ export function coerceCategories(raw: unknown): EventCategory[] {
       }
     }
 
+    const defaultNoDuration = typeof r.defaultNoDuration === 'boolean'
+      ? r.defaultNoDuration
+      : (typeof r.defaultDurationMin === 'number' && r.defaultDurationMin === 0);
+
     const cat: EventCategory = {
       id,
       name,
       color,
-      defaultDurationMin: typeof r.defaultDurationMin === 'number' && r.defaultDurationMin > 0 ? Math.round(r.defaultDurationMin) : 30,
+      defaultDurationMin: defaultNoDuration ? 0 : (typeof r.defaultDurationMin === 'number' && r.defaultDurationMin > 0 ? Math.round(r.defaultDurationMin) : 30),
+      defaultNoDuration,
       defaultAllDay: typeof r.defaultAllDay === 'boolean' ? r.defaultAllDay : false,
       defaultNoCheckbox: typeof r.defaultNoCheckbox === 'boolean' ? r.defaultNoCheckbox : false,
       showInWidget: typeof r.showInWidget === 'boolean' ? r.showInWidget : true,

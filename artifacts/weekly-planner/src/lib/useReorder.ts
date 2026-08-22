@@ -98,6 +98,9 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
     window.setTimeout(() => { justDraggedRef.current = false; }, 0);
 
     const gap = dropIndexRef.current;
+    document.body.style.userSelect = '';
+    document.body.style.webkitUserSelect = '';
+    window.getSelection()?.removeAllRanges();
     setDragId(null);
     setDragDelta(0);
     setGap(null);
@@ -118,6 +121,9 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
     if (e.button !== 0 || items.length < 2) return;
     if (ignore && (e.target as HTMLElement).closest(ignore)) return;
 
+    // Clear any text selection that might have started on pointer down
+    window.getSelection()?.removeAllRanges();
+
     const touch = e.pointerType !== 'mouse';
     const origin = axis === 'x' ? e.clientX : e.clientY;
 
@@ -125,6 +131,9 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
       const drag = dragRef.current;
       if (!drag || drag.dragging) return;
       drag.dragging = true;
+      document.body.style.userSelect = 'none';
+      document.body.style.webkitUserSelect = 'none';
+      window.getSelection()?.removeAllRanges();
       setDragId(id);
       setGap(items.findIndex(it => idOf(it) === id));
       try { navigator.vibrate?.(10); } catch { /* unsupported */ }
@@ -159,6 +168,8 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
         else if (Math.abs(point - drag.origin) > threshold) begin();
         if (!dragRef.current?.dragging) return;
       }
+      ev.preventDefault();
+      window.getSelection()?.removeAllRanges();
       setDragDelta(point - drag.origin);
       setGap(gapUnder(point));
     }, { signal });
@@ -177,7 +188,11 @@ export function useReorder<T, E extends HTMLElement = HTMLDivElement>(
     }
   }, [items, idOf, axis, threshold, holdMs, ignore, gapUnder, end, setGap]);
 
-  useEffect(() => () => { gestureRef.current?.abort(); }, []);
+  useEffect(() => () => {
+    document.body.style.userSelect = '';
+    document.body.style.webkitUserSelect = '';
+    gestureRef.current?.abort();
+  }, []);
 
   const wasDragged = useCallback(() => justDraggedRef.current, []);
 

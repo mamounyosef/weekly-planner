@@ -9,6 +9,8 @@ export type ShortcutAction =
   | 'nextWeek'
   | 'today'
   | 'toggleView'
+  | 'customView'
+  | 'monthView'
   | 'goToLive'
   | 'newEvent'
   | 'toggleTimer'
@@ -40,6 +42,8 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
   { action: 'today',         label: 'Jump to today',     hint: 'Return to the current week',             group: 'Navigation', blockedInTextFields: true },
   { action: 'goToLive',      label: 'Go to live time',   hint: 'Scroll the red now-line into view',      group: 'Navigation', blockedInTextFields: true },
   { action: 'toggleView',    label: 'Week / Month',      hint: 'Switch between week and month view',     group: 'View',       blockedInTextFields: true },
+  { action: 'customView',    label: 'Custom preview',    hint: 'Switch to custom range preview',        group: 'View',       blockedInTextFields: true },
+  { action: 'monthView',     label: 'Month preview',     hint: 'Switch to month preview',               group: 'View',       blockedInTextFields: true },
   { action: 'focusAnalysis', label: 'Focus analysis',    hint: 'Open or close the analysis screen',      group: 'View',       blockedInTextFields: true },
   { action: 'openSettings',  label: 'Settings',          hint: 'Open or close the settings drawer',      group: 'View',       blockedInTextFields: true },
   { action: 'openWidget',    label: 'Open widget',       hint: 'Launch the floating side widget',        group: 'View',       blockedInTextFields: true },
@@ -80,6 +84,8 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   today:         'Alt+T',
   goToLive:      'S',
   toggleView:    'Alt+M',
+  customView:    '1',
+  monthView:     '2',
   focusAnalysis: 'Alt+A',
   openSettings:  'Alt+S',
   openWidget:    'Alt+W',

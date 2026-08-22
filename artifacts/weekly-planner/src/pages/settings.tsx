@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'wouter';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion';
 import {
   ArrowLeft,
   Sun,
@@ -125,7 +125,6 @@ import {
   PRESET_CATEGORY_COLORS,
   type EventCategory,
 } from '@/lib/categories';
-import { useReorder } from '@/lib/useReorder';
 import {
   coerceTaskLists, GENERAL_LIST_ID, TASK_LIST_COLORS, makeListId, nextListColor,
   type TaskList,
@@ -613,21 +612,349 @@ interface Toast {
   tone: 'info' | 'success' | 'error';
 }
 
-/**
- * Where a dragged card would land. Collapsed to nothing while idle, so the
- * stack doesn't jump the moment a drag starts.
- */
-function DropGap({ active, color }: { active: boolean; color: string }) {
+function CategoryRow({
+  cat,
+  darkMode,
+  accentColor,
+  cardBdr,
+  textPrimary,
+  textSecondary,
+  eventColorStyle,
+  activeTheme,
+  deleteConfirmCatId,
+  onOpenEdit,
+  onSetDefault,
+  onSetDeleteConfirm,
+  onDelete,
+}: {
+  cat: EventCategory;
+  darkMode: boolean;
+  accentColor: string;
+  cardBdr: string;
+  textPrimary: string;
+  textSecondary: string;
+  eventColorStyle: EventCardStyle;
+  activeTheme: { rootBg: string };
+  deleteConfirmCatId: string | null;
+  onOpenEdit: () => void;
+  onSetDefault: () => void;
+  onSetDeleteConfirm: (id: string | null) => void;
+  onDelete: () => void;
+}) {
+  const controls = useDragControls();
+  const previewStyle = gcalChipColors(cat.color, { dark: darkMode, style: eventColorStyle, pageBg: activeTheme.rootBg });
+
   return (
-    <div
-      className="pointer-events-none rounded-full transition-all duration-100"
+    <Reorder.Item
+      value={cat}
+      id={cat.id}
+      dragListener={false}
+      dragControls={controls}
+      className="p-4 rounded-2xl border flex flex-col gap-3 group select-none relative"
       style={{
-        height: active ? 3 : 0,
-        marginTop: active ? -3 : 0,
-        background: active ? color : 'transparent',
-        boxShadow: active ? `0 0 10px ${color}` : 'none',
+        background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
+        borderColor: cardBdr,
       }}
-    />
+      whileDrag={{
+        scale: 1.02,
+        boxShadow: `0 20px 40px -8px rgba(0,0,0,0.5), 0 0 0 2px ${accentColor}`,
+        background: darkMode ? 'rgba(255,255,255,0.08)' : '#ffffff',
+        zIndex: 50,
+      }}
+      transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+    >
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        {/* Left: Grip + Color dot + Name + Default Badge */}
+        <div className="flex items-center gap-3">
+          <div
+            onPointerDown={e => {
+              e.preventDefault();
+              controls.start(e);
+            }}
+            className="cursor-grab active:cursor-grabbing p-1.5 -m-1.5 touch-none rounded-lg hover:bg-white/10 transition-colors flex items-center justify-center"
+            title="Drag to reorder"
+          >
+            <GripVertical
+              size={16}
+              className="flex-shrink-0 opacity-40 group-hover:opacity-90 transition-opacity"
+              style={{ color: textSecondary }}
+            />
+          </div>
+          <div
+            className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
+            style={{
+              backgroundColor: cat.color,
+              borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)',
+            }}
+          />
+          <div className="flex flex-col">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-bold" style={{ color: textPrimary }}>
+                {cat.name}
+              </span>
+              {cat.isDefault && (
+                <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 flex items-center gap-1">
+                  <Check size={10} /> Default
+                </span>
+              )}
+              <span className="text-[10.5px] font-mono opacity-60" style={{ color: textSecondary }}>
+                {cat.color}
+              </span>
+            </div>
+            {cat.description && (
+              <span className="text-[11.5px] mt-0.5" style={{ color: textSecondary }}>
+                {cat.description}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Actions */}
+        <div className="flex items-center gap-1.5 self-end sm:self-center">
+          {!cat.isDefault && (
+            <button
+              type="button"
+              onClick={onSetDefault}
+              className="px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
+              style={{ borderColor: cardBdr, color: textSecondary }}
+              title="Set as default category for new items"
+            >
+              <Check size={11} className="opacity-40" />
+              Make Default
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenEdit}
+            className="touch-target px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
+            style={{ borderColor: cardBdr, color: textPrimary }}
+          >
+            <Edit2 size={11} />
+            Edit
+          </button>
+
+          {deleteConfirmCatId === cat.id ? (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={onDelete}
+                className="touch-target px-2 h-7 rounded-lg text-[10.5px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30 transition-smooth"
+              >
+                Confirm
+              </button>
+              <button
+                type="button"
+                onClick={() => onSetDeleteConfirm(null)}
+                className="touch-target px-1.5 h-7 rounded-lg text-[10.5px] border transition-smooth"
+                style={{ borderColor: cardBdr, color: textSecondary }}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onSetDeleteConfirm(cat.id)}
+              className="touch-target w-7 h-7 rounded-lg border flex items-center justify-center text-xs transition-smooth hover:bg-rose-500/10 hover:text-rose-400 hover:border-rose-500/30"
+              style={{ borderColor: cardBdr, color: textSecondary }}
+              title="Delete category"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Category Settings Badges Row & Live Sample Preview */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-2 border-t" style={{ borderColor: cardBdr }}>
+        <div className="flex items-center gap-2 flex-wrap text-[11px]" style={{ color: textSecondary }}>
+          <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+            <Clock size={11} /> {cat.defaultNoDuration || cat.defaultDurationMin === 0 ? 'Point in Time (10m space)' : `Default: ${cat.defaultDurationMin ?? 30}m`}
+          </span>
+          <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+            <Calendar size={11} /> {cat.defaultAllDay ? 'Defaults to All-Day' : 'Defaults to Timed'}
+          </span>
+          <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+            {cat.defaultNoCheckbox ? <Square size={11} /> : <CheckSquare size={11} />}
+            {cat.defaultNoCheckbox ? 'Checkbox hidden' : 'Checkbox enabled'}
+          </span>
+          <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
+            {cat.showInWidget !== false ? <Eye size={11} /> : <EyeOff size={11} />}
+            {cat.showInWidget !== false ? 'Shown in Widget' : 'Hidden in Widget'}
+          </span>
+        </div>
+
+        {previewStyle && (
+          <div
+            className="px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-2 self-start sm:self-auto border transition-smooth"
+            style={{
+              backgroundColor: previewStyle.bg,
+              borderColor: previewStyle.border,
+              color: previewStyle.text,
+              boxShadow: previewStyle.boxShadow,
+            }}
+          >
+            {previewStyle.accentBar && (
+              <span className="w-1.5 h-3 rounded-full" style={{ backgroundColor: previewStyle.accentBar }} />
+            )}
+            <span>Preview: {cat.name}</span>
+          </div>
+        )}
+      </div>
+    </Reorder.Item>
+  );
+}
+
+function TaskListRow({
+  list,
+  darkMode,
+  accentColor,
+  cardBdr,
+  textPrimary,
+  textSecondary,
+  isGeneral,
+  deleteConfirmListId,
+  isTouch,
+  onPatch,
+  onDelete,
+  onSetDeleteConfirm,
+}: {
+  list: TaskList;
+  darkMode: boolean;
+  accentColor: string;
+  cardBdr: string;
+  textPrimary: string;
+  textSecondary: string;
+  isGeneral: boolean;
+  deleteConfirmListId: string | null;
+  isTouch: boolean;
+  onPatch: (patch: Partial<TaskList>) => void;
+  onDelete: () => void;
+  onSetDeleteConfirm: (id: string | null) => void;
+}) {
+  const controls = useDragControls();
+
+  return (
+    <Reorder.Item
+      value={list}
+      id={list.id}
+      dragListener={false}
+      dragControls={controls}
+      className="p-3.5 rounded-2xl border flex flex-col gap-3 group select-none relative"
+      style={{
+        background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
+        borderColor: cardBdr,
+      }}
+      whileDrag={{
+        scale: 1.02,
+        boxShadow: `0 20px 40px -8px rgba(0,0,0,0.5), 0 0 0 2px ${accentColor}`,
+        background: darkMode ? 'rgba(255,255,255,0.08)' : '#ffffff',
+        zIndex: 50,
+      }}
+      transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+    >
+      <div className="flex items-center gap-3">
+        <div
+          onPointerDown={e => {
+            e.preventDefault();
+            controls.start(e);
+          }}
+          className="cursor-grab active:cursor-grabbing p-1.5 -m-1.5 touch-none rounded-lg hover:bg-white/10 transition-colors flex items-center justify-center"
+          title="Drag to reorder"
+        >
+          <GripVertical
+            size={16}
+            className="flex-shrink-0 opacity-40 group-hover:opacity-90 transition-opacity"
+            style={{ color: textSecondary }}
+          />
+        </div>
+        <div
+          className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
+          style={{ backgroundColor: list.color, borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)' }}
+        />
+        <input
+          value={list.name}
+          onChange={e => onPatch({ name: e.target.value })}
+          onBlur={e => { if (!e.target.value.trim()) onPatch({ name: 'Untitled list' }); }}
+          maxLength={40}
+          className="flex-1 min-w-0 px-3 py-2 rounded-xl border text-xs font-semibold outline-none transition-smooth"
+          style={{
+            background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff',
+            borderColor: cardBdr,
+            color: textPrimary,
+          }}
+        />
+        {isGeneral && (
+          <span
+            className="text-[10px] font-bold px-2 py-1 rounded-full flex-shrink-0"
+            style={{ background: `${accentColor}18`, color: accentColor }}
+            title="Every task that isn't filed anywhere else lives here, so this list can't be removed."
+          >
+            Default
+          </span>
+        )}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => onSetDeleteConfirm(list.id)}
+            disabled={isGeneral}
+            className="touch-target w-7 h-7 rounded-lg flex items-center justify-center border transition-smooth active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
+            style={{ borderColor: cardBdr, color: '#ef4444' }}
+            title={isGeneral ? 'The default list cannot be deleted' : 'Delete list'}
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap pl-7">
+        {TASK_LIST_COLORS.map(hex => {
+          const selected = list.color.toLowerCase() === hex.toLowerCase();
+          return (
+            <button
+              key={hex}
+              type="button"
+              onClick={() => onPatch({ color: hex })}
+              className={`${isTouch ? 'w-10 h-10' : 'w-6 h-6'} rounded-full flex items-center justify-center transition-smooth hover:scale-110 active:scale-95`}
+              style={{ background: hex, border: `2px solid ${selected ? textPrimary : 'transparent'}` }}
+              title={hex}
+            >
+              {selected && <CheckCircle2 size={12} color="#ffffff" />}
+            </button>
+          );
+        })}
+      </div>
+
+      {deleteConfirmListId === list.id && (
+        <div
+          className="rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border"
+          style={{ background: 'rgba(239,68,68,0.08)', borderColor: 'rgba(239,68,68,0.35)' }}
+        >
+          <span className="text-[11px] font-medium" style={{ color: textPrimary }}>
+            Delete “{list.name}”? Its tasks aren't deleted — they move back to General.
+          </span>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => onSetDeleteConfirm(null)}
+              className="touch-target px-3 h-8 rounded-lg text-[11px] font-semibold border"
+              style={{ borderColor: cardBdr, color: textSecondary }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              className="touch-target px-3 h-8 rounded-lg text-[11px] font-bold text-white"
+              style={{ background: '#ef4444' }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      )}
+    </Reorder.Item>
   );
 }
 
@@ -660,11 +987,34 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'categories', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
   });
+
+  const handleSelectTab = useCallback((tabId: TabCategory) => {
+    setActiveTab(tabId);
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('tab', tabId);
+      window.history.replaceState(null, '', url.toString());
+    } catch (_) {}
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      try {
+        const requested = new URLSearchParams(window.location.search).get('tab');
+        const known: string[] = ['appearance', 'calendar', 'categories', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+        if (requested && known.includes(requested)) {
+          setActiveTab(requested as TabCategory);
+        }
+      } catch (_) {}
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Initialize state from local settings cache for instant display
   const initialSettings = useRef(loadSettingsLocal()).current;
@@ -732,6 +1082,7 @@ export default function SettingsPage() {
     name: string;
     color: string;
     defaultDurationMin: number;
+    defaultNoDuration: boolean;
     defaultAllDay: boolean;
     defaultNoCheckbox: boolean;
     showInWidget: boolean;
@@ -741,6 +1092,7 @@ export default function SettingsPage() {
     name: '',
     color: '#22c55e',
     defaultDurationMin: 30,
+    defaultNoDuration: false,
     defaultAllDay: false,
     defaultNoCheckbox: false,
     showInWidget: true,
@@ -755,6 +1107,7 @@ export default function SettingsPage() {
       name: '',
       color: PRESET_CATEGORY_COLORS[categories.length % PRESET_CATEGORY_COLORS.length].hex,
       defaultDurationMin: 30,
+      defaultNoDuration: false,
       defaultAllDay: false,
       defaultNoCheckbox: false,
       showInWidget: true,
@@ -767,10 +1120,12 @@ export default function SettingsPage() {
   const openEditCategory = (cat: EventCategory) => {
     setIsAddingCategory(false);
     setEditingCategory(cat);
+    const noDur = Boolean(cat.defaultNoDuration || cat.defaultDurationMin === 0);
     setCategoryForm({
       name: cat.name,
       color: cat.color,
-      defaultDurationMin: cat.defaultDurationMin ?? 30,
+      defaultDurationMin: noDur ? 0 : (cat.defaultDurationMin ?? 30),
+      defaultNoDuration: noDur,
       defaultAllDay: cat.defaultAllDay ?? false,
       defaultNoCheckbox: cat.defaultNoCheckbox ?? false,
       showInWidget: cat.showInWidget ?? true,
@@ -780,9 +1135,66 @@ export default function SettingsPage() {
   };
 
   const closeCategoryModal = () => {
+    const trimmedName = categoryForm.name.trim();
+    if (trimmedName) {
+      let color = categoryForm.color.trim();
+      if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
+        color = '#22c55e';
+      }
+
+      if (isAddingCategory) {
+        const newCat: EventCategory = {
+          id: `cat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          name: trimmedName,
+          color,
+          defaultDurationMin: categoryForm.defaultNoDuration ? 0 : categoryForm.defaultDurationMin,
+          defaultNoDuration: categoryForm.defaultNoDuration,
+          defaultAllDay: categoryForm.defaultAllDay,
+          defaultNoCheckbox: categoryForm.defaultNoCheckbox,
+          showInWidget: categoryForm.showInWidget,
+          isDefault: categoryForm.isDefault,
+          description: categoryForm.description.trim(),
+        };
+
+        setCategories(prev => {
+          const list = categoryForm.isDefault ? prev.map(c => ({ ...c, isDefault: false })) : [...prev];
+          return [...list, newCat];
+        });
+        showToast(`Category “${trimmedName}” saved.`, 'success');
+      } else if (editingCategory) {
+        setCategories(prev => {
+          return prev.map(c => {
+            if (c.id === editingCategory.id) {
+              return {
+                ...c,
+                name: trimmedName,
+                color,
+                defaultDurationMin: categoryForm.defaultNoDuration ? 0 : categoryForm.defaultDurationMin,
+                defaultNoDuration: categoryForm.defaultNoDuration,
+                defaultAllDay: categoryForm.defaultAllDay,
+                defaultNoCheckbox: categoryForm.defaultNoCheckbox,
+                showInWidget: categoryForm.showInWidget,
+                isDefault: categoryForm.isDefault,
+                description: categoryForm.description.trim(),
+              };
+            }
+            if (categoryForm.isDefault) {
+              return { ...c, isDefault: false };
+            }
+            return c;
+          });
+        });
+        showToast(`Category “${trimmedName}” updated.`, 'success');
+      }
+    }
     setEditingCategory(null);
     setIsAddingCategory(false);
   };
+
+  const closeCategoryModalRef = useRef(closeCategoryModal);
+  useEffect(() => {
+    closeCategoryModalRef.current = closeCategoryModal;
+  });
 
   const handleSaveCategory = () => {
     const trimmedName = categoryForm.name.trim();
@@ -801,7 +1213,8 @@ export default function SettingsPage() {
         id: `cat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         name: trimmedName,
         color,
-        defaultDurationMin: categoryForm.defaultDurationMin,
+        defaultDurationMin: categoryForm.defaultNoDuration ? 0 : categoryForm.defaultDurationMin,
+        defaultNoDuration: categoryForm.defaultNoDuration,
         defaultAllDay: categoryForm.defaultAllDay,
         defaultNoCheckbox: categoryForm.defaultNoCheckbox,
         showInWidget: categoryForm.showInWidget,
@@ -822,7 +1235,8 @@ export default function SettingsPage() {
               ...c,
               name: trimmedName,
               color,
-              defaultDurationMin: categoryForm.defaultDurationMin,
+              defaultDurationMin: categoryForm.defaultNoDuration ? 0 : categoryForm.defaultDurationMin,
+              defaultNoDuration: categoryForm.defaultNoDuration,
               defaultAllDay: categoryForm.defaultAllDay,
               defaultNoCheckbox: categoryForm.defaultNoCheckbox,
               showInWidget: categoryForm.showInWidget,
@@ -838,7 +1252,8 @@ export default function SettingsPage() {
       });
       showToast(`Category “${trimmedName}” updated.`, 'success');
     }
-    closeCategoryModal();
+    setEditingCategory(null);
+    setIsAddingCategory(false);
   };
 
   const handleDeleteCategory = (id: string) => {
@@ -886,12 +1301,6 @@ export default function SettingsPage() {
     showToast(`List “${list?.name || 'Untitled'}” deleted — its tasks moved to General.`, 'info');
   };
 
-  // Both cards below are reordered by dragging rather than by arrow buttons.
-  // The grip is the affordance; the whole card is draggable except its own
-  // controls (the default `ignore` selector covers inputs and buttons).
-  const catDrag = useReorder(categories, c => c.id, setCategories);
-  const listDrag = useReorder(taskLists, l => l.id, setTaskLists);
-
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
   const patchPrayer = useCallback((patch: Partial<PrayerSettings>) => {
     setPrayer(prev => ({ ...prev, ...patch }));
@@ -927,7 +1336,7 @@ export default function SettingsPage() {
     window.setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4200);
   }, []);
 
-  const settingsLoaded = useRef(true);
+  const settingsLoaded = useRef(false);
 
   // ── This device's own settings ───────────────────────────────────────────
   // Mirrors home.tsx: the keys that describe THIS screen are read from and
@@ -1107,14 +1516,28 @@ export default function SettingsPage() {
           if (typeof coerced.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(coerced.autoRollRecurringTasks);
           setTaskColor(coerced.taskColor);
           setTaskCheckboxShape(coerced.taskCheckboxShape);
+          if (typeof coerced.googleSyncEnabled === 'boolean') setGoogleSyncEnabled(coerced.googleSyncEnabled);
           setGoogleTasksSync(coerced.googleTasksSync);
-          setStickyAllDayWidget(coerced.stickyAllDayWidget);
-          setStickyTasksWidget(coerced.stickyTasksWidget);
+          if (typeof coerced.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(coerced.stickyAllDayWidget);
+          if (typeof coerced.stickyTasksWidget === 'boolean') setStickyTasksWidget(coerced.stickyTasksWidget);
+          if (typeof coerced.gcalPushEnabled === 'boolean') setGcalPushEnabled(coerced.gcalPushEnabled);
+          if (coerced.gcalPushTarget) setGcalPushTarget(coerced.gcalPushTarget);
+          if (typeof coerced.gcalPushOtherCalendars === 'boolean') setGcalPushOtherCalendars(coerced.gcalPushOtherCalendars);
+          if (typeof coerced.gcalPullDailyEdits === 'boolean') setGcalPullDailyEdits(coerced.gcalPullDailyEdits);
+          if (typeof coerced.gcalPullDailyNew === 'boolean') setGcalPullDailyNew(coerced.gcalPullDailyNew);
+          if (typeof coerced.gcalPullOtherCalendars === 'boolean') setGcalPullOtherCalendars(coerced.gcalPullOtherCalendars);
+          if (typeof coerced.gcalMirrorLocalDeletions === 'boolean') setGcalMirrorLocalDeletions(coerced.gcalMirrorLocalDeletions);
+          if (typeof coerced.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(coerced.gcalMirrorGoogleDeletions);
           setPrayer(coerced.prayer);
           setHardware(coerced.hardware);
+          if (coerced.categories) setCategories(coerced.categories);
+          if (coerced.taskLists) setTaskLists(coerceTaskLists(coerced.taskLists));
         }
       })
-      .catch(err => console.error('Failed to load settings:', err));
+      .catch(err => console.error('Failed to load settings:', err))
+      .finally(() => {
+        settingsLoaded.current = true;
+      });
 
     // Fetch Auto Backup Status
     fetch('/api/auto-backup')
@@ -1204,6 +1627,9 @@ export default function SettingsPage() {
       }
 
       if (e.key === 'Escape') {
+        if (closeCategoryModalRef.current) {
+          closeCategoryModalRef.current();
+        }
         setLocation('/');
       }
     };
@@ -1600,7 +2026,7 @@ export default function SettingsPage() {
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => handleSelectTab(tab.id)}
                   className="flex items-center gap-1.5 px-3 h-10 rounded-xl text-[12px] font-bold whitespace-nowrap flex-shrink-0 active:scale-95 transition-transform"
                   style={{
                     background: active ? accentLight : (darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'),
@@ -1630,7 +2056,7 @@ export default function SettingsPage() {
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => handleSelectTab(tab.id)}
                   className="flex items-center justify-between px-3.5 py-3 rounded-2xl text-xs font-semibold transition-smooth duration-200 text-left"
                   style={{
                     background: active ? accentLight : 'transparent',
@@ -2470,168 +2896,32 @@ export default function SettingsPage() {
                     </button>
                   </div>
 
-                  {/* Categories Cards List — drag a card to reorder */}
-                  <div className="flex flex-col gap-3" ref={catDrag.containerRef}>
-                    {categories.map((cat, idx) => {
-                      const previewStyle = gcalChipColors(cat.color, { dark: darkMode, style: eventColorStyle, pageBg: activeTheme.rootBg });
-                      const dragging = catDrag.dragId === cat.id;
-
-                      return (
-                        <React.Fragment key={cat.id}>
-                        <DropGap active={catDrag.dragId !== null && catDrag.dropIndex === idx} color={accentColor} />
-                        <div
-                          data-reorder-id={cat.id}
-                          onPointerDown={e => catDrag.startDrag(e, cat.id)}
-                          className="p-4 rounded-2xl border transition-smooth duration-200 flex flex-col gap-3 group cursor-grab active:cursor-grabbing"
-                          style={{
-                            background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
-                            borderColor: dragging ? accentColor : cardBdr,
-                            boxShadow: dragging ? `0 10px 28px rgba(0,0,0,0.32)` : undefined,
-                            opacity: dragging ? 0.85 : 1,
-                            transform: dragging ? 'scale(1.01)' : undefined,
-                          }}
-                        >
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                            {/* Left: Grip + Color dot + Name + Default Badge */}
-                            <div className="flex items-center gap-3">
-                              <GripVertical
-                                size={15}
-                                className="flex-shrink-0 opacity-30 group-hover:opacity-70 transition-opacity"
-                                style={{ color: textSecondary }}
-                              />
-                              <div
-                                className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
-                                style={{
-                                  backgroundColor: cat.color,
-                                  borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)',
-                                }}
-                              />
-                              <div className="flex flex-col">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-sm font-bold" style={{ color: textPrimary }}>
-                                    {cat.name}
-                                  </span>
-                                  {cat.isDefault && (
-                                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 flex items-center gap-1">
-                                      <Check size={10} /> Default
-                                    </span>
-                                  )}
-                                  <span className="text-[10.5px] font-mono opacity-60" style={{ color: textSecondary }}>
-                                    {cat.color}
-                                  </span>
-                                </div>
-                                {cat.description && (
-                                  <span className="text-[11.5px] mt-0.5" style={{ color: textSecondary }}>
-                                    {cat.description}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Right: Actions */}
-                            <div className="flex items-center gap-1.5 self-end sm:self-center">
-                              {/* Toggle Default */}
-                              <button
-                                type="button"
-                                onClick={() => handleToggleDefaultCategory(cat.id)}
-                                className={`px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth ${
-                                  cat.isDefault ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'hover:bg-white/5 text-muted-foreground'
-                                }`}
-                                style={{ borderColor: cat.isDefault ? undefined : cardBdr, color: cat.isDefault ? undefined : textSecondary }}
-                                title={cat.isDefault ? 'Currently default category' : 'Set as default category for new items'}
-                              >
-                                <Check size={11} className={cat.isDefault ? 'opacity-100' : 'opacity-40'} />
-                                {cat.isDefault ? 'Default' : 'Make Default'}
-                              </button>
-
-                              {/* Edit Button */}
-                              <button
-                                type="button"
-                                onClick={() => openEditCategory(cat)}
-                                className="touch-target px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
-                                style={{ borderColor: cardBdr, color: textPrimary }}
-                              >
-                                <Edit2 size={11} />
-                                Edit
-                              </button>
-
-                              {/* Delete Button */}
-                              {deleteConfirmCatId === cat.id ? (
-                                <div className="flex items-center gap-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteCategory(cat.id)}
-                                    className="touch-target px-2 h-7 rounded-lg text-[10.5px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30 hover:bg-rose-500/30 transition-smooth"
-                                  >
-                                    Confirm
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setDeleteConfirmCatId(null)}
-                                    className="touch-target px-1.5 h-7 rounded-lg text-[10.5px] border transition-smooth"
-                                    style={{ borderColor: cardBdr, color: textSecondary }}
-                                  >
-                                    <X size={12} />
-                                  </button>
-                                </div>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => setDeleteConfirmCatId(cat.id)}
-                                  disabled={categories.length <= 1}
-                                  className="touch-target w-7 h-7 rounded-lg border flex items-center justify-center text-xs transition-smooth hover:bg-rose-500/10 hover:text-rose-400 hover:border-rose-500/30 disabled:opacity-20 disabled:cursor-not-allowed"
-                                  style={{ borderColor: cardBdr, color: textSecondary }}
-                                  title="Delete category"
-                                >
-                                  <Trash2 size={12} />
-                                </button>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Category Settings Badges Row & Live Sample Preview */}
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-2 border-t border-dashed" style={{ borderColor: cardBdr }}>
-                            <div className="flex items-center gap-2 flex-wrap text-[11px]" style={{ color: textSecondary }}>
-                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
-                                <Clock size={11} /> Default: {cat.defaultDurationMin ?? 30}m
-                              </span>
-                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
-                                <Calendar size={11} /> {cat.defaultAllDay ? 'Defaults to All-Day' : 'Defaults to Timed'}
-                              </span>
-                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
-                                {cat.defaultNoCheckbox ? <Square size={11} /> : <CheckSquare size={11} />}
-                                {cat.defaultNoCheckbox ? 'Checkbox hidden' : 'Checkbox enabled'}
-                              </span>
-                              <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
-                                {cat.showInWidget !== false ? <Eye size={11} /> : <EyeOff size={11} />}
-                                {cat.showInWidget !== false ? 'Shown in Widget' : 'Hidden in Widget'}
-                              </span>
-                            </div>
-
-                            {/* Mini Card Preview Chip */}
-                            {previewStyle && (
-                              <div
-                                className="px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-2 self-start sm:self-auto border transition-smooth"
-                                style={{
-                                  backgroundColor: previewStyle.bg,
-                                  borderColor: previewStyle.border,
-                                  color: previewStyle.text,
-                                  boxShadow: previewStyle.boxShadow,
-                                }}
-                              >
-                                {previewStyle.accentBar && (
-                                  <span className="w-1.5 h-3 rounded-full" style={{ backgroundColor: previewStyle.accentBar }} />
-                                )}
-                                <span>Preview: {cat.name}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                        </React.Fragment>
-                      );
-                    })}
-                    <DropGap active={catDrag.dragId !== null && catDrag.dropIndex === categories.length} color={accentColor} />
-                  </div>
+                  {/* Categories Cards List — smooth Framer Motion drag to reorder */}
+                  <Reorder.Group
+                    axis="y"
+                    values={categories}
+                    onReorder={setCategories}
+                    className="flex flex-col gap-3 select-none"
+                  >
+                    {categories.map((cat) => (
+                      <CategoryRow
+                        key={cat.id}
+                        cat={cat}
+                        darkMode={darkMode}
+                        accentColor={accentColor}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                        eventColorStyle={eventColorStyle}
+                        activeTheme={activeTheme}
+                        deleteConfirmCatId={deleteConfirmCatId}
+                        onOpenEdit={() => openEditCategory(cat)}
+                        onSetDefault={() => handleToggleDefaultCategory(cat.id)}
+                        onSetDeleteConfirm={(id) => setDeleteConfirmCatId(id)}
+                        onDelete={() => handleDeleteCategory(cat.id)}
+                      />
+                    ))}
+                  </Reorder.Group>
                 </div>
 
                 {/* ── Task Lists ──────────────────────────────────────────── */}
@@ -2663,122 +2953,31 @@ export default function SettingsPage() {
                     </button>
                   </div>
 
-                  <div className="flex flex-col gap-3" ref={listDrag.containerRef}>
-                    {taskLists.map((list, idx) => {
-                      const isGeneral = list.id === GENERAL_LIST_ID;
-                      const dragging = listDrag.dragId === list.id;
-                      return (
-                        <React.Fragment key={list.id}>
-                        <DropGap active={listDrag.dragId !== null && listDrag.dropIndex === idx} color={accentColor} />
-                        <div
-                          data-reorder-id={list.id}
-                          onPointerDown={e => listDrag.startDrag(e, list.id)}
-                          className="p-3.5 rounded-2xl border flex flex-col gap-3 group cursor-grab active:cursor-grabbing"
-                          style={{
-                            background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)',
-                            borderColor: dragging ? accentColor : cardBdr,
-                            boxShadow: dragging ? '0 10px 28px rgba(0,0,0,0.32)' : undefined,
-                            opacity: dragging ? 0.85 : 1,
-                            transform: dragging ? 'scale(1.01)' : undefined,
-                          }}
-                        >
-                          <div className="flex items-center gap-3">
-                            <GripVertical
-                              size={15}
-                              className="flex-shrink-0 opacity-30 group-hover:opacity-70 transition-opacity"
-                              style={{ color: textSecondary }}
-                            />
-                            <div
-                              className="w-5 h-5 rounded-full flex-shrink-0 shadow-sm border"
-                              style={{ backgroundColor: list.color, borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)' }}
-                            />
-                            <input
-                              value={list.name}
-                              onChange={e => patchTaskList(list.id, { name: e.target.value })}
-                              onBlur={e => { if (!e.target.value.trim()) patchTaskList(list.id, { name: 'Untitled list' }); }}
-                              maxLength={40}
-                              className="flex-1 min-w-0 px-3 py-2 rounded-xl border text-xs font-semibold outline-none transition-smooth"
-                              style={{
-                                background: darkMode ? 'rgba(255,255,255,0.06)' : '#ffffff',
-                                borderColor: cardBdr,
-                                color: textPrimary,
-                              }}
-                            />
-                            {isGeneral && (
-                              <span
-                                className="text-[10px] font-bold px-2 py-1 rounded-full flex-shrink-0"
-                                style={{ background: `${accentColor}18`, color: accentColor }}
-                                title="Every task that isn't filed anywhere else lives here, so this list can't be removed."
-                              >
-                                Default
-                              </span>
-                            )}
-                            <div className="flex items-center gap-1 flex-shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => setDeleteConfirmListId(list.id)}
-                                disabled={isGeneral}
-                                className="touch-target w-7 h-7 rounded-lg flex items-center justify-center border transition-smooth active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
-                                style={{ borderColor: cardBdr, color: '#ef4444' }}
-                                title={isGeneral ? 'The default list cannot be deleted' : 'Delete list'}
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {TASK_LIST_COLORS.map(hex => {
-                              const selected = list.color.toLowerCase() === hex.toLowerCase();
-                              return (
-                                <button
-                                  key={hex}
-                                  type="button"
-                                  onClick={() => patchTaskList(list.id, { color: hex })}
-                                  className={`${isTouch ? 'w-10 h-10' : 'w-6 h-6'} rounded-full flex items-center justify-center transition-smooth hover:scale-110 active:scale-95`}
-                                  style={{ background: hex, border: `2px solid ${selected ? textPrimary : 'transparent'}` }}
-                                  title={hex}
-                                >
-                                  {selected && <CheckCircle2 size={12} color="#ffffff" />}
-                                </button>
-                              );
-                            })}
-                          </div>
-
-                          {deleteConfirmListId === list.id && (
-                            <div
-                              className="rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border"
-                              style={{ background: 'rgba(239,68,68,0.08)', borderColor: 'rgba(239,68,68,0.35)' }}
-                            >
-                              <span className="text-[11px] font-medium" style={{ color: textPrimary }}>
-                                Delete “{list.name}”? Its tasks aren't deleted — they move back to General.
-                              </span>
-                              <div className="flex items-center gap-2 flex-shrink-0">
-                                <button
-                                  type="button"
-                                  onClick={() => setDeleteConfirmListId(null)}
-                                  className="touch-target px-3 h-8 rounded-lg text-[11px] font-semibold border"
-                                  style={{ borderColor: cardBdr, color: textSecondary }}
-                                >
-                                  Cancel
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteTaskList(list.id)}
-                                  className="touch-target px-3 h-8 rounded-lg text-[11px] font-bold text-white"
-                                  style={{ background: '#ef4444' }}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        </React.Fragment>
-                      );
-                    })}
-                    <DropGap active={listDrag.dragId !== null && listDrag.dropIndex === taskLists.length} color={accentColor} />
-                  </div>
+                  {/* Task Lists — smooth Framer Motion drag to reorder */}
+                  <Reorder.Group
+                    axis="y"
+                    values={taskLists}
+                    onReorder={setTaskLists}
+                    className="flex flex-col gap-3 select-none"
+                  >
+                    {taskLists.map((list) => (
+                      <TaskListRow
+                        key={list.id}
+                        list={list}
+                        darkMode={darkMode}
+                        accentColor={accentColor}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                        isGeneral={list.id === GENERAL_LIST_ID}
+                        deleteConfirmListId={deleteConfirmListId}
+                        isTouch={isTouch}
+                        onPatch={(patch) => patchTaskList(list.id, patch)}
+                        onDelete={() => handleDeleteTaskList(list.id)}
+                        onSetDeleteConfirm={(id) => setDeleteConfirmListId(id)}
+                      />
+                    ))}
+                  </Reorder.Group>
                 </div>
 
                 {/* ── Task Recurrence & Overdue Behavior ─────────────────── */}
@@ -2841,8 +3040,8 @@ export default function SettingsPage() {
                         isPhone ? 'items-end' : 'items-center p-4'
                       }`}
                       style={isPhone ? { height: `calc(100% - ${vp.keyboardInset}px)` } : undefined}
-                      // Tapping outside is the gesture a sheet is expected to answer.
-                      onPointerDown={e => { if (isPhone && e.target === e.currentTarget) closeCategoryModal(); }}
+                      // Tapping/clicking outside dismisses and auto-saves the category
+                      onPointerDown={e => { if (e.target === e.currentTarget) closeCategoryModal(); }}
                     >
                       <motion.div
                         initial={{ opacity: 0, scale: 0.95, y: 10 }}
@@ -2985,28 +3184,59 @@ export default function SettingsPage() {
                             Default Item Settings
                           </span>
 
-                          {/* Default Duration — six chips beside a label is
-                              ~270px of unshrinkable row, so on a phone the
-                              chips drop onto their own line and wrap. */}
+                          {/* Default Duration — chips: None (10m space), 15m, 30m, 45m, 60m, 90m, 120m */}
                           <div className={`flex gap-3 ${isPhone ? 'flex-col' : 'items-center justify-between'}`}>
                             <div className="min-w-0">
                               <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Default Duration</span>
-                              <span className="text-[11px]" style={{ color: textSecondary }}>Pre-set duration when creating timed items in this category</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>
+                                Pre-set duration when creating timed items in this category (or None for point-in-time deadlines)
+                              </span>
                             </div>
                             <div className="flex items-center gap-1 bg-muted/20 p-1 rounded-xl border flex-wrap" style={{ borderColor: cardBdr }}>
+                              <button
+                                type="button"
+                                onClick={() => setCategoryForm(prev => ({ ...prev, defaultNoDuration: true, defaultDurationMin: 0 }))}
+                                className={`${isTouch ? 'px-3 py-2.5' : 'px-2 py-1'} rounded-lg text-[11px] font-bold transition-smooth ${
+                                  categoryForm.defaultNoDuration ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                }`}
+                              >
+                                None (10m space)
+                              </button>
                               {[15, 30, 45, 60, 90, 120].map(dur => (
                                 <button
                                   key={dur}
                                   type="button"
-                                  onClick={() => setCategoryForm(prev => ({ ...prev, defaultDurationMin: dur }))}
+                                  onClick={() => setCategoryForm(prev => ({ ...prev, defaultNoDuration: false, defaultDurationMin: dur }))}
                                   className={`${isTouch ? 'px-3 py-2.5' : 'px-2 py-1'} rounded-lg text-[11px] font-bold tabular-nums transition-smooth ${
-                                    categoryForm.defaultDurationMin === dur ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                                    !categoryForm.defaultNoDuration && categoryForm.defaultDurationMin === dur ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
                                   }`}
                                 >
                                   {dur}m
                                 </button>
                               ))}
                             </div>
+                          </div>
+
+                          {/* No-Duration / Point-in-Time Toggle */}
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <span className="text-xs font-semibold block" style={{ color: textPrimary }}>Point-in-Time / Deadline (No End Time)</span>
+                              <span className="text-[11px]" style={{ color: textSecondary }}>
+                                Items take a compact 10-minute slot on the calendar grid with start time only
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setCategoryForm(prev => ({
+                                ...prev,
+                                defaultNoDuration: !prev.defaultNoDuration,
+                                defaultDurationMin: !prev.defaultNoDuration ? 0 : (prev.defaultDurationMin || 30),
+                              }))}
+                              className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0"
+                              style={{ background: categoryForm.defaultNoDuration ? categoryForm.color : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                            >
+                              <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-smooth" style={{ left: categoryForm.defaultNoDuration ? 22 : 2 }} />
+                            </button>
                           </div>
 
                           {/* Default All-Day */}
@@ -3100,7 +3330,7 @@ export default function SettingsPage() {
                                       {categoryForm.name.trim() || 'Category Preview'}
                                     </span>
                                     <span className="text-[10px] font-semibold tabular-nums" style={{ color: previewChip.textMuted }}>
-                                      {categoryForm.defaultAllDay ? 'All Day' : `09:00 AM (${categoryForm.defaultDurationMin}m)`}
+                                      {categoryForm.defaultAllDay ? 'All Day' : categoryForm.defaultNoDuration ? '09:00 AM' : `09:00 AM (${categoryForm.defaultDurationMin}m)`}
                                     </span>
                                   </div>
                                   <span className="text-[10.5px] truncate" style={{ color: previewChip.textMuted }}>
@@ -3120,7 +3350,7 @@ export default function SettingsPage() {
                             className="px-4 py-2 rounded-xl text-xs font-semibold border transition-colors hover:bg-white/5"
                             style={{ borderColor: cardBdr, color: textSecondary }}
                           >
-                            Cancel
+                            {editingCategory ? 'Done / Close' : 'Cancel'}
                           </button>
                           <button
                             type="button"
@@ -4969,29 +5199,34 @@ export default function SettingsPage() {
                       </div>
 
                       {/* Local Wi-Fi link */}
-                      <div className="p-3 rounded-xl border flex items-center justify-between gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <Wifi size={15} className="text-blue-400 flex-shrink-0" />
-                          <div className="min-w-0">
-                            <span className="text-[10px] font-bold uppercase tracking-wider block text-blue-400">Local Wi-Fi / LAN Link</span>
-                            <span className="text-xs font-mono truncate block" style={{ color: textPrimary }}>
-                              http://192.168.1.118:5173
-                            </span>
+                      {(() => {
+                        const localLanUrl = (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' && !window.location.hostname.includes('ts.net')) ? window.location.origin : 'http://192.168.1.118:5173';
+                        return (
+                          <div className="p-3 rounded-xl border flex items-center justify-between gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <Wifi size={15} className="text-blue-400 flex-shrink-0" />
+                              <div className="min-w-0">
+                                <span className="text-[10px] font-bold uppercase tracking-wider block text-blue-400">Local Wi-Fi / LAN Link</span>
+                                <span className="text-xs font-mono truncate block" style={{ color: textPrimary }}>
+                                  {localLanUrl}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(localLanUrl);
+                                showToast('Local Wi-Fi link copied to clipboard!', 'success');
+                              }}
+                              className="p-2 rounded-lg border hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
+                              style={{ borderColor: cardBdr, color: textSecondary }}
+                              title="Copy Local Link"
+                            >
+                              <Copy size={14} />
+                            </button>
                           </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText('http://192.168.1.118:5173');
-                            showToast('Local Wi-Fi link copied to clipboard!', 'success');
-                          }}
-                          className="p-2 rounded-lg border hover:bg-white/5 transition-colors flex-shrink-0"
-                          style={{ borderColor: cardBdr, color: textSecondary }}
-                          title="Copy Local Link"
-                        >
-                          <Copy size={14} />
-                        </button>
-                      </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 </div>

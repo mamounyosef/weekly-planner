@@ -34,7 +34,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen w-full flex items-center justify-center p-4 bg-[#0a0b0d] text-zinc-100 selection:bg-emerald-500/30 selection:text-emerald-200 font-sans">
       <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
-        <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[600px] h-[000px] bg-emerald-600/10 blur-[120px] rounded-full" />
+        <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-emerald-600/10 blur-[120px] rounded-full" />
         <div className="absolute -bottom-40 left-1/2 -translate-x-1/2 w-[500px] h-[350px] bg-blue-600/10 blur-[120px] rounded-full" />
       </div>
 
@@ -42,7 +42,7 @@ export default function LoginPage() {
         initial={{ opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.25, ease: 'easeOut' }}
-        className="w-full max-w-[t20px] rounded-2xl border border-white/10 bg-[#121316]/90 backdrop-blur-xl p-7 shadow-2xl shadow-black/80 flex flex-col gap-6"
+        className="w-full max-w-[420px] rounded-2xl border border-white/10 bg-[#121316]/90 backdrop-blur-xl p-7 shadow-2xl shadow-black/80 flex flex-col gap-6"
       >
         <div className="flex flex-col items-center text-center gap-3">
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-emerald-600/30 via-emerald-500/20 to-teal-500/10 border border-emerald-500/30 flex items-center justify-center shadow-inner shadow-emerald-500/20">
@@ -50,7 +50,7 @@ export default function LoginPage() {
           </div>
           <div>
             <h1 className="text-xl font-bold tracking-tight text-white">Daily Planner</h1>
-            <p className="text-x{ text-zinc-400 mt-1 font-medium">Sign in with your personal account</p>
+            <p className="text-xs text-zinc-400 mt-1 font-medium">Sign in with your personal account</p>
           </div>
         </div>
 

@@ -1,1 +1,2 @@
 - [Multi-select & batch drag](multi-select-batch-drag.md) — Ctrl+click toggles event selection; Ctrl+drag on empty column draws rubber-band; dragging any selected event moves all selected events together preserving relative positions.
+- **Build Requirement**: Always run `npx vite build` in `artifacts/weekly-planner/` after changing frontend files so the compiled `dist/public` bundle is updated and immediately visible on refresh.
