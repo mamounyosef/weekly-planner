@@ -8,12 +8,14 @@
     "build": "vite build --config vite.config.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx src/lib/recurrence.test.ts && tsx src/lib/focusSessions.test.ts && tsx src/lib/sensorFilter.test.ts && tsx src/lib/hardwareController.test.ts && tsx src/lib/shortcuts.test.ts && tsx src/lib/backup.test.ts",
+    "test": "tsx src/lib/recurrence.test.ts && tsx src/lib/focusSessions.test.ts && tsx src/lib/sensorFilter.test.ts && tsx src/lib/hardwareBridge.test.ts && tsx src/lib/hardwareController.test.ts && tsx src/lib/deskIntegration.test.ts && tsx src/lib/shortcuts.test.ts && tsx src/lib/backup.test.ts && tsx src/lib/notifications.test.ts",
     "test:recurrence": "tsx src/lib/recurrence.test.ts",
     "test:focus": "tsx src/lib/focusSessions.test.ts",
-    "test:hardware": "tsx src/lib/hardwareController.test.ts && tsx src/lib/sensorFilter.test.ts",
+    "test:hardware": "tsx src/lib/sensorFilter.test.ts && tsx src/lib/hardwareBridge.test.ts && tsx src/lib/hardwareController.test.ts",
+    "test:desk": "tsx src/lib/sensorFilter.test.ts && tsx src/lib/hardwareBridge.test.ts && tsx src/lib/hardwareController.test.ts && tsx src/lib/focusSessions.test.ts && tsx src/lib/deskIntegration.test.ts",
     "test:shortcuts": "tsx src/lib/shortcuts.test.ts",
-    "test:backup": "tsx src/lib/backup.test.ts"
+    "test:backup": "tsx src/lib/backup.test.ts",
+    "test:notifications": "tsx src/lib/notifications.test.ts"
   },
   "devDependencies": {
     "@radix-ui/react-dialog": "^1.1.7",

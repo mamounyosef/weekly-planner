@@ -79,6 +79,8 @@ export function getUserDbPaths(rootDir: string, username: string) {
     timerPath: path.join(dbDir, 'focus-timer.json'),
     beatPath: path.join(dbDir, 'focus-heartbeat.json'),
     donePath: path.join(dbDir, 'prayer-done.json'),
+    notificationsPath: path.join(dbDir, 'notifications.json'),
+    pushSubsPath: path.join(dbDir, 'push-subscriptions.json'),
     configPath: path.join(dbDir, 'google-config.json'),
     tokensPath: path.join(dbDir, 'google-tokens.json'),
     statePath: path.join(dbDir, 'auto-backup-state.json'),
@@ -106,6 +108,8 @@ export async function ensureUserDb(rootDir: string, username: string) {
     initFile(p.focusPath, '[]'),
     initFile(p.timerPath, JSON.stringify({ plannedSeconds: 3600, accumulatedSeconds: 0, isRunning: false, lastStartedAt: null, sessionStartedAt: null, lastPausedAt: null }, null, 2)),
     initFile(p.donePath, '{}'),
+    initFile(p.notificationsPath, JSON.stringify({ items: {}, updatedAt: 0 }, null, 2)),
+    initFile(p.pushSubsPath, '[]'),
     initFile(p.devicePath, '{}'),
   ]);
 

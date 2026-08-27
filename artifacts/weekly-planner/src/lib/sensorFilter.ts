@@ -257,8 +257,8 @@ export function coerceSensorFilterConfig(raw: Partial<SensorFilterConfig> | null
     const n = Number(v);
     return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
   };
-  c.enterCm = num(raw.enterCm, 2, 400, c.enterCm);
-  c.exitCm = num(raw.exitCm, 2, 400, c.exitCm);
+  c.enterCm = num(raw.enterCm, 2, 392, c.enterCm);
+  c.exitCm = num(raw.exitCm, 2, 396, c.exitCm);
   c.maxValidCm = num(raw.maxValidCm, 20, 400, c.maxValidCm);
   c.minValidCm = num(raw.minValidCm, 1, 20, c.minValidCm);
   c.presentConfirmMs = num(raw.presentConfirmMs, 0, 60000, c.presentConfirmMs);
@@ -280,6 +280,7 @@ export function coerceSensorFilterConfig(raw: Partial<SensorFilterConfig> | null
   // reading past the away threshold would be dismissed as a glitch.
   if (c.exitCm <= c.enterCm) c.exitCm = c.enterCm + 4;
   if (c.maxValidCm <= c.exitCm) c.maxValidCm = c.exitCm + 4;
+  if (c.minValidCm >= c.enterCm) c.minValidCm = Math.max(1, c.enterCm - 1);
   return c;
 }
 
@@ -373,7 +374,7 @@ export class PresenceFilter {
     const prev = this.samples.length ? this.samples[this.samples.length - 1] : null;
     // A hole in the stream means the board or the link went away. Joining
     // across it would compute a spread between two unrelated moments.
-    if (prev && at - prev.at > c.streamGapMs) {
+    if (prev && (at - prev.at > c.streamGapMs || at < prev.at)) {
       this.samples = [];
       this.lastCm = null;
       this.rampRun = 0;
@@ -480,7 +481,7 @@ export class PresenceFilter {
     // "absent" while you sit in front of the sensor. It still waits for a
     // window that agrees with itself, so one reading cannot decide it alone.
     if (!this.initialised) {
-      if (!this.everEchoed || support < c.minClusterSupport || spreadCm > c.chaosSpreadCm) {
+      if (!this.everEchoed || usable.length < 2 || support < c.minClusterSupport || spreadCm > c.chaosSpreadCm) {
         this.last = snap;
         return snap;
       }
@@ -488,7 +489,7 @@ export class PresenceFilter {
       this.present = centre < c.enterCm;
       snap.present = this.present;
       snap.ready = true;
-      snap.changed = true;
+      snap.changed = this.present !== wasPresent;
       this.last = snap;
       return snap;
     }

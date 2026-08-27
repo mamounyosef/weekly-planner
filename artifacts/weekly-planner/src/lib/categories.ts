@@ -1,4 +1,5 @@
 import { SWATCH_BASE_HEX, FALLBACK_EVENT_HEX } from './gcalColor';
+import { coerceNotifySpec, type NotifySpec } from './notifications';
 
 export interface EventCategory {
   id: string;
@@ -12,6 +13,12 @@ export interface EventCategory {
   showInWidget?: boolean;     // Whether events of this category appear in the side widget (default true)
   isDefault?: boolean;        // Whether this category is automatically selected for new items
   description?: string;        // Optional category notes / description
+  // Category-level notification defaults. An item in this category that has no
+  // notification settings of its own inherits these. ABSENT means "inherit the
+  // global default" rather than "no notifications", so a category only overrides
+  // once it has actually been configured.
+  notifyTimed?: NotifySpec;   // applies to items with a time
+  notifyAllDay?: NotifySpec;  // applies to all-day items
 }
 
 /**
@@ -110,6 +117,11 @@ export function coerceCategories(raw: unknown): EventCategory[] {
       showInWidget: typeof r.showInWidget === 'boolean' ? r.showInWidget : true,
       isDefault: typeof r.isDefault === 'boolean' ? r.isDefault : false,
       description: typeof r.description === 'string' ? r.description : '',
+      // Undefined stays undefined here: it is what "inherits the global
+      // default" is stored as, and coercing it into a real spec would silently
+      // freeze today's global default onto every category.
+      notifyTimed: coerceNotifySpec(r.notifyTimed),
+      notifyAllDay: coerceNotifySpec(r.notifyAllDay),
     };
 
     result.push(cat);

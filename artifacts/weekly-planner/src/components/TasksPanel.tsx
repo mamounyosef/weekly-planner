@@ -22,6 +22,7 @@ import {
   type TaskList as TaskListDef,
 } from '@/lib/taskLists';
 import { useReorder } from '@/lib/useReorder';
+import { useViewport } from '@/hooks/use-mobile';
 
 /** What the panel's composer hands back; home.tsx turns it into a real Task. */
 export interface NewTaskInput {
@@ -162,6 +163,7 @@ function TasksPanel({
   page = false,
   zoom,
 }: TasksPanelProps) {
+  const vp = useViewport();
   const today = todayYmd();
   const tomorrow = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd'), [today]);
 
@@ -541,9 +543,9 @@ function TasksPanel({
       )}
     <aside
       className={page
-        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden'
+        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden gpu-layer'
         : sheet
-        ? 'fixed inset-x-0 bottom-0 z-[81] overflow-hidden shadow-2xl'
+        ? 'fixed inset-x-0 bottom-0 z-[81] overflow-hidden shadow-2xl gpu-layer'
         : 'flex-shrink-0 overflow-hidden relative shadow-lg'}
       style={{
         ...(page ? {
@@ -551,7 +553,7 @@ function TasksPanel({
           // no slide to animate and nothing rendered underneath. Switching tabs is
           // a plain show/hide, which is the only version of this that can't drop
           // frames on a phone.
-          bottom: 'var(--bottom-nav-h)',
+          bottom: vp.keyboardInset > 0 ? `${vp.keyboardInset}px` : 'var(--bottom-nav-h)',
           paddingTop: 'var(--safe-top)',
           background: theme.menuBg,
           display: open ? undefined : 'none',
@@ -559,11 +561,11 @@ function TasksPanel({
           // Stops at the tab bar rather than sliding under it: the bar stays
           // usable (tap Calendar to get straight back) and the composer at the
           // foot of the list is never hidden behind it.
-          bottom: 'var(--bottom-nav-h)',
+          bottom: vp.keyboardInset > 0 ? `${vp.keyboardInset}px` : 'var(--bottom-nav-h)',
           // Not full height — leaving the top of the calendar peeking through is
           // what makes a sheet read as "on top of" rather than "instead of", and
           // it gives the eye somewhere to tap to dismiss.
-          height: 'calc(86dvh - var(--bottom-nav-h))',
+          height: vp.keyboardInset > 0 ? `calc(100% - ${vp.keyboardInset}px)` : 'calc(86dvh - var(--bottom-nav-h))',
           borderTopLeftRadius: 18,
           borderTopRightRadius: 18,
           borderTop: `1px solid ${theme.surfaceBdr}`,
@@ -594,7 +596,7 @@ function TasksPanel({
           transition: 'width 130ms cubic-bezier(0.16, 1, 0.3, 1)',
           borderLeft: open ? `1px solid ${theme.surfaceBdr}` : 'none',
         }),
-        ...(zoom ? { zoom } : {}),
+        ...(zoom && zoom !== 1 ? { zoom } : {}),
       }}
       aria-hidden={!open}
     >
@@ -738,7 +740,7 @@ function TasksPanel({
         <div className="flex-shrink-0 relative border-b" style={{ borderColor: theme.surfaceBdr }}>
           <div
             ref={rail.containerRef}
-            className="flex gap-1.5 px-3 py-2 overflow-x-auto overflow-y-hidden"
+            className="flex gap-1.5 px-3 py-2 overflow-x-auto overflow-y-hidden no-scrollbar touch-scroll-x"
             style={{ background: theme.surfaceBg + '22' }}
           >
             <ListPill
@@ -810,7 +812,7 @@ function TasksPanel({
 
         {/* Filter chips */}
         <div
-          className="flex-shrink-0 px-3 py-2 flex gap-1.5 border-b overflow-x-auto overflow-y-hidden"
+          className="flex-shrink-0 px-3 py-2 flex gap-1.5 border-b overflow-x-auto overflow-y-hidden no-scrollbar touch-scroll-x"
           style={{ borderColor: theme.surfaceBdr, background: theme.menuBg }}
         >
           <FilterChip
@@ -1086,7 +1088,7 @@ function TasksPanel({
 
                         {showListPicker && (
                           <>
-                            <div className="fixed inset-0 z-40" onMouseDown={() => setShowListPicker(false)} />
+                            <div className="fixed inset-0 z-40" onMouseDown={() => setShowListPicker(false)} onPointerDown={() => setShowListPicker(false)} />
                             <div
                               className="absolute left-0 top-full mt-1.5 z-50 w-48 max-h-56 overflow-y-auto rounded-xl shadow-xl py-1.5 border"
                               style={{ background: theme.menuBg, borderColor: theme.surfaceBdr }}
@@ -1177,7 +1179,7 @@ function TasksPanel({
         </div>
 
         {/* Task List */}
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-2.5 py-3 space-y-3">
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden touch-scroll px-2.5 py-3 space-y-3">
           {visibleCount === 0 && (
             <div
               className="flex flex-col items-center justify-center gap-3 py-14 text-center px-6 rounded-2xl border"
@@ -1313,13 +1315,13 @@ function TimePickerPopover({ value, timeFormat, theme, taskColor, onChange, onCl
 
   return (
     <>
-      <div className="fixed inset-0 z-40" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40" onMouseDown={onClose} onPointerDown={onClose} />
       <motion.div
         initial={{ opacity: 0, y: -4, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -4, scale: 0.98 }}
         transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-        className="absolute left-0 top-full mt-2 z-50 w-56 rounded-xl border p-2 shadow-xl"
+        className="absolute left-0 top-full mt-2 z-50 w-56 max-w-[calc(100vw-24px)] rounded-xl border p-2 shadow-xl"
         style={{
           background: theme.menuBg,
           borderColor: theme.surfaceBdr,
@@ -1488,13 +1490,13 @@ function RepeatPickerPopover({
 
   return (
     <>
-      <div className="fixed inset-0 z-40" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-40" onMouseDown={onClose} onPointerDown={onClose} />
       <motion.div
         initial={{ opacity: 0, y: -6, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -6, scale: 0.96 }}
         transition={{ duration: 0.14, ease: [0.16, 1, 0.3, 1] }}
-        className="absolute left-0 top-full mt-2 z-50 w-72 max-h-[80vh] overflow-y-auto rounded-2xl border p-3 shadow-2xl space-y-3"
+        className="absolute left-0 top-full mt-2 z-50 w-72 max-w-[calc(100vw-24px)] max-h-[80vh] overflow-y-auto rounded-2xl border p-3 shadow-2xl space-y-3"
         style={{
           background: theme.menuBg,
           borderColor: theme.surfaceBdr,
@@ -1511,7 +1513,7 @@ function RepeatPickerPopover({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-lg hover:opacity-75 transition-opacity"
+            className="touch-target p-1 rounded-lg hover:opacity-75 transition-opacity"
             style={{ color: theme.menuSub }}
           >
             <X size={13} />
@@ -1877,7 +1879,7 @@ function ListEditor({ list, lists, taskCount, theme, onSave, onMove, onDelete, o
 
   return (
     <>
-      <div className="fixed inset-0 z-[60]" onMouseDown={onClose} />
+      <div className="fixed inset-0 z-[60]" onMouseDown={onClose} onPointerDown={onClose} onClick={onClose} />
       <motion.div
         initial={{ opacity: 0, y: -6, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -2792,11 +2794,12 @@ function TaskRow({
       </div>
 
       {/* Quick Action Buttons */}
-      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-50 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-80 sm:opacity-50 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
         {onToggleExpand && (
           <button
+            type="button"
             onClick={e => { e.stopPropagation(); onToggleExpand(); }}
-            className="p-1 rounded-lg transition-colors"
+            className="touch-target p-1 rounded-lg transition-colors flex items-center justify-center"
             style={{ color: theme.menuSub }}
             title="Toggle subtasks"
           >
@@ -2804,8 +2807,9 @@ function TaskRow({
           </button>
         )}
         <button
+          type="button"
           onClick={e => { e.stopPropagation(); onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }); }}
-          className="p-1 rounded-lg transition-colors"
+          className="touch-target p-1 rounded-lg transition-colors flex items-center justify-center"
           style={{ color: theme.menuSub }}
           title="Task options"
         >

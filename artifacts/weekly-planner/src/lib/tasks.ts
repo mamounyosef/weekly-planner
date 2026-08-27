@@ -10,6 +10,7 @@ import {
   type RecurFields,
   type WeekStartsOn,
 } from './recurrence';
+import type { NotifySpec } from './notifications';
 
 // ─── Tasks ───────────────────────────────────────────────────────────────────
 // A task is a separate entity from a calendar event, stored in its own file
@@ -36,6 +37,10 @@ export interface Task extends RecurFields {
   parentId?: string;         // subtask → parent task id (one level deep)
   listId?: string;           // which task list it lives on; unset = General
   order?: number;            // manual sort key within its section / siblings
+
+  // Reminders. Absent means "use the global task default", which is how every
+  // task that already exists gets notifications without being rewritten.
+  notify?: NotifySpec;
 
   completed?: boolean;       // non-repeating tasks
   completedDates?: string[]; // repeating: 'yyyy-MM-dd' occurrences done

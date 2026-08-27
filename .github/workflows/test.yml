@@ -32,7 +32,7 @@ jobs:
       - name: Typecheck TypeScript
         run: pnpm --filter @workspace/weekly-planner run typecheck
 
-      - name: Run Core Test Suites (Recurrence, Focus Timer, Ultrasonic Simulation, Hardware Controller, Backup)
+      - name: Run Core Test Suites (Recurrence, Focus, Ultrasonic Filter, Hardware Bridge, Hardware Controller, Desk Simulation, Shortcuts, Backup)
         run: pnpm --filter @workspace/weekly-planner test
 
       - name: Production Bundle Build

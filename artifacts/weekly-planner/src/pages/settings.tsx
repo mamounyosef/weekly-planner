@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useLocation } from 'wouter';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion';
 import {
@@ -46,6 +46,14 @@ import {
   Wifi,
   Copy,
   ExternalLink,
+  Bell,
+  BellOff,
+  BellRing,
+  AlarmClock,
+  MonitorSmartphone,
+  Send,
+  Activity,
+  ShieldAlert,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import {
@@ -91,6 +99,16 @@ import {
   type PrayerSettings,
   type PrayerStyle,
 } from '@/lib/prayerTimes';
+import {
+  DEFAULT_NOTIFICATION_SETTINGS,
+  offsetChip,
+  offsetLabel,
+  resolveSpec,
+  type NotificationSettings,
+  type NotifySpec,
+} from '@/lib/notifications';
+import { isInstalledApp, primeNotificationAudio, useNotifications } from '@/lib/notificationClient';
+import { NotifyEditor, type NotifyTheme } from '@/components/NotifyEditor';
 import { DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from '@/lib/hardwareController';
 import { NumberField } from '@/components/NumberField';
 import { useViewport } from '@/hooks/use-mobile';
@@ -483,6 +501,124 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
  * the only honest way to check a method/offset change — you compare these six
  * numbers against your mosque, not a description of an algorithm.
  */
+/**
+ * A category's reminder override. Shown as "following the global default" until
+ * it is customised, because a category that silently froze today's global
+ * default the moment it was created would be impossible to reason about later.
+ */
+function CategoryNotifyBlock({
+  label, spec, fallback, kind, onChange, theme, cardBdr, textPrimary, textSecondary, hint,
+}: {
+  label: string;
+  spec: NotifySpec | undefined;
+  fallback: NotifySpec;
+  kind: 'timed' | 'allDay';
+  onChange: (next: NotifySpec | undefined) => void;
+  theme: NotifyTheme;
+  cardBdr: string;
+  textPrimary: string;
+  textSecondary: string;
+  hint?: string;
+}) {
+  return (
+    <div className="rounded-xl p-2.5 flex flex-col gap-1.5" style={{ border: `1px solid ${cardBdr}` }}>
+      <p className="text-[11.5px] font-semibold" style={{ color: textPrimary }}>{label}</p>
+      {hint && <p className="text-[10.5px]" style={{ color: textSecondary }}>{hint}</p>}
+      <NotifyEditor
+        spec={spec}
+        effective={spec ?? fallback}
+        onChange={onChange}
+        inheritedFrom="the global default"
+        kind={kind}
+        theme={theme}
+      />
+    </div>
+  );
+}
+
+/** One row of the delivery-health list. */
+function HealthRow({
+  label, ok, detail, textPrimary, textSecondary, cardBdr,
+}: {
+  label: string; ok: boolean; detail: string;
+  textPrimary: string; textSecondary: string; cardBdr: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-xl px-3 py-2" style={{ border: `1px solid ${cardBdr}` }}>
+      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: ok ? '#22c55e' : '#ef4444' }} />
+      <span className="text-[12px] font-medium" style={{ color: textPrimary }}>{label}</span>
+      <span className="text-[10.5px] ml-auto text-right truncate" style={{ color: textSecondary }}>{detail}</span>
+    </div>
+  );
+}
+
+/** A labelled switch row, used throughout the notification settings. */
+function ToggleRow({
+  label, hint, value, onChange, accentColor, darkMode, cardBdr, textPrimary, textSecondary, noBorder,
+}: {
+  label: string; hint: string; value: boolean; onChange: (v: boolean) => void;
+  accentColor: string; darkMode: boolean; cardBdr: string;
+  textPrimary: string; textSecondary: string; noBorder?: boolean;
+}) {
+  return (
+    <div
+      className="flex items-start justify-between gap-3 py-2"
+      style={noBorder ? undefined : { borderBottom: `1px solid ${cardBdr}` }}
+    >
+      <div className="min-w-0">
+        <p className="text-[12.5px] font-medium" style={{ color: textPrimary }}>{label}</p>
+        <p className="text-[11px] mt-0.5 max-w-[54ch]" style={{ color: textSecondary }}>{hint}</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => onChange(!value)}
+        className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+        style={{ background: value ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+        aria-pressed={value}
+      >
+        <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: value ? 22 : 2 }} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * One default rule set. These are the bottom of the inheritance chain, so there
+ * is nothing for them to fall back to and the editor hides its inherit control.
+ */
+function DefaultBlock({
+  title, hint, spec, kind, onChange, theme, cardBdr, textPrimary, textSecondary, extra,
+}: {
+  title: string;
+  hint: string;
+  spec: NotifySpec;
+  kind: 'timed' | 'allDay' | 'task';
+  onChange: (next: NotifySpec) => void;
+  theme: NotifyTheme;
+  cardBdr: string;
+  textPrimary: string;
+  textSecondary: string;
+  extra?: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-2 pt-3" style={{ borderTop: `1px solid ${cardBdr}` }}>
+      <div>
+        <p className="text-[12.5px] font-semibold" style={{ color: textPrimary }}>{title}</p>
+        <p className="text-[11px] mt-0.5 max-w-[60ch]" style={{ color: textSecondary }}>{hint}</p>
+      </div>
+      {extra}
+      <NotifyEditor
+        spec={spec}
+        effective={spec}
+        onChange={next => onChange(next ?? spec)}
+        inheritedFrom={null}
+        kind={kind}
+        theme={theme}
+      />
+    </div>
+  );
+}
+
 function PrayerTodayPreview({ prayer, textPrimary, textSecondary, cardBdr, darkMode }: {
   prayer: PrayerSettings;
   textPrimary: string;
@@ -604,7 +740,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'categories' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
+type TabCategory = 'appearance' | 'calendar' | 'categories' | 'notifications' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
 
 interface Toast {
   id: number;
@@ -676,7 +812,7 @@ function CategoryRow({
           >
             <GripVertical
               size={16}
-              className="flex-shrink-0 opacity-40 group-hover:opacity-90 transition-opacity"
+              className="flex-shrink-0 opacity-70 sm:opacity-40 sm:group-hover:opacity-90 transition-opacity"
               style={{ color: textSecondary }}
             />
           </div>
@@ -772,6 +908,30 @@ function CategoryRow({
           <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
             <Clock size={11} /> {cat.defaultNoDuration || cat.defaultDurationMin === 0 ? 'Point in Time (10m space)' : `Default: ${cat.defaultDurationMin ?? 30}m`}
           </span>
+          {/* Only shown once the category actually overrides the default: a
+              chip that appears on every category would say nothing. */}
+          {(cat.defaultAllDay ? cat.notifyAllDay : cat.notifyTimed) && (() => {
+            const spec = (cat.defaultAllDay ? cat.notifyAllDay : cat.notifyTimed)!;
+            const critical = spec.priority === 'critical';
+            return (
+              <span
+                className="px-2 py-0.5 rounded-md flex items-center gap-1"
+                style={{
+                  background: critical ? 'rgba(239,68,68,0.14)' : 'rgba(59,130,246,0.14)',
+                  border: `1px solid ${critical ? 'rgba(239,68,68,0.3)' : 'rgba(59,130,246,0.3)'}`,
+                  color: critical ? '#f87171' : '#60a5fa',
+                }}
+                title={spec.enabled
+                  ? spec.rules.map(r => offsetLabel(r.offsetMin)).join(', ')
+                  : 'Items in this category are not reminded about'}
+              >
+                {spec.enabled ? <Bell size={11} /> : <BellOff size={11} />}
+                {spec.enabled
+                  ? [...spec.rules].sort((a, b) => a.offsetMin - b.offsetMin).map(r => offsetChip(r.offsetMin)).join(', ')
+                  : 'No reminders'}
+              </span>
+            );
+          })()}
           <span className="px-2 py-0.5 rounded-md bg-muted/20 border border-border/30 flex items-center gap-1">
             <Calendar size={11} /> {cat.defaultAllDay ? 'Defaults to All-Day' : 'Defaults to Timed'}
           </span>
@@ -865,7 +1025,7 @@ function TaskListRow({
         >
           <GripVertical
             size={16}
-            className="flex-shrink-0 opacity-40 group-hover:opacity-90 transition-opacity"
+            className="flex-shrink-0 opacity-70 sm:opacity-40 sm:group-hover:opacity-90 transition-opacity"
             style={{ color: textSecondary }}
           />
         </div>
@@ -959,7 +1119,7 @@ function TaskListRow({
 }
 
 export default function SettingsPage() {
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
   const { user, logout } = useAuth();
   // Settings is a two-column layout with a 256px sidebar — on a phone that
   // leaves ~130px for the controls themselves, so the sidebar becomes a
@@ -987,7 +1147,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'categories', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
@@ -1003,10 +1163,21 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    try {
+      const search = window.location.search || (location.includes('?') ? location.slice(location.indexOf('?')) : '');
+      const requested = new URLSearchParams(search).get('tab');
+      const known: string[] = ['appearance', 'calendar', 'categories', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+      if (requested && known.includes(requested)) {
+        setActiveTab(requested as TabCategory);
+      }
+    } catch (_) {}
+  }, [location]);
+
+  useEffect(() => {
     const handlePopState = () => {
       try {
         const requested = new URLSearchParams(window.location.search).get('tab');
-        const known: string[] = ['appearance', 'calendar', 'categories', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+        const known: string[] = ['appearance', 'calendar', 'categories', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
         if (requested && known.includes(requested)) {
           setActiveTab(requested as TabCategory);
         }
@@ -1015,6 +1186,15 @@ export default function SettingsPage() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  const mobileTabStripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isPhone || !mobileTabStripRef.current) return;
+    const activeBtn = mobileTabStripRef.current.querySelector<HTMLElement>('[data-active="true"]');
+    if (activeBtn) {
+      activeBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
+  }, [activeTab, isPhone]);
 
   // Initialize state from local settings cache for instant display
   const initialSettings = useRef(loadSettingsLocal()).current;
@@ -1034,6 +1214,7 @@ export default function SettingsPage() {
   const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
   const [customDaysAfter, setCustomDaysAfter] = useState<number>(initialSettings.customDaysAfter);
   const [customAnchor, setCustomAnchor] = useState<'day' | 'week'>(initialSettings.customAnchor ?? 'day');
+  const [mobileSwipeViewSwitch, setMobileSwipeViewSwitch] = useState<boolean>(initialSettings.mobileSwipeViewSwitch ?? true);
   const [eventColorStyle, setEventColorStyle] = useState<EventCardStyle>(initialSettings.eventColorStyle);
   const [sidebarStyle, setSidebarStyle] = useState<SidebarStyle>(initialSettings.sidebarStyle);
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(initialSettings.timeFormat);
@@ -1073,6 +1254,14 @@ export default function SettingsPage() {
   const [gcalMirrorLocalDeletions, setGcalMirrorLocalDeletions] = useState<boolean>(initialSettings.gcalMirrorLocalDeletions ?? true);
   const [gcalMirrorGoogleDeletions, setGcalMirrorGoogleDeletions] = useState<boolean>(initialSettings.gcalMirrorGoogleDeletions ?? false);
   const [prayer, setPrayer] = useState<PrayerSettings>(initialSettings.prayer);
+  const [notifications, setNotifications] = useState<NotificationSettings>(initialSettings.notifications);
+  /** Patch one slice without disturbing the rest, exactly like patchPrayer. */
+  const patchNotifications = useCallback((patch: Partial<NotificationSettings>) => {
+    setNotifications(prev => ({ ...prev, ...patch }));
+  }, []);
+  // Used here only for this device's push state, the test buttons and the
+  // health panel. The settings page never shows the banner itself.
+  const notify = useNotifications({ soundEnabled: false, inAppEnabled: false });
   const [hardware, setHardware] = useState<HardwareSettings>(initialSettings.hardware);
   const [categories, setCategories] = useState<EventCategory[]>(initialSettings.categories ?? DEFAULT_CATEGORIES);
   const [taskLists, setTaskLists] = useState<TaskList[]>(() => coerceTaskLists(initialSettings.taskLists));
@@ -1088,6 +1277,9 @@ export default function SettingsPage() {
     showInWidget: boolean;
     isDefault: boolean;
     description: string;
+    // `undefined` means this category inherits the global reminder defaults.
+    notifyTimed: NotifySpec | undefined;
+    notifyAllDay: NotifySpec | undefined;
   }>({
     name: '',
     color: '#22c55e',
@@ -1098,6 +1290,8 @@ export default function SettingsPage() {
     showInWidget: true,
     isDefault: false,
     description: '',
+    notifyTimed: undefined,
+    notifyAllDay: undefined,
   });
   const [deleteConfirmCatId, setDeleteConfirmCatId] = useState<string | null>(null);
 
@@ -1113,6 +1307,8 @@ export default function SettingsPage() {
       showInWidget: true,
       isDefault: false,
       description: '',
+      notifyTimed: undefined,
+      notifyAllDay: undefined,
     });
     setIsAddingCategory(true);
   };
@@ -1131,6 +1327,8 @@ export default function SettingsPage() {
       showInWidget: cat.showInWidget ?? true,
       isDefault: cat.isDefault ?? false,
       description: cat.description ?? '',
+      notifyTimed: cat.notifyTimed,
+      notifyAllDay: cat.notifyAllDay,
     });
   };
 
@@ -1154,6 +1352,8 @@ export default function SettingsPage() {
           showInWidget: categoryForm.showInWidget,
           isDefault: categoryForm.isDefault,
           description: categoryForm.description.trim(),
+          notifyTimed: categoryForm.notifyTimed,
+          notifyAllDay: categoryForm.notifyAllDay,
         };
 
         setCategories(prev => {
@@ -1176,6 +1376,8 @@ export default function SettingsPage() {
                 showInWidget: categoryForm.showInWidget,
                 isDefault: categoryForm.isDefault,
                 description: categoryForm.description.trim(),
+                notifyTimed: categoryForm.notifyTimed,
+                notifyAllDay: categoryForm.notifyAllDay,
               };
             }
             if (categoryForm.isDefault) {
@@ -1220,6 +1422,8 @@ export default function SettingsPage() {
         showInWidget: categoryForm.showInWidget,
         isDefault: categoryForm.isDefault,
         description: categoryForm.description.trim(),
+        notifyTimed: categoryForm.notifyTimed,
+        notifyAllDay: categoryForm.notifyAllDay,
       };
 
       setCategories(prev => {
@@ -1242,6 +1446,8 @@ export default function SettingsPage() {
               showInWidget: categoryForm.showInWidget,
               isDefault: categoryForm.isDefault,
               description: categoryForm.description.trim(),
+              notifyTimed: categoryForm.notifyTimed,
+              notifyAllDay: categoryForm.notifyAllDay,
             };
           }
           if (categoryForm.isDefault) {
@@ -1346,6 +1552,7 @@ export default function SettingsPage() {
     customDaysBefore: initialSettings.customDaysBefore,
     customDaysAfter: initialSettings.customDaysAfter,
     customAnchor: initialSettings.customAnchor ?? 'day',
+    mobileSwipeViewSwitch: initialSettings.mobileSwipeViewSwitch ?? true,
     interval: initialSettings.interval,
     tasksPanelOpen: initialSettings.tasksPanelOpen,
     tasksPanelWidth: initialSettings.tasksPanelWidth,
@@ -1374,6 +1581,7 @@ export default function SettingsPage() {
     setCustomDaysBefore(d.customDaysBefore);
     setCustomDaysAfter(d.customDaysAfter);
     if (d.customAnchor === 'day' || d.customAnchor === 'week') setCustomAnchor(d.customAnchor);
+    if (typeof d.mobileSwipeViewSwitch === 'boolean') setMobileSwipeViewSwitch(d.mobileSwipeViewSwitch);
     setDayStartH(d.dayStartH);
     setDayEndH(d.dayEndH);
     setMobileContentZoom(d.mobileContentZoom ?? 1);
@@ -1427,6 +1635,7 @@ export default function SettingsPage() {
     saveDeviceSettings({
       calendarView: calendarView ?? 'week',
       customDaysBefore, customDaysAfter, customAnchor, interval,
+      mobileSwipeViewSwitch,
       tasksPanelOpen, tasksPanelWidth, showTaskRow,
       stickyAllDayMain, stickyTasksMain,
       darkMode, darkPreset, lightPreset,
@@ -1436,7 +1645,7 @@ export default function SettingsPage() {
       mobileUiZoom,
       ...deviceExtrasRef.current,
     });
-  }, [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, tasksPanelOpen,
+  }, [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, mobileSwipeViewSwitch, tasksPanelOpen,
       tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
       darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
       mobileContentZoom, mobileUiZoom]);
@@ -1482,6 +1691,7 @@ export default function SettingsPage() {
       if (typeof s.gcalMirrorLocalDeletions === 'boolean') setGcalMirrorLocalDeletions(s.gcalMirrorLocalDeletions);
       if (typeof s.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(s.gcalMirrorGoogleDeletions);
       setPrayer(s.prayer);
+      setNotifications(s.notifications);
       setHardware(s.hardware);
       if (s.categories) setCategories(s.categories);
       if (s.taskLists) setTaskLists(coerceTaskLists(s.taskLists));
@@ -1529,6 +1739,7 @@ export default function SettingsPage() {
           if (typeof coerced.gcalMirrorLocalDeletions === 'boolean') setGcalMirrorLocalDeletions(coerced.gcalMirrorLocalDeletions);
           if (typeof coerced.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(coerced.gcalMirrorGoogleDeletions);
           setPrayer(coerced.prayer);
+          setNotifications(coerced.notifications);
           setHardware(coerced.hardware);
           if (coerced.categories) setCategories(coerced.categories);
           if (coerced.taskLists) setTaskLists(coerceTaskLists(coerced.taskLists));
@@ -1595,12 +1806,13 @@ export default function SettingsPage() {
       gcalMirrorLocalDeletions,
       gcalMirrorGoogleDeletions,
       prayer,
+      notifications,
       hardware,
       categories,
     taskLists,
     }), 150);
     return () => window.clearTimeout(broadcastId);
-  }, [hardware, prayer, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
+  }, [hardware, prayer, notifications, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
@@ -1700,6 +1912,7 @@ export default function SettingsPage() {
     gcalMirrorLocalDeletions,
     gcalMirrorGoogleDeletions,
     prayer,
+    notifications,
     hardware,
     categories,
     taskLists,
@@ -1753,6 +1966,7 @@ export default function SettingsPage() {
     setGcalMirrorLocalDeletions(restored.gcalMirrorLocalDeletions);
     setGcalMirrorGoogleDeletions(restored.gcalMirrorGoogleDeletions);
     setPrayer(restored.prayer);
+    setNotifications(restored.notifications);
     setHardware(restored.hardware);
     broadcastSettingsChange(restored);
   };
@@ -1905,10 +2119,25 @@ export default function SettingsPage() {
   const accentColor = '#3b82f6';
   const accentLight = darkMode ? 'rgba(59, 130, 246, 0.15)' : 'rgba(59, 130, 246, 0.08)';
 
+  // The reminder editor paints from this page's palette rather than carrying
+  // its own, so it looks the same here as it does in the event menu.
+  const notifyTheme: NotifyTheme = useMemo(() => ({
+    darkMode,
+    text: textPrimary,
+    sub: textSecondary,
+    bg: activeTheme.cardBg,
+    bdr: cardBdr,
+    surface: activeTheme.surfaceBg,
+    hover: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
+    accent: accentColor,
+  }), [darkMode, textPrimary, textSecondary, activeTheme.cardBg, activeTheme.surfaceBg, cardBdr, accentColor]);
+
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
     { id: 'calendar', label: 'Calendar Grid', icon: <Calendar size={17} /> },
     { id: 'categories', label: 'Tasks & Categories', icon: <Tag size={17} />, badge: `${categories.length + taskLists.length}` },
+    { id: 'notifications', label: 'Notifications', icon: <Bell size={17} />,
+      badge: notifications.enabled ? undefined : 'Off' },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
@@ -2016,7 +2245,8 @@ export default function SettingsPage() {
             no accordion, no hamburger, and the current section always visible. */}
         {isPhone ? (
           <div
-            className="sticky z-40 -mx-3 px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar touch-scroll"
+            ref={mobileTabStripRef}
+            className="sticky z-40 -mx-3 px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar touch-scroll-x"
             // Must be the header's exact height (10 + 40 + 10 + 1px border): a
             // few pixels short and scrolling content shows through the seam.
             style={{ top: 'calc(61px + var(--safe-top))', background: headerBg }}
@@ -2026,6 +2256,7 @@ export default function SettingsPage() {
               return (
                 <button
                   key={tab.id}
+                  data-active={active ? 'true' : 'false'}
                   onClick={() => handleSelectTab(tab.id)}
                   className="flex items-center gap-1.5 px-3 h-10 rounded-xl text-[12px] font-bold whitespace-nowrap flex-shrink-0 active:scale-95 transition-transform"
                   style={{
@@ -2286,7 +2517,7 @@ export default function SettingsPage() {
                       onClick={() => setDarkMode(d => !d)}
                       className="touch-target relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 cursor-pointer"
                       style={{
-                        background: darkMode ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'),
+                        background: darkMode ? '#3b82f6' : 'rgba(0,0,0,0.15)',
                       }}
                       title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
                     >
@@ -2575,6 +2806,30 @@ export default function SettingsPage() {
                         </span>
                       </button>
                     </div>
+                  </div>
+
+                  {/* Mobile Swipe View Switching */}
+                  <div className="flex flex-col gap-2 pt-2 border-t" style={{ borderColor: cardBdr }}>
+                    <label className="flex items-center justify-between gap-4 cursor-pointer">
+                      <span className="flex flex-col">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Mobile Horizontal Swipe Navigation</span>
+                        <span className="text-[11px]" style={{ color: textSecondary }}>
+                          Swipe left or right horizontally on mobile screens to toggle between Custom View and Month View.
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setMobileSwipeViewSwitch(v => !v)}
+                        className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                        style={{ background: mobileSwipeViewSwitch ? (darkMode ? '#38bdf8' : '#0284c7') : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                        aria-pressed={mobileSwipeViewSwitch}
+                      >
+                        <span
+                          className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
+                          style={{ left: mobileSwipeViewSwitch ? 22 : 2 }}
+                        />
+                      </button>
+                    </label>
                   </div>
 
                   {/* Grid Interval */}
@@ -3342,6 +3597,46 @@ export default function SettingsPage() {
                           );
                         })()}
 
+                        {/* Reminder defaults for this category. This is the
+                            middle of the inheritance chain: an item in this
+                            category with no reminders of its own takes these,
+                            and these fall back to the global defaults. */}
+                        <div className="flex flex-col gap-3 pt-3 border-t" style={{ borderColor: cardBdr }}>
+                          <div>
+                            <p className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: textPrimary }}>
+                              <Bell size={13} /> Reminders for this category
+                            </p>
+                            <p className="text-[10.5px] mt-0.5" style={{ color: textSecondary }}>
+                              Anything in this category uses these unless it sets its own. Leave a section untouched to
+                              keep following the global default under Notifications.
+                            </p>
+                          </div>
+
+                          <CategoryNotifyBlock
+                            label="Items with a time"
+                            spec={categoryForm.notifyTimed}
+                            fallback={notifications.defaultTimed}
+                            kind="timed"
+                            onChange={next => setCategoryForm(prev => ({ ...prev, notifyTimed: next }))}
+                            theme={notifyTheme}
+                            cardBdr={cardBdr}
+                            textPrimary={textPrimary}
+                            textSecondary={textSecondary}
+                          />
+                          <CategoryNotifyBlock
+                            label="All-day items"
+                            spec={categoryForm.notifyAllDay}
+                            fallback={notifications.defaultAllDay}
+                            kind="allDay"
+                            onChange={next => setCategoryForm(prev => ({ ...prev, notifyAllDay: next }))}
+                            theme={notifyTheme}
+                            cardBdr={cardBdr}
+                            textPrimary={textPrimary}
+                            textSecondary={textSecondary}
+                            hint={`Counted from ${String(notifications.allDayHour).padStart(2, '0')}:00 on the day, so "1 day before" lands at ${String(notifications.allDayHour).padStart(2, '0')}:00 the morning before.`}
+                          />
+                        </div>
+
                         {/* Modal Footer Buttons */}
                         <div className="flex items-center justify-end gap-2.5 pt-3 border-t" style={{ borderColor: cardBdr }}>
                           <button
@@ -3366,6 +3661,507 @@ export default function SettingsPage() {
                     </div>
                   )}
                 </AnimatePresence>
+              </motion.div>
+            )}
+
+            {/* 🔔 NOTIFICATIONS TAB */}
+            {activeTab === 'notifications' && (
+              <motion.div
+                key="notifications"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.18 }}
+                className="flex flex-col gap-6"
+              >
+                {/* ── Master switch ───────────────────────────────────────── */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Notifications</h2>
+                      <p className="text-xs mt-0.5 max-w-[60ch]" style={{ color: textSecondary }}>
+                        Reminders are scheduled by the planner server, not by a browser tab, so they still fire when
+                        every window is closed. They go out to this PC as a Windows notification and to every signed-up
+                        phone or browser at the same time. Dealing with one anywhere clears it everywhere.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => patchNotifications({ enabled: !notifications.enabled })}
+                      className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                      style={{ background: notifications.enabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={notifications.enabled}
+                    >
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: notifications.enabled ? 22 : 2 }} />
+                    </button>
+                  </div>
+                </div>
+
+                {notifications.enabled && (
+                  <>
+                    {/* ── This device ──────────────────────────────────────── */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-4" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div>
+                        <h3 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
+                          <MonitorSmartphone size={15} /> This device
+                        </h3>
+                        <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                          Each device signs itself up once. On a phone this is the important one: an installed app that
+                          has signed up keeps receiving reminders even if you do not open it for days.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-semibold"
+                          style={{
+                            background: notify.pushState === 'subscribed' ? 'rgba(34,197,94,0.14)'
+                              : notify.pushState === 'denied' || notify.pushState === 'error' ? 'rgba(239,68,68,0.14)'
+                              : 'rgba(148,163,184,0.14)',
+                            color: notify.pushState === 'subscribed' ? '#22c55e'
+                              : notify.pushState === 'denied' || notify.pushState === 'error' ? '#ef4444'
+                              : textSecondary,
+                          }}
+                        >
+                          {notify.pushState === 'subscribed' ? <BellRing size={12} /> : <BellOff size={12} />}
+                          {notify.pushState === 'subscribed' ? 'Signed up for notifications'
+                            : notify.pushState === 'denied' ? 'Blocked in this browser'
+                            : notify.pushState === 'unsupported' ? 'This browser cannot receive push'
+                            : notify.pushState === 'subscribing' ? 'Signing up…'
+                            : notify.pushState === 'error' ? 'Sign-up failed'
+                            : 'Not signed up yet'}
+                        </span>
+
+                        {notify.pushState !== 'subscribed' && notify.pushState !== 'unsupported' && (
+                          <button
+                            type="button"
+                            onClick={() => { primeNotificationAudio(); void notify.enablePush(); }}
+                            className="rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white transition-colors"
+                            style={{ background: accentColor }}
+                          >
+                            Turn on for this device
+                          </button>
+                        )}
+                        {notify.pushState === 'subscribed' && (
+                          <button
+                            type="button"
+                            onClick={() => void notify.disablePush()}
+                            className="rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors"
+                            style={{ border: `1px solid ${cardBdr}`, color: textSecondary }}
+                          >
+                            Turn off here
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => { void notify.sendTest('normal'); showToast('Test notification sent to every signed-up device.', 'success'); }}
+                          className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors"
+                          style={{ border: `1px solid ${cardBdr}`, color: textPrimary }}
+                        >
+                          <Send size={12} /> Send a test
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { void notify.sendTest('critical'); showToast('Critical test sent. It will repeat until you acknowledge it.', 'success'); }}
+                          className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors"
+                          style={{ border: '1px solid rgba(239,68,68,0.35)', color: '#ef4444' }}
+                        >
+                          <ShieldAlert size={12} /> Test a critical one
+                        </button>
+                      </div>
+
+                      {notify.pushState === 'denied' && (
+                        <p className="text-[11.5px] rounded-xl p-3" style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171' }}>
+                          This browser is blocking notifications, and only you can undo that: open the site settings for
+                          this page (the icon next to the address, or the app's info screen) and set Notifications to Allow.
+                        </p>
+                      )}
+                      {notify.pushError && (
+                        <p className="text-[11.5px]" style={{ color: '#f87171' }}>{notify.pushError}</p>
+                      )}
+
+                      {/* The one piece of advice that actually matters on Android. */}
+                      {!isInstalledApp() && (
+                        <p className="text-[11.5px] rounded-xl p-3" style={{ background: accentLight, color: textSecondary }}>
+                          On a phone, install this page as an app first (browser menu, then "Install app" or "Add to
+                          Home screen"). An installed app gets its own icon in the notification shade and is allowed a
+                          background wake-up, which is what lets it still alert you while this PC is asleep.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* ── Delivery health ──────────────────────────────────── */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
+                            <Activity size={15} /> Delivery health
+                          </h3>
+                          <p className="text-xs mt-0.5 max-w-[60ch]" style={{ color: textSecondary }}>
+                            A notification that silently fails to send is the one real danger here, so every channel
+                            reports whether it last worked. Check this page if something ever feels quiet.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void notify.refreshHealth()}
+                          className="rounded-lg px-2.5 py-1 text-[11.5px] font-medium"
+                          style={{ border: `1px solid ${cardBdr}`, color: textSecondary }}
+                        >
+                          Refresh
+                        </button>
+                      </div>
+
+                      {notify.health ? (
+                        <div className="flex flex-col gap-2">
+                          <HealthRow
+                            label="Scheduler"
+                            ok={Date.now() - notify.health.lastTickAt < 90_000}
+                            detail={notify.health.lastTickAt
+                              ? `last checked ${new Date(notify.health.lastTickAt).toLocaleTimeString()}`
+                              : 'has not run yet'}
+                            textPrimary={textPrimary}
+                            textSecondary={textSecondary}
+                            cardBdr={cardBdr}
+                          />
+                          <HealthRow
+                            label="Windows notifications"
+                            ok={!notify.health.windowsToast.lastErrorAt
+                              || (notify.health.windowsToast.lastOkAt ?? 0) > notify.health.windowsToast.lastErrorAt}
+                            detail={notify.health.windowsToast.lastOkAt
+                              ? `last shown ${new Date(notify.health.windowsToast.lastOkAt).toLocaleString()}`
+                              : notify.health.windowsToast.lastError || 'nothing sent yet'}
+                            textPrimary={textPrimary}
+                            textSecondary={textSecondary}
+                            cardBdr={cardBdr}
+                          />
+                          {notify.health.scheduledNext && (
+                            <HealthRow
+                              label="Next reminder"
+                              ok
+                              detail={`${notify.health.scheduledNext.title} — ${new Date(notify.health.scheduledNext.fireAt).toLocaleString()}`}
+                              textPrimary={textPrimary}
+                              textSecondary={textSecondary}
+                              cardBdr={cardBdr}
+                            />
+                          )}
+
+                          <p className="text-[10.5px] font-bold uppercase tracking-wider mt-1" style={{ color: textSecondary }}>
+                            Signed-up devices ({notify.health.push.length})
+                          </p>
+                          {notify.health.push.length === 0 && (
+                            <p className="text-[11.5px]" style={{ color: textSecondary }}>
+                              No device has signed up yet. Nothing will reach your phone until one does.
+                            </p>
+                          )}
+                          {notify.health.push.map(device => {
+                            const healthy = !device.lastErrorAt || (device.lastOkAt ?? 0) > device.lastErrorAt;
+                            return (
+                              <div
+                                key={device.id}
+                                className="flex items-center gap-2 rounded-xl px-3 py-2"
+                                style={{ border: `1px solid ${cardBdr}` }}
+                              >
+                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: healthy ? '#22c55e' : '#ef4444' }} />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-[12px] font-medium truncate" style={{ color: textPrimary }}>
+                                    {device.label || 'Unnamed device'}
+                                  </p>
+                                  <p className="text-[10.5px] truncate" style={{ color: textSecondary }}>
+                                    {healthy
+                                      ? (device.lastOkAt ? `last delivered ${new Date(device.lastOkAt).toLocaleString()}` : 'signed up, nothing sent yet')
+                                      : `failing: ${device.lastError ?? 'unknown error'}`}
+                                  </p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-[11.5px]" style={{ color: textSecondary }}>Press Refresh to check.</p>
+                      )}
+                    </div>
+
+                    {/* ── Defaults ─────────────────────────────────────────── */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div>
+                        <h3 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Default reminders</h3>
+                        <p className="text-xs mt-0.5 max-w-[60ch]" style={{ color: textSecondary }}>
+                          What anything gets when it has no reminders of its own and its category has none either.
+                          A category set up under Tasks &amp; Categories overrides these, and a single item overrides both.
+                        </p>
+                      </div>
+
+                      <DefaultBlock
+                        title="Items with a time"
+                        hint="Counted from the item's start time."
+                        theme={notifyTheme}
+                        spec={notifications.defaultTimed}
+                        kind="timed"
+                        onChange={next => patchNotifications({ defaultTimed: next })}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                      />
+
+                      <DefaultBlock
+                        title="All-day items"
+                        hint={`An all-day item is treated as starting at ${String(notifications.allDayHour).padStart(2, '0')}:00, so "1 day before" means ${String(notifications.allDayHour).padStart(2, '0')}:00 the previous morning.`}
+                        theme={notifyTheme}
+                        spec={notifications.defaultAllDay}
+                        kind="allDay"
+                        onChange={next => patchNotifications({ defaultAllDay: next })}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                        extra={(
+                          <label className="flex items-center gap-2 text-[11.5px]" style={{ color: textSecondary }}>
+                            All-day items count from
+                            <select
+                              value={notifications.allDayHour}
+                              onChange={e => patchNotifications({ allDayHour: Number(e.target.value) })}
+                              className="rounded-lg px-2 py-1 text-[12px] outline-none"
+                              style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            >
+                              {Array.from({ length: 24 }, (_, h) => (
+                                <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                      />
+
+                      <DefaultBlock
+                        title="Tasks"
+                        hint="A task with a time is reminded like an event. A task with only a date is not reminded on its own: whatever is still open that day arrives as one summary at the cutoff."
+                        theme={notifyTheme}
+                        spec={notifications.defaultTask}
+                        kind="task"
+                        onChange={next => patchNotifications({ defaultTask: next })}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                        extra={(
+                          <label className="flex items-center gap-2 text-[11.5px]" style={{ color: textSecondary }}>
+                            Daily summary of what is still open at
+                            <select
+                              value={notifications.taskCutoffHour}
+                              onChange={e => patchNotifications({ taskCutoffHour: Number(e.target.value) })}
+                              className="rounded-lg px-2 py-1 text-[12px] outline-none"
+                              style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            >
+                              {Array.from({ length: 24 }, (_, h) => (
+                                <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                      />
+
+                      <DefaultBlock
+                        title="Prayer times"
+                        hint="Off by default. A prayer already marked done is never reminded about."
+                        theme={notifyTheme}
+                        spec={notifications.prayer}
+                        kind="timed"
+                        onChange={next => patchNotifications({ prayer: next })}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                      />
+                    </div>
+
+                    {/* ── How they arrive ──────────────────────────────────── */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <h3 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>How they arrive</h3>
+                      <p className="text-xs" style={{ color: textSecondary }}>
+                        Each channel is independent. Leaving them all on is the point: if one fails, the others still get through.
+                      </p>
+
+                      <ToggleRow
+                        label="Windows notifications"
+                        hint="A real Windows notification from the planner server, with working buttons, even with every window closed."
+                        value={notifications.windowsToast}
+                        onChange={v => patchNotifications({ windowsToast: v })}
+                        accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
+                        textPrimary={textPrimary} textSecondary={textSecondary}
+                      />
+                      <ToggleRow
+                        label="Phone and browser push"
+                        hint="Sent to every signed-up device over its own always-on channel."
+                        value={notifications.webPush}
+                        onChange={v => patchNotifications({ webPush: v })}
+                        accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
+                        textPrimary={textPrimary} textSecondary={textSecondary}
+                      />
+                      <ToggleRow
+                        label="Also push to this PC's browsers"
+                        hint="Off keeps one reminder per screen here: the Windows notification only. Turn on if the Windows ones ever stop arriving."
+                        value={notifications.desktopPush}
+                        onChange={v => patchNotifications({ desktopPush: v })}
+                        accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
+                        textPrimary={textPrimary} textSecondary={textSecondary}
+                      />
+                      <ToggleRow
+                        label="Banner inside the planner"
+                        hint="What you see when you already have the planner open."
+                        value={notifications.inApp}
+                        onChange={v => patchNotifications({ inApp: v })}
+                        accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
+                        textPrimary={textPrimary} textSecondary={textSecondary}
+                      />
+                      <ToggleRow
+                        label="Sound"
+                        hint="Plays in open planner windows. A critical reminder always sounds, whatever this says."
+                        value={notifications.sound}
+                        onChange={v => patchNotifications({ sound: v })}
+                        accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
+                        textPrimary={textPrimary} textSecondary={textSecondary}
+                      />
+                    </div>
+
+                    {/* ── Behaviour ────────────────────────────────────────── */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-4" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <h3 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Behaviour</h3>
+
+                      <div className="flex flex-col gap-1.5">
+                        <span className="text-[11.5px] font-semibold flex items-center gap-1.5" style={{ color: textPrimary }}>
+                          <AlarmClock size={13} /> Snooze buttons
+                        </span>
+                        <p className="text-[11px]" style={{ color: textSecondary }}>
+                          Offered on the notification itself. Snoozing on one device snoozes it everywhere.
+                        </p>
+                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                          {[5, 10, 15, 20, 30, 45, 60, 120].map(m => {
+                            const on = notifications.snoozeOptions.includes(m);
+                            return (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => {
+                                  const next = on
+                                    ? notifications.snoozeOptions.filter(v => v !== m)
+                                    : [...notifications.snoozeOptions, m].sort((a, b) => a - b).slice(0, 5);
+                                  if (!next.length) return; // there must always be one
+                                  patchNotifications({ snoozeOptions: next });
+                                }}
+                                className="rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition-colors"
+                                style={{
+                                  background: on ? accentLight : 'transparent',
+                                  border: `1px solid ${on ? accentColor : cardBdr}`,
+                                  color: on ? accentColor : textSecondary,
+                                }}
+                              >
+                                {m < 60 ? `${m} min` : `${m / 60} hr`}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-1.5 pt-2" style={{ borderTop: `1px solid ${cardBdr}` }}>
+                        <span className="text-[11.5px] font-semibold flex items-center gap-1.5" style={{ color: textPrimary }}>
+                          <ShieldAlert size={13} /> Critical reminders
+                        </span>
+                        <p className="text-[11px]" style={{ color: textSecondary }}>
+                          A reminder marked critical keeps going until you acknowledge it on any device.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5 text-[11.5px]" style={{ color: textSecondary }}>
+                          Repeat every
+                          <NumberField
+                            value={notifications.escalateEveryMin}
+                            onCommit={n => patchNotifications({ escalateEveryMin: n })}
+                            min={1} max={60}
+                            className="w-16 rounded-lg px-2 py-1 text-[12px] outline-none"
+                            style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            ariaLabel="Minutes between repeats"
+                          />
+                          minutes, up to
+                          <NumberField
+                            value={notifications.escalateTimes}
+                            onCommit={n => patchNotifications({ escalateTimes: n })}
+                            min={0} max={60}
+                            className="w-16 rounded-lg px-2 py-1 text-[12px] outline-none"
+                            style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            ariaLabel="Maximum repeats"
+                          />
+                          times
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-1.5 pt-2" style={{ borderTop: `1px solid ${cardBdr}` }}>
+                        <span className="text-[11.5px] font-semibold flex items-center gap-1.5" style={{ color: textPrimary }}>
+                          <Bell size={13} /> After the PC has been off
+                        </span>
+                        <p className="text-[11px]" style={{ color: textSecondary }}>
+                          Anything missed while this machine was asleep is delivered when it wakes, as long as it is no
+                          older than this. Older ones are still listed in the notification centre, marked as missed,
+                          rather than arriving as a pile of stale alerts.
+                        </p>
+                        <div className="flex items-center gap-2 pt-0.5 text-[11.5px]" style={{ color: textSecondary }}>
+                          Deliver anything missed in the last
+                          <NumberField
+                            value={notifications.catchUpHours}
+                            onCommit={n => patchNotifications({ catchUpHours: n })}
+                            min={0} max={72}
+                            className="w-16 rounded-lg px-2 py-1 text-[12px] outline-none"
+                            style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            ariaLabel="Catch-up window in hours"
+                          />
+                          hours
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-1.5 pt-2" style={{ borderTop: `1px solid ${cardBdr}` }}>
+                        <ToggleRow
+                          label="Quiet hours"
+                          hint="Ordinary reminders are held back and released when the window ends. Critical ones ignore it completely."
+                          value={notifications.quietHoursEnabled}
+                          onChange={v => patchNotifications({ quietHoursEnabled: v })}
+                          accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
+                          textPrimary={textPrimary} textSecondary={textSecondary}
+                          noBorder
+                        />
+                        {notifications.quietHoursEnabled && (
+                          <div className="flex items-center gap-2 text-[11.5px]" style={{ color: textSecondary }}>
+                            From
+                            <select
+                              value={notifications.quietFromH}
+                              onChange={e => patchNotifications({ quietFromH: Number(e.target.value) })}
+                              className="rounded-lg px-2 py-1 text-[12px] outline-none"
+                              style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            >
+                              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                            </select>
+                            to
+                            <select
+                              value={notifications.quietToH}
+                              onChange={e => patchNotifications({ quietToH: Number(e.target.value) })}
+                              className="rounded-lg px-2 py-1 text-[12px] outline-none"
+                              style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                            >
+                              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-2 text-[11.5px]" style={{ borderTop: `1px solid ${cardBdr}`, color: textSecondary }}>
+                        Keep the last
+                        <NumberField
+                          value={notifications.historyLimit}
+                          onCommit={n => patchNotifications({ historyLimit: n })}
+                          min={20} max={2000}
+                          className="w-20 rounded-lg px-2 py-1 text-[12px] outline-none"
+                          style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
+                          ariaLabel="How many notifications to keep"
+                        />
+                        notifications in the notification centre
+                      </div>
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
 
@@ -3911,11 +4707,12 @@ export default function SettingsPage() {
                           return (
                             <button
                               key={def.action}
+                              disabled={isTouch}
                               onClick={e => {
-                                if (e.detail === 0) return;
+                                if (isTouch || e.detail === 0) return;
                                 setRecordingAction(recording ? null : def.action);
                               }}
-                              className="flex items-center justify-between p-3.5 rounded-2xl border text-left transition-smooth"
+                              className={`flex items-center justify-between p-3.5 rounded-2xl border text-left transition-smooth ${isTouch ? 'cursor-default' : 'cursor-pointer'}`}
                               style={{
                                 background: recording ? accentLight : cardBg,
                                 borderColor: recording ? accentColor : cardBdr,
@@ -4176,6 +4973,27 @@ export default function SettingsPage() {
                               aria-pressed={hardware.awayPauseEnabled}
                             >
                               <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.awayPauseEnabled ? 22 : 2 }} />
+                            </button>
+                          </div>
+
+                          {/* Sessions started by hand */}
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1">
+                              <span className="text-xs font-semibold" style={{ color: textPrimary }}>Also control sessions I start myself</span>
+                              <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
+                                A session started from the app, the widget, the hotkey or the phone behaves exactly like one
+                                the desk started: leaving pauses it, staying away ends it, and finishing it chains into the
+                                next. Turn this off and a hand-started session is left entirely alone.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => patchHardware({ manualFollowsSensor: !hardware.manualFollowsSensor })}
+                              className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                              style={{ background: hardware.manualFollowsSensor ? '#3b82f6' : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                              aria-pressed={hardware.manualFollowsSensor}
+                            >
+                              <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: hardware.manualFollowsSensor ? 22 : 2 }} />
                             </button>
                           </div>
 
@@ -4762,6 +5580,9 @@ export default function SettingsPage() {
                               placeholder="Client ID"
                               value={clientIdInput}
                               onChange={e => setClientIdInput(e.target.value)}
+                              autoCapitalize="none"
+                              autoCorrect="off"
+                              spellCheck={false}
                               className="w-full py-2 px-3 text-xs rounded-xl border outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />
@@ -4770,6 +5591,9 @@ export default function SettingsPage() {
                               placeholder="Client Secret"
                               value={clientSecretInput}
                               onChange={e => setClientSecretInput(e.target.value)}
+                              autoCapitalize="none"
+                              autoCorrect="off"
+                              spellCheck={false}
                               className="w-full py-2 px-3 text-xs rounded-xl border outline-none"
                               style={{ background: cardBg, borderColor: cardBdr, color: textPrimary }}
                             />

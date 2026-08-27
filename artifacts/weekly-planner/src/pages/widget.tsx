@@ -1205,6 +1205,10 @@ export default function Widget() {
     session: {
       isRunning: focusTimer.isRunning,
       hasSession: Boolean(focusTimer.sessionStartedAt),
+      // Until the timer has loaded, "no session" is a guess -- and the
+      // controller reads a session appearing out of nowhere as one you started
+      // by hand, so a guess here would mislabel every desk-started session.
+      ready: timerHydratedRef.current,
     },
     display: {
       mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',

@@ -110,6 +110,7 @@ export function getDeviceLabel(): string {
  */
 export const DEVICE_SCOPED_KEYS = [
   'calendarView', 'customDaysBefore', 'customDaysAfter', 'customAnchor',
+  'mobileSwipeViewSwitch',
   'interval',
   'tasksPanelOpen', 'tasksPanelWidth', 'showTaskRow',
   'stickyAllDayMain', 'stickyTasksMain',
@@ -170,6 +171,7 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
   const shared: Pick<AppSettings, DeviceScopedKey> = {
     calendarView: base.calendarView, customDaysBefore: base.customDaysBefore,
     customDaysAfter: base.customDaysAfter, customAnchor: base.customAnchor ?? 'day',
+    mobileSwipeViewSwitch: base.mobileSwipeViewSwitch ?? true,
     interval: base.interval,
     tasksPanelOpen: base.tasksPanelOpen, tasksPanelWidth: base.tasksPanelWidth,
     showTaskRow: base.showTaskRow,
@@ -217,6 +219,7 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = clampNum(Math.round(r.customDaysBefore), -14, 14);
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = clampNum(Math.round(r.customDaysAfter), -14, 14);
   if (r.customAnchor === 'day' || r.customAnchor === 'week') s.customAnchor = r.customAnchor;
+  if (typeof r.mobileSwipeViewSwitch === 'boolean') s.mobileSwipeViewSwitch = r.mobileSwipeViewSwitch;
   if (typeof r.interval === 'number' && [5, 15, 30, 60].includes(r.interval)) s.interval = r.interval as IntervalMin;
   if (typeof r.tasksPanelOpen === 'boolean') s.tasksPanelOpen = r.tasksPanelOpen;
   if (typeof r.tasksPanelWidth === 'number' && Number.isFinite(r.tasksPanelWidth)) {

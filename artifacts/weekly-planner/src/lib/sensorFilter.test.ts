@@ -16,7 +16,7 @@
 //
 // Run with:  npx tsx src/lib/sensorFilter.test.ts
 
-import { DEFAULT_SENSOR_FILTER_CONFIG, PresenceFilter, type SensorFilterConfig } from './sensorFilter';
+import { DEFAULT_SENSOR_FILTER_CONFIG, PresenceFilter, coerceSensorFilterConfig, type SensorFilterConfig } from './sensorFilter';
 
 const CFG = DEFAULT_SENSOR_FILTER_CONFIG;
 const DT = 100;  // ping interval used throughout, matching the shipped default
@@ -396,6 +396,389 @@ console.log('\n--- ADVANCED ULTRASONIC ACOUSTIC SIMULATIONS ---');
     r.present && (r.believed ?? 0) < CFG.enterCm, `believed=${r.believed}`);
 }
 
+// ---------------------------------------------------------------------------
+// LAYER A — EXHAUSTIVE SCENARIO TEST MATRIX (ITEMS 1 - 15)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- LAYER A: EXHAUSTIVE SCENARIO MATRIX ---');
+
+// --- A.1: coerceSensorFilterConfig total surface ---
+{
+  // Null and non-object inputs fall back to defaults
+  check('coerce(null) returns defaults',
+    JSON.stringify(coerceSensorFilterConfig(null)) === JSON.stringify(DEFAULT_SENSOR_FILTER_CONFIG));
+  check('coerce(undefined) returns defaults',
+    JSON.stringify(coerceSensorFilterConfig(undefined)) === JSON.stringify(DEFAULT_SENSOR_FILTER_CONFIG));
+
+  // Clamping of every numeric knob against NaN, negative, huge, string
+  const pathological = {
+    enterCm: 'NaN',
+    exitCm: -10,
+    maxValidCm: 999999,
+    minValidCm: 'string',
+    presentConfirmMs: -50,
+    absentConfirmMs: Infinity,
+    glitchHoldMs: -1,
+    clusterWindowMs: 0,
+    clusterTolCm: 500,
+    minClusterSupport: 2.5,
+    chaosSpreadCm: -10,
+    chaosMaxMs: -5,
+    rampStepCm: -20,
+    rampMinSteps: 100,
+    rampMaskMs: 999999,
+    streamGapMs: 10,
+    glitchIgnoreAlways: true,
+    extraUnknownKey: 42,
+  };
+  const coerced = coerceSensorFilterConfig(pathological as unknown as Partial<SensorFilterConfig>);
+  check('enterCm NaN falls back to default', coerced.enterCm === DEFAULT_SENSOR_FILTER_CONFIG.enterCm);
+  check('exitCm negative is repaired above enterCm', coerced.exitCm > coerced.enterCm);
+  check('maxValidCm huge clamps to 400', coerced.maxValidCm === 400);
+  check('minValidCm non-number falls back and stays < enterCm', coerced.minValidCm < coerced.enterCm);
+  check('presentConfirmMs negative clamps to 0', coerced.presentConfirmMs === 0);
+  check('absentConfirmMs Infinity falls back to default', coerced.absentConfirmMs === DEFAULT_SENSOR_FILTER_CONFIG.absentConfirmMs);
+  check('glitchHoldMs negative clamps to 0', coerced.glitchHoldMs === 0);
+  check('clusterWindowMs below floor clamps to 200', coerced.clusterWindowMs === 200);
+  check('clusterTolCm above ceiling clamps to 100', coerced.clusterTolCm === 100);
+  check('minClusterSupport above 1.0 clamps to 1.0', coerced.minClusterSupport === 1.0);
+  check('chaosSpreadCm negative clamps to 5', coerced.chaosSpreadCm === 5);
+  check('chaosMaxMs negative clamps to 0', coerced.chaosMaxMs === 0);
+  check('rampStepCm negative clamps to 2', coerced.rampStepCm === 2);
+  check('rampMinSteps above 10 clamps to 10', coerced.rampMinSteps === 10);
+  check('rampMaskMs above 20000 clamps to 20000', coerced.rampMaskMs === 20000);
+  check('streamGapMs below 500 clamps to 500', coerced.streamGapMs === 500);
+  check('glitchIgnoreAlways boolean preserved', coerced.glitchIgnoreAlways === true);
+  check('unknown extra keys ignored', (coerced as Record<string, unknown>).extraUnknownKey === undefined);
+}
+
+// --- A.2: Threshold coherence rules & idempotence ---
+{
+  // Inverted hysteresis: enterCm >= exitCm
+  const inverted = coerceSensorFilterConfig({ enterCm: 60, exitCm: 40 });
+  check('inverted hysteresis is repaired (exitCm > enterCm)',
+    inverted.exitCm > inverted.enterCm && inverted.exitCm === inverted.enterCm + 4);
+
+  // maxValidCm <= exitCm
+  const badMax = coerceSensorFilterConfig({ enterCm: 40, exitCm: 50, maxValidCm: 45 });
+  check('maxValidCm below exitCm is repaired (maxValidCm > exitCm)',
+    badMax.maxValidCm > badMax.exitCm && badMax.maxValidCm === badMax.exitCm + 4);
+
+  // minValidCm >= enterCm
+  const badMin = coerceSensorFilterConfig({ enterCm: 10, minValidCm: 15 });
+  check('minValidCm >= enterCm is repaired (minValidCm < enterCm)',
+    badMin.minValidCm < badMin.enterCm && badMin.minValidCm === 9);
+
+  // Idempotence: coerce(coerce(x)) === coerce(x)
+  const testInputs: Array<Partial<SensorFilterConfig>> = [
+    {},
+    { enterCm: 100, exitCm: 80, maxValidCm: 70, minValidCm: 90 },
+    { enterCm: 2, exitCm: 2, maxValidCm: 20 },
+    { enterCm: 400, exitCm: 400, maxValidCm: 400 },
+    { enterCm: 350, exitCm: 360, maxValidCm: 370 },
+  ];
+  let allIdempotent = true;
+  for (const inp of testInputs) {
+    const c1 = coerceSensorFilterConfig(inp);
+    const c2 = coerceSensorFilterConfig(c1);
+    if (JSON.stringify(c1) !== JSON.stringify(c2)) {
+      allIdempotent = false;
+    }
+  }
+  check('coerce(coerce(x)) === coerce(x) holds across all pathological configs (idempotent)', allIdempotent);
+}
+
+// --- A.3: Hysteresis band exact boundaries & internal oscillations ---
+{
+  // Seated filter parked exactly at enterCm (48cm) and exitCm (52cm)
+  const rPresent = new Rig().seat();
+  for (let i = 0; i < 20; i++) rPresent.feed(48); // exactly enterCm
+  check('parked exactly at enterCm while present stays present', rPresent.present);
+
+  for (let i = 0; i < 20; i++) rPresent.feed(52); // exactly exitCm
+  check('parked exactly at exitCm while present stays present (hysteresis upper bound)', rPresent.present);
+
+  // Oscillating inside the hysteresis band from the present side
+  const flipsBefore = rPresent.flips.length;
+  for (let i = 0; i < 50; i++) rPresent.feed(i % 2 ? 49 : 51);
+  check('oscillating inside hysteresis band while present never flips',
+    rPresent.present && rPresent.flips.length === flipsBefore);
+
+  // Absent filter parked inside band
+  const rAbsent = new Rig();
+  rAbsent.hold(58, 6); // confirmed absent
+  check('absent initially', !rAbsent.present);
+
+  const absentFlipsBefore = rAbsent.flips.length;
+  for (let i = 0; i < 30; i++) rAbsent.feed(50); // inside band (48..52)
+  check('parked inside band while absent stays absent',
+    !rAbsent.present && rAbsent.flips.length === absentFlipsBefore);
+
+  for (let i = 0; i < 50; i++) rAbsent.feed(i % 2 ? 49 : 51);
+  check('oscillating inside band while absent never flips to present',
+    !rAbsent.present && rAbsent.flips.length === absentFlipsBefore);
+}
+
+// --- A.4: presentConfirmMs / absentConfirmMs exact boundaries ---
+{
+  // Arrival: presentConfirmMs is 2000ms.
+  // Rig feeds at DT = 100ms.
+  const r = new Rig();
+  r.hold(58, 6); // start absent
+  check('arrival test starts absent', !r.present);
+
+  // Feed near samples (32cm) until arriveSince starts tracking
+  // Old 58cm readings age out of the 1500ms window, then arriveSince begins counting.
+  let snap = r.feed(32);
+  while (snap.arriveProgressMs === 0) {
+    snap = r.feed(32);
+  }
+  // Now arriveProgressMs is counting. Feed until exactly one sample before presentConfirmMs (1900ms)
+  while (snap.arriveProgressMs < CFG.presentConfirmMs - DT) {
+    snap = r.feed(32);
+  }
+  check('1 sample before presentConfirmMs (1900ms) is still absent', !r.present);
+
+  // Next ping lands at exactly presentConfirmMs (2000ms)
+  snap = r.feed(32);
+  check('at presentConfirmMs (2000ms) arrival fires', r.present && snap.present);
+}
+{
+  // Departure: absentConfirmMs is 5000ms. Analysis window is 1500ms.
+  // Full departure needs window (1500ms) + absentConfirmMs (5000ms) = 6500ms.
+  const r = new Rig().seat();
+  // 64 pings at 100ms = 6400ms (< 6500ms)
+  for (let i = 0; i < 64; i++) r.feed(58);
+  check('1 sample before confirm window (6400ms) is still present', r.present);
+
+  // 65th and 66th pings land at >= 6500ms
+  r.feed(58);
+  r.feed(58);
+  check('at and past confirm window departure fires', !r.present);
+}
+
+// --- A.5: Over-range handling and glitchIgnoreAlways ---
+{
+  // Burst shorter than glitchHoldMs (10s)
+  const r = new Rig().seat();
+  r.hold(400, 9); // 9s < 10s
+  check('burst of over-range pings shorter than glitchHoldMs never causes departure', r.present);
+
+  // Burst longer than glitchHoldMs (10s) with glitchIgnoreAlways: false
+  r.hold(400, 6); // 9s + 6s = 15s > 11.5s
+  check('sustained over-range pings past glitchHoldMs cause departure', !r.present);
+}
+{
+  // glitchIgnoreAlways: true -> never departs on over-range
+  const r = new Rig({ glitchIgnoreAlways: true }).seat();
+  r.hold(400, 30); // 30 seconds of timeouts
+  check('with glitchIgnoreAlways: true, over-range timeouts never evict even after 30s', r.present);
+
+  // But a valid chair distance (58cm <= maxValidCm 100cm) still does
+  r.hold(58, 8);
+  check('credible empty chair reading (58cm) still causes departure', !r.present);
+}
+
+// --- A.6: Clustering & dominantCluster edge cases ---
+{
+  // Bimodal window: half 35cm, half 70cm
+  const r = new Rig().seat();
+  // Alternate 35 and 70: no dominant cluster has support >= 0.5
+  for (let i = 0; i < 20; i++) {
+    r.feed(i % 2 ? 35 : 70);
+  }
+  check('bimodal window with no dominant consensus preserves current decision', r.present);
+
+  // clusterTolCm boundary: exactly clusterTolCm (12cm) apart form one cluster
+  const rTol = new Rig();
+  rTol.hold(58, 6); // absent
+  // Feed pairs at 30 and 42 (diff exactly 12cm = clusterTolCm)
+  for (let i = 0; i < 30; i++) {
+    rTol.feed(i % 2 ? 30 : 42);
+  }
+  check('two readings exactly clusterTolCm apart form a single cluster and detect presence',
+    rTol.present && (rTol.believed === 30 || rTol.believed === 42));
+}
+
+// --- A.7: Chaos escape hatch ---
+{
+  // Incoherent far signal with chaosMaxMs: 15000
+  const r = new Rig({ chaosMaxMs: 15000 }).seat();
+  // Feed wide-spread readings (spread > 40cm) between 60cm and 350cm
+  for (let i = 0; i < 200; i++) {
+    r.feed([60, 200, 90, 350, 80, 280][i % 6]);
+  }
+  check('chaotic far signal triggers escape hatch and marks away after chaosMaxMs', !r.present);
+}
+{
+  // chaosMaxMs: 0 disables the escape hatch completely
+  const rNoHatch = new Rig({ chaosMaxMs: 0 }).seat();
+  for (let i = 0; i < 400; i++) {
+    rNoHatch.feed([60, 200, 90, 350, 80, 280][i % 6]);
+  }
+  check('chaosMaxMs: 0 disables escape hatch completely (stays present under chaotic signal)', rNoHatch.present);
+}
+
+// --- A.8: Ramp masking edge cases ---
+{
+  // rampMinSteps - 1 (2 jumps of +15cm) is not a ramp
+  const r = new Rig().seat();
+  const snap2Steps = r.seq([30, 46, 62]); // 2 steps of +16cm
+  check('2 steps (< rampMinSteps 3) does not activate ramp masking', !snap2Steps.masked);
+
+  // 3 jumps of +15cm activates ramp masking
+  const snap3Steps = r.seq([30, 46, 62, 78]); // 3 steps
+  check('3 steps (>= rampMinSteps 3) activates ramp masking', snap3Steps.masked);
+
+  // Downward ramp: approaching target (e.g. 150 -> 100 -> 50 -> 30) is NOT masked
+  const rDown = new Rig();
+  rDown.hold(58, 6); // start absent
+  const snapDown = rDown.seq([150, 100, 50, 30]);
+  check('downward ramp (approaching target) is never masked', !snapDown.masked);
+
+  // Specific documented failure: 40 -> 80 -> 120 -> 400 does not evict seated user
+  const rFoot = new Rig().seat();
+  rFoot.seq([40, 80, 120, 400]);
+  rFoot.hold(400, 3);
+  check('foot against transducer (40 -> 80 -> 120 -> 400) does not evict seated user', rFoot.present);
+}
+
+// --- A.9: Stream gaps & board reboot ---
+{
+  const r = new Rig().seat();
+  // Gap > streamGapMs (3000ms)
+  r.t += 5000;
+  const snapGap = r.feed(32);
+  check('stream gap > streamGapMs resets window count cleanly', snapGap.windowCount === 1);
+  check('and user remains present after gap resumes', r.present);
+
+  // Gap < streamGapMs (1000ms)
+  r.feed(32);
+  r.feed(32);
+  const countBefore = r.filter.snapshot.windowCount;
+  r.t += 1000; // 1s < 3s
+  const snapSmallGap = r.feed(32);
+  check('stream gap < streamGapMs does not reset rolling window', snapSmallGap.windowCount > 1);
+
+  // Board reboot mid-arrival: 1s arrival, reboot (5s gap), resumes
+  const rReboot = new Rig();
+  rReboot.hold(58, 6); // absent
+  rReboot.hold(32, 1); // 1s of arrival (needs 2s)
+  check('mid-arrival not yet present', !rReboot.present);
+  rReboot.t += 5000; // reboot gap
+  rReboot.hold(32, 1.5); // 1.5s after reboot (< 2s needed from scratch)
+  check('arrival timer restarted cleanly after reboot gap', !rReboot.present);
+  rReboot.hold(32, 1); // now reaches 2.5s total post-reboot
+  check('arrival completes after full post-reboot dwell', rReboot.present);
+}
+
+// --- A.10: ready and everEchoed preconditions ---
+{
+  const rFresh = new Rig();
+  check('fresh filter with no pings has ready=false and everEchoed=false',
+    !rFresh.filter.snapshot.ready && !rFresh.filter.snapshot.everEchoed);
+
+  // Disconnected sensor: only timeouts (null / 0) for 100 pings
+  rFresh.hold(null, 10);
+  check('disconnected sensor (timeouts only) never sets everEchoed or ready',
+    !rFresh.filter.snapshot.everEchoed && !rFresh.filter.snapshot.ready && rFresh.flips.length === 0);
+
+  // Valid echo establishes everEchoed immediately on first valid echo
+  const snap1 = rFresh.feed(35);
+  check('first valid echo sets everEchoed', snap1.everEchoed);
+
+  // Holding valid echo allows old timeouts to age out of the window and establish ready + present
+  rFresh.hold(35, 2);
+  check('valid echo stream clears timeouts and establishes ready and present',
+    rFresh.filter.snapshot.everEchoed && rFresh.filter.snapshot.ready && rFresh.present);
+}
+
+// --- A.11: Degenerate inputs ---
+{
+  const r = new Rig().seat();
+  const degenerateVals = [null, 0, -1, -50, NaN, Infinity, -Infinity, 1e12];
+  let survived = true;
+  for (const v of degenerateVals) {
+    try {
+      r.feed(v as number);
+    } catch (_) {
+      survived = false;
+    }
+  }
+  check('all degenerate inputs (null, 0, negative, NaN, Infinity) handled without throwing', survived);
+  check('still seated after transient degenerate input sequence', r.present);
+}
+
+// --- A.12: Clock abuse ---
+{
+  const r = new Rig().seat();
+  // Duplicate timestamps
+  r.filter.push(32, r.t);
+  r.filter.push(32, r.t);
+  check('duplicate timestamps handled safely', r.present);
+
+  // Timestamp going backwards
+  r.filter.push(32, r.t - 5000);
+  check('clock rewind resets window safely without crashing', r.present);
+
+  // Huge jump forward (e.g. 8 hours)
+  r.filter.push(32, r.t + 8 * 3600 * 1000);
+  r.t += 8 * 3600 * 1000;
+  check('multi-hour clock jump handled safely as stream gap', r.present);
+}
+
+// --- A.13: changed flag semantics ---
+{
+  const f = new PresenceFilter();
+  // First sample of fresh filter
+  const s1 = f.push(32, 1000);
+  check('changed is false on the very first sample of a fresh filter', s1.changed === false);
+
+  // Second sample initializes presence
+  const s2 = f.push(32, 1100);
+  check('changed is true on the sample where presence first becomes confirmed', s2.changed === true && s2.present === true);
+
+  // Third sample continues present
+  const s3 = f.push(32, 1200);
+  check('changed is false on following sample with steady state', s3.changed === false && s3.present === true);
+}
+
+// --- A.14: 10,000-sample seated soak test ---
+{
+  const r = new Rig().seat();
+  let maxWindowCount = 0;
+  let allPresent = true;
+  for (let i = 0; i < 10000; i++) {
+    const snap = r.feed(32 + (i % 5) - 2);
+    if (snap.windowCount > maxWindowCount) maxWindowCount = snap.windowCount;
+    if (!snap.present) allPresent = false;
+  }
+  const maxExpectedWindow = Math.ceil(CFG.clusterWindowMs / DT) + 5;
+  check('10,000-sample seated soak test: window count never grows without bound',
+    maxWindowCount <= maxExpectedWindow, `maxWindowCount=${maxWindowCount} expected<=${maxExpectedWindow}`);
+  check('10,000-sample seated soak test: verdict stays 100% stable present', allPresent);
+}
+
+// --- A.15: Determinism across parallel instances ---
+{
+  const f1 = new PresenceFilter();
+  const f2 = new PresenceFilter();
+  const testPings = [30, 32, 31, 400, null, 35, 58, 60, 48, 52, 33, 400, 400, 31];
+  let identical = true;
+  let t = 1000;
+  for (const p of testPings) {
+    t += 100;
+    const snap1 = f1.push(p, t);
+    const snap2 = f2.push(p, t);
+    if (JSON.stringify(snap1) !== JSON.stringify(snap2)) {
+      identical = false;
+      break;
+    }
+  }
+  check('two filters fed identical sequence produce identical snapshots field-for-field (deterministic)', identical);
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
 if (failures > 0) process.exitCode = 1;
+
 

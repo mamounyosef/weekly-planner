@@ -48,19 +48,34 @@ const frostWash = (dark: boolean) => dark
 export function CanvasAmbient({ style, dark }: { style: SidebarStyle; dark: boolean }) {
   const spec = AMBIENT_SPECS[style] ?? AMBIENT_SPECS['subtle-glow'];
   return (
-    <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+    <div
+      className="fixed inset-0 pointer-events-none z-0 overflow-hidden"
+      style={{ contain: 'strict', transform: 'translate3d(0,0,0)' }}
+    >
       <div
-        className="absolute -top-32 -left-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-opacity duration-500"
-        style={{ background: leftAura(dark), opacity: spec.leftOpacity }}
+        className="ambient-aura-blob absolute -top-32 -left-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-opacity duration-500"
+        style={{
+          background: leftAura(dark),
+          opacity: spec.leftOpacity,
+          contain: 'paint layout',
+          transform: 'translate3d(0,0,0)',
+          willChange: 'opacity',
+        }}
       />
       <div
-        className="absolute top-1/3 -right-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-opacity duration-500"
-        style={{ background: rightAura(dark), opacity: spec.rightOpacity }}
+        className="ambient-aura-blob absolute top-1/3 -right-32 w-[600px] h-[600px] rounded-full blur-[160px] pointer-events-none transition-opacity duration-500"
+        style={{
+          background: rightAura(dark),
+          opacity: spec.rightOpacity,
+          contain: 'paint layout',
+          transform: 'translate3d(0,0,0)',
+          willChange: 'opacity',
+        }}
       />
       {spec.frost && (
         <div
           className="absolute inset-0 pointer-events-none transition-opacity duration-500"
-          style={{ background: frostWash(dark), opacity: dark ? 1 : 0.55 }}
+          style={{ background: frostWash(dark), opacity: dark ? 1 : 0.55, transform: 'translate3d(0,0,0)' }}
         />
       )}
       <div
@@ -69,6 +84,7 @@ export function CanvasAmbient({ style, dark }: { style: SidebarStyle; dark: bool
           backgroundImage: `radial-gradient(${dark ? 'rgba(255,255,255,0.8)' : 'rgba(15,23,42,0.8)'} 1px, transparent 1px)`,
           backgroundSize: spec.frost ? '16px 16px' : '28px 28px',
           opacity: DOT_BASE(dark) * spec.dotOpacity,
+          transform: 'translate3d(0,0,0)',
         }}
       />
     </div>

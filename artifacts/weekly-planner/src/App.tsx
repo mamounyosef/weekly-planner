@@ -95,7 +95,8 @@ function Router() {
             transition={{ duration: 0.15, ease: 'easeOut' }}
             // overscroll-contain: reaching the end of the settings page must not
             // hand the remaining scroll to the planner underneath.
-            className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background"
+            className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background gpu-layer"
+            style={{ willChange: 'transform, opacity' }}
           >
             <Suspense fallback={null}>
               <Settings />

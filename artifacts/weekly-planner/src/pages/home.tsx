@@ -21,7 +21,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
+import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -138,6 +138,16 @@ import {
   TASK_PANEL_MIN_W,
   TASK_PANEL_MAX_W,
 } from '@/lib/settingsSync';
+import {
+  DEFAULT_NOTIFICATION_SETTINGS,
+  resolveSpec,
+  specOrigin,
+  type NotificationSettings,
+  type NotifySpec,
+} from '@/lib/notifications';
+import { primeNotificationAudio, useNotifications } from '@/lib/notificationClient';
+import { NotificationBanner, NotificationBell, NotificationPanel } from '@/components/NotificationCenter';
+import { NotifyEditor, type NotifyTheme } from '@/components/NotifyEditor';
 import {
   type Task,
   type TaskData,
@@ -276,6 +286,9 @@ interface PlannerEvent {
   content: string;
   color: EventColor;
   categoryId?: string;
+  // Reminders. Absent means "inherit the category, then the global default",
+  // which is why every event already in the database notifies without a migration.
+  notify?: NotifySpec;
   completedDates?: string[];
   noCheckbox?: boolean; // when true, this event has no completion checkbox
   noDuration?: boolean; // when true, this event has no duration (point in time / deadline), taking 10-minute visual space with start time only
@@ -715,6 +728,46 @@ export default function DailyPlanner() {
     return cfg;
   };
   const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(initialSettings.autoBackup);
+  const [notificationSettings, setNotificationSettings] =
+    useState<NotificationSettings>(initialSettings.notifications ?? DEFAULT_NOTIFICATION_SETTINGS);
+
+  // The notification centre. The store itself is owned by the server; this only
+  // mirrors it, raises the in-app banner, and keeps this device's push
+  // subscription and offline plan current.
+  const notify = useNotifications({
+    soundEnabled: notificationSettings.sound,
+    inAppEnabled: notificationSettings.inApp,
+  });
+  const adoptNotificationFrame = notify.adoptStreamFrame;
+  const [notifyPanelOpen, setNotifyPanelOpen] = useState(false);
+  /** Set when the window was opened by tapping a notification. */
+  const [notifyHighlight, setNotifyHighlight] = useState<string | null>(null);
+  /** Drives the red, pulsing badge. A critical item outranks a count. */
+  const notifyHasCritical = notify.active.some(n => n.priority === 'critical' && !n.acknowledgedAt);
+
+  // Arriving from a notification: open the centre on the exact item, and take
+  // the query parameters back out of the URL so a refresh does not repeat it.
+  useEffect(() => {
+    const openFromUrl = () => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('notifications') !== '1') return;
+      setNotifyPanelOpen(true);
+      setNotifyHighlight(params.get('open'));
+      params.delete('notifications');
+      params.delete('open');
+      const rest = params.toString();
+      window.history.replaceState({}, '', window.location.pathname + (rest ? `?${rest}` : ''));
+    };
+    openFromUrl();
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'planner-open-notification') return;
+      setNotifyPanelOpen(true);
+      setNotifyHighlight(event.data.key ?? null);
+    };
+    navigator.serviceWorker?.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker?.removeEventListener('message', onMessage);
+  }, []);
   const [backupStatus, setBackupStatus] = useState<{ count: number; lastBackupAt: string | null } | null>(null);
   // User-rebindable keyboard shortcuts (see lib/shortcuts.ts).
   const [shortcuts, setShortcuts]     = useState<ShortcutMap>(DEFAULT_SHORTCUTS);
@@ -837,6 +890,8 @@ export default function DailyPlanner() {
   // While it is open the planner must not scroll or show its own scrollbar.
   const settingsRouteOpen = location === '/settings' || location.startsWith('/settings');
   const [direction, setDirection]     = useState(0);
+  const [swipeAnimDir, setSwipeAnimDir] = useState<'left' | 'right' | 'none'>('none');
+  const swipeJustEndedRef = useRef(false);
 
   const [darkMode, setDarkMode]             = useState<boolean>(initialSettings.darkMode);
   const [darkPreset, setDarkPreset]         = useState<DarkPreset>(initialSettings.darkPreset);
@@ -858,6 +913,7 @@ export default function DailyPlanner() {
   const [customDaysBefore, setCustomDaysBefore] = useState<number>(initialSettings.customDaysBefore);
   const [customDaysAfter, setCustomDaysAfter]   = useState<number>(initialSettings.customDaysAfter);
   const [customAnchor, setCustomAnchor]         = useState<'day' | 'week'>(() => initialSettings.customAnchor ?? 'day');
+  const [mobileSwipeViewSwitch, setMobileSwipeViewSwitch] = useState<boolean>(() => initialSettings.mobileSwipeViewSwitch ?? true);
   // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
   // it's applied as CSS `zoom` on the root so layout reflows instead of blurring.
   const [appZoom, setAppZoom] = useState(1);
@@ -876,15 +932,27 @@ export default function DailyPlanner() {
   const isShort = vp.isPhone && vp.isShort;
   const isCompact = vp.isPhone || vp.isTablet;
   const [mobileTab, setMobileTab] = useState<'calendar' | 'tasks' | 'focus'>('calendar');
+  const mobileTabRef = useRef(mobileTab);
+  useEffect(() => { mobileTabRef.current = mobileTab; }, [mobileTab]);
   useEffect(() => { isPhoneRef.current = isPhone; }, [isPhone]);
   useEffect(() => { isTouchRef.current = isTouch; }, [isTouch]);
   // The overflow ("⋯") sheet on the phone header, holding everything that
   // doesn't fit: interval, undo/redo, zoom, theme, widget, backup.
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mobileMenuOpenRef = useRef(false);
+  useEffect(() => { mobileMenuOpenRef.current = mobileMenuOpen; }, [mobileMenuOpen]);
   // The view picker sheet (Day / Week / Month / Year / Custom) on the phone.
   const [mobileViewPickerOpen, setMobileViewPickerOpen] = useState(false);
+  const mobileViewPickerOpenRef = useRef(false);
+  useEffect(() => { mobileViewPickerOpenRef.current = mobileViewPickerOpen; }, [mobileViewPickerOpen]);
   // The prayer times sheet on the phone.
   const [mobilePrayerOpen, setMobilePrayerOpen] = useState(false);
+  const mobilePrayerOpenRef = useRef(false);
+  useEffect(() => { mobilePrayerOpenRef.current = mobilePrayerOpen; }, [mobilePrayerOpen]);
+  const mobileSwipeViewSwitchRef = useRef(initialSettings.mobileSwipeViewSwitch ?? true);
+  useEffect(() => { mobileSwipeViewSwitchRef.current = mobileSwipeViewSwitch; }, [mobileSwipeViewSwitch]);
+  const settingsRouteOpenRef = useRef(settingsRouteOpen);
+  useEffect(() => { settingsRouteOpenRef.current = settingsRouteOpen; }, [settingsRouteOpen]);
   // Whether the focus banner is unfolded on a phone (desktop always shows it).
   const [focusBannerOpen, setFocusBannerOpen] = useState(false);
   // â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -975,6 +1043,8 @@ export default function DailyPlanner() {
   // Brief victory flourish on the timer when a session completes naturally.
   const [focusCelebrate, setFocusCelebrate] = useState(false);
   const [showFocusAnalysis, setShowFocusAnalysis] = useState(false);
+  const showFocusAnalysisRef = useRef(showFocusAnalysis);
+  useEffect(() => { showFocusAnalysisRef.current = showFocusAnalysis; }, [showFocusAnalysis]);
   const [analysisTab, setAnalysisTab]       = useState<'week' | 'month' | 'year'>('week');
   /**
    * Category ids currently hidden from the grid, plus the sentinel
@@ -1249,6 +1319,13 @@ export default function DailyPlanner() {
   };
 
   const handleMonthCellTouchMove = (e: React.TouchEvent) => {
+    if (swipeJustEndedRef.current) {
+      if (monthDragRef.current) {
+        monthDragRef.current = null;
+        setMonthSelectionRange(null);
+      }
+      return;
+    }
     if (!monthDragRef.current) return;
     const touch = e.touches[0];
     const targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -1265,6 +1342,11 @@ export default function DailyPlanner() {
   };
 
   const handleMonthCellTouchEnd = (e: React.TouchEvent) => {
+    if (swipeJustEndedRef.current) {
+      monthDragRef.current = null;
+      setMonthSelectionRange(null);
+      return;
+    }
     if (!monthDragRef.current) return;
     const { startDay, currentDay, moved } = monthDragRef.current;
     monthDragRef.current = null;
@@ -1610,7 +1692,7 @@ export default function DailyPlanner() {
   }, [calendarView]);
 
   /** Smoothly switch calendar views while remembering the current view's scroll offset */
-  const switchCalendarView = useCallback((next: CalendarView | ((prev: CalendarView) => CalendarView)) => {
+  const switchCalendarView = useCallback((next: CalendarView | ((prev: CalendarView) => CalendarView), animDir: 'left' | 'right' | 'none' = 'none') => {
     if (mainRef.current) {
       viewScrollMapRef.current[activeCalendarViewRef.current] = {
         top: mainRef.current.scrollTop,
@@ -1618,6 +1700,7 @@ export default function DailyPlanner() {
       };
     }
     setDirection(0);
+    setSwipeAnimDir(animDir);
     setCalendarView(next);
   }, []);
 
@@ -1647,9 +1730,26 @@ export default function DailyPlanner() {
   const updateScrollState = useCallback(() => {
     if (!mainRef.current) return;
     const scrollTop = mainRef.current.scrollTop;
-    const gridTop = gridCardRef.current ? gridCardRef.current.offsetTop : 0;
-    const threshold = Math.max(10, gridTop - 5);
-    const nextScrolled = scrollTop >= threshold;
+    let gridTop = 0;
+    if (gridCardRef.current && mainRef.current) {
+      const mainRect = mainRef.current.getBoundingClientRect();
+      const gridRect = gridCardRef.current.getBoundingClientRect();
+      gridTop = Math.max(0, gridRect.top - mainRect.top + scrollTop);
+    }
+
+    // Hysteresis window to prevent rapid toggling/blinking at the scroll boundary.
+    // When compacting headers, require scrolling clearly past the focus banner.
+    // When returning to full headers, require scrolling back up with a safe deadband.
+    const enterThreshold = Math.max(20, gridTop + 10);
+    const leaveThreshold = Math.max(0, enterThreshold - 40);
+
+    let nextScrolled = isScrolledStateRef.current;
+    if (!isScrolledStateRef.current && scrollTop >= enterThreshold) {
+      nextScrolled = true;
+    } else if (isScrolledStateRef.current && scrollTop <= leaveThreshold) {
+      nextScrolled = false;
+    }
+
     if (isScrolledStateRef.current !== nextScrolled) {
       isScrolledStateRef.current = nextScrolled;
       setIsScrolled(nextScrolled);
@@ -1731,11 +1831,9 @@ export default function DailyPlanner() {
   }, [updateScrollState]);
 
   useEffect(() => {
-    const el = mainRef.current;
-    if (!el) return;
     updateScrollState();
-    el.addEventListener('scroll', updateScrollState, { passive: true });
-    return () => el.removeEventListener('scroll', updateScrollState);
+    window.addEventListener('resize', updateScrollState, { passive: true });
+    return () => window.removeEventListener('resize', updateScrollState);
   }, [updateScrollState]);
 
   useLayoutEffect(() => {
@@ -2679,6 +2777,7 @@ export default function DailyPlanner() {
     customDaysBefore: initialSettings.customDaysBefore,
     customDaysAfter: initialSettings.customDaysAfter,
     customAnchor: initialSettings.customAnchor ?? 'day',
+    mobileSwipeViewSwitch: initialSettings.mobileSwipeViewSwitch ?? true,
     interval: initialSettings.interval,
     tasksPanelOpen: initialSettings.tasksPanelOpen,
     tasksPanelWidth: initialSettings.tasksPanelWidth,
@@ -2720,7 +2819,9 @@ export default function DailyPlanner() {
       gcalPushEnabled: true, gcalPushTarget: true, gcalPushOtherCalendars: true,
       gcalPullDailyEdits: true, gcalPullDailyNew: true, gcalPullOtherCalendars: true,
       gcalMirrorLocalDeletions: true, gcalMirrorGoogleDeletions: true,
+      mobileSwipeViewSwitch: true,
       prayer: true,
+      notifications: true,
       hardware: true,
       categories: true, taskLists: true,
     };
@@ -2736,6 +2837,7 @@ export default function DailyPlanner() {
     setFocusCues(s.focusCues);
     setShortcuts(s.shortcuts);
     setAutoBackup(s.autoBackup);
+    setNotificationSettings(s.notifications);
     setTaskColor(s.taskColor);
     setTaskCheckboxShape(s.taskCheckboxShape);
     setTaskFilters(canonicalFilters(s.taskFilters));
@@ -2760,6 +2862,7 @@ export default function DailyPlanner() {
     setCustomDaysBefore(clamp(s.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
     setCustomDaysAfter(clamp(s.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
     if (s.customAnchor === 'day' || s.customAnchor === 'week') setCustomAnchor(s.customAnchor);
+    if (typeof s.mobileSwipeViewSwitch === 'boolean') setMobileSwipeViewSwitch(s.mobileSwipeViewSwitch);
     setTasksPanelOpen(s.tasksPanelOpen);
     setTasksPanelWidth(clampPanelWidth(s.tasksPanelWidth));
     setShowTaskRow(s.showTaskRow);
@@ -2815,6 +2918,7 @@ export default function DailyPlanner() {
     customDaysBefore,
     customDaysAfter,
     customAnchor,
+    mobileSwipeViewSwitch,
     interval,
     tasksPanelOpen,
     tasksPanelWidth,
@@ -2835,7 +2939,7 @@ export default function DailyPlanner() {
     mobileTab,
     hiddenCategoryIds,
     hiddenCategoriesByView,
-  }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, tasksPanelOpen,
+  }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, mobileSwipeViewSwitch, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
        appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds, hiddenCategoriesByView]);
@@ -2846,6 +2950,7 @@ export default function DailyPlanner() {
     setCustomDaysBefore(clamp(d.customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX));
     setCustomDaysAfter(clamp(d.customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX));
     if (d.customAnchor === 'day' || d.customAnchor === 'week') setCustomAnchor(d.customAnchor);
+    if (typeof d.mobileSwipeViewSwitch === 'boolean') setMobileSwipeViewSwitch(d.mobileSwipeViewSwitch);
     setIntervalOpt(d.interval);
     setTasksPanelOpen(d.tasksPanelOpen);
     setTasksPanelWidth(clampPanelWidth(d.tasksPanelWidth));
@@ -3086,12 +3191,14 @@ export default function DailyPlanner() {
   // VISIBLE in the current view, because that is what can actually be dragged:
   // a partner outside the viewed range has nothing on screen to move.
 
-  /** Occurrence ids currently on screen that share `ev`'s link group (incl. itself). */
+  /** Occurrence ids currently on screen that share `ev`'s link group (incl. itself), scoped to the same day. */
   const linkedIdsOf = useCallback((ev: PlannerEvent | undefined, id: string): string[] => {
     if (!ev?.linkGroup) return [id];
+    const targetDayIndex = ev.dayIndex ?? weekEventsRef.current[id]?.dayIndex;
     const out: string[] = [];
     for (const [otherId, other] of Object.entries(weekEventsRef.current)) {
       if (other.deleted || other.allDay) continue;
+      if (targetDayIndex !== undefined && other.dayIndex !== targetDayIndex) continue;
       if (other.linkGroup === ev.linkGroup) out.push(otherId);
     }
     return out.length ? out : [id];
@@ -3382,11 +3489,19 @@ export default function DailyPlanner() {
     if (viewingAnotherWeek) { setShowLiveBtn(true); return; }
     if (!liveLineOnScreen) { setShowLiveBtn(false); return; }
     recomputeLiveBtn();
-    const onScroll = () => recomputeLiveBtn();
+    let liveRaf = 0;
+    const onScroll = () => {
+      if (liveRaf) return;
+      liveRaf = requestAnimationFrame(() => {
+        liveRaf = 0;
+        recomputeLiveBtn();
+      });
+    };
     // Capture true so it also catches scrolling on inner overflow containers.
     window.addEventListener('scroll', onScroll, { passive: true, capture: true });
-    window.addEventListener('resize', onScroll);
+    window.addEventListener('resize', onScroll, { passive: true });
     return () => {
+      if (liveRaf) cancelAnimationFrame(liveRaf);
       window.removeEventListener('scroll', onScroll, { capture: true } as EventListenerOptions);
       window.removeEventListener('resize', onScroll);
     };
@@ -3749,6 +3864,12 @@ export default function DailyPlanner() {
           writeEvents(next);
         } catch (_) { /* ignore */ }
       });
+      // The notification store rides the SAME stream as events and tasks, so a
+      // new alert (or one read on the phone) lands here without a second
+      // connection and without waiting for a poll.
+      dbStream.addEventListener('notifications', (evt) => {
+        adoptNotificationFrame((evt as MessageEvent).data);
+      });
       dbStream.addEventListener('tasks', (evt) => {
         if (uiBusyRef.current) return;
         if (Date.now() - lastLocalTasksWriteRef.current < 3000) return;
@@ -3767,7 +3888,7 @@ export default function DailyPlanner() {
     // Safety net only — the stream is what makes this feel instant.
     const focusPollId = setInterval(loadFocusSessions, 15000);
     return () => { clearInterval(focusPollId); if (dbStream) dbStream.close(); };
-  }, [writeEvents, writeTasks]);
+  }, [writeEvents, writeTasks, adoptNotificationFrame]);
 
   // The running timer is shared through the backend so the main window and the
   // side widget always show the SAME live session (localStorage `storage` events
@@ -4287,6 +4408,10 @@ export default function DailyPlanner() {
     session: {
       isRunning: focusTimer.isRunning,
       hasSession: Boolean(focusTimer.sessionStartedAt),
+      // Until the timer has loaded, "no session" is a guess -- and the
+      // controller reads a session appearing out of nowhere as one you started
+      // by hand, so a guess here would mislabel every desk-started session.
+      ready: timerHydratedRef.current,
     },
     display: {
       mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',
@@ -6285,6 +6410,132 @@ export default function DailyPlanner() {
     };
   }, [isTouch, endTouchDrag]);
 
+  // ── Mobile horizontal swipe between Custom view and Month view ──────────────
+  const touchSwipeRef = useRef<{
+    startX: number;
+    startY: number;
+    startTime: number;
+    triggered: boolean;
+    valid: boolean;
+  } | null>(null);
+
+  const executeSwipeSwitch = useCallback((dir: 'left' | 'right') => {
+    swipeJustEndedRef.current = true;
+    window.setTimeout(() => {
+      swipeJustEndedRef.current = false;
+    }, 200);
+
+    if (monthDragRef.current) {
+      monthDragRef.current = null;
+      setMonthSelectionRange(null);
+    }
+    cancelPendingTouch();
+
+    const current = activeCalendarViewRef.current;
+    const targetView: CalendarView = current === 'custom' ? 'month' : current === 'month' ? 'custom' : (current === 'day' || current === 'week' ? 'month' : 'custom');
+
+    haptic(10);
+    switchCalendarView(targetView, dir);
+  }, [cancelPendingTouch, switchCalendarView]);
+
+  useEffect(() => {
+    const onTouchStart = (e: TouchEvent) => {
+      if (!mobileSwipeViewSwitchRef.current || e.touches.length !== 1) {
+        touchSwipeRef.current = null;
+        return;
+      }
+      if (mobileTabRef.current !== 'calendar' || showFocusAnalysisRef.current) {
+        touchSwipeRef.current = null;
+        return;
+      }
+      if (mobileMenuOpenRef.current || mobileViewPickerOpenRef.current || mobilePrayerOpenRef.current || settingsRouteOpenRef.current) {
+        touchSwipeRef.current = null;
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Only ignore text fields, open dialog popovers, and bottom nav bar
+      if (target.closest('input, textarea, select, [role="dialog"], nav')) {
+        touchSwipeRef.current = null;
+        return;
+      }
+
+      const t = e.touches[0];
+      touchSwipeRef.current = {
+        startX: t.clientX,
+        startY: t.clientY,
+        startTime: Date.now(),
+        triggered: false,
+        valid: true,
+      };
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      const sw = touchSwipeRef.current;
+      if (!sw || !sw.valid || sw.triggered || e.touches.length !== 1) return;
+
+      if (touchDragArmedRef.current || (monthItemDragRef.current && monthItemDragRef.current.moved) || resizeRef.current || createDragRef.current || batchDragRef.current) {
+        sw.valid = false;
+        return;
+      }
+
+      const t = e.touches[0];
+      const dx = t.clientX - sw.startX;
+      const dy = t.clientY - sw.startY;
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+
+      // If vertical scroll is dominating, cancel horizontal swipe
+      if (absDy > 16 && absDy > absDx * 1.15) {
+        sw.valid = false;
+        return;
+      }
+
+      // Fast trigger: once 35px horizontal travel is reached, trigger immediately
+      if (absDx >= 35 && absDx > absDy * 1.15) {
+        sw.triggered = true;
+        sw.valid = false;
+        executeSwipeSwitch(dx < 0 ? 'left' : 'right');
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      const sw = touchSwipeRef.current;
+      touchSwipeRef.current = null;
+      if (!sw || !sw.valid || sw.triggered) return;
+
+      if (touchDragArmedRef.current || didDragRef.current || (monthItemDragRef.current && monthItemDragRef.current.moved)) {
+        return;
+      }
+
+      const lastTouch = e.changedTouches?.[0];
+      if (!lastTouch) return;
+
+      const dx = lastTouch.clientX - sw.startX;
+      const dy = lastTouch.clientY - sw.startY;
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+      const dt = Date.now() - sw.startTime;
+
+      if (absDx >= 30 && absDx > absDy * 1.1 && dt < 800) {
+        sw.triggered = true;
+        executeSwipeSwitch(dx < 0 ? 'left' : 'right');
+      }
+    };
+
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    window.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+      window.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [executeSwipeSwitch]);
+
   // Keep the editable field in sync when zoom changes elsewhere. Zoom itself is
   // persisted per device (see deviceSettings) — the phone and the desktop each
   // keep their own, which is the whole point of a zoom control.
@@ -6370,6 +6621,31 @@ export default function DailyPlanner() {
     chip: taskChipColors,
   }), [darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, surfaceBdr, hoverBg, taskColor, taskChipColors]);
 
+  // The notification UI paints from the same palette as everything else, with
+  // its own accent so a reminder never reads as a task or a prayer by colour.
+  const notifyTheme: NotifyTheme = useMemo(() => ({
+    darkMode,
+    text: menuText,
+    sub: menuSub,
+    bg: menuBg,
+    bdr: menuBdr,
+    surface: surfaceBg,
+    hover: hoverBg,
+    accent: darkMode ? '#60a5fa' : '#2563eb',
+  }), [darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, hoverBg]);
+
+  /** Jump the calendar to whatever a notification was about. */
+  const openNotificationTarget = useCallback((rec: { kind: string; occDate: string; refId: string }) => {
+    setNotifyPanelOpen(false);
+    setNotifyHighlight(null);
+    if (!rec.occDate) return;
+    const [y, m, d] = rec.occDate.split('-').map(Number);
+    if (!y || !m || !d) return;
+    setDirection(0);
+    setCurrentDate(new Date(y, m - 1, d));
+    if (rec.kind === 'task' || rec.kind === 'task-digest') setTasksPanelOpen(true);
+  }, []);
+
   // The task the popover is editing. Occurrence ids ("master::date") aren't in the
   // raw store, so resolve through the week expansion first — same rule as events.
   const menuTask = taskMenuId
@@ -6404,7 +6680,7 @@ export default function DailyPlanner() {
       } ${touchDragging ? 'dragging-touch' : ''}`}
       style={{
         cursor: globalCursor,
-        zoom: isPhone ? 1 : appZoom,
+        zoom: isPhone ? undefined : (appZoom !== 1 ? appZoom : undefined),
         // dvh, not vh: on a phone `100vh` is the height the window WOULD have
         // with the URL bar hidden, so the last ~60px of the planner sits under
         // the browser chrome until you scroll. dvh tracks the real viewport.
@@ -6444,7 +6720,7 @@ export default function DailyPlanner() {
         className="sticky top-0 z-30 bg-background/95 border-b border-border/50"
         style={{
           paddingTop: 'var(--safe-top)',
-          ...(isPhone ? { zoom: mobileUiZoom } : {}),
+          ...(isPhone && mobileUiZoom !== 1 ? { zoom: mobileUiZoom } : {}),
         }}
       >
         {/* ── Phone toolbar ──────────────────────────────────────────────────
@@ -6459,14 +6735,24 @@ export default function DailyPlanner() {
             {/* Row 1 — where you are, and the way out of it */}
             <div className={`flex items-center gap-2 ${isShort ? 'min-w-0 flex-shrink' : 'min-h-[36px]'}`}>
               {showFocusAnalysis ? (
-                <button
-                  onClick={() => setShowFocusAnalysis(false)}
-                  className="flex items-center gap-1.5 pl-2 pr-3 h-9 rounded-xl text-[13px] font-semibold active:scale-95 transition-transform"
-                  style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
-                >
-                  <ChevronLeft size={16} />
-                  Calendar
-                </button>
+                <div className="flex items-center gap-2 flex-1 min-w-0">
+                  <button
+                    onClick={() => setShowFocusAnalysis(false)}
+                    className="flex items-center gap-1.5 pl-2 pr-3 h-9 rounded-xl text-[13px] font-semibold active:scale-95 transition-transform flex-shrink-0"
+                    style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
+                  >
+                    <ChevronLeft size={16} />
+                    Calendar
+                  </button>
+                  <div className="min-w-0 text-left">
+                    <div className="text-[14px] font-bold tracking-tight truncate leading-tight">
+                      Focus Analysis
+                    </div>
+                    <div className="text-[10px] font-medium leading-tight capitalize" style={{ color: headerInactive }}>
+                      {analysisTab} view
+                    </div>
+                  </div>
+                </div>
               ) : (
                 <button
                   onClick={goToday}
@@ -6532,6 +6818,35 @@ export default function DailyPlanner() {
                     <span>{nextPrayer ? formatTimeLabel(nextPrayer.minutes, timeFormat) : 'Prayers'}</span>
                   </button>
                 )}
+
+                {/* Deliberately NOT inside the "..." sheet: an unread count is
+                    useless if it is behind another tap. */}
+                <button
+                  onClick={() => { haptic(6); primeNotificationAudio(); setNotifyPanelOpen(true); }}
+                  className="relative w-9 h-9 rounded-xl flex items-center justify-center active:scale-95 transition-transform cursor-pointer"
+                  style={{
+                    background: surfaceBg,
+                    border: `1px solid ${notify.unread > 0 ? (notifyHasCritical ? '#ef444488' : `${notifyTheme.accent}66`) : surfaceBdr}`,
+                    color: notify.unread > 0 ? (notifyHasCritical ? '#f87171' : notifyTheme.accent) : menuText,
+                  }}
+                  title={notify.unread > 0 ? `${notify.unread} unread` : 'Notifications'}
+                >
+                  {notify.unread > 0 ? <BellRing size={17} /> : <Bell size={17} />}
+                  {notify.unread > 0 && (
+                    <span
+                      className="absolute flex items-center justify-center rounded-full text-[9.5px] font-bold tabular-nums"
+                      style={{
+                        top: -3, right: -3, minWidth: 16, height: 16, padding: '0 4px',
+                        background: notifyHasCritical ? '#ef4444' : notifyTheme.accent,
+                        color: '#fff',
+                        boxShadow: `0 0 0 2px ${menuBg}`,
+                        animation: notifyHasCritical ? 'planner-notify-pulse 1.6s ease-in-out infinite' : undefined,
+                      }}
+                    >
+                      {notify.unread > 99 ? '99+' : notify.unread}
+                    </span>
+                  )}
+                </button>
 
                 <button
                   onClick={() => { haptic(6); setMobileMenuOpen(true); }}
@@ -6936,7 +7251,8 @@ export default function DailyPlanner() {
                         {todayPrayerList.map(p => {
                           const done = isPrayerDone(p.dateStr, p.key);
                           const isNext = nextPrayer?.key === p.key;
-                          const passed = !done && !isNext && nextPrayer !== null && p.minutes < nextPrayer.minutes;
+                          const nowMins = new Date(nowTick).getHours() * 60 + new Date(nowTick).getMinutes();
+                          const passed = !done && !isNext && p.minutes < nowMins;
                           return (
                             <button
                               key={p.id}
@@ -7048,6 +7364,12 @@ export default function DailyPlanner() {
             >
               <Keyboard size={14}/>
             </button>
+            <NotificationBell
+              count={notify.unread}
+              hasCritical={notifyHasCritical}
+              theme={notifyTheme}
+              onClick={() => { primeNotificationAudio(); setNotifyPanelOpen(true); }}
+            />
             <button onClick={() => navigateToSettings()} title="Settings" className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               <Settings size={14}/>
             </button>
@@ -7065,26 +7387,69 @@ export default function DailyPlanner() {
         )}
       </header>
 
+      {/* â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <NotificationBanner
+        rec={notify.banner}
+        theme={notifyTheme}
+        snoozeOptions={notificationSettings.snoozeOptions}
+        onDismiss={notify.dismissBanner}
+        onRead={notify.markRead}
+        onSnooze={notify.snooze}
+        onAcknowledge={notify.acknowledge}
+        onComplete={notify.complete}
+        onOpen={openNotificationTarget}
+      />
+      <NotificationPanel
+        open={notifyPanelOpen}
+        onClose={() => { setNotifyPanelOpen(false); setNotifyHighlight(null); }}
+        grouped={notify.grouped}
+        unread={notify.unread}
+        theme={notifyTheme}
+        snoozeOptions={notificationSettings.snoozeOptions}
+        onRead={notify.markRead}
+        onUnread={notify.markUnread}
+        onReadAll={notify.markAllRead}
+        onSnooze={notify.snooze}
+        onAcknowledge={notify.acknowledge}
+        onComplete={notify.complete}
+        onClear={notify.clear}
+        onClearAll={notify.clearAll}
+        onOpenItem={openNotificationTarget}
+        highlightKey={notifyHighlight}
+      />
+
       {/* â”€â”€ Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <main
         ref={mainRef}
-        className={`flex-1 min-h-0 touch-scroll ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'} ${(calendarView === 'month' || calendarView === 'year') && !showFocusAnalysis ? 'flex flex-col' : ''}`}
+        className={`relative flex-1 min-h-0 touch-scroll ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'} ${(calendarView === 'month' || calendarView === 'year') && !showFocusAnalysis ? 'flex flex-col' : ''}`}
         // Room for the phone's tab bar and the home indicator beneath it, so the
         // last event of the day isn't permanently hidden behind the Tasks button.
         style={{
-          paddingBottom: 'var(--bottom-nav-h)',
-          ...(isPhone ? { zoom: mobileContentZoom } : {}),
+          paddingBottom: isPhone ? (mobileContentZoom !== 1 ? `calc(var(--bottom-nav-h) / ${mobileContentZoom})` : 'var(--bottom-nav-h)') : undefined,
+          ...(isPhone && mobileContentZoom !== 1 ? { zoom: mobileContentZoom } : {}),
         }}
         onScroll={handleMainScroll}
       >
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="wait" initial={false}>
           {!showFocusAnalysis ? (
             <motion.div
-              key="calendar-view-container"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.05, ease: 'easeOut' }}
+              key={`calendar-view-${calendarView}`}
+              initial={{
+                opacity: 0,
+                x: swipeAnimDir === 'left' ? 32 : swipeAnimDir === 'right' ? -32 : 0,
+              }}
+              animate={{
+                opacity: 1,
+                x: 0,
+              }}
+              exit={{
+                opacity: 0,
+                x: swipeAnimDir === 'left' ? -32 : swipeAnimDir === 'right' ? 32 : 0,
+              }}
+              transition={{
+                duration: 0.18,
+                ease: [0.22, 1, 0.36, 1],
+              }}
               // The 900px floor is a desktop guard against the toolbar wrapping
               // into a mess; on a phone it would simply force a sideways scroll
               // of the entire page, so a narrow screen drops it and tightens the
@@ -7466,22 +7831,24 @@ export default function DailyPlanner() {
                 >
                   {/* During the desk countdown this is the way out of a session
                       you did not ask for, so it says so rather than "Start". */}
-                  {hardwareArmSeconds > 0 ? <X size={12} /> : focusTimer.isRunning ? <Pause size={12} /> : <Play size={12} />}
+                  {hardwareArmSeconds > 0 ? <X size={isPhone ? 15 : 12} /> : focusTimer.isRunning ? <Pause size={isPhone ? 15 : 12} /> : <Play size={isPhone ? 15 : 12} />}
                   {hardwareArmSeconds > 0 ? 'Cancel' : focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
                 </button>
                 <button
+                  type="button"
                   onClick={resetFocus}
                   disabled={focusElapsedSeconds <= 0}
-                  className={`rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
+                  className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
                   title="Reset focus timer"
                   style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub, opacity: focusElapsedSeconds <= 0 ? 0.4 : 1 }}
                 >
-                  <RotateCcw size={12} />
+                  <RotateCcw size={isPhone ? 15 : 12} />
                 </button>
                 <button
+                  type="button"
                   onClick={stopFocusByHand}
                   disabled={focusElapsedSeconds <= 0}
-                  className={`rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
+                  className={`touch-target rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
                   title="Stop and log focus time"
                   style={{
                     background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
@@ -7495,15 +7862,16 @@ export default function DailyPlanner() {
                 {/* 3-dots options menu for today */}
                 <div className="relative">
                   <button
+                    type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       setOpenDayMenuKey(openDayMenuKey === todayFocusKey ? null : todayFocusKey);
                     }}
-                    className="w-7 h-7 rounded-md flex items-center justify-center transition-smooth active:scale-[0.98]"
+                    className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
                     style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub }}
                     title="Today's focus options"
                   >
-                    <MoreHorizontal size={13} />
+                    <MoreHorizontal size={isPhone ? 16 : 13} />
                   </button>
                   {openDayMenuKey === todayFocusKey && (
                     <div
@@ -8084,7 +8452,7 @@ export default function DailyPlanner() {
                                 { edit: true, menuAt: { x: e.clientX + 10, y: e.clientY } }
                               );
                             }}
-                            className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-smooth bg-background/70 hover:bg-background border border-border/40 opacity-0 group-hover:opacity-100 shadow-sm active:scale-95 z-20"
+                            className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-smooth bg-background/70 hover:bg-background border border-border/40 opacity-60 sm:opacity-0 sm:group-hover:opacity-100 shadow-sm active:scale-95 z-20"
                             style={{ color: menuSub }}
                           >
                             <Plus size={11} />
@@ -8230,7 +8598,7 @@ export default function DailyPlanner() {
                               });
                               if (id) openTaskMenu(id, { x: e.clientX + 10, y: e.clientY });
                             }}
-                            className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-smooth bg-background/70 hover:bg-background border border-border/40 opacity-0 group-hover:opacity-100 shadow-sm active:scale-95 z-20"
+                            className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-smooth bg-background/70 hover:bg-background border border-border/40 opacity-60 sm:opacity-0 sm:group-hover:opacity-100 shadow-sm active:scale-95 z-20"
                             style={{ color: menuSub }}
                             title="Add a task on this day"
                           >
@@ -8297,8 +8665,6 @@ export default function DailyPlanner() {
                         style={{
                           height: totalH,
                           contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style',
-                          contentVisibility: (isPhone && !isDraggingAnything && !isResizingAnything) ? 'auto' : undefined,
-                          containIntrinsicSize: isPhone ? `auto ${totalH}px` : undefined,
                           cursor: isDraggingAnything ? 'grabbing' : 'crosshair',
                           ...columnGridBackground,
                         }}
@@ -9434,7 +9800,7 @@ export default function DailyPlanner() {
                             onMouseDown={(e) => handleMonthCellMouseDown(date, e)}
                             onTouchStart={(e) => handleMonthCellTouchStart(date, e)}
                             onClick={(e) => {
-                              if (monthDragJustEndedRef.current || monthItemDragJustEndedRef.current) return;
+                              if (monthDragJustEndedRef.current || monthItemDragJustEndedRef.current || swipeJustEndedRef.current) return;
                               openCreateForDate(date, e);
                             }}
                             title={`Add event · ${format(date, 'MMM d')}`}
@@ -9483,16 +9849,16 @@ export default function DailyPlanner() {
 
                             {/* Timed events list */}
                             {isPhone ? (
-                              <div className="flex flex-wrap gap-[3px] items-center content-start">
+                              <div className="flex flex-wrap gap-1 items-center content-start">
                                 {timedEvents.slice(0, 6).map(ev => {
                                   const { accentBar, border } = chipColors(ev);
                                   const isBeingDragged = monthItemDrag?.event.id === ev.id;
                                   return (
-                                    <span
+                                    <button
+                                      type="button"
                                       key={ev.id}
                                       data-event="1"
-                                      className={`rounded-full cursor-grab active:cursor-grabbing ${isBeingDragged ? 'opacity-25' : ''}`}
-                                      style={{ width: 6, height: 6, background: accentBar || border }}
+                                      className={`w-4 h-4 rounded-full inline-flex items-center justify-center cursor-grab active:cursor-grabbing ${isBeingDragged ? 'opacity-25' : ''}`}
                                       onMouseDown={(e) => handleMonthItemMouseDown(ev, date, e)}
                                       onTouchStart={(e) => handleMonthItemTouchStart(ev, date, e)}
                                       onClick={(e) => {
@@ -9501,11 +9867,16 @@ export default function DailyPlanner() {
                                         openMenu(e, ev);
                                       }}
                                       title={ev.content}
-                                    />
+                                    >
+                                      <span
+                                        className="rounded-full flex-shrink-0"
+                                        style={{ width: 7.5, height: 7.5, background: accentBar || border }}
+                                      />
+                                    </button>
                                   );
                                 })}
                                 {timedEvents.length > 6 && (
-                                  <span className="text-[8px] tabular-nums leading-none" style={{ color: menuSub }}>+{timedEvents.length - 6}</span>
+                                  <span className="text-[8.5px] font-semibold tabular-nums leading-none ml-0.5" style={{ color: menuSub }}>+{timedEvents.length - 6}</span>
                                 )}
                               </div>
                             ) : (
@@ -9605,13 +9976,18 @@ export default function DailyPlanner() {
                                     e.stopPropagation();
                                     toggleEventCompleted(ev.id, startDayDate);
                                   }}
-                                  className="flex-shrink-0 w-3 h-3 rounded-full border transition-smooth flex items-center justify-center cursor-pointer"
-                                  style={{
-                                    borderColor: isCompleted ? text : `${text}60`,
-                                    backgroundColor: isCompleted ? text : 'transparent',
-                                  }}
+                                  className="flex-shrink-0 p-1 -m-1 flex items-center justify-center cursor-pointer"
+                                  title={isCompleted ? 'Mark incomplete' : 'Mark complete'}
                                 >
-                                  {isCompleted && <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />}
+                                  <span
+                                    className="w-3 h-3 rounded-full border transition-smooth flex items-center justify-center"
+                                    style={{
+                                      borderColor: isCompleted ? text : `${text}60`,
+                                      backgroundColor: isCompleted ? text : 'transparent',
+                                    }}
+                                  >
+                                    {isCompleted && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: bg }} />}
+                                  </span>
                                 </button>
                               )}
                               <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
@@ -9728,6 +10104,7 @@ export default function DailyPlanner() {
           exit={{ opacity: 0, y: -15 }}
           transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
           className={isCompact ? 'w-full max-w-full px-2 py-3' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
+          style={isPhone ? { paddingBottom: 'calc(var(--bottom-nav-h) + 24px)' } : undefined}
         >
             {/* All-time summary strip. Five tiles across is unreadable at 390px
                 — two columns keeps each number and its label legible, and the
@@ -9739,8 +10116,8 @@ export default function DailyPlanner() {
                 ['Avg Session', formatFocusDuration(focusAnalysis.avgSessionLength), <BarChart3 size={13} key="i" />],
                 ['Current Streak', `${focusAnalysis.currentStreak}d`, <Flame size={13} key="i" />],
                 ['Best Streak', `${focusAnalysis.longestStreak}d`, <Award size={13} key="i" />],
-              ].map(([label, value, icon]) => (
-                <div key={label as string} className="rounded-xl px-3.5 py-3" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+              ].map(([label, value, icon], i) => (
+                <div key={label as string} className={`rounded-xl px-3.5 py-3 ${isPhone && i === 4 ? 'col-span-2' : ''}`} style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                   <div className="flex items-center gap-1.5 mb-1.5" style={{ color: menuSub }}>
                     {icon}
                     <span className="text-[9px] font-bold uppercase tracking-wider truncate">{label}</span>
@@ -10084,7 +10461,7 @@ export default function DailyPlanner() {
                             }}
                           >
                             {/* 3-dots day options menu */}
-                            <div className="absolute top-1 right-1 z-20 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <div className="absolute top-1 right-1 z-20 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -10136,7 +10513,7 @@ export default function DailyPlanner() {
                               )}
                             </div>
 
-                            <span className="text-[17px] font-semibold tabular-nums leading-none" style={{ color: isExcluded ? '#f59e0b' : (hot ? '#fff' : menuText) }}>
+                            <span className={`${isPhone ? 'text-[12px]' : 'text-[17px]'} font-semibold tabular-nums leading-none`} style={{ color: isExcluded ? '#f59e0b' : (hot ? '#fff' : menuText) }}>
                               {format(d, 'd')}
                             </span>
                             {/* Exact time for this day, always visible — not just in the tooltip. */}
@@ -10145,7 +10522,7 @@ export default function DailyPlanner() {
                                 e.stopPropagation();
                                 startEditingFocusDay('month', key, d, secs);
                               }}
-                              className={`text-[15px] font-bold tabular-nums leading-none cursor-pointer ${isExcluded ? 'line-through opacity-75 text-amber-400' : ''}`}
+                              className={`${isPhone ? 'text-[10px]' : 'text-[15px]'} font-bold tabular-nums leading-none cursor-pointer ${isExcluded ? 'line-through opacity-75 text-amber-400' : ''}`}
                               style={{ color: isExcluded ? '#f59e0b' : (secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub), opacity: secs > 0 || isExcluded ? 1 : 0.45 }}
                             >
                               {editingFocusDayKey === focusEditKey('month', key) ? (
@@ -10177,7 +10554,7 @@ export default function DailyPlanner() {
                               <span className="text-[9px] font-bold uppercase tracking-wider text-amber-400 leading-none">Excl</span>
                             ) : (
                               sessions > 0 && (
-                                <span className="text-[11px] font-bold tabular-nums leading-none" style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
+                                <span className={`${isPhone ? 'text-[9px]' : 'text-[11px]'} font-bold tabular-nums leading-none`} style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
                                   {sessions}×
                                 </span>
                               )
@@ -10285,9 +10662,8 @@ export default function DailyPlanner() {
                 className="absolute left-0 right-0 z-[120] pointer-events-none flex justify-center"
                 style={{
                   bottom: isPhone
-                    ? `calc(${Math.round(BOTTOM_NAV_H * mobileUiZoom + 32)}px + var(--safe-bottom))`
+                    ? 'calc(var(--bottom-nav-h) + 20px)'
                     : '32px',
-                  ...(isPhone && mobileUiZoom !== 1 ? { zoom: mobileUiZoom } : {}),
                 }}
               >
                 <div className={`w-full mx-auto px-4 flex justify-center pointer-events-none ${isCompact ? '' : 'min-w-[900px] max-w-[1400px]'}`}>
@@ -10307,9 +10683,11 @@ export default function DailyPlanner() {
                   >
                     <Clock size={12} />
                     <span>Go to Live</span>
-                    <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
-                      {formatCombo(shortcuts.goToLive)}
-                    </kbd>
+                    {!isPhone && (
+                      <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
+                        {formatCombo(shortcuts.goToLive)}
+                      </kbd>
+                    )}
                   </motion.button>
                 </div>
               </div>
@@ -10320,7 +10698,7 @@ export default function DailyPlanner() {
         <TasksPanel
           sheet={isPhone}
           page={isPhone}
-          zoom={isPhone ? mobileContentZoom : undefined}
+          zoom={isPhone && mobileContentZoom !== 1 ? mobileContentZoom : undefined}
           // On the phone the panel is a sheet driven by the bottom tab bar, so
           // it opens on the Tasks tab regardless of the docked-panel preference
           // (which is about a side-by-side layout this screen doesn't have).
@@ -10359,7 +10737,7 @@ export default function DailyPlanner() {
           onClick={() => setConfirmFocusModal(null)}
         >
           <div
-            className="w-full max-w-md rounded-2xl p-6 border shadow-2xl relative animate-in fade-in zoom-in-95 duration-150"
+            className="w-full max-w-md max-h-[90dvh] overflow-y-auto overscroll-contain rounded-2xl p-6 border shadow-2xl relative animate-in fade-in zoom-in-95 duration-150"
             style={{ background: darkMode ? '#18181b' : '#ffffff', borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)', color: darkMode ? '#ffffff' : '#09090b' }}
             onClick={e => e.stopPropagation()}
           >
@@ -10468,7 +10846,7 @@ export default function DailyPlanner() {
                   <X size={15} />
                 </button>
               </div>
-              <div className="px-5 py-4 grid grid-cols-2 gap-x-6 gap-y-5">
+              <div className={`px-5 py-4 grid gap-x-6 gap-y-5 ${isPhone ? 'grid-cols-1' : 'grid-cols-2'}`}>
                 {(['Navigation', 'View', 'Editing', 'Focus'] as const).map(group => (
                   <div key={group} className="flex flex-col gap-1.5">
                     <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>{group}</span>
@@ -10485,7 +10863,7 @@ export default function DailyPlanner() {
                     ))}
                   </div>
                 ))}
-                <div className="col-span-2 pt-1 text-[10px] leading-relaxed" style={{ color: menuSub, borderTop: `1px solid ${menuBdr}` }}>
+                <div className={`${isPhone ? 'col-span-1' : 'col-span-2'} pt-1 text-[10px] leading-relaxed`} style={{ color: menuSub, borderTop: `1px solid ${menuBdr}` }}>
                   <span className="block pt-2.5">
                     Rebind any of these in <span style={{ color: menuText }}>Settings → Keyboard Shortcuts</span>.
                     Always available: <kbd style={{ color: menuText }}>Esc</kbd> to close, <kbd style={{ color: menuText }}>Ctrl + drag</kbd> to box-select,
@@ -10501,7 +10879,12 @@ export default function DailyPlanner() {
 
       {/* ── Toasts ───────────────────────────────────────────────────────────── */}
       {createPortal(
-        <div className="fixed bottom-5 right-5 z-[300] flex flex-col gap-2 items-end pointer-events-none">
+        <div
+          className={`fixed z-[300] flex flex-col gap-2 pointer-events-none ${
+            isPhone ? 'left-3 right-3 items-center' : 'bottom-5 right-5 items-end'
+          }`}
+          style={isPhone ? { bottom: `calc(${Math.round(BOTTOM_NAV_H * mobileUiZoom + 16)}px + var(--safe-bottom))` } : undefined}
+        >
           <AnimatePresence initial={false}>
             {toasts.map(t => {
               const tone = t.tone === 'success'
@@ -10513,9 +10896,9 @@ export default function DailyPlanner() {
                 <motion.div
                   key={t.id}
                   layout
-                  initial={{ opacity: 0, x: 24, scale: 0.96 }}
-                  animate={{ opacity: 1, x: 0, scale: 1 }}
-                  exit={{ opacity: 0, x: 24, scale: 0.96 }}
+                  initial={{ opacity: 0, x: isPhone ? 0 : 24, y: isPhone ? 16 : 0, scale: 0.96 }}
+                  animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, x: isPhone ? 0 : 24, y: isPhone ? 16 : 0, scale: 0.96 }}
                   transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
                   className="pointer-events-auto flex items-center gap-2.5 pl-3 pr-4 py-2.5 rounded-xl text-[12px] font-medium max-w-[340px] backdrop-blur-md"
                   style={{
@@ -11240,13 +11623,15 @@ export default function DailyPlanner() {
             ? { type: 'spring', stiffness: 460, damping: 42 }
             : { duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
           data-menu="1"
-          className={`fixed z-[200] overflow-y-auto overflow-x-hidden touch-scroll ${isPhone ? '' : 'rounded-xl shadow-xl'}`}
+          className={`fixed z-[200] overflow-y-auto overflow-x-hidden touch-scroll ${isPhone ? 'overscroll-contain' : 'rounded-xl shadow-xl'}`}
           style={isPhone ? {
-            left: 0, right: 0, bottom: 0, top: 'auto',
+            left: 0, right: 0,
+            bottom: vp.keyboardInset > 0 ? `${vp.keyboardInset}px` : 0,
+            top: 'auto',
             borderTopLeftRadius: 20,
             borderTopRightRadius: 20,
-            maxHeight: '86dvh',
-            paddingBottom: 'var(--safe-bottom)',
+            maxHeight: vp.keyboardInset > 0 ? `calc(100% - ${vp.keyboardInset}px)` : '86dvh',
+            paddingBottom: vp.keyboardInset > 0 ? '16px' : 'calc(var(--safe-bottom) + 12px)',
             background: menuBg,
             borderTop: `1px solid ${menuBdr}`,
             // Tight shadow + own layer: a wide-blur shadow on a sheet that
@@ -11268,31 +11653,55 @@ export default function DailyPlanner() {
           }}
           onMouseDown={e => e.stopPropagation()}
         >
-          <div
-            className={`flex items-center justify-between px-3 ${isPhone ? 'sticky top-0 z-10 pt-3 pb-2 relative' : 'py-2'}`}
-            style={{ borderBottom: `1px solid ${menuBdr}`, background: isPhone ? menuBg : undefined }}
-          >
-            {isPhone && (
+          {isPhone ? (
+            <div
+              className="flex items-center justify-between px-3 pt-3 pb-2 sticky top-0 z-10 relative flex-shrink-0"
+              style={{ borderBottom: `1px solid ${menuBdr}`, background: menuBg }}
+            >
               <span
                 className="absolute left-1/2 -translate-x-1/2 top-1.5 w-10 h-1 rounded-full"
                 style={{ background: menuBdr }}
               />
-            )}
-            <div className="flex items-center gap-1.5">
-              <ListTodo size={13} style={{ color: taskColor }} />
-              <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Task</span>
+              <div className="flex items-center gap-1.5">
+                <ListTodo size={14} style={{ color: taskColor }} />
+                <span className="text-xs font-bold uppercase tracking-wider" style={{ color: menuSub }}>Task</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTaskMenuId(null)}
+                className="text-[13px] font-bold px-3 h-8 rounded-lg active:scale-95 transition-transform"
+                style={{ background: `${taskColor}18`, color: taskColor }}
+              >
+                Done
+              </button>
             </div>
-            <button onClick={() => setTaskMenuId(null)} className="p-0.5 rounded" style={{ color: menuSub }}>
-              <X size={13} />
-            </button>
-          </div>
+          ) : (
+            <div
+              className="flex items-center justify-between px-3 py-2 flex-shrink-0"
+              style={{ borderBottom: `1px solid ${menuBdr}` }}
+            >
+              <div className="flex items-center gap-1.5">
+                <ListTodo size={13} style={{ color: taskColor }} />
+                <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Task</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTaskMenuId(null)}
+                className="touch-target w-6 h-6 flex items-center justify-center rounded transition-colors hover:bg-white/10"
+                style={{ color: menuSub }}
+                title="Close"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )}
 
           <div className="p-3 flex flex-col gap-2.5">
             <input
               value={menuTask.title}
               onChange={e => editTask(taskMenuId!, { title: e.target.value })}
               placeholder="Task title"
-              autoFocus
+              autoFocus={!isPhone && !isTouch}
               className="w-full bg-transparent outline-none text-[13px] font-medium rounded-md px-2 py-1.5"
               style={{ color: menuText, background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
             />
@@ -11374,6 +11783,43 @@ export default function DailyPlanner() {
                 })}
               </div>
             )}
+
+            {/* Reminders. A task with no time is swept into the end-of-day
+                digest instead of alerting on its own, so this only appears once
+                the task actually has a time to count from. */}
+            <div className="flex flex-col gap-1.5 pt-1" style={{ borderTop: `1px solid ${menuBdr}` }}>
+              <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
+                <Bell size={10} /> Reminders
+              </span>
+              {menuTask.startTime ? (() => {
+                const dateStr = dueDateOf(menuTask);
+                const anchor = new Date();
+                if (dateStr) {
+                  const [ay, am, ad] = dateStr.split('-').map(Number);
+                  anchor.setFullYear(ay, (am || 1) - 1, ad || 1);
+                }
+                const [h, mi] = menuTask.startTime.split(':').map(Number);
+                anchor.setHours(h || 0, mi || 0, 0, 0);
+                return (
+                  <NotifyEditor
+                    spec={menuTask.notify}
+                    effective={resolveSpec(menuTask, 'task', categories, notificationSettings)}
+                    onChange={next => editTask(taskMenuId!, { notify: next })}
+                    inheritedFrom="the task default"
+                    kind="task"
+                    theme={notifyTheme}
+                    anchorHint={{ at: anchor, label: dateStr ?? '' }}
+                    compact
+                  />
+                );
+              })() : (
+                <p className="text-[11px] leading-snug" style={{ color: menuSub }}>
+                  {menuTask.weekKey
+                    ? `Included in the ${String(notificationSettings.taskCutoffHour).padStart(2, '0')}:00 summary of what is still open that day. Give it a time for its own reminder.`
+                    : 'A task with no date is never notified about. Give it a date to include it in the daily summary.'}
+                </p>
+              )}
+            </div>
 
             <textarea
               value={menuTask.notes ?? ''}
@@ -11459,11 +11905,13 @@ export default function DailyPlanner() {
             : { duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
           className={`fixed z-[200] overflow-hidden flex flex-col touch-scroll ${isPhone ? '' : 'rounded-xl shadow-2xl'}`}
           style={isPhone ? {
-            left: 0, right: 0, bottom: 0, top: 'auto',
+            left: 0, right: 0,
+            bottom: vp.keyboardInset > 0 ? `${vp.keyboardInset}px` : 0,
+            top: 'auto',
             borderTopLeftRadius: 20,
             borderTopRightRadius: 20,
-            maxHeight: '86dvh',
-            paddingBottom: 'var(--safe-bottom)',
+            maxHeight: vp.keyboardInset > 0 ? `calc(100% - ${vp.keyboardInset}px)` : '86dvh',
+            paddingBottom: vp.keyboardInset > 0 ? '16px' : 'calc(var(--safe-bottom) + 12px)',
             background: menuBg,
             borderTop: `1px solid ${menuBdr}`,
             boxShadow: '0 -6px 18px rgba(0,0,0,0.34)',
@@ -11549,7 +11997,7 @@ export default function DailyPlanner() {
           )}
 
           {/* Scrollable body content container */}
-          <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar">
+          <div className={`flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar ${isPhone ? 'touch-scroll overscroll-contain pb-6' : ''}`}>
             {/* Title field (works for drafts, which have no grid block, and live items) */}
             <div className="px-3 pt-2.5 pb-2" style={{ borderBottom: `1px solid ${menuBdr}` }}>
               <input
@@ -12060,6 +12508,48 @@ export default function DailyPlanner() {
               </span>
             </button>
 
+            {/* Reminders. Sits above Category on purpose: the category is what a
+                reminder inherits FROM, so seeing the effect first explains the
+                cause when you then change the category underneath it. */}
+            <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
+                <Bell size={10} /> Reminders
+              </span>
+              {(() => {
+                const kind: 'timed' | 'allDay' = menuEvent.allDay ? 'allDay' : 'timed';
+                const origin = specOrigin(menuEvent, kind, categories);
+                const cat = menuEvent.categoryId ? categories.find(c => c.id === menuEvent.categoryId) : undefined;
+                const inheritedFrom = origin === 'item'
+                  ? (cat ? cat.name : 'the default')
+                  : (origin === 'category' && cat ? cat.name : 'the default');
+
+                // Where the reminder counts from: the start time, or the
+                // configured morning hour for something that has no time.
+                const dateStr = menuEvent.occDate
+                  ?? format(addDays(parseDate(menuEvent.weekKey || weekKeyOf(currentDate, weekStartsOn)), menuEvent.dayIndex ?? 0), 'yyyy-MM-dd');
+                const [ay, am, ad] = dateStr.split('-').map(Number);
+                const anchor = new Date(ay, (am || 1) - 1, ad || 1);
+                if (menuEvent.allDay) anchor.setHours(notificationSettings.allDayHour, 0, 0, 0);
+                else {
+                  const [h, mi] = (menuEvent.startTime || '00:00').split(':').map(Number);
+                  anchor.setHours(h || 0, mi || 0, 0, 0);
+                }
+
+                return (
+                  <NotifyEditor
+                    spec={menuEvent.notify}
+                    effective={resolveSpec(menuEvent, kind, categories, notificationSettings)}
+                    onChange={next => applyEdit(menuEvent.id, { notify: next })}
+                    inheritedFrom={inheritedFrom}
+                    kind={kind}
+                    theme={notifyTheme}
+                    anchorHint={{ at: anchor, label: dateStr }}
+                    compact
+                  />
+                );
+              })()}
+            </div>
+
             {/* Category Selection Section */}
             <div className="px-3 py-2 flex flex-col gap-1.5" style={{ borderBottom: `1px solid ${menuBdr}` }}>
               <div className="flex items-center justify-between">
@@ -12321,14 +12811,15 @@ export default function DailyPlanner() {
                   </div>
                   {linkedNow.length > 0 && (
                     <>
-                      <div className="flex flex-col gap-0.5 max-h-20 overflow-y-auto custom-scrollbar">
+                      <div className="flex flex-col gap-1 max-h-24 overflow-y-auto custom-scrollbar py-0.5">
                         {linkedNow.map(lid => {
                           const partner = weekEvents[lid] ?? events[lid];
                           if (!partner) return null;
                           return (
-                            <span key={lid} className="text-[10px] truncate flex items-center gap-1" style={{ color: menuSub }}>
-                              <Link2 size={9} style={{ opacity: 0.7, flexShrink: 0 }} />
-                              {partner.content || 'Untitled'} · {formatTimeLabel(timeToMin(partner.startTime), timeFormat)}
+                            <span key={lid} className="text-[11px] truncate flex items-center gap-1.5" style={{ color: menuSub }}>
+                              <Link2 size={11} style={{ opacity: 0.7, flexShrink: 0 }} />
+                              <span className="truncate">{partner.content || 'Untitled'}</span>
+                              <span className="opacity-60 text-[10px] ml-auto shrink-0">{formatTimeLabel(timeToMin(partner.startTime), timeFormat)}</span>
                             </span>
                           );
                         })}
@@ -12370,7 +12861,7 @@ export default function DailyPlanner() {
 
             {/* Actions (live items only — a draft isn't on the grid yet) */}
             {!isDraft && [
-              { icon: <Pencil size={13}/>, label: 'Edit inline', action: () => { enterEdit(menuEvent.id); } },
+              { icon: <Pencil size={13}/>, label: 'Edit inline', action: () => { enterEdit(menuEvent.id); if (isPhone) { setMenuId(null); setMenuPos(null); } } },
               { icon: <CalendarRange size={13}/>, label: 'Clone to whole week', action: () => cloneAcrossWeek(menuEvent) },
             ].map(({ icon, label, action }) => (
               <button
@@ -12485,10 +12976,11 @@ export default function DailyPlanner() {
                 <button
                   type="button"
                   onClick={() => setTaskOverflowModal(null)}
-                  className="w-5 h-5 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                  className="touch-target w-6 h-6 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
                   style={{ color: menuSub }}
+                  title="Close"
                 >
-                  <X size={12} />
+                  <X size={13} />
                 </button>
               </div>
 
@@ -12567,10 +13059,9 @@ export default function DailyPlanner() {
                 className="fixed z-[70] w-14 h-14 rounded-full flex items-center justify-center text-white active:scale-90 transition-transform"
                 style={{
                   right: 'calc(16px + var(--safe-right))',
-                  bottom: `calc(${Math.round(BOTTOM_NAV_H * mobileUiZoom + 16)}px + var(--safe-bottom))`,
+                  bottom: 'calc(var(--bottom-nav-h) + 16px)',
                   background: 'linear-gradient(140deg, #3b82f6, #2563eb)',
                   boxShadow: '0 8px 26px rgba(37,99,235,0.45)',
-                  ...(mobileUiZoom !== 1 ? { zoom: mobileUiZoom } : {}),
                 }}
                 title="New event"
               >
@@ -12784,18 +13275,20 @@ export default function DailyPlanner() {
                       </div>
                       <div className="flex items-center gap-1.5">
                         <button
+                          type="button"
                           onClick={() => row.set(v => Math.max(row.min, (customAnchor === 'day' ? Math.max(0, v) : v) - 1))}
                           disabled={row.value <= row.min}
-                          className="w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                          className="touch-target w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform cursor-pointer"
                           style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
                         ><Minus size={16} /></button>
                         <span className="w-9 text-center text-[13px] font-bold tabular-nums" style={{ color: menuText }}>
                           {customAnchor === 'day' ? row.value : (row.value > 0 ? `+${row.value}` : row.value)}
                         </span>
                         <button
+                          type="button"
                           onClick={() => row.set(v => Math.min(row.max, (customAnchor === 'day' ? Math.max(0, v) : v) + 1))}
                           disabled={row.value >= row.max}
-                          className="w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform"
+                          className="touch-target w-10 h-10 rounded-lg flex items-center justify-center disabled:opacity-30 active:scale-90 transition-transform cursor-pointer"
                           style={{ background: menuBg, border: `1px solid ${surfaceBdr}`, color: menuText }}
                         ><Plus size={16} /></button>
                       </div>
@@ -12848,7 +13341,8 @@ export default function DailyPlanner() {
                   {todayPrayerList.map((p, i) => {
                     const done = isPrayerDone(p.dateStr, p.key);
                     const isNext = nextPrayer?.key === p.key;
-                    const passed = !done && !isNext && nextPrayer !== null && p.minutes < nextPrayer.minutes;
+                    const nowMins = new Date(nowTick).getHours() * 60 + new Date(nowTick).getMinutes();
+                    const passed = !done && !isNext && p.minutes < nowMins;
                     return (
                       <button
                         key={p.id}
@@ -13633,7 +14127,7 @@ function CategoryFilterList({
               <button
                 type="button"
                 onClick={() => handleOpenEdit(matchingCat)}
-                className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
+                className="opacity-70 sm:opacity-0 sm:group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-opacity"
                 style={{ color: theme.menuSub }}
                 title={`Edit "${row.name}"`}
               >
@@ -13695,11 +14189,16 @@ function MobileSheet({
   children: React.ReactNode;
   theme: { darkMode: boolean; menuBg: string; menuText: string; menuSub: string; surfaceBg: string; surfaceBdr: string };
 }) {
-  const [dragY, setDragY] = useState(0);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
   const startRef = useRef<number | null>(null);
+  const currentDragRef = useRef(0);
 
   useEffect(() => {
-    if (!open) { setDragY(0); startRef.current = null; return; }
+    if (!open) {
+      startRef.current = null;
+      currentDragRef.current = 0;
+      return;
+    }
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -13720,14 +14219,13 @@ function MobileSheet({
             style={{ background: 'rgba(0,0,0,0.52)', willChange: 'opacity' }}
           />
           <motion.div
+            ref={sheetRef}
             key="sheet"
             initial={{ transform: 'translate3d(0, 100%, 0)' }}
-            animate={{ transform: dragY > 0 ? `translate3d(0, ${dragY}px, 0)` : 'translate3d(0, 0%, 0)' }}
+            animate={{ transform: 'translate3d(0, 0%, 0)' }}
             exit={{ transform: 'translate3d(0, 100%, 0)' }}
-            transition={startRef.current !== null
-              ? { duration: 0 }
-              : { duration: 0.19, ease: [0.32, 0.72, 0, 1] }}
-            className="fixed inset-x-0 bottom-0 z-[91] flex flex-col overflow-hidden"
+            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            className="fixed inset-x-0 bottom-0 z-[91] flex flex-col overflow-hidden gpu-layer"
             style={{
               maxHeight: '85dvh',
               borderTopLeftRadius: 20,
@@ -13737,27 +14235,49 @@ function MobileSheet({
               boxShadow: '0 -4px 16px rgba(0,0,0,0.25)',
               willChange: 'transform',
               contain: 'paint layout',
+              overscrollBehavior: 'contain',
             }}
           >
             <div
-              className="flex-shrink-0 pt-2.5 pb-1 flex items-center justify-center cursor-grab"
+              className="flex-shrink-0 pt-2.5 pb-1 flex items-center justify-center cursor-grab touch-target"
               style={{ touchAction: 'none' }}
               onPointerDown={e => {
                 (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
                 startRef.current = e.clientY;
+                currentDragRef.current = 0;
+                if (sheetRef.current) {
+                  sheetRef.current.style.transition = 'none';
+                }
               }}
               onPointerMove={e => {
-                if (startRef.current === null) return;
-                setDragY(Math.max(0, e.clientY - startRef.current));
+                if (startRef.current === null || !sheetRef.current) return;
+                const dy = Math.max(0, e.clientY - startRef.current);
+                currentDragRef.current = dy;
+                sheetRef.current.style.transform = `translate3d(0, ${dy}px, 0)`;
               }}
-              onPointerUp={e => {
+              onPointerUp={() => {
                 if (startRef.current === null) return;
-                const travelled = e.clientY - startRef.current;
+                const travelled = currentDragRef.current;
                 startRef.current = null;
-                setDragY(0);
-                if (travelled > 90) onClose();
+                currentDragRef.current = 0;
+                if (sheetRef.current) {
+                  sheetRef.current.style.transition = 'transform 0.2s cubic-bezier(0.22, 1, 0.36, 1)';
+                  if (travelled > 80) {
+                    sheetRef.current.style.transform = 'translate3d(0, 100%, 0)';
+                    onClose();
+                  } else {
+                    sheetRef.current.style.transform = 'translate3d(0, 0%, 0)';
+                  }
+                }
               }}
-              onPointerCancel={() => { startRef.current = null; setDragY(0); }}
+              onPointerCancel={() => {
+                startRef.current = null;
+                currentDragRef.current = 0;
+                if (sheetRef.current) {
+                  sheetRef.current.style.transition = 'transform 0.2s cubic-bezier(0.22, 1, 0.36, 1)';
+                  sheetRef.current.style.transform = 'translate3d(0, 0%, 0)';
+                }
+              }}
             >
               <div className="w-10 h-1 rounded-full" style={{ background: theme.surfaceBdr }} />
             </div>
@@ -13769,7 +14289,7 @@ function MobileSheet({
               </div>
               <button
                 onClick={onClose}
-                className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 active:scale-90 transition-transform"
+                className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 active:scale-90 transition-transform touch-target"
                 style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}`, color: theme.menuSub }}
                 title="Close"
               >

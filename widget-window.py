@@ -235,6 +235,24 @@ user32.GetWindowLongW.restype = ctypes.c_long
 user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
 user32.SetWindowLongW.restype = ctypes.c_long
 
+user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+user32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+user32.GetWindowTextW.restype = ctypes.c_int
+
+user32.IsWindow.argtypes = [ctypes.c_void_p]
+user32.IsWindow.restype = ctypes.wintypes.BOOL
+
+user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+user32.IsWindowVisible.restype = ctypes.wintypes.BOOL
+
+user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+
+user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
+user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
+
 
 
 class Api:
@@ -269,7 +287,47 @@ class Api:
         except Exception as e:
             print("Failed to move window relatively:", e)
     def open_browser(self):
+        # If the main app window is already open, bring it to the front rather than opening another copy
+        hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
+        hwnds = []
+        def enum_proc(hwnd, lparam):
+            if user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    if buff.value == 'Daily Planner':
+                        hwnds.append(hwnd)
+            return True
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+        if hdesk:
+            try:
+                user32.EnumDesktopWindows(hdesk, WNDENUMPROC(enum_proc), 0)
+            finally:
+                user32.CloseDesktop(hdesk)
+        else:
+            user32.EnumWindows(WNDENUMPROC(enum_proc), 0)
+
+        if hwnds:
+            SW_RESTORE = 9
+            SW_SHOW = 5
+            try:
+                main_hwnd = hwnds[0]
+                if user32.IsIconic(main_hwnd):
+                    user32.ShowWindow(main_hwnd, SW_RESTORE)
+                else:
+                    user32.ShowWindow(main_hwnd, SW_SHOW)
+                user32.BringWindowToTop(main_hwnd)
+                user32.SetForegroundWindow(main_hwnd)
+                if len(hwnds) > 1:
+                    for extra in hwnds[1:]:
+                        user32.PostMessageW(extra, 0x0010, 0, 0)
+                return
+            except Exception as e:
+                print("Failed to focus existing planner window:", e)
+
         import os
+        import json
         import subprocess
         chrome_path1 = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         chrome_path2 = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
@@ -278,13 +336,58 @@ class Api:
         # Chrome reuses the persistent planner_session cookie from the launcher.
         url = "http://localhost:5173"
         user_data = r"D:\My Projects\weekly-planner\.chrome-profile"
+        awake_flags = [
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore",
+            "--hide-crash-restore-bubble",
+            "--disable-session-crashed-bubble",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+
+        try:
+            default_dir = os.path.join(user_data, "Default")
+            pref_path = os.path.join(default_dir, "Preferences")
+            if os.path.exists(pref_path):
+                with open(pref_path, "r", encoding="utf-8-sig") as f:
+                    pref_data = json.load(f)
+                mod = False
+                if not isinstance(pref_data.get("profile"), dict):
+                    pref_data["profile"] = {}
+                if pref_data["profile"].get("exit_type") != "Normal":
+                    pref_data["profile"]["exit_type"] = "Normal"
+                    mod = True
+                if pref_data["profile"].get("exited_cleanly") is not True:
+                    pref_data["profile"]["exited_cleanly"] = True
+                    mod = True
+                if not isinstance(pref_data.get("session"), dict):
+                    pref_data["session"] = {}
+                if pref_data["session"].get("restore_on_startup") != 1:
+                    pref_data["session"]["restore_on_startup"] = 1
+                    mod = True
+                if mod:
+                    with open(pref_path, "w", encoding="utf-8") as f:
+                        json.dump(pref_data, f)
+            sessions_dir = os.path.join(default_dir, "Sessions")
+            if os.path.exists(sessions_dir):
+                for fname in os.listdir(sessions_dir):
+                    fpath = os.path.join(sessions_dir, fname)
+                    if os.path.isfile(fpath):
+                        try:
+                            os.remove(fpath)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         
         if os.path.exists(chrome_path1):
-            subprocess.Popen([chrome_path1, f"--app={url}", f"--user-data-dir={user_data}"])
+            subprocess.Popen([chrome_path1, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags)
         elif os.path.exists(chrome_path2):
-            subprocess.Popen([chrome_path2, f"--app={url}", f"--user-data-dir={user_data}"])
+            subprocess.Popen([chrome_path2, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags)
         elif os.path.exists(edge_path):
-            subprocess.Popen([edge_path, f"--app={url}", f"--user-data-dir={user_data}"])
+            subprocess.Popen([edge_path, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags)
         else:
             import webbrowser
             webbrowser.open(url)

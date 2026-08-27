@@ -164,7 +164,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       return { ok: false, error: data.error || 'Invalid credentials' };
     } catch (err) {
-      return { ok: false, error: 'Connection error while signing in' };
+      // The bare wording hid what actually went wrong, which cost a day of
+      // guessing when sign-in failed on the phone but nowhere else. Carry the
+      // real reason through: it is the only thing that identifies the fault.
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: `Connection error while signing in (${detail})` };
     }
   }, [activateRegisteredWidgets, claimWidgetSession, pairingId]);
 

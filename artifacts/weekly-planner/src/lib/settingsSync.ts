@@ -4,6 +4,7 @@ import { coerceHardwareSettings, DEFAULT_HARDWARE_SETTINGS, type HardwareSetting
 import { coercePrayerSettings, DEFAULT_PRAYER_SETTINGS, type PrayerSettings } from './prayerTimes';
 import { coerceCategories, DEFAULT_CATEGORIES, type EventCategory } from './categories';
 import { coerceTaskLists, DEFAULT_TASK_LISTS, type TaskList } from './taskLists';
+import { coerceNotificationSettings, DEFAULT_NOTIFICATION_SETTINGS, type NotificationSettings } from './notifications';
 
 export type TimeFormat = '12h' | '24h';
 export type IntervalMin = 5 | 15 | 30 | 60;
@@ -180,6 +181,7 @@ export interface AppSettings {
   customDaysBefore: number;
   customDaysAfter: number;
   customAnchor?: 'day' | 'week';
+  mobileSwipeViewSwitch?: boolean; // Swipe horizontally on mobile to switch Custom <-> Month views
   focusDayStartHour: number;
   focusChime: FocusChimeId;
   focusCues: Record<FocusCueSlot, FocusCueId>;
@@ -211,6 +213,8 @@ export interface AppSettings {
   gcalMirrorGoogleDeletions: boolean; // Deleting an event on Google's Daily Calendar deletes it in app
   // ── Prayer times ───────────────────────────────────────────────────────────
   prayer: PrayerSettings;
+  // ── Notifications ──────────────────────────────────────────────────────────
+  notifications: NotificationSettings;
   // ── ESP32 desk controller ──────────────────────────────────────────────────
   hardware: HardwareSettings;
   shortcutDefaultsVersion?: number;
@@ -237,6 +241,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customDaysBefore: 0,
   customDaysAfter: 0,
   customAnchor: 'day',
+  mobileSwipeViewSwitch: true,
   focusDayStartHour: 4,
   focusChime: 'breath',
   focusCues: DEFAULT_FOCUS_CUES,
@@ -264,6 +269,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gcalMirrorLocalDeletions: true,
   gcalMirrorGoogleDeletions: false,
   prayer: DEFAULT_PRAYER_SETTINGS,
+  notifications: DEFAULT_NOTIFICATION_SETTINGS,
   hardware: DEFAULT_HARDWARE_SETTINGS,
   categories: DEFAULT_CATEGORIES,
   taskLists: DEFAULT_TASK_LISTS,
@@ -323,6 +329,7 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = Math.max(-14, Math.min(14, Math.round(r.customDaysBefore)));
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(-14, Math.min(14, Math.round(r.customDaysAfter)));
   if (r.customAnchor === 'day' || r.customAnchor === 'week') s.customAnchor = r.customAnchor;
+  if (typeof r.mobileSwipeViewSwitch === 'boolean') s.mobileSwipeViewSwitch = r.mobileSwipeViewSwitch;
   if (typeof r.focusDayStartHour === 'number') {
     s.focusDayStartHour = Math.max(0, Math.min(23, Math.round(r.focusDayStartHour)));
   }
@@ -373,6 +380,7 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.gcalMirrorLocalDeletions === 'boolean') s.gcalMirrorLocalDeletions = r.gcalMirrorLocalDeletions;
   if (typeof r.gcalMirrorGoogleDeletions === 'boolean') s.gcalMirrorGoogleDeletions = r.gcalMirrorGoogleDeletions;
   if (r.prayer != null) s.prayer = coercePrayerSettings(r.prayer);
+  if (r.notifications != null) s.notifications = coerceNotificationSettings(r.notifications);
   if (r.hardware != null) s.hardware = coerceHardwareSettings(r.hardware);
   if (r.categories != null) s.categories = coerceCategories(r.categories);
   if (r.taskLists != null) s.taskLists = coerceTaskLists(r.taskLists);

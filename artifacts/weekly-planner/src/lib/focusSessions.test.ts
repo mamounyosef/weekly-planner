@@ -362,5 +362,166 @@ assertEqual(coerceFocusCue('invalid_cue', 'start'), 'rise', 'invalid cue start f
 assertEqual(coerceFocusCue('tap', 'start'), 'tap', 'valid cue preserved');
 
 console.log('✓ Coercion & corrupt data recovery tests passed');
+
+// ---------------------------------------------------------------------------
+// LAYER D — EXHAUSTIVE SCENARIO TEST MATRIX (ITEMS 1 - 9)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- LAYER D: EXHAUSTIVE SCENARIO MATRIX ---');
+
+// --- D.1: Timer arithmetic & live elapsed calculation ---
+{
+  const t0 = 1_700_000_000_000;
+  const runningTimer: FocusTimerState = {
+    plannedSeconds: 1500,
+    accumulatedSeconds: 300,
+    isRunning: true,
+    lastStartedAt: new Date(t0).toISOString(),
+    sessionStartedAt: new Date(t0 - 300_000).toISOString(),
+  };
+
+  // Live timer 200s later
+  const elapsed = getFocusTimerElapsedSeconds(runningTimer, t0 + 200_000);
+  assertEqual(elapsed, 500, 'live timer adds running delta to accumulatedSeconds');
+
+  // Checkpointing banks whole seconds and adjusts anchor precisely
+  const checkpointed = checkpointFocusTimer(runningTimer, t0 + 200_500);
+  assertEqual(checkpointed.accumulatedSeconds, 500, 'checkpoint banks 200 whole seconds');
+  assertEqual(new Date(checkpointed.lastStartedAt!).getTime(), t0 + 200_000, 'anchor moved forward by whole seconds');
+
+  // Pausing stops the clock and freezes elapsed seconds
+  const paused = pauseFocusTimer(runningTimer, t0 + 200_000);
+  assertEqual(paused.isRunning, false, 'paused isRunning is false');
+  assertEqual(paused.accumulatedSeconds, 500, 'paused accumulated is 500s');
+  assertEqual(getFocusTimerElapsedSeconds(paused, t0 + 500_000), 500, 'paused elapsed does not drift over time');
+}
+
+// --- D.2: Crash recovery & orphan salvage ---
+{
+  const t0 = 1_700_000_000_000;
+  const deadTimer: FocusTimerState = {
+    plannedSeconds: 1800,
+    accumulatedSeconds: 600,
+    isRunning: true,
+    lastStartedAt: new Date(t0 - 3600_000).toISOString(),
+    sessionStartedAt: new Date(t0 - 3600_000).toISOString(),
+  };
+
+  // Heartbeat available from 10 minutes into the session (stale by 50 minutes)
+  const staleHeartbeat: FocusHeartbeat = {
+    at: new Date(t0 - 3000_000).toISOString(),
+    sessionStartedAt: deadTimer.sessionStartedAt,
+    elapsedSeconds: 600,
+  };
+  const recovery = focusRecoveryFor(deadTimer, staleHeartbeat, t0);
+  assert(recovery !== null, 'recovery identified for dead session');
+  assertEqual(recovery!.durationSeconds, 600, 'recovered duration matches heartbeat elapsed');
+  assertEqual(recovery!.endedAt, staleHeartbeat.at, 'recovered endedAt matches heartbeat timestamp');
+
+  // Actively running session with fresh heartbeat returns null (no false recovery)
+  const liveHeartbeat: FocusHeartbeat = {
+    at: new Date(t0 - 5_000).toISOString(), // 5s ago
+    sessionStartedAt: deadTimer.sessionStartedAt,
+    elapsedSeconds: 1200,
+  };
+  const liveRecovery = focusRecoveryFor(deadTimer, liveHeartbeat, t0);
+  assert(liveRecovery === null, 'fresh heartbeat returns null (no crash recovery)');
+}
+
+// --- D.3: Session deduplication ---
+{
+  const sessions: FocusSession[] = [
+    { id: 's1', startedAt: '2026-08-17T10:00:00Z', endedAt: '2026-08-17T10:25:00Z', durationSeconds: 1500, plannedSeconds: 1500 },
+    { id: 's1', startedAt: '2026-08-17T10:00:00Z', endedAt: '2026-08-17T10:25:00Z', durationSeconds: 1500, plannedSeconds: 1500 },
+    { id: 's2', startedAt: '2026-08-17T11:00:00Z', endedAt: '2026-08-17T11:25:00Z', durationSeconds: 1500, plannedSeconds: 1500 },
+  ];
+  const deduped = dedupeFocusSessions(sessions);
+  assertEqual(deduped.length, 2, 'dedupeFocusSessions removes duplicate id');
+  assertEqual(autoSessionId('2026-08-17T10:00:00Z', 1500), 'auto-2026-08-17T10:00:00Z-1500', 'deterministic autoSessionId');
+  assertEqual(recoveredSessionId('2026-08-17T10:00:00Z'), 'recovered-2026-08-17T10:00:00Z', 'deterministic recoveredSessionId');
+}
+
+// --- D.4: Day keys & configurable day-start hours ---
+{
+  // 2:00 AM on 2026-08-18
+  const earlyMorning = new Date(2026, 7, 18, 2, 0, 0); // local 2:00 AM
+  // With dayStartHour = 0 (calendar day) -> 2026-08-18
+  assertEqual(focusDayKey(earlyMorning, 0), '2026-08-18', 'dayStartHour 0 assigns to current calendar day');
+
+  // With dayStartHour = 4 (night owl cutoff) -> 2026-08-17 (previous calendar day)
+  assertEqual(focusDayKey(earlyMorning, 4), '2026-08-17', 'dayStartHour 4 assigns 2am to previous focus day');
+
+  // 5:00 AM on 2026-08-18 with dayStartHour = 4 -> 2026-08-18
+  const morningAfterCutoff = new Date(2026, 7, 18, 5, 0, 0);
+  assertEqual(focusDayKey(morningAfterCutoff, 4), '2026-08-18', '5am is past 4am cutoff -> current focus day');
+}
+
+// --- D.5: Short-session discarding & completion check ---
+{
+  const shortSession: FocusSession = {
+    id: 'short-1',
+    startedAt: '2026-08-17T10:00:00Z',
+    endedAt: '2026-08-17T10:05:00Z',
+    durationSeconds: 300, // 5 min < 20 min
+    plannedSeconds: 1500,
+  };
+  const fullSession: FocusSession = {
+    id: 'full-1',
+    startedAt: '2026-08-17T10:00:00Z',
+    endedAt: '2026-08-17T10:25:00Z',
+    durationSeconds: 1500, // 25 min >= 20 min
+    plannedSeconds: 1500,
+  };
+  assertEqual(isCompletedFocusSession(shortSession), false, '5m session is not completed');
+  assertEqual(isCompletedFocusSession(fullSession), true, '25m session is completed');
+}
+
+// --- D.6: Multi-tab reconciliation & identity keys ---
+{
+  const timerA: FocusTimerState = {
+    plannedSeconds: 1500,
+    accumulatedSeconds: 100,
+    isRunning: true,
+    lastStartedAt: '2026-08-17T10:00:00Z',
+    sessionStartedAt: '2026-08-17T10:00:00Z',
+    updatedAt: 1000,
+  };
+  const timerB: FocusTimerState = {
+    ...timerA,
+    updatedAt: 2000, // different write timestamp
+  };
+  assertEqual(focusTimerIdentity(timerA), focusTimerIdentity(timerB),
+    'focusTimerIdentity ignores updatedAt so echo checks do not loop');
+}
+
+// --- D.7: Storage corruption resilience ---
+{
+  const corruptList = [null, undefined, 42, 'string', {}, { id: 'ok', startedAt: '2026-08-17', endedAt: '2026-08-17', durationSeconds: -5 }];
+  const safeList = safeFocusSessions(corruptList);
+  assertEqual(safeList.length, 0, 'safeFocusSessions discards all malformed and negative duration items');
+}
+
+// --- D.8: Settings boundaries & duration parser ---
+{
+  assertEqual(parseDurationInput('999h'), 999 * 3600, 'huge duration parsed accurately');
+  assertEqual(parseDurationInput('0m'), 0, 'zero minutes yields 0');
+  assertEqual(coerceFocusChime('invalid'), 'breath', 'invalid chime falls back to default');
+}
+
+// --- D.9: Focus statistics calculation ---
+{
+  const d1 = new Date(2026, 7, 17, 12, 0, 0);
+  const d2 = new Date(2026, 7, 18, 12, 0, 0);
+  const sampleSessions: FocusSession[] = [
+    createManualFocusSession('2026-08-17', 3600, 0),
+    createManualFocusSession('2026-08-17', 1800, 0),
+    createManualFocusSession('2026-08-18', 2400, 0),
+  ];
+
+  assertEqual(sumFocusSecondsForDay(sampleSessions, d1, 0), 5400, 'day 1 total is 5400s (1.5h)');
+  assertEqual(sumFocusSecondsForDay(sampleSessions, d2, 0), 2400, 'day 2 total is 2400s (40m)');
+}
+
 console.log('====================================================');
 console.log('ALL FOCUS SESSION & TIMER TESTS PASSED SUCCESSFULLY!');
+

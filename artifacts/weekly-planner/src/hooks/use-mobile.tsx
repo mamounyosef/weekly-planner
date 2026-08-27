@@ -46,8 +46,8 @@ function read(): Viewport {
   const width = window.innerWidth;
   const height = window.innerHeight;
   const isTouch =
-    (window.matchMedia?.('(pointer: coarse)').matches ?? false) ||
-    (navigator.maxTouchPoints ?? 0) > 1;
+    (typeof window !== 'undefined') &&
+    ((window.matchMedia?.('(pointer: coarse)').matches ?? false) || (navigator.maxTouchPoints ?? 0) > 0);
   // The visual viewport shrinks when the software keyboard opens; the layout
   // viewport does not. The difference is how much of the screen the keyboard ate.
   const vv = window.visualViewport;

@@ -34,6 +34,11 @@ export interface HardwareSettings extends HardwareSensorSettings {
   armSeconds: number;
   /** Leaving the desk pauses a running session. */
   awayPauseEnabled: boolean;
+  /** Sessions you start yourself -- the on-screen button, the system-wide
+   *  hotkey, the phone -- are governed by the sensor exactly like ones the desk
+   *  started. Off = a hand-started session is the sensor's business no longer,
+   *  until you leave and come back. */
+  manualFollowsSensor: boolean;
   /** When a session finishes and you are still at the desk, start or arm the next one.
    *  Without it the day stops after the first session, since staying put
    *  produces no sensor event to react to. */
@@ -78,6 +83,7 @@ export const DEFAULT_HARDWARE_SETTINGS: HardwareSettings = {
   sensorEnabled: true,
   armSeconds: 30,
   awayPauseEnabled: true,
+  manualFollowsSensor: true,
   autoRestartEnabled: true,
   autoRestartArmSeconds: 0,
   awayTerminateSeconds: 120,
@@ -95,6 +101,7 @@ export function coerceHardwareSettings(raw: unknown): HardwareSettings {
   if (typeof r.buttonsEnabled === 'boolean') s.buttonsEnabled = r.buttonsEnabled;
   if (typeof r.sensorEnabled === 'boolean') s.sensorEnabled = r.sensorEnabled;
   if (typeof r.awayPauseEnabled === 'boolean') s.awayPauseEnabled = r.awayPauseEnabled;
+  if (typeof r.manualFollowsSensor === 'boolean') s.manualFollowsSensor = r.manualFollowsSensor;
   if (typeof r.autoRestartEnabled === 'boolean') s.autoRestartEnabled = r.autoRestartEnabled;
   // Clamped rather than rejected: a nonsensical value should degrade to a sane
   // one, not silently disable the feature.
@@ -138,6 +145,14 @@ export interface HardwareControllerState {
   /** True while a session is active. Used to distinguish a finished session (which
    *  chains with autoRestartArmSeconds) from a fresh arrival (which uses armSeconds). */
   sessionActive?: boolean;
+  /** The session now in progress was not started by this controller -- it came
+   *  from the on-screen button, the system-wide hotkey or the phone. Tracked so
+   *  the desk can adopt it rather than ignore it, and so the one preference
+   *  that says otherwise has something to key off. */
+  manualSession?: boolean;
+  /** The session is paused because the sensor saw you leave, as opposed to you
+   *  pausing it yourself. Only the former should be resumed on your return. */
+  pausedByAway?: boolean;
 }
 
 export const INITIAL_CONTROLLER_STATE: HardwareControllerState = {
@@ -146,6 +161,8 @@ export const INITIAL_CONTROLLER_STATE: HardwareControllerState = {
   awaySince: null,
   stoppedByHand: false,
   sessionActive: false,
+  manualSession: false,
+  pausedByAway: false,
 };
 
 /** What the reducer wants done, expressed in the app's own vocabulary. */
@@ -156,6 +173,10 @@ export interface SessionSnapshot {
   isRunning: boolean;
   /** A session exists (running or paused) rather than a clean slate. */
   hasSession: boolean;
+  /** False until the window has actually loaded the timer. Before that
+   *  `hasSession` is a guess, and adopting a session on a guess would flag a
+   *  perfectly ordinary desk-started session as hand-started. */
+  ready?: boolean;
 }
 
 export interface HardwareInput {
@@ -197,6 +218,14 @@ export function reduceHardware(
     // resumed is not terminated a moment later by the sensor.
     next.armingUntil = null;
     next.awaySince = null;
+    next.pausedByAway = false;
+    // A toggle from the desk that begins a session is a desk-started session,
+    // and it clears any earlier "I am done" for the same reason arriving does.
+    if (!session.hasSession) {
+      next.sessionActive = true;
+      next.manualSession = false;
+      next.stoppedByHand = false;
+    }
     actions.push('toggle');
     return { state: next, actions };
   }
@@ -209,6 +238,8 @@ export function reduceHardware(
     // this, still being sat at the desk would arm a fresh session moments later.
     next.stoppedByHand = true;
     next.sessionActive = false;
+    next.manualSession = false;
+    next.pausedByAway = false;
     if (session.hasSession) actions.push('terminate');
     return { state: next, actions };
   }
@@ -223,6 +254,8 @@ export function reduceHardware(
     // should not immediately arm another one. Cleared by leaving and returning.
     next.stoppedByHand = true;
     next.sessionActive = false;
+    next.manualSession = false;
+    next.pausedByAway = false;
     // No actions -- the app performed the stop itself before telling us.
     return { state: next, actions };
   }
@@ -244,15 +277,22 @@ export function reduceHardware(
 
       if (session.isRunning) {
         // Already working; nothing to do beyond cancelling the timeout above.
+        next.pausedByAway = false;
       } else if (session.hasSession && wasAway) {
-        // Came back within the grace window -- pick the session back up.
-        actions.push('resume');
+        // Came back within the grace window. Only resume what the sensor itself
+        // paused: a session you paused by hand before getting up was paused on
+        // purpose, and sitting down again is not a request to un-do that.
+        if (state.pausedByAway) {
+          next.pausedByAway = false;
+          actions.push('resume');
+        }
       } else if (!session.hasSession) {
         // Fresh arrival. The countdown gives you time to settle in, and is
         // cancellable by leaving again before it fires.
         if (settings.armSeconds <= 0) {
           actions.push('start');
           next.sessionActive = true;
+          next.manualSession = false;
         } else {
           next.armingUntil = now + settings.armSeconds * 1000;
         }
@@ -261,9 +301,18 @@ export function reduceHardware(
       // Standing up during the countdown means you were not settling in after
       // all, so nothing should start.
       next.armingUntil = null;
-      if (session.isRunning && settings.awayPauseEnabled) {
+      // Off means the desk keeps its hands off a session you started yourself:
+      // no pause, and no absence countdown either.
+      const ignored = !settings.manualFollowsSensor && Boolean(state.manualSession);
+      if (!ignored && settings.awayPauseEnabled && session.hasSession) {
+        // The absence clock starts because you left, not because something was
+        // paused. Anchoring it to the pause meant a session that was already
+        // paused when you walked away sat there for the rest of the day.
         next.awaySince = now;
-        actions.push('pause');
+        if (session.isRunning) {
+          next.pausedByAway = true;
+          actions.push('pause');
+        }
       }
     }
     return { state: next, actions };
@@ -275,6 +324,23 @@ export function reduceHardware(
   const wasSessionActive = Boolean(state.sessionActive);
   if (session.hasSession) {
     next.sessionActive = true;
+
+    // A session appeared that this controller did not start: the on-screen
+    // button, the system-wide hotkey, the phone. It is adopted rather than
+    // ignored, because "the sensor only governs sessions the sensor started"
+    // is exactly the split that made a hand-started timer run on undisturbed
+    // after you got up and walked off. Adopting it also retires the stale "I
+    // stopped that one by hand", which would otherwise keep every later
+    // session from chaining.
+    //
+    // Gated on `ready`: before the timer has loaded, hasSession is a guess,
+    // and a guess here would brand an ordinary desk-started session as manual.
+    if (!wasSessionActive && session.ready !== false) {
+      next.manualSession = true;
+      next.stoppedByHand = false;
+      next.pausedByAway = false;
+      next.armingUntil = null;
+    }
   }
 
   // Session chaining: a session was active and has now ended on its own
@@ -282,10 +348,14 @@ export function reduceHardware(
   const sessionJustFinished = wasSessionActive && !session.hasSession;
   if (sessionJustFinished) {
     next.sessionActive = false;
+    next.pausedByAway = false;
+    const wasManual = Boolean(state.manualSession);
+    next.manualSession = false;
     if (settings.sensorEnabled
         && settings.autoRestartEnabled
         && state.present
         && !state.stoppedByHand
+        && !(wasManual && !settings.manualFollowsSensor)
         && state.armingUntil === null) {
       const restartDelay = settings.autoRestartArmSeconds ?? 0;
       if (restartDelay <= 0) {
@@ -306,6 +376,7 @@ export function reduceHardware(
     if (!session.hasSession) {
       actions.push('start');
       next.sessionActive = true;
+      next.manualSession = false;
     }
   }
 
@@ -326,6 +397,8 @@ export function reduceHardware(
       next.awaySince = null;
     } else if (now - state.awaySince >= settings.awayTerminateSeconds * 1000) {
       next.awaySince = null;
+      next.pausedByAway = false;
+      next.manualSession = false;
       // Terminating leaves a clean slate, so returning to the desk arms a brand
       // new session rather than resuming the abandoned one.
       actions.push('terminate');
@@ -553,6 +626,12 @@ export function useHardwareController(opts: HardwareControllerOptions): {
               armingUntil: stamp(s?.armingUntil),
               awaySince: stamp(s?.awaySince),
               stoppedByHand: Boolean(s?.stoppedByHand),
+              // Dropped here once, which quietly broke chaining after every
+              // reload: the incoming state said "no session active", so the
+              // next tick read a live session as one nobody had started.
+              sessionActive: Boolean(s?.sessionActive),
+              manualSession: Boolean(s?.manualSession),
+              pausedByAway: Boolean(s?.pausedByAway),
             };
           }
         } catch (_) { /* keep whatever we had */ }

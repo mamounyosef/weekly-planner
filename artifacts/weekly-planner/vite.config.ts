@@ -11,6 +11,7 @@ import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 // reimplemented here: the board posts raw centimetres and this is the only
 // place that decides what they mean, so there must be exactly one copy of it.
 import { createPresenceFilter, coerceSensorFilterConfig } from './src/lib/sensorFilter';
+import { createHardwareBridge } from './src/lib/hardwareBridge';
 import {
   loadAccessConfig,
   getUserDbPaths,
@@ -24,6 +25,8 @@ import {
   SESSION_MAX_AGE_SECONDS,
   type AppUser,
 } from './server-user-db';
+import { createNotificationEngine } from './notification-engine';
+import { createFunnelWatchdog } from './funnel-watchdog';
 
 // Keep the persisted shortcut migration in step with src/lib/shortcuts.ts.
 // This server-side copy also lets the windowless Windows hotkey helper see the
@@ -546,6 +549,17 @@ export default defineConfig({
               if (registration.username === username) delete registration.username;
             }
           };
+
+          // The one endpoint that answers before any authentication, so a device
+          // that cannot sign in can still be asked the only question that
+          // matters: is this a network fault or a wrong password? Sign-in used
+          // to fail with a single opaque line, and the real cause (the phone's
+          // network, not the server) took a day to find.
+          server.middlewares.use('/api/ping', (req, res) => {
+            res.setHeader('Content-Type', 'application/json');
+            res.setHeader('Cache-Control', 'no-store');
+            res.end(JSON.stringify({ ok: true, at: Date.now() }));
+          });
 
           // ── Multi-User Session Authentication Endpoints ──────────────────
           server.middlewares.use('/api/auth/me', async (req, res) => {
@@ -2731,6 +2745,208 @@ export default defineConfig({
           }
         });
 
+        // ── Notifications ────────────────────────────────────────────────────
+        // The engine lives in the server, not in a page, so a reminder still
+        // fires with every planner window closed. Delivery goes out over three
+        // independent transports (Windows toast, Web Push, and the shared store
+        // that open windows read over db-stream), and read state is shared, so
+        // dealing with something on the phone clears it on the PC too.
+        {
+          const rootDir = path.resolve(import.meta.dirname, '..', '..');
+
+          const notifications = createNotificationEngine({
+            rootDir,
+            listUsers: async () => (await loadAccessConfig(rootDir)).users.map(u => u.username),
+            ensureUser: (username: string) => ensureUserDb(rootDir, username),
+          });
+          notifications.start();
+
+          // The public link is what the phone depends on, and it can be taken
+          // down by things outside this app entirely. Watch it and put it back.
+          const funnelWatchdog = createFunnelWatchdog({
+            rootDir,
+            port: Number(server.config.server.port) || 5173,
+          });
+          funnelWatchdog.start();
+
+          const readBody = (req: any): Promise<any> => new Promise(resolve => {
+            let body = '';
+            req.on('data', (chunk: any) => { body += chunk; });
+            req.on('end', () => {
+              try { resolve(body ? JSON.parse(body) : {}); } catch { resolve({}); }
+            });
+            req.on('error', () => resolve({}));
+          });
+
+          const sendJson = (res: any, value: unknown, status = 200) => {
+            res.statusCode = status;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(value));
+          };
+
+          // The Windows toast agent has no session cookie: it is a separate
+          // process reacting to a button press. It is trusted only when the
+          // request comes from this machine AND carries the token the engine
+          // generated, which never leaves the local database directory.
+          const isLoopback = (req: any): boolean => {
+            const addr = String(req.socket?.remoteAddress || '');
+            return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+          };
+
+          server.middlewares.use('/api/notifications/agent-action', async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const body = await readBody(req);
+            const token = await notifications.getAgentToken();
+            if (!isLoopback(req) || !body?.token || body.token !== token) {
+              return sendJson(res, { error: 'Forbidden' }, 403);
+            }
+            const { users } = await loadAccessConfig(rootDir);
+            const username = users.find(u => u.username === body.user)?.username ?? users[0]?.username;
+            if (!username) return sendJson(res, { error: 'No user' }, 400);
+            try {
+              const { store } = await notifications.applyAction(username, {
+                action: body.action,
+                keys: Array.isArray(body.keys) ? body.keys : [],
+                minutes: body.minutes,
+                deviceId: body.deviceId || 'windows-toast',
+              });
+              sendJson(res, { success: true, updatedAt: store.updatedAt });
+            } catch (err) {
+              sendJson(res, { error: String((err as Error)?.message || err) }, 500);
+            }
+          });
+
+          server.middlewares.use('/api/notifications/action', async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const body = await readBody(req);
+            try {
+              const { store } = await notifications.applyAction(auth.user.username, {
+                action: body.action,
+                keys: Array.isArray(body.keys) ? body.keys : undefined,
+                minutes: body.minutes,
+                deviceId: body.deviceId,
+              });
+              sendJson(res, { success: true, store });
+            } catch (err) {
+              sendJson(res, { error: String((err as Error)?.message || err) }, 500);
+            }
+          });
+
+          // The next couple of days of reminders, so the phone can still alert
+          // with this machine switched off. Nothing already delivered is
+          // included, which is what stops the same reminder arriving twice.
+          server.middlewares.use('/api/notifications/schedule', async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            // Every open planner window refreshes its offline plan periodically,
+            // which keeps this machine's list of local accounts fresh even when
+            // the live stream means nothing else is being polled.
+            if (isLoopback(req)) notifications.markDesktopUser(auth.user.username);
+            const hours = Number(new URL(req.url || '', 'http://x').searchParams.get('hours')) || 30;
+            try {
+              sendJson(res, await notifications.upcomingFor(auth.user.username, hours));
+            } catch (err) {
+              sendJson(res, { error: String((err as Error)?.message || err) }, 500);
+            }
+          });
+
+          // A device reporting what it fired by itself while offline.
+          server.middlewares.use('/api/notifications/local-fired', async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const body = await readBody(req);
+            try {
+              await notifications.recordLocallyFired(
+                auth.user.username,
+                Array.isArray(body.keys) ? body.keys : [],
+                body.deviceId,
+              );
+              sendJson(res, { success: true });
+            } catch (err) {
+              sendJson(res, { error: String((err as Error)?.message || err) }, 500);
+            }
+          });
+
+          server.middlewares.use('/api/notifications/health', async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const engineHealth = await notifications.health(auth.user.username);
+            sendJson(res, { ...engineHealth, funnel: funnelWatchdog.health() });
+          });
+
+          server.middlewares.use('/api/notifications/test', async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const body = await readBody(req);
+            try {
+              const rec = await notifications.sendTest(
+                auth.user.username,
+                body?.priority === 'critical' ? 'critical' : 'normal',
+              );
+              sendJson(res, { success: true, key: rec.key });
+            } catch (err) {
+              sendJson(res, { error: String((err as Error)?.message || err) }, 500);
+            }
+          });
+
+          server.middlewares.use('/api/push/key', async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, { error: 'Method not allowed' }, 405);
+            sendJson(res, { publicKey: await notifications.getVapidPublicKey() });
+          });
+
+          server.middlewares.use('/api/push/subscribe', async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const body = await readBody(req);
+            if (!body?.endpoint || !body?.keys?.p256dh || !body?.keys?.auth) {
+              return sendJson(res, { error: 'Malformed subscription' }, 400);
+            }
+            const subs = await notifications.savePushSubscription(auth.user.username, {
+              endpoint: String(body.endpoint),
+              keys: { p256dh: String(body.keys.p256dh), auth: String(body.keys.auth) },
+              label: typeof body.label === 'string' ? body.label.slice(0, 80) : undefined,
+              deviceId: typeof body.deviceId === 'string' ? body.deviceId.slice(0, 80) : undefined,
+              userAgent: typeof body.userAgent === 'string' ? body.userAgent.slice(0, 200) : undefined,
+              local: isLoopback(req),
+            });
+            sendJson(res, { success: true, count: subs.length });
+          });
+
+          server.middlewares.use('/api/push/unsubscribe', async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            const body = await readBody(req);
+            const subs = await notifications.removePushSubscription(
+              auth.user.username,
+              String(body?.endpoint || body?.id || ''),
+            );
+            sendJson(res, { success: true, count: subs.length });
+          });
+
+          // Registered last: connect matches by prefix, so the specific routes
+          // above must claim their paths before this one sees them.
+          server.middlewares.use('/api/notifications', async (req, res, next) => {
+            const rest = (req.url || '/').split('?')[0];
+            if (rest !== '/' && rest !== '') return next();
+            if (req.method !== 'GET') return sendJson(res, { error: 'Method not allowed' }, 405);
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+            // Every planner window on this PC polls this. It is therefore the
+            // natural place to learn which account is sitting at this machine,
+            // which is what decides who may raise a Windows toast here.
+            if (isLoopback(req)) notifications.markDesktopUser(auth.user.username);
+            sendJson(res, await notifications.getStore(auth.user.username));
+          });
+        }
+
         server.middlewares.use('/api/settings', async (req, res, next) => {
           if (req.method !== 'GET' && req.method !== 'POST') return next();
           const auth = await requireAuth(req, res);
@@ -3001,6 +3217,7 @@ export default defineConfig({
             settings: 'settings.json',
             'focus-sessions': 'focus-sessions.json',
             tasks: 'tasks.json',
+            notifications: 'notifications.json',
           };
 
           res.writeHead(200, {
@@ -3188,8 +3405,8 @@ export default defineConfig({
         //
         // The firmware holds no logic at all: it posts raw button edges and
         // raw ultrasonic centimetres, and renders whatever display state it is
-        // handed. Presence is decided here, by the shared filter in
-        // src/lib/sensorFilter.ts -- on the PC, where the analysis can be as
+        // handed. Presence is decided in src/lib/sensorFilter.ts via
+        // src/lib/hardwareBridge.ts -- on the PC, where the analysis can be as
         // involved as it needs to be and can be tested without a board on the
         // desk. The windows then consume presence events and drive the session
         // through the app's own start/pause/terminate code, so a hardware
@@ -3200,66 +3417,7 @@ export default defineConfig({
         // database for no benefit.
         // ---------------------------------------------------------------
 
-        type HardwareEvent = { id: number; type: string; present?: boolean; distanceCm?: number; at: number };
-        const hwEvents: HardwareEvent[] = [];
-        let hwEventSeq = 0;
-
-        // What the ESP32's LCD should show. Pushed by whichever window owns the
-        // controller, so the LCD renders the app's own numbers rather than a
-        // second, independently-computed version of them.
-        let hwDisplay: Record<string, unknown> = { mode: 'idle', remainingSeconds: 0, todaySeconds: 0, sessionsToday: 0, armSeconds: 0 };
-        let hwDisplayAt = 0;
-
-        // Both windows poll the same events. Without arbitration a single
-        // button press would be acted on twice -- started by one window and
-        // immediately paused by the other. A short lease makes exactly one
-        // window the owner, and lets the widget take over within seconds if the
-        // main window is closed.
-        const HW_LEASE_MS = 6000;
-        let hwOwner: string | null = null;
-        let hwOwnerAt = 0;
-
-        // Sensor tuning, owned by the app's settings and fetched by the board.
-        // Keeping it here rather than in firmware means the thresholds and
-        // filter parameters can be changed without plugging the ESP32 into the
-        // PC to reflash it. Defaults match the firmware's own fallbacks.
-        let hwConfig: Record<string, unknown> = {
-          ...coerceSensorFilterConfig(null),
-          sampleIntervalMs: 100, calibrating: false, announceOnConnect: true,
-        };
-
-        // The presence filter itself. One instance for the whole server: it is
-        // a property of the desk, not of a browser window, so it survives
-        // reloads and hand-offs between the main window and the widget, and
-        // both of them see exactly the same verdict.
-        const hwFilter = createPresenceFilter();
-
-        // Latest readout, for the settings page. Every number here comes out
-        // of the filter rather than off the wire, so what the page shows is
-        // what the decision was actually made on.
-        let hwLiveDistance: number | null = null;
-        let hwLiveRaw: number | null = null;
-        let hwLivePresent = false;
-        let hwLiveDiagnostics: Record<string, unknown> = {};
-        let hwLiveBtnA = 1;
-        let hwLiveBtnB = 1;
-        let hwLiveEdgesA = 0;
-        let hwLiveEdgesB = 0;
-        let hwLiveDiag: Record<string, unknown> = {};
-        let hwLiveAt = 0;
-        let hwLastAnnounceAt = 0;
-
-        // A short trail of what the controller actually decided and why. Two
-        // bugs here were diagnosed by guesswork and the guesses were wrong;
-        // this makes the sequence inspectable after the fact instead.
-        const hwLog: Array<Record<string, unknown>> = [];
-
-        // The controller's own state (are you here, is a countdown pending, how
-        // long have you been away). This lives on the server rather than in a
-        // window because it has to outlive both: a page reload or the lease
-        // moving to the widget would otherwise lose the fact that you walked
-        // away, so the session would neither terminate nor resume.
-        let hwController: Record<string, unknown> = { present: false, armingUntil: null, awaySince: null, stoppedByHand: false };
+        const hwBridge = createHardwareBridge();
 
         // --- app <- server: a heartbeat to drive the controller's poll loop ---
         //
@@ -3309,292 +3467,127 @@ export default defineConfig({
             req.on('end', () => resolve(body));
           });
 
-          const json = (payload: unknown) => {
+          const json = (payload: unknown, status = 200) => {
+            res.statusCode = status;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(payload));
           };
 
-          // --- ESP32 -> server: a button was pressed, or presence changed ---
           if (route === '/event' && req.method === 'POST') {
+            let parsed: unknown = {};
             try {
-              const parsed = JSON.parse((await readBody()) || '{}');
-              const type = String(parsed?.type ?? '');
-              if (!type) throw new Error('missing type');
-
-              // A batch of raw pings. Not queued as events: the queue is for
-              // decisions, and these are the evidence a decision gets made
-              // from. They go straight into the filter, which is the only
-              // thing on either side of the link that knows what they mean.
-              if (type === 'samples') {
-                const now = Date.now();
-                const dt = Math.max(20, Math.min(5000, Number(parsed?.dt) || 100));
-                const raw: unknown[] = Array.isArray(parsed?.cm) ? parsed.cm : [];
-
-                // Timestamps are reconstructed backwards from arrival rather
-                // than taken from the board's millis(): the two clocks share no
-                // epoch, and the board's would have to be re-synchronised after
-                // every reset. Network jitter shifts the whole batch by a few
-                // ms, which no dwell time here can notice.
-                let snap = hwFilter.snapshot;
-                const n = raw.length;
-                for (let i = 0; i < n; i++) {
-                  const v = Number(raw[i]);
-                  const at = now - (n - 1 - i) * dt;
-                  snap = hwFilter.push(Number.isFinite(v) && v > 0 ? v : null, at);
-                  // Emitted from inside the loop so a change that happened
-                  // three samples into the batch is reported at the moment it
-                  // happened, not at the end of the batch.
-                  if (snap.changed && snap.ready) {
-                    hwEvents.push({
-                      id: ++hwEventSeq,
-                      type: 'presence',
-                      present: snap.present,
-                      distanceCm: snap.distanceCm ?? undefined,
-                      at,
-                    });
-                    while (hwEvents.length > 50) hwEvents.shift();
-                  }
-                }
-
-                if (n > 0) {
-                  hwLiveDistance = snap.distanceCm;
-                  hwLiveRaw = snap.rawCm;
-                  hwLivePresent = snap.present;
-                  hwLiveDiagnostics = {
-                    ready: snap.ready,
-                    rawKind: snap.rawKind,
-                    support: Math.round(snap.support * 100) / 100,
-                    spreadCm: Math.round(snap.spreadCm * 10) / 10,
-                    nearRatio: Math.round(snap.nearRatio * 100) / 100,
-                    overRatio: Math.round(snap.overRatio * 100) / 100,
-                    masked: snap.masked,
-                    holding: snap.holding,
-                    holdingMs: Math.round(snap.holdingMs),
-                    awayProgressMs: Math.round(snap.awayProgressMs),
-                    awayNeedsMs: Math.round(snap.awayNeedsMs),
-                    arriveProgressMs: Math.round(snap.arriveProgressMs),
-                    arriveNeedsMs: Math.round(snap.arriveNeedsMs),
-                    windowCount: snap.windowCount,
-                    everEchoed: snap.everEchoed,
-                    forced: snap.forced,
-                  };
-                }
-
-                hwLiveBtnA = Number(parsed?.btnA);
-                hwLiveBtnB = Number(parsed?.btnB);
-                hwLiveEdgesA = Number(parsed?.edgesA);
-                hwLiveEdgesB = Number(parsed?.edgesB);
-                hwLiveDiag = {
-                  host: String(parsed?.host ?? ''),
-                  pollCode: Number(parsed?.pollCode),
-                  uiMode: String(parsed?.uiMode ?? ''),
-                  uiValid: Boolean(parsed?.uiValid),
-                };
-                hwLiveAt = now;
-                json({ success: true });
-                return;
-              }
-
-              const evt: HardwareEvent = { id: ++hwEventSeq, type, at: Date.now() };
-              if (typeof parsed.present === 'boolean') evt.present = parsed.present;
-              if (Number.isFinite(Number(parsed.distanceCm))) evt.distanceCm = Number(parsed.distanceCm);
-
-              hwEvents.push(evt);
-              // Unconsumed events are worthless once stale, and the queue must
-              // not grow without bound if no window is open to drain it.
-              while (hwEvents.length > 50) hwEvents.shift();
-
-              json({ success: true, id: evt.id });
+              const text = await readBody();
+              parsed = text ? JSON.parse(text) : {};
             } catch (_) {
-              res.statusCode = 400;
-              json({ error: 'Bad hardware event' });
+              json({ error: 'Bad hardware event' }, 400);
+              return;
             }
+            const out = hwBridge.handleEvent(parsed);
+            json(out.body, out.status);
             return;
           }
 
-          // --- app -> server: drain events newer than the last one seen ---
           if (route === '/events' && req.method === 'GET') {
             const { users } = await loadAccessConfig(rootDir);
             const authUser = getRequestUser(req, users);
-            if (!authUser) {
-              json({ events: [], latest: 0 });
+            const since = Number(url.searchParams.get('since') ?? 0) || 0;
+            const out = hwBridge.getEvents(since, Boolean(authUser));
+            json(out.body, out.status);
+            return;
+          }
+
+          if (route === '/state' && req.method === 'GET') {
+            const out = hwBridge.getState();
+            json(out.body, out.status);
+            return;
+          }
+
+          if (route === '/state' && req.method === 'POST') {
+            let parsed: unknown = {};
+            try {
+              const text = await readBody();
+              parsed = text ? JSON.parse(text) : {};
+            } catch (_) {
+              json({ error: 'Bad hardware state' }, 400);
               return;
             }
-            const since = Number(url.searchParams.get('since') ?? 0) || 0;
-            json({ events: hwEvents.filter(e => e.id > since), latest: hwEventSeq });
-
-            // since=0 is a window opening for the first time. It deliberately
-            // does not replay the backlog (acting on a ten-minute-old presence
-            // change would pause a session that is running fine), so a desk
-            // that was already occupied before the PC finished booting would
-            // otherwise start nothing until you got up and sat back down.
-            // Queued *after* responding, so the newcomer picks it up on its
-            // next poll rather than in the batch it is about to discard.
-            const announce = Boolean(hwConfig.announceOnConnect);
-            const nowAt = Date.now();
-            if (since === 0 && announce && hwFilter.snapshot.ready && nowAt - hwLastAnnounceAt > 10000) {
-              hwLastAnnounceAt = nowAt;
-              hwEvents.push({
-                id: ++hwEventSeq,
-                type: 'presence',
-                present: hwFilter.snapshot.present,
-                distanceCm: hwFilter.snapshot.distanceCm ?? undefined,
-                at: nowAt,
-              });
-              while (hwEvents.length > 50) hwEvents.shift();
-            }
+            const out = hwBridge.postState(parsed);
+            json(out.body, out.status);
             return;
           }
 
-          // --- ESP32 <- server: what to draw on the LCD ---
-          if (route === '/state' && req.method === 'GET') {
-            // A display that stopped being refreshed means no window is driving
-            // the controller, which the firmware shows as "not working".
-            const fresh = Date.now() - hwDisplayAt < HW_LEASE_MS;
-            json(fresh ? hwDisplay : { mode: 'offline', remainingSeconds: 0, todaySeconds: 0, sessionsToday: 0, armSeconds: 0 });
-            return;
-          }
-
-          // --- app -> server: publish the numbers the LCD should mirror ---
-          if (route === '/state' && req.method === 'POST') {
-            try {
-              const parsed = JSON.parse((await readBody()) || '{}');
-              hwDisplay = {
-                mode: ['idle', 'arming', 'running', 'paused'].includes(String(parsed?.mode)) ? String(parsed.mode) : 'idle',
-                remainingSeconds: Math.max(0, Math.floor(Number(parsed?.remainingSeconds) || 0)),
-                todaySeconds: Math.max(0, Math.floor(Number(parsed?.todaySeconds) || 0)),
-                sessionsToday: Math.max(0, Math.floor(Number(parsed?.sessionsToday) || 0)),
-                armSeconds: Math.max(0, Math.floor(Number(parsed?.armSeconds) || 0)),
-              };
-              hwDisplayAt = Date.now();
-              json({ success: true });
-            } catch (_) {
-              res.statusCode = 400;
-              json({ error: 'Bad hardware state' });
-            }
-            return;
-          }
-
-          // --- ESP32 <- server: sensor tuning to apply at runtime ---
           if (route === '/config' && req.method === 'GET') {
-            json(hwConfig);
+            const out = hwBridge.getConfig();
+            json(out.body, out.status);
             return;
           }
 
-          // --- app -> server: publish sensor tuning from settings ---
           if (route === '/config' && req.method === 'POST') {
+            let parsed: unknown = {};
             try {
-              const parsed = JSON.parse((await readBody()) || '{}');
-              // Already validated and clamped by coerceHardwareSettings before
-              // being sent; stored as-is so the firmware sees exactly what the
-              // settings page shows.
-              const filterCfg = coerceSensorFilterConfig(parsed);
-              hwConfig = {
-                ...filterCfg,
-                sampleIntervalMs: Math.max(40, Math.min(2000, Number(parsed?.sampleIntervalMs) || 100)),
-                calibrating: Boolean(parsed?.calibrating),
-                announceOnConnect: Boolean(parsed?.announceOnConnect),
-              };
-              // Applied live. The readings already in the window stay -- they
-              // are still true -- but every dwell timer restarts, since a timer
-              // part-way to expiry was counting against a rule that has gone.
-              hwFilter.configure(filterCfg);
-              json({ success: true });
+              const text = await readBody();
+              parsed = text ? JSON.parse(text) : {};
             } catch (_) {
-              res.statusCode = 400;
-              json({ error: 'Bad hardware config' });
+              json({ error: 'Bad hardware config' }, 400);
+              return;
             }
+            const out = hwBridge.postConfig(parsed);
+            json(out.body, out.status);
             return;
           }
 
-          // --- app <- server: latest sensor reading ---
           if (route === '/live' && req.method === 'GET') {
-            const fresh = Date.now() - hwLiveAt < 4000;
-            json({
-              // The believed distance, i.e. the dominant cluster's centre --
-              // this is the number the decision was actually made on. rawCm is
-              // the last unprocessed ping alongside it, so a placement problem
-              // (the raw number thrashing) reads differently from a threshold
-              // problem (a steady raw number on the wrong side of the line).
-              distanceCm: fresh ? hwLiveDistance : null,
-              rawCm: fresh ? hwLiveRaw : null,
-              present: fresh ? hwLivePresent : null,
-              filter: fresh ? hwLiveDiagnostics : null,
-              btnA: fresh ? hwLiveBtnA : null,
-              btnB: fresh ? hwLiveBtnB : null,
-              edgesA: fresh ? hwLiveEdgesA : null,
-              edgesB: fresh ? hwLiveEdgesB : null,
-              diag: fresh ? hwLiveDiag : null,
-              fresh,
-              ageMs: hwLiveAt ? Date.now() - hwLiveAt : null,
-            });
+            const out = hwBridge.getLive();
+            json(out.body, out.status);
             return;
           }
 
-          // --- decision trail, for diagnosing the controller after the fact ---
           if (route === '/log' && req.method === 'POST') {
+            let parsed: unknown = {};
             try {
-              const parsed = JSON.parse((await readBody()) || '{}');
-              hwLog.push({ at: Date.now(), ...parsed });
-              while (hwLog.length > 200) hwLog.shift();
-              json({ success: true });
+              const text = await readBody();
+              parsed = text ? JSON.parse(text) : {};
             } catch (_) {
-              res.statusCode = 400;
-              json({ error: 'Bad log entry' });
+              json({ error: 'Bad log entry' }, 400);
+              return;
             }
+            const out = hwBridge.postLog(parsed);
+            json(out.body, out.status);
             return;
           }
 
           if (route === '/log' && req.method === 'GET') {
-            json({ entries: hwLog });
+            const out = hwBridge.getLog();
+            json(out.body, out.status);
             return;
           }
 
-          // --- controller state, shared across windows and reloads ---
           if (route === '/controller' && req.method === 'GET') {
-            json(hwController);
+            const out = hwBridge.getController();
+            json(out.body, out.status);
             return;
           }
 
           if (route === '/controller' && req.method === 'POST') {
+            let parsed: unknown = {};
             try {
-              const parsed = JSON.parse((await readBody()) || '{}');
-              // Must test the value itself, not Number(value): Number(null) is
-              // 0, which is finite, so "no timer set" came back as a timestamp
-              // in 1970 -- instantly older than any timeout, which terminated
-              // sessions the moment they paused.
-              const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
-              hwController = {
-                present: Boolean(parsed?.present),
-                armingUntil: num(parsed?.armingUntil),
-                awaySince: num(parsed?.awaySince),
-                stoppedByHand: Boolean(parsed?.stoppedByHand),
-              };
-              json({ success: true });
+              const text = await readBody();
+              parsed = text ? JSON.parse(text) : {};
             } catch (_) {
-              res.statusCode = 400;
-              json({ error: 'Bad controller state' });
+              json({ error: 'Bad controller state' }, 400);
+              return;
             }
+            const out = hwBridge.postController(parsed);
+            json(out.body, out.status);
             return;
           }
 
-          // --- app: which window owns the controller right now? ---
           if (route === '/claim' && req.method === 'POST') {
             const { users } = await loadAccessConfig(rootDir);
             const authUser = getRequestUser(req, users);
-            if (!authUser) {
-              json({ owner: false });
-              return;
-            }
             const key = url.searchParams.get('key') ?? '';
-            const now = Date.now();
-            if (!hwOwner || hwOwner === key || now - hwOwnerAt > HW_LEASE_MS) {
-              hwOwner = key;
-              hwOwnerAt = now;
-              json({ owner: true });
-            } else {
-              json({ owner: false });
-            }
+            const out = hwBridge.claim(key, Boolean(authUser));
+            json(out.body, out.status);
             return;
           }
 
@@ -3615,11 +3608,7 @@ export default defineConfig({
           }
           lastToggleAt = nowMs;
 
-          const armingUntil = hwController.armingUntil;
-          if (typeof armingUntil === 'number' && Number.isFinite(armingUntil) && armingUntil > nowMs) {
-            hwController = { ...hwController, armingUntil: null, stoppedByHand: true };
-            hwEvents.push({ id: ++hwEventSeq, type: 'manual_stop', at: nowMs });
-            while (hwEvents.length > 50) hwEvents.shift();
+          if (hwBridge.cancelArming(nowMs)) {
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ success: true, cancelledArm: true }));
             return;

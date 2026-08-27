@@ -12,12 +12,14 @@ import {
   reduceHardware,
   INITIAL_CONTROLLER_STATE,
   DEFAULT_HARDWARE_SETTINGS,
+  coerceHardwareSettings,
   armingSecondsLeft,
   dropCrosstalkButtons,
   type HardwareAction,
   type HardwareControllerState,
   type HardwareSettings,
 } from './hardwareController';
+import { createHardwareBridge } from './hardwareBridge';
 
 /**
  * Stands in for the hook plus the app's focus timer. Ticks at the real poll
@@ -28,6 +30,7 @@ class Desk {
   state: HardwareControllerState = { ...INITIAL_CONTROLLER_STATE };
   isRunning = false;
   hasSession = false;
+  ready = true;
   t = 1_700_000_000_000;
   actions: string[] = [];
   settings: HardwareSettings;
@@ -56,7 +59,7 @@ class Desk {
     const r = reduceHardware(
       this.state,
       { kind, present },
-      { isRunning: this.isRunning, hasSession: this.hasSession },
+      { isRunning: this.isRunning, hasSession: this.hasSession, ready: this.ready },
       this.settings,
       this.t,
     );
@@ -74,6 +77,20 @@ class Desk {
       this.run('tick');
     }
   }
+
+  /** You start or resume the timer yourself: the on-screen button, the
+   *  system-wide hotkey, the phone. Nothing is reported to the controller --
+   *  the session simply appears, exactly as it does in the real app. */
+  handStart() { this.isRunning = true; this.hasSession = true; }
+
+  /** You pause it yourself. Also unannounced. */
+  handPause() { this.isRunning = false; }
+
+  /** You stop it yourself. The app reports this one. */
+  handStop() { this.isRunning = false; this.hasSession = false; this.event('manual_stop'); }
+
+  /** The planned time runs out and the app logs the session. */
+  sessionEnds() { this.isRunning = false; this.hasSession = false; }
 
   /** A page reload, or the lease moving to the other window. */
   handOff() {
@@ -548,5 +565,408 @@ section('Button crosstalk rejection');
   check('cancel survives a reload / lease hand-off', !d.hasSession, d.actions.join(','));
 }
 
+// ── sessions the desk did not start ──────────────────────────────────────────
+// The reported bug: stop a session by hand, start a fresh one by hand, and the
+// desk ignored it completely -- walking away neither paused nor ended it.
+section('Hand-started sessions');
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  check('desk started a session', d.isRunning);
+  d.handStop();                       // stopped and terminated by hand
+  d.advance(2);
+  check('nothing running after a hand stop', !d.hasSession);
+
+  d.handStart();                      // started again by hand, sensor told nothing
+  d.advance(2);
+  d.event('presence', false); d.advance(1);
+  check('hand-started session pauses when you leave', d.paused, `running=${d.isRunning}`);
+  d.advance(125);
+  check('hand-started session ends after the away timeout', !d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.handStop(); d.advance(2);
+  d.handStart(); d.advance(2);
+  d.sessionEnds();                    // ran to completion while sat there
+  d.advance(2);
+  check('a hand-started session still chains into the next', d.isRunning, `running=${d.isRunning}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.event('presence', false); d.advance(60);
+  d.event('presence', true); d.advance(2);   // back, resumed
+  d.handPause();                              // paused by hand, still sitting there
+  d.advance(2);
+  d.event('presence', false); d.advance(125);
+  check('a hand-paused session still ends after the away timeout', !d.hasSession, `hasSession=${d.hasSession}`);
+}
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.handPause(); d.advance(2);
+  d.event('presence', false); d.advance(30);
+  d.event('presence', true); d.advance(2);
+  check('returning does not un-do a pause you made yourself', !d.isRunning, `running=${d.isRunning}`);
+  check('...and the session is still there', d.hasSession);
+}
+{
+  const d = new Desk({ manualFollowsSensor: false });
+  d.handStart(); d.advance(2);
+  d.event('presence', false); d.advance(200);
+  check('preference off: a hand-started session is left alone', d.isRunning, `running=${d.isRunning}`);
+}
+{
+  const d = new Desk({ manualFollowsSensor: false });
+  d.event('presence', true); d.advance(32);
+  d.event('presence', false); d.advance(1);
+  check('preference off: a desk-started session still pauses', d.paused);
+}
+
+// ── chaining must survive a reload ───────────────────────────────────────────
+section('Chaining across a hand-off');
+{
+  const d = new Desk();
+  d.event('presence', true); d.advance(32);
+  d.handOff();                        // reload / widget takes the lease
+  d.advance(2);
+  d.sessionEnds();
+  d.advance(2);
+  check('the next session still chains after a hand-off', d.isRunning, `running=${d.isRunning}`);
+}
+
+// ── a session already in progress when a window opens ────────────────────────
+{
+  const d = new Desk();
+  d.isRunning = true; d.hasSession = true; d.ready = false;   // not loaded yet
+  d.advance(3);
+  d.ready = true;
+  d.advance(2);
+  d.sessionEnds();
+  d.advance(2);
+  check('an unhydrated window does not invent a chained session', !d.isRunning, `running=${d.isRunning}`);
+}
+
+// ---------------------------------------------------------------------------
+// LAYER B — EXHAUSTIVE SCENARIO TEST MATRIX (ITEMS 1 - 15)
+// ---------------------------------------------------------------------------
+
+console.log('\n--- LAYER B: EXHAUSTIVE SCENARIO MATRIX ---');
+
+// --- B.1: reduceHardware pure reducer exhaustive permutations ---
+{
+  const testStates: HardwareControllerState[] = [
+    { ...INITIAL_CONTROLLER_STATE },
+    { ...INITIAL_CONTROLLER_STATE, present: true, sessionActive: true },
+    { ...INITIAL_CONTROLLER_STATE, present: false, awaySince: 1000, sessionActive: true, pausedByAway: true },
+    { ...INITIAL_CONTROLLER_STATE, present: true, armingUntil: 2000, stoppedByHand: false },
+    { ...INITIAL_CONTROLLER_STATE, present: true, stoppedByHand: true },
+  ];
+  const testInputs = [
+    { kind: 'tick' as const },
+    { kind: 'presence' as const, present: true },
+    { kind: 'presence' as const, present: false },
+    { kind: 'button_a' as const },
+    { kind: 'button_b' as const },
+    { kind: 'manual_stop' as const },
+  ];
+  const testSessions = [
+    { isRunning: false, hasSession: false, ready: true },
+    { isRunning: true, hasSession: true, ready: true },
+    { isRunning: false, hasSession: true, ready: true },
+  ];
+
+  let reducerSurvivesAll = true;
+  for (const st of testStates) {
+    for (const inp of testInputs) {
+      for (const sess of testSessions) {
+        const res = reduceHardware(st, inp, sess, DEFAULT_HARDWARE_SETTINGS, 1500);
+        if (!res || !res.state || !Array.isArray(res.actions)) reducerSurvivesAll = false;
+      }
+    }
+  }
+  check('reduceHardware evaluates all state/input/session permutations without error', reducerSurvivesAll);
+}
+
+// --- B.2: Countdown arming lifecycles ---
+{
+  // Sit down -> arms countdown
+  const d = new Desk({ armSeconds: 10 });
+  d.event('presence', true);
+  check('sitting down sets arming countdown', d.state.armingUntil !== null && d.state.armingUntil > d.t);
+
+  // Stand up during countdown -> cancels cleanly
+  d.advance(3);
+  d.event('presence', false);
+  check('standing up during countdown cancels arming', d.state.armingUntil === null && !d.isRunning);
+
+  // Sit down again, arming starts
+  d.event('presence', true);
+  check('sitting down again restarts countdown', d.state.armingUntil !== null);
+
+  // Hand toggle during countdown (manual_stop) -> cancels with stoppedByHand: true
+  d.advance(2);
+  d.event('manual_stop');
+  check('manual_stop during countdown cancels arming and sets stoppedByHand',
+    d.state.armingUntil === null && d.state.stoppedByHand === true && !d.isRunning);
+
+  // Leaving and returning clears stoppedByHand and arms countdown
+  d.event('presence', false);
+  d.advance(2);
+  d.event('presence', true);
+  check('leaving and returning clears stoppedByHand and arms countdown',
+    d.state.stoppedByHand === false && d.state.armingUntil !== null);
+
+  // Countdown expires while seated -> starts session
+  d.advance(11);
+  check('countdown expiration starts session', d.isRunning && d.hasSession && d.state.sessionActive === true);
+}
+
+// --- B.3: Auto-start disabled & instant start ---
+{
+  // sensorEnabled: false -> sitting down never sets armingUntil
+  const dNoSensor = new Desk({ sensorEnabled: false });
+  dNoSensor.event('presence', true);
+  dNoSensor.advance(5);
+  check('sensorEnabled: false ignores presence and never arms',
+    dNoSensor.state.armingUntil === null && !dNoSensor.isRunning);
+
+  // Button A starts immediately even with sensor disabled
+  dNoSensor.event('button_a');
+  check('button A starts session immediately when sensor is disabled', dNoSensor.isRunning);
+
+  // armSeconds: 0 -> starts immediately on sitting down
+  const dZeroArm = new Desk({ armSeconds: 0 });
+  dZeroArm.event('presence', true);
+  check('armSeconds: 0 starts session immediately upon sitting down',
+    dZeroArm.isRunning && dZeroArm.hasSession && dZeroArm.state.sessionActive === true);
+}
+
+// --- B.4: Auto-pause on departure ---
+{
+  // awayPauseEnabled: true -> departs during active session -> pauses immediately
+  const d = new Desk({ awayPauseEnabled: true, armSeconds: 0 });
+  d.event('presence', true);
+  check('session active', d.isRunning);
+  d.event('presence', false);
+  check('awayPauseEnabled: true pauses session immediately on departure',
+    !d.isRunning && d.hasSession && d.state.pausedByAway === true && d.state.awaySince !== null);
+
+  // awayPauseEnabled: false -> departs during active session -> keeps running
+  const dNoPause = new Desk({ awayPauseEnabled: false, armSeconds: 0 });
+  dNoPause.event('presence', true);
+  dNoPause.event('presence', false);
+  check('awayPauseEnabled: false keeps session running when user departs',
+    dNoPause.isRunning && dNoPause.hasSession);
+}
+
+// --- B.5: Auto-resume on return ---
+{
+  const d = new Desk({ armSeconds: 0, awayTerminateSeconds: 60 });
+  d.event('presence', true);
+  d.event('presence', false); // paused by away
+  check('paused on departure', !d.isRunning && d.state.pausedByAway === true);
+
+  // Return within away timeout -> auto resumes
+  d.advance(10); // 10s < 60s
+  d.event('presence', true);
+  check('returning within timeout auto-resumes session and clears awaySince',
+    d.isRunning && d.hasSession && d.state.pausedByAway === false && d.state.awaySince === null);
+}
+
+// --- B.6: Away timeout termination ---
+{
+  const d = new Desk({ armSeconds: 0, awayTerminateSeconds: 30 });
+  d.event('presence', true);
+  d.event('presence', false); // paused
+  check('paused', !d.isRunning && d.hasSession);
+
+  // Advance past awayTerminateSeconds (30s)
+  d.advance(35);
+  check('away timeout terminates abandoned session cleanly',
+    !d.isRunning && !d.hasSession && d.state.sessionActive === false);
+
+  // Returning now starts/arms a fresh session rather than resuming
+  d.event('presence', true);
+  check('returning after termination starts a fresh session', d.isRunning && d.hasSession);
+}
+
+// --- B.7: Manual override precedence (standing up to stretch) ---
+{
+  const d = new Desk({ armSeconds: 0 });
+  d.event('presence', true);
+  check('running', d.isRunning);
+
+  // User pauses manually while seated (e.g. stretch break)
+  d.handPause(); // manual pause
+  d.advance(2);
+  check('session paused manually', !d.isRunning && d.hasSession);
+
+  // User stands up (leaves desk) and comes back 10 seconds later
+  d.event('presence', false);
+  d.advance(10);
+  d.event('presence', true);
+  check('getting up and returning does NOT unpause a hand-paused session',
+    !d.isRunning && d.hasSession);
+
+  // Resuming by pressing button A resumes normally
+  d.event('button_a');
+  check('pressing button A resumes the hand-paused session', d.isRunning && d.hasSession);
+}
+
+// --- B.8: Long-break termination vs autoTerminate ---
+{
+  // awayPauseEnabled: false ignores away termination
+  const d = new Desk({ awayPauseEnabled: false, awayTerminateSeconds: 20 });
+  d.handStart();
+  d.event('presence', false);
+  d.advance(30);
+  check('when awayPauseEnabled is false, away timer does not terminate running session',
+    d.isRunning && d.hasSession);
+}
+
+// --- B.9: dropCrosstalkButtons electrical debouncing ---
+{
+  const t0 = 1000;
+  // Crosstalk: button_a followed 50ms later by button_b
+  const inputWithCrosstalk = [
+    { type: 'presence', present: true, at: t0 },
+    { type: 'button_a', at: t0 + 100 },
+    { type: 'button_b', at: t0 + 150 }, // crosstalk within 250ms -> dropped
+    { type: 'presence', present: true, at: t0 + 200 },
+  ];
+  const filtered = dropCrosstalkButtons(inputWithCrosstalk);
+  check('dropCrosstalkButtons drops button B occurring 50ms after button A',
+    filtered.length === 3 &&
+    filtered.some(e => e.type === 'button_a') &&
+    !filtered.some(e => e.type === 'button_b'));
+
+  // Legitimate double-tap of the SAME button is preserved
+  const doubleTap = [
+    { type: 'button_a', at: t0 },
+    { type: 'button_a', at: t0 + 100 },
+  ];
+  const filteredDouble = dropCrosstalkButtons(doubleTap);
+  check('repeated presses of the same button are preserved', filteredDouble.length === 2);
+
+  // Button presses separated by > 250ms are both preserved
+  const separated = [
+    { type: 'button_a', at: t0 },
+    { type: 'button_b', at: t0 + 300 },
+  ];
+  const filteredSep = dropCrosstalkButtons(separated);
+  check('button presses separated by > 250ms are both preserved', filteredSep.length === 2);
+}
+
+// --- B.10: Multi-window lease race & seamless hand-off ---
+{
+  const bridge = createHardwareBridge();
+  // Window 1 claims lease
+  const claim1 = bridge.claim('window-1', true);
+  check('window 1 acquires lease', claim1.body.owner === true);
+
+  // Window 1 writes state
+  bridge.postController({
+    present: true,
+    sessionActive: true,
+    awaySince: null,
+    stoppedByHand: false,
+  });
+
+  // Window 2 attempts claim and is denied
+  const claim2 = bridge.claim('window-2', true);
+  check('window 2 denied lease while window 1 active', claim2.body.owner === false);
+
+  // Simulate window 1 closing (time advances > HW_LEASE_MS)
+  const nowAfterLease = bridge.now() + 7000;
+  const claim2After = bridge.claim('window-2', true, nowAfterLease);
+  check('window 2 acquires lease after window 1 expires', claim2After.body.owner === true);
+
+  // Window 2 reads controller state and continues without loss
+  const inheritedState = bridge.getController().body as HardwareControllerState;
+  check('window 2 inherits controller state seamlessly',
+    inheritedState.present === true && inheritedState.sessionActive === true);
+}
+
+// --- B.11: Settings coercion (coerceHardwareSettings) ---
+{
+  const corruptSettings = {
+    enabled: 'yes',
+    buttonsEnabled: 1,
+    sensorEnabled: null,
+    armSeconds: -50,
+    awayTerminateSeconds: '999999',
+    sampleIntervalMs: 5,
+    enterCm: 50,
+    exitCm: 30, // inverted hysteresis
+  };
+  const coerced = coerceHardwareSettings(corruptSettings);
+  check('enabled invalid type falls back to default true', coerced.enabled === true);
+  check('armSeconds negative clamps to 0', coerced.armSeconds === 0);
+  check('awayTerminateSeconds huge clamps to 3600', coerced.awayTerminateSeconds === 3600);
+  check('sampleIntervalMs < 40 clamps to 40', coerced.sampleIntervalMs === 40);
+  check('enterCm and exitCm inverted hysteresis repaired in settings coercion', coerced.exitCm > coerced.enterCm);
+}
+
+// --- B.12: Display state generation ---
+{
+  // armingSecondsLeft helper
+  const stateArming: HardwareControllerState = { ...INITIAL_CONTROLLER_STATE, armingUntil: 10_000 };
+  check('armingSecondsLeft calculates correct seconds remaining', armingSecondsLeft(stateArming, 6500) === 4);
+  check('armingSecondsLeft returns 0 when armingUntil is null', armingSecondsLeft(INITIAL_CONTROLLER_STATE, 6500) === 0);
+}
+
+// --- B.13: Server-side controller state round-trip ---
+{
+  const bridge = createHardwareBridge();
+  const sampleState: HardwareControllerState = {
+    present: true,
+    armingUntil: 1700000050000,
+    awaySince: 1700000020000,
+    stoppedByHand: true,
+    sessionActive: true,
+    manualSession: true,
+    pausedByAway: true,
+  };
+  bridge.postController(sampleState);
+  const fetched = bridge.getController().body as HardwareControllerState;
+  let allEqual = true;
+  for (const k of Object.keys(sampleState) as Array<keyof HardwareControllerState>) {
+    if (fetched[k] !== sampleState[k]) allEqual = false;
+  }
+  check('all 7 HardwareControllerState fields survive JSON serialization/deserialization', allEqual);
+}
+
+// --- B.14: Whitelist completeness ---
+{
+  const bridge = createHardwareBridge();
+  const allKeys = Object.keys(INITIAL_CONTROLLER_STATE) as Array<keyof HardwareControllerState>;
+  const populated: Record<string, unknown> = {};
+  for (const k of allKeys) {
+    if (k === 'armingUntil' || k === 'awaySince') populated[k] = 123456789;
+    else populated[k] = true;
+  }
+  bridge.postController(populated);
+  const out = bridge.getController().body as Record<string, unknown>;
+  const missingKeys = allKeys.filter(k => out[k] === undefined);
+  check('server-side /controller whitelist covers 100% of INITIAL_CONTROLLER_STATE keys',
+    missingKeys.length === 0, `missing=${missingKeys.join(', ')}`);
+}
+
+// --- B.15: End-of-day rollover ---
+{
+  // Session running across midnight
+  const d = new Desk({ armSeconds: 0 });
+  d.t = 1_700_092_790_000; // 10s before midnight epoch
+  d.event('presence', true);
+  check('running before midnight', d.isRunning);
+
+  d.advance(30); // 30s advances across midnight
+  check('session continues running uninterrupted across midnight boundary', d.isRunning && d.hasSession);
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
 if (failures > 0) process.exitCode = 1;
+

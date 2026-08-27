@@ -31,13 +31,15 @@
 ## Test Architecture
 - TypeScript Check: `npx tsc --noEmit`
 - Production Bundle: `npx vite build`
-- Unit Test Suites:
-  - `npx tsx src/lib/backup.test.ts`
-  - `npx tsx src/lib/focusSessions.test.ts`
-  - `npx tsx src/lib/hardwareController.test.ts`
-  - `npx tsx src/lib/sensorFilter.test.ts`
-  - `npx tsx src/lib/recurrence.test.ts`
-  - `npx tsx src/lib/shortcuts.test.ts`
+- Unit & Simulation Test Suites:
+  - `npx tsx src/lib/sensorFilter.test.ts` (Layer A: Ultrasonic Acoustic Presence Filter)
+  - `npx tsx src/lib/hardwareController.test.ts` (Layer B: Client State Machine Reducer)
+  - `npx tsx src/lib/hardwareBridge.test.ts` (Layer C: Server REST Bridge & Lease Arbitration)
+  - `npx tsx src/lib/focusSessions.test.ts` (Layer D: Focus Timer Arithmetic & Crash Recovery)
+  - `npx tsx src/lib/deskIntegration.test.ts` (Layer E: End-to-End Simulation)
+  - `npx tsx src/lib/recurrence.test.ts` (RFC 5545 Recurrence Engine)
+  - `npx tsx src/lib/shortcuts.test.ts` (Keyboard Shortcuts & Hotkeys)
+  - `npx tsx src/lib/backup.test.ts` (Atomic Storage & Backup Engine)
 
 ## Coverage Thresholds
 - Tier 1: Feature Coverage (all components and API endpoints)
