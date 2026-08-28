@@ -45,8 +45,11 @@ const frostWash = (dark: boolean) => dark
  * Full-page ambient background. Sits behind everything, never takes pointer
  * events. Rendered identically by the planner and the settings page.
  */
-export function CanvasAmbient({ style, dark }: { style: SidebarStyle; dark: boolean }) {
+export function CanvasAmbient({ style, dark, lite }: { style: SidebarStyle; dark: boolean; lite?: boolean }) {
   const spec = AMBIENT_SPECS[style] ?? AMBIENT_SPECS['subtle-glow'];
+  if (lite) {
+    return <div className="fixed inset-0 pointer-events-none z-0" aria-hidden />;
+  }
   return (
     <div
       className="fixed inset-0 pointer-events-none z-0 overflow-hidden gpu-layer"

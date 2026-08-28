@@ -267,6 +267,29 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
   animation: now-dot-pulse 2.6s ease-in-out infinite;
   will-change: transform, opacity;
 }
+html[data-app-hidden] .now-dot-pulse {
+  animation: none !important;
+  will-change: auto;
+}
+@media (pointer: coarse), (max-width: 768px) {
+  .now-dot-pulse {
+    animation: none !important;
+    will-change: auto;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes grid-shimmer {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.85; }
+}
+.grid-shimmer {
+  animation: grid-shimmer 1.4s ease-in-out infinite;
+}
+html[data-app-hidden] .grid-shimmer {
+  animation: none;
+}
 
 /* Respect users who prefer less motion. */
 @media (prefers-reduced-motion: reduce) {
@@ -363,20 +386,21 @@ body {
 }
 
 @media (pointer: coarse), (max-width: 768px) {
-  /* Compositor layer promotion for silky 60/120 FPS scrolling without VRAM exhaustion */
+  /* Native scrolling — do NOT promote every nested scroller to its own layer
+     (that exhausts fill-rate on a weak GPU). The main calendar scroller
+     opts into a layer via .touch-scroll-main. */
   .touch-scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
     touch-action: pan-x pan-y;
-    transform: translateZ(0);
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
   }
   .touch-scroll-x {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
     overscroll-behavior-y: auto;
     touch-action: pan-x pan-y;
+  }
+  .touch-scroll-main {
     transform: translateZ(0);
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
@@ -412,6 +436,11 @@ body {
   }
   button, [role="button"], label[for] {
     transition: transform 60ms cubic-bezier(0.22, 1, 0.36, 1), opacity 60ms ease;
+  }
+
+  /* Do not animate shadows/backgrounds on chips while the page is scrolling */
+  [data-event="1"], .content-auto-task {
+    transition-property: transform, opacity !important;
   }
   button:not(:disabled):active,
   [role="button"]:not([aria-disabled="true"]):active {
@@ -491,8 +520,28 @@ body {
   to   { transform: translate3d(0, 0, 0); }
 }
 .animate-sheet-up {
-  animation: sheet-up 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  will-change: transform;
+  animation: sheet-up 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes scrim-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-scrim-in {
+  animation: scrim-in 80ms ease-out;
+}
+@keyframes fab-in {
+  from { opacity: 0; transform: translate3d(0, 8px, 0) scale(0.92); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+.animate-fab-in {
+  animation: fab-in 100ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes overlay-in {
+  from { opacity: 0; transform: translate3d(0, 4px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+.animate-overlay-in {
+  animation: overlay-in 100ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* The finger-sized minimum. Applied to icon buttons on touch devices so a

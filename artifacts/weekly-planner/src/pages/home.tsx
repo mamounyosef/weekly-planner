@@ -23,7 +23,7 @@ import {
 } from 'date-fns';
 import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
   FOCUS_EXCLUDED_DATES_KEY,
@@ -120,6 +120,8 @@ import {
 import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColor';
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
+import { FocusLiveCountdown, FocusLiveProgress, FocusLiveStartingLabel } from '@/components/FocusLiveBits';
+import { publishLiveClock } from '@/lib/liveClock';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
@@ -334,6 +336,44 @@ const DAY_END_KEY    = 'planner-dayend';
 const ACTIVE_TASK_LIST_KEY = 'planner-active-task-list';
 const HEADER_PX      = 56;
 const HEADER_COMPACT_PX = 28;
+
+const MOTION_ONLY = new Set([
+  'initial', 'animate', 'exit', 'transition', 'variants', 'custom', 'layout', 'layoutId',
+]);
+
+function splitMotion<T extends Record<string, unknown>>(props: T) {
+  const dom: Record<string, unknown> = {};
+  const motionRest: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(props)) {
+    if (MOTION_ONLY.has(k)) motionRest[k] = v;
+    else dom[k] = v;
+  }
+  return { dom, motionRest };
+}
+
+/** Phone: a plain div (no exit-clone). Desktop: framer-motion. */
+const ViewShell = React.forwardRef<HTMLDivElement, HTMLMotionProps<'div'> & { isPhone: boolean }>(
+  function ViewShell({ isPhone, children, className, style, ...rest }, ref) {
+    if (isPhone) {
+      const { dom } = splitMotion(rest as Record<string, unknown>);
+      return <div ref={ref} className={className} style={style as React.CSSProperties} {...dom}>{children as React.ReactNode}</div>;
+    }
+    return <motion.div ref={ref} className={className} style={style} {...rest}>{children}</motion.div>;
+  },
+);
+
+/** Phone editors slide with CSS; desktop keeps the popup spring. */
+const MenuShell = React.forwardRef<HTMLDivElement, HTMLMotionProps<'div'> & { isPhone: boolean }>(
+  function MenuShell({ isPhone, children, className, style, ...rest }, ref) {
+    if (isPhone) {
+      const restStyle = { ...(style ?? {}) };
+      delete restStyle.willChange;
+      const { dom } = splitMotion(rest as Record<string, unknown>);
+      return <div ref={ref} className={`${className ?? ''} animate-sheet-up`} style={restStyle as React.CSSProperties} {...dom}>{children as React.ReactNode}</div>;
+    }
+    return <motion.div ref={ref} className={className} style={style} {...rest}>{children}</motion.div>;
+  },
+);
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP  = 5;
 const DEFAULT_EVENT_MIN = 30; // default duration for a newly created event
@@ -1788,7 +1828,9 @@ export default function DailyPlanner() {
 
     if (isScrolledStateRef.current !== nextScrolled) {
       isScrolledStateRef.current = nextScrolled;
-      setIsScrolled(nextScrolled);
+      // Phone headers stay compact; skipping this setState is what keeps
+      // scrolling from rebuilding the whole calendar on every threshold cross.
+      if (!isPhoneRef.current) setIsScrolled(nextScrolled);
     }
   }, []);
 
@@ -2692,9 +2734,9 @@ export default function DailyPlanner() {
    * every drop and every dashed placeholder ~20 minutes too high.
    */
   const topBandsHeight =
-    (isScrolled ? HEADER_COMPACT_PX : HEADER_PX)
-    + (isScrolled && maxAllDayRowIndex === 0 ? 0 : allDayHeight)
-    + (isScrolled && maxTasksInAnyCol === 0 ? 0 : taskRowHeight)
+    (isPhone || isScrolled ? HEADER_COMPACT_PX : HEADER_PX)
+    + (!isPhone && isScrolled && maxAllDayRowIndex === 0 ? 0 : allDayHeight)
+    + (!isPhone && isScrolled && maxTasksInAnyCol === 0 ? 0 : taskRowHeight)
     + prayerRowHeight;
 
   // ── Scroll-aware sticky heights ──────────────────────────────────────────
@@ -2709,8 +2751,8 @@ export default function DailyPlanner() {
   const focusMiniEnabled = isTimelineView && !isPhone;
   const focusMiniBarH    = focusMiniEnabled && focusMiniMode === 'mini' ? 34 : 0;
   const stickyHeaderH  = isPhone ? HEADER_COMPACT_PX : (isScrolled ? HEADER_COMPACT_PX : HEADER_PX);
-  const stickyAllDayH  = isScrolled && !hasAnyAllDayEvents ? 0 : allDayHeight;
-  const stickyTasksH   = isScrolled && !hasAnyDatedTasks ? 0 : taskRowHeight;
+  const stickyAllDayH  = !isPhone && isScrolled && !hasAnyAllDayEvents ? 0 : allDayHeight;
+  const stickyTasksH   = !isPhone && isScrolled && !hasAnyDatedTasks ? 0 : taskRowHeight;
 
   // Month overview: full weeks covering the current month, each day resolved to the
   // events actually visible that week (recurring versions + single-week overrides).
@@ -3892,10 +3934,34 @@ export default function DailyPlanner() {
   useEffect(() => {
     const id = setInterval(() => {
       const now = Date.now();
+      const timer = focusTimerRef.current;
+      const running = timer.isRunning;
+      const hidden = document.visibilityState !== 'visible';
+      const settingsOpen = settingsRouteOpenRef.current;
+      const onTasks = mobileTabRef.current === 'tasks';
+
+      if (hidden || settingsOpen || onTasks) {
+        if (running && getFocusTimerElapsedSeconds(timer, now) >= timer.plannedSeconds) {
+          setNowTick(now);
+        }
+        return;
+      }
+
       setNowTick(prev => {
-        if (focusTimerRef.current.isRunning) return now;
+        // Desktop keeps a 1s Home tick while focus runs (hardware LCD).
+        // On the phone, only commit when the minute turns, analysis is open,
+        // or the session is about to complete — countdown leaves use liveClock.
+        if (running && !isPhoneRef.current) return now;
+        if (running && showFocusAnalysisRef.current) return now;
+        if (running) {
+          const elapsed = getFocusTimerElapsedSeconds(timer, now);
+          if (elapsed >= timer.plannedSeconds) return now;
+        }
         return Math.floor(prev / 60_000) === Math.floor(now / 60_000) ? prev : now;
       });
+      if (running && !settingsOpen && !onTasks) {
+        publishLiveClock(now);
+      }
     }, 1000);
 
     const onWake = () => {
@@ -4533,7 +4599,7 @@ export default function DailyPlanner() {
   };
 
   const stopFocus = () => {
-    completeFocusSession(focusElapsedSeconds);
+    completeFocusSession(getFocusTimerElapsedSeconds(focusTimerRef.current));
   };
 
   // ── ESP32 desk controller ──────────────────────────────────────────────────
@@ -4563,7 +4629,7 @@ export default function DailyPlanner() {
     },
     display: {
       mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',
-      remainingSeconds: focusRemainingSeconds,
+      remainingSeconds: Math.max(0, focusTimer.plannedSeconds - getFocusTimerElapsedSeconds(focusTimer)),
       todaySeconds: hwTodaySeconds,
       sessionsToday: hwSessionsToday,
       // The timer is the last thing to arrive from the server; until it has,
@@ -6855,7 +6921,7 @@ export default function DailyPlanner() {
       }}
     >
       {/* Outer side ambient canvas — see components/CanvasAmbient.tsx */}
-      <CanvasAmbient style={sidebarStyle} dark={darkMode} />
+      <CanvasAmbient style={sidebarStyle} dark={darkMode} lite={isPhone} />
       {/* â”€â”€ Content column + tasks panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           The tasks panel sits in normal flow beside the content rather than
           overlaying it, so opening it NARROWS the header, the focus banner and
@@ -7582,7 +7648,7 @@ export default function DailyPlanner() {
       {/* â”€â”€ Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <main
         ref={mainRef}
-        className={`relative flex-1 min-h-0 touch-scroll ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'} ${(calendarView === 'month' || calendarView === 'year') && !showFocusAnalysis ? 'flex flex-col' : ''}`}
+        className={`relative flex-1 min-h-0 touch-scroll ${isPhone ? 'touch-scroll-main' : ''} ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'} ${(calendarView === 'month' || calendarView === 'year') && !showFocusAnalysis ? 'flex flex-col' : ''}`}
         // Room for the phone's tab bar and the home indicator beneath it, so the
         // last event of the day isn't permanently hidden behind the Tasks button.
         style={{
@@ -7591,36 +7657,24 @@ export default function DailyPlanner() {
         }}
         onScroll={handleMainScroll}
       >
-        <AnimatePresence initial={false} mode={isPhone ? "popLayout" : "popLayout"}>
+        <AnimatePresence initial={false} mode={isPhone ? 'sync' : 'popLayout'}>
           {!showFocusAnalysis ? (
-            <motion.div
+            <ViewShell
+              isPhone={isPhone}
               key={`calendar-view-${calendarView}`}
-              initial={{
+              initial={isPhone ? false : {
                 opacity: 0,
-                x: swipeAnimDir === 'left' ? (isPhone ? 12 : 24) : swipeAnimDir === 'right' ? (isPhone ? -12 : -24) : 0,
+                x: swipeAnimDir === 'left' ? 24 : swipeAnimDir === 'right' ? -24 : 0,
               }}
-              animate={{
-                opacity: 1,
-                x: 0,
-              }}
-              exit={{
+              animate={{ opacity: 1, x: 0 }}
+              exit={isPhone ? undefined : {
                 opacity: 0,
-                x: swipeAnimDir === 'left' ? (isPhone ? -12 : -24) : swipeAnimDir === 'right' ? (isPhone ? 12 : 24) : 0,
+                x: swipeAnimDir === 'left' ? -24 : swipeAnimDir === 'right' ? 24 : 0,
               }}
               transition={{
-                duration: isPhone ? 0.08 : 0.14,
+                duration: 0.14,
                 ease: [0.16, 1, 0.3, 1],
               }}
-              style={{
-                willChange: 'transform, opacity',
-                transform: 'translate3d(0,0,0)',
-                backfaceVisibility: 'hidden',
-                WebkitBackfaceVisibility: 'hidden',
-              }}
-              // The 900px floor is a desktop guard against the toolbar wrapping
-              // into a mess; on a phone it would simply force a sideways scroll
-              // of the entire page, so a narrow screen drops it and tightens the
-              // padding — every pixel of width is a pixel of the day.
               className={isCompact ? 'w-full max-w-full px-1.5 py-2 flex flex-col min-h-0 flex-1' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
             >
           {/* ── Focus banner ────────────────────────────────────────────────
@@ -7644,7 +7698,7 @@ export default function DailyPlanner() {
                 <Target size={14} />
               </span>
               <span className="text-[16px] font-semibold tabular-nums leading-none" style={{ color: focusTimer.isRunning ? '#60a5fa' : menuText }}>
-                {hardwareArmSeconds > 0 ? `${hardwareArmSeconds}s` : formatCountdown(focusRemainingSeconds)}
+                {hardwareArmSeconds > 0 ? `${hardwareArmSeconds}s` : <FocusLiveCountdown timer={focusTimer} hardwareArmSeconds={hardwareArmSeconds} />}
               </span>
               <span
                 role="button"
@@ -7913,7 +7967,7 @@ export default function DailyPlanner() {
                       the LCD — so they never show different things. */}
                   {hardwareArmSeconds > 0
                     ? <span className="text-base font-semibold whitespace-nowrap" style={{ color: '#60a5fa' }}>Starting in {hardwareArmSeconds}s</span>
-                    : formatCountdown(focusRemainingSeconds)}
+                    : <FocusLiveStartingLabel timer={focusTimer} hardwareArmSeconds={0} />}
                   <AnimatePresence>
                     {focusCelebrate && (
                       <motion.span
@@ -7931,12 +7985,10 @@ export default function DailyPlanner() {
                   </AnimatePresence>
                 </motion.div>
                 <div className="flex-1 min-w-[80px] max-w-[220px] h-1.5 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
-                  <div
-                    className="h-full rounded-full transition-smooth duration-300"
-                    style={{
-                      width: `${focusProgressPct}%`,
-                      background: focusTimer.isRunning ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)',
-                    }}
+                  <FocusLiveProgress
+                    timer={focusTimer}
+                    runningColor="#60a5fa"
+                    idleColor={darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)'}
                   />
                 </div>
                 <button
@@ -8004,7 +8056,7 @@ export default function DailyPlanner() {
                 <button
                   type="button"
                   onClick={resetFocus}
-                  disabled={focusElapsedSeconds <= 0}
+                  disabled={!focusTimer.isRunning && focusElapsedSeconds <= 0}
                   className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
                   title="Reset focus timer"
                   style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub, opacity: focusElapsedSeconds <= 0 ? 0.4 : 1 }}
@@ -8014,7 +8066,7 @@ export default function DailyPlanner() {
                 <button
                   type="button"
                   onClick={stopFocusByHand}
-                  disabled={focusElapsedSeconds <= 0}
+                  disabled={!focusTimer.isRunning && focusElapsedSeconds <= 0}
                   className={`touch-target rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
                   title="Stop and log focus time"
                   style={{
@@ -8120,18 +8172,16 @@ export default function DailyPlanner() {
                       style={{ color: focusCelebrate ? '#4ade80' : focusTimer.isRunning ? '#60a5fa' : menuText }}
                       title="Focus countdown"
                     >
-                      {hardwareArmSeconds > 0 ? `${hardwareArmSeconds}s` : formatCountdown(focusRemainingSeconds)}
+                      {hardwareArmSeconds > 0 ? `${hardwareArmSeconds}s` : <FocusLiveCountdown timer={focusTimer} hardwareArmSeconds={hardwareArmSeconds} />}
                     </span>
                     <div
                       className="w-24 h-1.5 rounded-full overflow-hidden flex-shrink-0"
                       style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}
                     >
-                      <div
-                        className="h-full rounded-full transition-smooth duration-300"
-                        style={{
-                          width: `${focusProgressPct}%`,
-                          background: focusTimer.isRunning ? '#60a5fa' : darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)',
-                        }}
+                      <FocusLiveProgress
+                        timer={focusTimer}
+                        runningColor="#60a5fa"
+                        idleColor={darkMode ? 'rgba(255,255,255,0.30)' : 'rgba(0,0,0,0.28)'}
                       />
                     </div>
                     <button
@@ -8148,7 +8198,7 @@ export default function DailyPlanner() {
                     </button>
                     <button
                       onClick={stopFocusByHand}
-                      disabled={focusElapsedSeconds <= 0}
+                      disabled={!focusTimer.isRunning && focusElapsedSeconds <= 0}
                       className="h-6 px-2.5 rounded-md flex items-center justify-center text-[11px] font-semibold transition-smooth active:scale-[0.98] flex-shrink-0"
                       title="Stop and log focus time"
                       style={{
@@ -8213,54 +8263,36 @@ export default function DailyPlanner() {
           )}
             {isTimelineView ? (
               <div key="week-view-wrapper" className="w-full flex flex-col min-h-0">
-                <AnimatePresence initial={false} custom={direction} mode="sync">
-            <motion.div
-              // Day view slides per day; week view per week; custom view per range.
+            <ViewShell
+              isPhone={isPhone}
+              ref={gridCardRef}
               key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : isCustomView ? `c:${weekStart.toISOString()}:${customFrom}:${customTo}` : `w:${weekStart.toISOString()}`}
               custom={direction}
               variants={{
-                enter: (d: number) => (d !== 0 ? { x: d > 0 ? (isPhone ? 8 : 12) : (isPhone ? -8 : -12), opacity: 0 } : { opacity: 0 }),
+                enter: (d: number) => (d !== 0 ? { x: d > 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
                 center: { x: 0, opacity: 1 },
-                exit: (d: number) => (d !== 0 ? { x: d < 0 ? (isPhone ? 8 : 12) : (isPhone ? -8 : -12), opacity: 0 } : { opacity: 0 }),
+                exit: (d: number) => (d !== 0 ? { x: d < 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
               }}
               initial="enter"
               animate="center"
-              exit="exit"
-              transition={isPhone ? {
-                x: { duration: 0.08, ease: [0.22, 1, 0.36, 1] },
-                opacity: { duration: 0.06, ease: 'easeOut' },
-              } : {
+              transition={{
                 x: { type: 'spring', stiffness: 2600, damping: 75, mass: 0.15 },
                 opacity: { duration: 0.04, ease: 'easeOut' },
               }}
-              ref={gridCardRef}
-              className={`flex border border-border/60 rounded-xl shadow-md relative z-10 gpu-layer ${
+              className={`flex border border-border/60 rounded-xl shadow-md relative z-10 ${isPhone ? '' : 'gpu-layer'} ${
                 scrollsSideways ? 'overflow-x-auto overflow-y-visible no-scrollbar touch-scroll-x' : 'overflow-clip'
               }`}
               style={{
                 background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
-                // Snap each day column under the finger when the week scrolls
-                // sideways, so a swipe lands on a day rather than between two.
                 scrollSnapType: scrollsSideways ? 'x proximity' : undefined,
-                // The hour gutter is sticky, so it floats OVER the columns. Without
-                // this a snap landed the day flush at scroll offset 0 — i.e. hidden
-                // underneath the gutter — and the day you swiped to was the one you
-                // couldn't read.
                 scrollPaddingLeft: scrollsSideways ? timeAxisW : undefined,
               }}
             >
               {/* Loading skeleton — a few shimmering placeholder blocks so the first
                   paint reads as "loading" rather than "your week is empty". */}
-              <AnimatePresence>
-                {eventsLoading && (
-                  <motion.div
-                    key="grid-skeleton"
-                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                    transition={{ duration: 0.25 }}
+              {eventsLoading && (
+                  <div
                     className="absolute inset-0 z-[60] pointer-events-none"
-                    // No backdrop blur: at 1px it is invisible, but it still
-                    // puts the whole grid on the expensive filter path for the
-                    // entire load.
                     style={{ background: darkMode ? 'rgba(20,22,24,0.86)' : 'rgba(250,250,249,0.9)' }}
                   >
                     {[
@@ -8268,17 +8300,18 @@ export default function DailyPlanner() {
                       { l: '40%', t: 120, h: 90 },  { l: '55%', t: 260, h: 60 },
                       { l: '70%', t: 180, h: 130 }, { l: '85%', t: 150, h: 80 },
                     ].map((b, i) => (
-                      <motion.div
+                      <div
                         key={i}
-                        className="absolute rounded-lg"
-                        style={{ left: b.l, top: b.t, width: '11%', height: b.h, background: darkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)' }}
-                        animate={{ opacity: [0.35, 0.85, 0.35] }}
-                        transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut', delay: i * 0.12 }}
+                        className="absolute rounded-lg grid-shimmer"
+                        style={{
+                          left: b.l, top: b.t, width: '11%', height: b.h,
+                          background: darkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
+                          animationDelay: `${i * 0.12}s`,
+                        }}
                       />
                     ))}
-                  </motion.div>
+                  </div>
                 )}
-              </AnimatePresence>
 
               {/* Time axis. Pinned to the left edge while the days scroll past
                   it — a column of events with no hours beside it is unreadable. */}
@@ -8529,7 +8562,7 @@ export default function DailyPlanner() {
                       }}>
                       {/* Day header */}
                       <div
-                        className={`flex-shrink-0 flex items-center justify-center border-b relative sticky z-40 ${isScrolled ? 'gap-1.5' : 'flex-col'} ${today ? 'border-primary/40' : 'border-border/50'}`}
+                        className={`flex-shrink-0 flex items-center justify-center border-b relative sticky z-40 ${isPhone || isScrolled ? 'gap-1.5' : 'flex-col'} ${today ? 'border-primary/40' : 'border-border/50'}`}
                         style={{
                           top: focusMiniBarH,
                           height: stickyHeaderH,
@@ -8543,10 +8576,10 @@ export default function DailyPlanner() {
                         {today && (
                           <div
                             className="absolute top-0 left-0 right-0"
-                            style={{ height: isScrolled ? 2 : 3, background: darkMode ? 'rgb(134,206,145)' : 'rgb(63,138,80)' }}
+                            style={{ height: isPhone || isScrolled ? 2 : 3, background: darkMode ? 'rgb(134,206,145)' : 'rgb(63,138,80)' }}
                           />
                         )}
-                        {isScrolled ? (
+                        {isPhone || isScrolled ? (
                           /* Compact single-line header */
                           <>
                             <span className={`text-[9px] font-bold uppercase tracking-widest ${today ? 'text-white' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
@@ -9760,15 +9793,15 @@ export default function DailyPlanner() {
                   )}
                 </AnimatePresence>
               </div>
-            </motion.div>
-          </AnimatePresence>
+            </ViewShell>
         </div>
         ) : calendarView === 'year' ? (
         /* â”€â”€ Year overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
         (() => {
         const yearMaxDayCount = Math.max(1, ...yearMatrix.flatMap(m => m.cells.map(c => c.count)));
         return (
-        <motion.div
+        <ViewShell
+          isPhone={isPhone}
           key="year-view-wrapper"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -9839,7 +9872,7 @@ export default function DailyPlanner() {
               </button>
             ))}
           </div>
-        </motion.div>
+        </ViewShell>
         );
         })()
         ) : (
@@ -9866,12 +9899,14 @@ export default function DailyPlanner() {
                 handleMonthCellTouchEnd(e);
                 handleMonthItemTouchEnd(e);
               }}
-              className={`rounded-lg border border-border/60 overflow-hidden shadow-md relative z-10 flex flex-col min-h-0 gpu-layer ${monthGridSize ? 'mx-auto' : 'flex-1'}`}
+              className={`rounded-lg border border-border/60 overflow-hidden shadow-md relative z-10 flex flex-col min-h-0 ${isPhone ? '' : 'gpu-layer'} ${monthGridSize ? 'mx-auto' : 'flex-1'}`}
               style={{
                 background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
-                transform: 'translate3d(0,0,0)',
-                backfaceVisibility: 'hidden',
-                WebkitBackfaceVisibility: 'hidden',
+                ...(isPhone ? {} : {
+                  transform: 'translate3d(0,0,0)',
+                  backfaceVisibility: 'hidden',
+                  WebkitBackfaceVisibility: 'hidden',
+                }),
                 contain: 'paint',
                 ...(monthGridSize ? {
                   width: monthGridSize.width,
@@ -9954,7 +9989,7 @@ export default function DailyPlanner() {
                               openCreateForDate(date, e);
                             }}
                             title={`Add event · ${format(date, 'MMM d')}`}
-                            className={`${isPhone ? 'min-h-[68px] p-1.5' : 'min-h-[112px] p-2'} border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1.5 transition-colors duration-150 relative select-none`}
+                            className={`${isPhone ? 'min-h-[68px] p-1.5' : 'min-h-[112px] p-2'} border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1.5 relative select-none`}
                             style={{
                               background: baseBg,
                               opacity: inMonth ? 1 : 0.4,
@@ -10244,9 +10279,10 @@ export default function DailyPlanner() {
           );
         })()
           )}
-      </motion.div>
+      </ViewShell>
       ) : (
-        <motion.div
+        <ViewShell
+          isPhone={isPhone}
           key="focus-analysis-container"
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
@@ -10800,13 +10836,12 @@ export default function DailyPlanner() {
                 )}
               </div>
             </div>
-          </motion.div>
+          </ViewShell>
         )}
       </AnimatePresence>
     </main>
           {/* Floating "Go to Live" button — centered on the main schedule table */}
-          <AnimatePresence>
-            {showLiveBtn && isTimelineView && !settingsRouteOpen && (
+          {showLiveBtn && isTimelineView && !settingsRouteOpen && (
               <div
                 className="absolute left-0 right-0 z-[120] pointer-events-none flex justify-center"
                 style={{
@@ -10816,14 +10851,10 @@ export default function DailyPlanner() {
                 }}
               >
                 <div className={`w-full mx-auto px-4 flex justify-center pointer-events-none ${isCompact ? '' : 'min-w-[900px] max-w-[1400px]'}`}>
-                  <motion.button
-                    key="go-to-live"
+                  <button
+                    type="button"
                     onClick={scrollToLive}
-                    initial={{ opacity: 0, y: 12 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 12 }}
-                    transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-                    className="pointer-events-auto flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg backdrop-blur-md active:scale-95 cursor-pointer"
+                    className="pointer-events-auto flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg active:scale-95 cursor-pointer animate-fab-in"
                     style={{
                       background: darkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.70)',
                       border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.20)' : 'rgba(0, 0, 0, 0.10)'}`,
@@ -10837,11 +10868,10 @@ export default function DailyPlanner() {
                         {formatCombo(shortcuts.goToLive)}
                       </kbd>
                     )}
-                  </motion.button>
+                  </button>
                 </div>
               </div>
             )}
-          </AnimatePresence>
         </div>
 
         <TasksPanel
@@ -11043,14 +11073,14 @@ export default function DailyPlanner() {
                   ? { accent: '#f87171', glow: 'rgba(248,113,113,0.30)' }
                   : { accent: '#60a5fa', glow: 'rgba(96,165,250,0.30)' };
               return (
-                <motion.div
+                <ViewShell
+                  isPhone={isPhone}
                   key={t.id}
-                  layout
                   initial={{ opacity: 0, x: isPhone ? 0 : 24, y: isPhone ? 16 : 0, scale: 0.96 }}
                   animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
                   exit={{ opacity: 0, x: isPhone ? 0 : 24, y: isPhone ? 16 : 0, scale: 0.96 }}
                   transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-                  className="pointer-events-auto flex items-center gap-2.5 pl-3 pr-4 py-2.5 rounded-xl text-[12px] font-medium max-w-[340px] backdrop-blur-md"
+                  className={`pointer-events-auto flex items-center gap-2.5 pl-3 pr-4 py-2.5 rounded-xl text-[12px] font-medium max-w-[340px] ${isPhone ? 'animate-fab-in' : 'backdrop-blur-md'}`}
                   style={{
                     background: darkMode ? 'rgba(30,32,34,0.92)' : 'rgba(255,255,255,0.94)',
                     border: `1px solid ${menuBdr}`,
@@ -11060,7 +11090,7 @@ export default function DailyPlanner() {
                 >
                   <span className="w-1 self-stretch rounded-full flex-shrink-0" style={{ background: tone.accent }} />
                   <span className="leading-snug">{t.message}</span>
-                </motion.div>
+                </ViewShell>
               );
             })}
           </AnimatePresence>
@@ -11755,17 +11785,15 @@ export default function DailyPlanner() {
           370 lines of event-specific fields. The recurrence editor is shared. */}
       <AnimatePresence>
       {menuTask && taskMenuPos && isPhone && (
-        <motion.div
-          key="task-menu-scrim"
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-[199]"
-          style={{ background: 'rgba(0,0,0,0.58)', willChange: 'opacity' }}
+        <div
+          className="fixed inset-0 z-[199] animate-scrim-in"
+          style={{ background: 'rgba(0,0,0,0.58)' }}
           onClick={() => setTaskMenuId(null)}
         />
       )}
       {menuTask && taskMenuPos && (
-        <motion.div
+        <MenuShell
+          isPhone={isPhone}
           initial={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.95 }}
           animate={isPhone ? { y: 0 } : { opacity: 1, scale: 1 }}
           exit={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.96 }}
@@ -12024,7 +12052,7 @@ export default function DailyPlanner() {
               )}
             </div>
           </div>
-        </motion.div>
+        </MenuShell>
       )}
       </AnimatePresence>
 
@@ -12035,25 +12063,21 @@ export default function DailyPlanner() {
           "drag the popup somewhere it fits" is not a thing to ask of a thumb.
           The scrim also gives an obvious way out — tap anywhere above it. */}
       {menuEvent && menuPos && isPhone && (
-        <motion.div
-          key="event-menu-scrim"
-          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-[199]"
-          style={{ background: 'rgba(0,0,0,0.58)', willChange: 'opacity' }}
+        <div
+          className="fixed inset-0 z-[199] animate-scrim-in"
+          style={{ background: 'rgba(0,0,0,0.58)' }}
           onClick={() => { if (isDraft) commitDraft(); setMenuId(null); setMenuPos(null); }}
         />
       )}
       {menuEvent && menuPos && (
-        <motion.div
+        <MenuShell
+          isPhone={isPhone}
           ref={menuRef}
           initial={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.95 }}
           animate={isPhone ? { y: 0 } : { opacity: 1, scale: 1 }}
           exit={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.96 }}
-          transition={isPhone
-            ? { duration: 0.14, ease: [0.22, 1, 0.36, 1] }
-            : { duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
-          className={`fixed z-[200] overflow-hidden flex flex-col touch-scroll gpu-layer ${isPhone ? '' : 'rounded-xl shadow-2xl'}`}
+          transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+          className={`fixed z-[200] overflow-hidden flex flex-col touch-scroll ${isPhone ? '' : 'rounded-xl shadow-2xl gpu-layer'}`}
           style={isPhone ? {
             left: 0, right: 0,
             bottom: vp.keyboardInset > 0 ? `${vp.keyboardInset}px` : 0,
@@ -13094,7 +13118,7 @@ export default function DailyPlanner() {
               </div>
             </>
           )}
-        </motion.div>
+        </MenuShell>
       )}
       </AnimatePresence>
 
@@ -13197,16 +13221,11 @@ export default function DailyPlanner() {
               Sits above the tab bar rather than in it: creating is the one
               action you do far more than navigating, and a thumb resting at
               the bottom-right corner is exactly where it lands. */}
-          <AnimatePresence>
-            {mobileTab === 'calendar' && !showFocusAnalysis && !mobileMenuOpen && !mobileViewPickerOpen && !mobilePrayerOpen && (
-              <motion.button
-                key="fab"
-                initial={{ opacity: 0, scale: 0.7, y: 8 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.7, y: 8 }}
-                transition={{ duration: 0.10, ease: [0.16, 1, 0.3, 1] }}
+          {mobileTab === 'calendar' && !showFocusAnalysis && !mobileMenuOpen && !mobileViewPickerOpen && !mobilePrayerOpen && (
+              <button
+                type="button"
                 onClick={() => { haptic(8); handleHeaderCreateClick(); }}
-                className="fixed z-[70] w-14 h-14 rounded-full flex items-center justify-center text-white active:scale-90 transition-transform gpu-layer"
+                className="fixed z-[70] w-14 h-14 rounded-full flex items-center justify-center text-white active:scale-90 transition-transform animate-fab-in"
                 style={{
                   right: 'calc(16px + var(--safe-right))',
                   bottom: 'calc(var(--bottom-nav-h) + 16px)',
@@ -13216,9 +13235,8 @@ export default function DailyPlanner() {
                 title="New event"
               >
                 <Plus size={26} strokeWidth={2.4} />
-              </motion.button>
+              </button>
             )}
-          </AnimatePresence>
 
           {/* ── Bottom tab bar ───────────────────────────────────────────────*/}
           <nav
@@ -14347,27 +14365,16 @@ function MobileSheet({
   }, [open, onClose]);
 
   return createPortal(
-    <AnimatePresence>
-      {open && (
+    open ? (
         <>
-          <motion.div
-            key="scrim"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.08, ease: 'easeOut' }}
+          <div
             onClick={onClose}
-            className="fixed inset-0 z-[90]"
-            style={{ background: 'rgba(0,0,0,0.52)', willChange: 'opacity' }}
+            className="fixed inset-0 z-[90] animate-scrim-in"
+            style={{ background: 'rgba(0,0,0,0.52)' }}
           />
-          <motion.div
+          <div
             ref={sheetRef}
-            key="sheet"
-            initial={{ transform: 'translate3d(0, 100%, 0)' }}
-            animate={{ transform: 'translate3d(0, 0%, 0)' }}
-            exit={{ transform: 'translate3d(0, 100%, 0)' }}
-            transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
-            className="fixed inset-x-0 bottom-0 z-[91] flex flex-col overflow-hidden gpu-layer"
+            className="fixed inset-x-0 bottom-0 z-[91] flex flex-col overflow-hidden animate-sheet-up"
             style={{
               maxHeight: '85dvh',
               borderTopLeftRadius: 20,
@@ -14375,7 +14382,6 @@ function MobileSheet({
               background: theme.menuBg,
               borderTop: `1px solid ${theme.surfaceBdr}`,
               boxShadow: '0 -4px 16px rgba(0,0,0,0.25)',
-              willChange: 'transform',
               contain: 'paint layout',
               overscrollBehavior: 'contain',
             }}
@@ -14461,10 +14467,9 @@ function MobileSheet({
             >
               {children}
             </div>
-          </motion.div>
+          </div>
         </>
-      )}
-    </AnimatePresence>,
+    ) : null,
     document.body,
   );
 }

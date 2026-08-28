@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, MotionConfig } from 'framer-motion';
 import {
   Check, ChevronDown, ChevronRight, Clock, ListTodo,
   MoreHorizontal, Plus, Repeat, StickyNote, X, Calendar, AlertCircle,
@@ -591,6 +591,7 @@ function TasksPanel({
   }, [onToggleDone]);
 
   return (
+    <MotionConfig reducedMotion={vp.isPhone ? 'always' : 'never'}>
     <>
       {/* Phone: the dimmed backdrop. Tapping it is the fastest way out, which
           matters because the sheet covers the calendar you were just reading. */}
@@ -604,16 +605,15 @@ function TasksPanel({
             // calendar underneath to be re-blurred on every frame the sheet
             // slides, which is exactly the stutter this panel used to have.
             background: 'rgba(0,0,0,0.55)',
-            willChange: 'opacity',
             opacity: open ? 1 : 0,
             pointerEvents: open ? 'auto' : 'none',
-            transition: 'opacity 220ms ease',
+            transition: vp.isPhone ? 'none' : 'opacity 220ms ease',
           }}
         />
       )}
     <aside
       className={page
-        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden gpu-layer'
+        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden'
         : sheet
         ? 'fixed inset-x-0 bottom-0 z-[81] overflow-hidden shadow-2xl gpu-layer'
         : 'flex-shrink-0 overflow-hidden relative shadow-lg'}
@@ -1380,6 +1380,7 @@ function TasksPanel({
       </div>
     </aside>
     </>
+    </MotionConfig>
   );
 }
 
@@ -2539,7 +2540,7 @@ function TaskList({
       }}
     >
       <InsertLine active={activeGap === 0} theme={theme} touch={!!liftedId} />
-      <AnimatePresence initial={false}>
+      <>
         {roots.map((r, index) => {
           const kids = childrenOf(r.task.id);
           const expanded = expandedParents[r.task.id] ?? true;
@@ -2588,7 +2589,6 @@ function TaskList({
                   onDrop={e => dropAtNearestTarget(e, kids)}
                 >
                   <InsertLine active={kidsActiveGap === 0} theme={theme} touch={!!liftedId} />
-                  <AnimatePresence initial={false}>
                     {kids.map((k, childIndex) => (
                       <React.Fragment key={k.occId}>
                         <div data-drop-row="1" data-occ-id={k.occId}>
@@ -2626,14 +2626,13 @@ function TaskList({
                         <InsertLine active={kidsActiveGap === childIndex + 1} theme={theme} touch={!!liftedId} />
                       </React.Fragment>
                     ))}
-                  </AnimatePresence>
                 </div>
               )}
               <InsertLine active={activeGap === index + 1} theme={theme} touch={!!liftedId} />
             </React.Fragment>
           );
         })}
-      </AnimatePresence>
+      </>
     </div>
   );
 }
@@ -2689,11 +2688,7 @@ function TaskRow({
   };
 
   return (
-    <motion.div
-      initial={vp.isPhone ? false : { opacity: 0, y: -4, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={vp.isPhone ? { opacity: 0 } : { opacity: 0, y: -4, scale: 0.96 }}
-      transition={{ duration: vp.isPhone ? 0.08 : 0.14, ease: [0.16, 1, 0.3, 1] }}
+    <div
       draggable
       onDragStart={(e: any) => {
         rowDragStartedRef.current = true;
@@ -2905,6 +2900,6 @@ function TaskRow({
           <MoreHorizontal size={14} />
         </button>
       </div>
-    </motion.div>
+    </div>
   );
 }

@@ -4,6 +4,7 @@ import NotFound from '@/pages/not-found';
 import Home from '@/pages/home';
 import { AnimatePresence, motion } from 'framer-motion';
 import { lazy, Suspense, useEffect } from 'react';
+import { useViewport } from '@/hooks/use-mobile';
 
 // Split out of the main bundle. The calendar is what every launch shows first,
 // and it was waiting on the settings screen and the side widget to download,
@@ -36,6 +37,7 @@ function AuthenticatedApp() {
 
 function Router() {
   const [location] = useLocation();
+  const { isPhone } = useViewport();
 
   if (location === '/widget') {
     return (
@@ -85,6 +87,15 @@ function Router() {
       >
         <Home />
       </div>
+      {isPhone ? (
+        isSettings ? (
+        <div className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background animate-overlay-in">
+          <Suspense fallback={null}>
+            <Settings />
+          </Suspense>
+        </div>
+        ) : null
+      ) : (
       <AnimatePresence>
         {isSettings && (
           <motion.div
@@ -93,10 +104,7 @@ function Router() {
             animate={{ opacity: 1, transform: 'translate3d(0, 0px, 0)' }}
             exit={{ opacity: 0, transform: 'translate3d(0, 4px, 0)' }}
             transition={{ duration: 0.10, ease: [0.16, 1, 0.3, 1] }}
-            // overscroll-contain: reaching the end of the settings page must not
-            // hand the remaining scroll to the planner underneath.
             className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background gpu-layer"
-            style={{ willChange: 'transform, opacity' }}
           >
             <Suspense fallback={null}>
               <Settings />
@@ -104,6 +112,7 @@ function Router() {
           </motion.div>
         )}
       </AnimatePresence>
+      )}
     </div>
   );
 }
@@ -123,6 +132,15 @@ function App() {
     }
     const id = window.setTimeout(warm, 2500);
     return () => window.clearTimeout(id);
+  }, []);
+
+  useEffect(() => {
+    const sync = () => {
+      document.documentElement.toggleAttribute('data-app-hidden', document.visibilityState !== 'visible');
+    };
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => document.removeEventListener('visibilitychange', sync);
   }, []);
 
   return (
