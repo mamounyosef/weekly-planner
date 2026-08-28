@@ -29,10 +29,27 @@ function widgetPairingId(): string | null {
   return id && WIDGET_ID_RE.test(id) ? id : null;
 }
 
+const AUTH_USER_STORAGE_KEY = 'planner_auth_user_cache';
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
   const pairingId = widgetPairingId();
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    if (pairingId) return null;
+    try {
+      const saved = localStorage.getItem(AUTH_USER_STORAGE_KEY);
+      return saved ? (JSON.parse(saved) as AuthUser) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isLoading, setIsLoading] = useState(() => {
+    if (pairingId) return true;
+    try {
+      return !localStorage.getItem(AUTH_USER_STORAGE_KEY);
+    } catch {
+      return true;
+    }
+  });
   const [pairingGraceExpired, setPairingGraceExpired] = useState(() => !pairingId);
   const checkInFlightRef = useRef(false);
 
@@ -94,12 +111,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const data = await res.json();
         if (data.authenticated && data.user) {
           setUser(data.user);
+          try { localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(data.user)); } catch (_) {}
           void activateRegisteredWidgets();
           setIsLoading(false);
           return;
         }
       }
       setUser(null);
+      try { localStorage.removeItem(AUTH_USER_STORAGE_KEY); } catch (_) {}
     } catch (err) {
       console.error('Failed to check auth:', err);
       setUser(null);
@@ -158,6 +177,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(await claimWidgetSession() || data.user);
         } else {
           setUser(data.user);
+          try { localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(data.user)); } catch (_) {}
           void activateRegisteredWidgets();
         }
         return { ok: true };
@@ -179,6 +199,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.error('Logout error:', err);
     }
     try {
+      localStorage.removeItem(AUTH_USER_STORAGE_KEY);
       localStorage.clear();
       sessionStorage.clear();
     } catch (_) {}

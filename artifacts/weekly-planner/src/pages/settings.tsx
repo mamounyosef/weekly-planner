@@ -111,7 +111,7 @@ import { isInstalledApp, primeNotificationAudio, useNotifications } from '@/lib/
 import { NotifyEditor, type NotifyTheme } from '@/components/NotifyEditor';
 import { DEFAULT_HARDWARE_SETTINGS, type HardwareSettings } from '@/lib/hardwareController';
 import { NumberField } from '@/components/NumberField';
-import { useViewport } from '@/hooks/use-mobile';
+import { useViewport, haptic } from '@/hooks/use-mobile';
 import {
   DEVICE_SCOPED_KEYS,
   FilterViewKey,
@@ -1154,6 +1154,7 @@ export default function SettingsPage() {
   });
 
   const handleSelectTab = useCallback((tabId: TabCategory) => {
+    haptic(6);
     setActiveTab(tabId);
     try {
       const url = new URL(window.location.href);
@@ -2246,7 +2247,7 @@ export default function SettingsPage() {
         {isPhone ? (
           <div
             ref={mobileTabStripRef}
-            className="sticky z-40 -mx-3 px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar touch-scroll-x"
+            className="sticky z-40 -mx-3 px-3 py-2 flex gap-1.5 overflow-x-auto no-scrollbar touch-scroll-x gpu-layer"
             // Must be the header's exact height (10 + 40 + 10 + 1px border): a
             // few pixels short and scrolling content shows through the seam.
             style={{ top: 'calc(61px + var(--safe-top))', background: headerBg }}
@@ -2312,16 +2313,16 @@ export default function SettingsPage() {
 
         {/* Content Container */}
         <main className={`flex-1 min-w-0 flex flex-col ${isPhone ? 'gap-4' : 'gap-6'}`}>
-          <AnimatePresence mode="wait">
+          <AnimatePresence mode="wait" initial={false}>
             {/* 🎨 APPEARANCE TAB */}
             {activeTab === 'appearance' && (
               <motion.div
                 key="appearance"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 {/* 📱 Mobile Page Sizing & Scale (Mobile view only) */}
                 {isPhone && (
@@ -2714,11 +2715,11 @@ export default function SettingsPage() {
             {activeTab === 'calendar' && (
               <motion.div
                 key="calendar"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
@@ -3119,11 +3120,11 @@ export default function SettingsPage() {
             {activeTab === 'categories' && (
               <motion.div
                 key="categories"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -3299,11 +3300,11 @@ export default function SettingsPage() {
                       onPointerDown={e => { if (e.target === e.currentTarget) closeCategoryModal(); }}
                     >
                       <motion.div
-                        initial={{ opacity: 0, scale: 0.95, y: 10 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95, y: 10 }}
-                        transition={{ duration: 0.18 }}
-                        className={`w-full max-w-lg border shadow-2xl p-5 sm:p-6 flex flex-col gap-5 overflow-y-auto touch-scroll ${
+                        initial={isPhone ? { opacity: 0, y: 30 } : { opacity: 0, scale: 0.95, y: 10 }}
+                        animate={isPhone ? { opacity: 1, y: 0 } : { opacity: 1, scale: 1, y: 0 }}
+                        exit={isPhone ? { opacity: 0, y: 30 } : { opacity: 0, scale: 0.95, y: 10 }}
+                        transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                        className={`w-full max-w-lg border shadow-2xl p-5 sm:p-6 flex flex-col gap-5 overflow-y-auto touch-scroll gpu-layer ${
                           isPhone ? 'rounded-t-3xl' : 'rounded-3xl max-h-[90vh]'
                         }`}
                         style={{
@@ -3668,11 +3669,11 @@ export default function SettingsPage() {
             {activeTab === 'notifications' && (
               <motion.div
                 key="notifications"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 {/* ── Master switch ───────────────────────────────────────── */}
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
@@ -4169,11 +4170,11 @@ export default function SettingsPage() {
             {activeTab === 'prayer' && (
               <motion.div
                 key="prayer"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex items-start justify-between gap-4">
@@ -4440,11 +4441,11 @@ export default function SettingsPage() {
             {activeTab === 'audio' && (
               <motion.div
                 key="audio"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className={`flex gap-3 ${isPhone ? 'flex-col items-start' : 'items-center justify-between'}`}>
@@ -4631,11 +4632,11 @@ export default function SettingsPage() {
             {activeTab === 'shortcuts' && (
               <motion.div
                 key="shortcuts"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className={`flex gap-3 ${isPhone ? 'flex-col items-start' : 'items-center justify-between'}`}>
@@ -4751,11 +4752,11 @@ export default function SettingsPage() {
             {activeTab === 'backup' && (
               <motion.div
                 key="backup"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>
@@ -4864,11 +4865,11 @@ export default function SettingsPage() {
             {activeTab === 'hardware' && (
               <motion.div
                 key="hardware"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div className="flex items-start justify-between gap-4">
@@ -5392,11 +5393,11 @@ export default function SettingsPage() {
             {activeTab === 'integrations' && (
               <motion.div
                 key="integrations"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 {/* Unified Master Google Integration Hero Card */}
                 <div
@@ -5922,11 +5923,11 @@ export default function SettingsPage() {
             {activeTab === 'account' && (
               <motion.div
                 key="account"
-                initial={{ opacity: 0, y: 8 }}
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18 }}
-                className="flex flex-col gap-6"
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6 gpu-layer"
               >
                 <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
                   <div>

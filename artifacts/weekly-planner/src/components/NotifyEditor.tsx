@@ -218,7 +218,7 @@ export function NotifyEditor({
                 })}
               </div>
 
-              <div className="flex items-center gap-1.5 pt-1" style={{ borderTop: `1px solid ${theme.bdr}` }}>
+              <div className="flex flex-wrap items-center gap-1.5 pt-1" style={{ borderTop: `1px solid ${theme.bdr}` }}>
                 <span className="text-[11px]" style={{ color: theme.sub }}>Or</span>
                 <input
                   value={customValue}

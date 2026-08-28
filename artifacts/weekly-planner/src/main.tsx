@@ -62,6 +62,14 @@ async function claimBrowserSessionHandoff() {
 }
 
 async function boot() {
+  try {
+    const s = localStorage.getItem('planner-settings-v1');
+    if (s) {
+      const parsed = JSON.parse(s);
+      if (parsed.darkMode) document.documentElement.classList.add('dark');
+      else if (parsed.darkMode === false) document.documentElement.classList.remove('dark');
+    }
+  } catch (_) {}
   await claimBrowserSessionHandoff();
   createRoot(document.getElementById('root')!).render(<App />);
 }

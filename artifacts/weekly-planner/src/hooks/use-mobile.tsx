@@ -3,24 +3,6 @@ import * as React from 'react';
 const MOBILE_BREAKPOINT = 768;
 const TABLET_BREAKPOINT = 1100;
 
-export function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState<boolean | undefined>(
-    undefined,
-  );
-
-  React.useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
-    const onChange = () => {
-      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
-    };
-    mql.addEventListener('change', onChange);
-    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-
-  return !!isMobile;
-}
-
 export interface Viewport {
   /** Live CSS pixel width of the visual viewport. */
   width: number;
@@ -46,17 +28,15 @@ function read(): Viewport {
   const width = window.innerWidth;
   const height = window.innerHeight;
   const isTouch =
-    (typeof window !== 'undefined') &&
     ((window.matchMedia?.('(pointer: coarse)').matches ?? false) || (navigator.maxTouchPoints ?? 0) > 0);
-  // The visual viewport shrinks when the software keyboard opens; the layout
-  // viewport does not. The difference is how much of the screen the keyboard ate.
+  // The visual viewport shrinks when the software keyboard opens.
+  // Address bar / URL bar collapse can cause small jitter (< 32px), so we threshold.
   const vv = window.visualViewport;
-  const keyboardInset = vv ? Math.max(0, height - vv.height - vv.offsetTop) : 0;
+  const rawInset = vv ? Math.max(0, height - vv.height - vv.offsetTop) : 0;
+  const keyboardInset = rawInset > 32 ? Math.round(rawInset) : 0;
   /**
-   * A phone turned sideways is 840px wide and still a phone — a width-only test
-   * hands it the full desktop toolbar and a docked 340px tasks panel on a 412px
-   * -tall screen. So a touch device is judged on its SHORT edge, which doesn't
-   * change when the device rotates.
+   * A phone turned sideways is 840px wide and still a phone — a touch device is
+   * judged on its short edge so layout doesn't jump to desktop mode on rotate.
    */
   const isPhone = width < MOBILE_BREAKPOINT || (isTouch && Math.min(width, height) < 600);
   return {
@@ -71,46 +51,90 @@ function read(): Viewport {
   };
 }
 
-/**
- * One subscription to every way a mobile viewport can change: rotation, the
- * URL bar sliding away, the keyboard opening, a desktop window being resized.
- * Updates are rAF-coalesced because `resize` fires per frame during a rotation
- * and re-rendering a full calendar grid on each of those frames is visible.
- */
+// ── Shared Singleton Store ───────────────────────────────────────────────────
+// Centralizes all window viewport subscriptions into ONE listener set, eliminating
+// dozens of duplicate DOM event listeners and keeping React state updates coalesced.
+
+let currentViewport: Viewport = read();
+const listeners = new Set<() => void>();
+let isListening = false;
+let rafId = 0;
+
+function notifySubscribers() {
+  const next = read();
+  const prev = currentViewport;
+
+  const flagsSame =
+    prev.isPhone === next.isPhone &&
+    prev.isTablet === next.isTablet &&
+    prev.isTouch === next.isTouch &&
+    prev.isLandscape === next.isLandscape &&
+    prev.isShort === next.isShort;
+
+  const keyboardSame = Math.abs(prev.keyboardInset - next.keyboardInset) < 16;
+
+  if (flagsSame && keyboardSame) {
+    if (next.isPhone && Math.abs(prev.width - next.width) < 12) {
+      return; // Skip re-render for address-bar micro jitter
+    }
+    if (!next.isPhone && prev.width === next.width && Math.abs(prev.height - next.height) < 32) {
+      return;
+    }
+  }
+
+  currentViewport = next;
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+function handleViewportChange() {
+  if (rafId) return;
+  rafId = requestAnimationFrame(() => {
+    rafId = 0;
+    notifySubscribers();
+  });
+}
+
+function subscribe(callback: () => void) {
+  listeners.add(callback);
+  if (!isListening && typeof window !== 'undefined') {
+    isListening = true;
+    window.addEventListener('resize', handleViewportChange, { passive: true });
+    window.addEventListener('orientationchange', handleViewportChange, { passive: true });
+    window.visualViewport?.addEventListener('resize', handleViewportChange, { passive: true });
+  }
+
+  return () => {
+    listeners.delete(callback);
+    if (listeners.size === 0 && isListening && typeof window !== 'undefined') {
+      isListening = false;
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('orientationchange', handleViewportChange);
+      window.visualViewport?.removeEventListener('resize', handleViewportChange);
+    }
+  };
+}
+
+function getSnapshot(): Viewport {
+  return currentViewport;
+}
+
+function getServerSnapshot(): Viewport {
+  return { width: 1280, height: 800, isPhone: false, isTablet: false, isTouch: false, isLandscape: true, isShort: false, keyboardInset: 0 };
+}
+
 export function useViewport(): Viewport {
-  const [vp, setVp] = React.useState<Viewport>(read);
+  return React.useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
 
-  React.useEffect(() => {
-    let frame = 0;
-    const onChange = () => {
-      if (frame) return;
-      frame = requestAnimationFrame(() => {
-        frame = 0;
-        setVp(prev => {
-          const next = read();
-          // Skip the re-render when nothing that matters actually moved.
-          if (
-            prev.width === next.width && prev.height === next.height &&
-            prev.isTouch === next.isTouch && prev.keyboardInset === next.keyboardInset
-          ) return prev;
-          return next;
-        });
-      });
-    };
-    window.addEventListener('resize', onChange);
-    window.addEventListener('orientationchange', onChange);
-    window.visualViewport?.addEventListener('resize', onChange);
-    window.visualViewport?.addEventListener('scroll', onChange);
-    return () => {
-      if (frame) cancelAnimationFrame(frame);
-      window.removeEventListener('resize', onChange);
-      window.removeEventListener('orientationchange', onChange);
-      window.visualViewport?.removeEventListener('resize', onChange);
-      window.visualViewport?.removeEventListener('scroll', onChange);
-    };
-  }, []);
-
-  return vp;
+export function useIsMobile(): boolean {
+  const vp = useViewport();
+  return vp.isPhone;
 }
 
 /** Short buzz for a confirmed touch gesture (drag armed, event created). */

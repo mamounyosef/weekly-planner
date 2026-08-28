@@ -214,7 +214,7 @@ export function NotificationPanel({
       />
 
       <aside
-        className="fixed z-[86] flex flex-col shadow-2xl gpu-layer"
+        className="fixed z-[86] flex flex-col shadow-2xl gpu-layer touch-scroll"
         style={{
           top: 0,
           right: 0,
@@ -224,8 +224,9 @@ export function NotificationPanel({
           paddingBottom: 'var(--safe-bottom)',
           background: theme.bg,
           borderLeft: `1px solid ${theme.bdr}`,
-          animation: 'planner-notify-slide 180ms cubic-bezier(0.22, 1, 0.36, 1)',
+          animation: 'planner-notify-slide 140ms cubic-bezier(0.22, 1, 0.36, 1)',
           willChange: 'transform',
+          contain: 'paint layout',
         }}
         role="dialog"
         aria-label="Notifications"
@@ -338,10 +339,31 @@ export function NotificationPanel({
                   <article
                     key={rec.key}
                     id={`notif-${cssId(rec.key)}`}
-                    className="group relative px-3 py-2.5 transition-colors"
+                    className="group relative px-3 py-2.5 transition-colors cursor-pointer"
                     style={{
                       borderBottom: `1px solid ${theme.bdr}`,
                       background: highlighted ? `${theme.accent}14` : rec.read ? 'transparent' : `${art.color}0d`,
+                    }}
+                    onClick={e => {
+                      if ((e.target as HTMLElement).closest('button, [role="button"], a, input, select, textarea')) {
+                        return;
+                      }
+                      if (!rec.read) onRead([rec.key]);
+                    }}
+                    onContextMenu={e => {
+                      e.preventDefault();
+                      if (!rec.read) onRead([rec.key]);
+                    }}
+                    onMouseDown={e => {
+                      if (e.button === 1) {
+                        e.preventDefault();
+                      }
+                    }}
+                    onAuxClick={e => {
+                      if (e.button === 1) {
+                        e.preventDefault();
+                        if (!rec.read) onRead([rec.key]);
+                      }
                     }}
                     onMouseEnter={e => { if (!highlighted) e.currentTarget.style.background = theme.hover; }}
                     onMouseLeave={e => {
@@ -436,6 +458,7 @@ export function NotificationPanel({
                                 <div
                                   className="absolute left-0 top-full z-10 mt-1 flex gap-1 rounded-lg p-1 shadow-lg"
                                   style={{ background: theme.bg, border: `1px solid ${theme.bdr}` }}
+                                  onClick={e => e.stopPropagation()}
                                 >
                                   {snoozeOptions.map(m => (
                                     <button
@@ -466,11 +489,11 @@ export function NotificationPanel({
                           <button
                             type="button"
                             onClick={() => onClear([rec.key])}
-                            className="rounded p-1 opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity"
+                            className="rounded p-1.5 opacity-70 sm:opacity-0 sm:group-hover:opacity-70 hover:!opacity-100 transition-opacity active:scale-90"
                             style={{ color: theme.sub }}
                             aria-label="Remove this notification"
                           >
-                            <Trash2 size={12} />
+                            <Trash2 size={13} />
                           </button>
                         </div>
                       </div>

@@ -522,6 +522,41 @@ console.log('\n--- LAYER D: EXHAUSTIVE SCENARIO MATRIX ---');
   assertEqual(sumFocusSecondsForDay(sampleSessions, d2, 0), 2400, 'day 2 total is 2400s (40m)');
 }
 
+// --- D.10: Cross-window chime claim coordination & cue keys ---
+{
+  const storageMap = new Map<string, string>();
+  (globalThis as any).localStorage = {
+    getItem: (k: string) => storageMap.get(k) ?? null,
+    setItem: (k: string, v: string) => storageMap.set(k, v),
+  };
+
+  // Import claimFocusCompletion directly
+  const { claimFocusCompletion } = await import('./focusSessions');
+  assertEqual(claimFocusCompletion(6000), true, 'first window succeeds in claiming chime');
+  assertEqual(claimFocusCompletion(6000), false, 'second window within 6000ms is blocked to prevent double chime');
+
+  // Pause cue keys must be distinct between subsequent pauses of the same session
+  const timerPaused1: FocusTimerState = {
+    plannedSeconds: 1500,
+    accumulatedSeconds: 100,
+    isRunning: false,
+    lastStartedAt: '2026-08-17T10:00:00Z',
+    sessionStartedAt: '2026-08-17T10:00:00Z',
+    lastPausedAt: '2026-08-17T10:05:00Z',
+  };
+  const timerPaused2: FocusTimerState = {
+    ...timerPaused1,
+    lastPausedAt: '2026-08-17T10:15:00Z',
+  };
+  assert(focusCueKey('pause', timerPaused1) !== focusCueKey('pause', timerPaused2),
+    'second pause of a session must produce a different cue key');
+
+  // safeFocusExcludedDates
+  assertEqual(safeFocusExcludedDates(['2026-08-17', 'invalid-date', 123, '2026-08-18']).length, 2,
+    'safeFocusExcludedDates keeps only valid yyyy-MM-dd strings');
+}
+
 console.log('====================================================');
 console.log('ALL FOCUS SESSION & TIMER TESTS PASSED SUCCESSFULLY!');
+
 

@@ -49,35 +49,27 @@
       media="print"
       onload="this.media='all'"
     />
-    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"></noscript>
+    <!-- Prevent dark mode theme flash on initial paint -->
+    <script>
+      (function() {
+        try {
+          var s = localStorage.getItem('planner-settings-v1');
+          if (s) {
+            var parsed = JSON.parse(s);
+            if (parsed.darkMode) document.documentElement.classList.add('dark');
+            else if (parsed.darkMode === false) document.documentElement.classList.remove('dark');
+          } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
-    <!-- The service worker makes Chrome offer a real "Install app" (its own
-         window, no address bar) and, more importantly on a weak connection,
-         serves the shell and the hashed bundle straight from the device.
-         Secure contexts only, which covers localhost and the public https
-         address.
-
-         The reload below closes the one gap in cache-first: the worker checks
-         the shell in the background, and if the build changed it says so. The
-         page reloads itself once — but only in the first seconds after opening
-         and only while nothing is being typed, so a new build is never dropped
-         on top of someone mid-edit. -->
     <script>
       (function () {
         if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
-        var openedAt = Date.now();
-        var reloaded = false;
-        navigator.serviceWorker.addEventListener('message', function (event) {
-          if (!event.data || event.data.type !== 'planner-shell-updated') return;
-          if (reloaded || Date.now() - openedAt > 10000) return;
-          var active = document.activeElement;
-          var typing = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-          if (typing) return;
-          reloaded = true;
-          window.location.reload();
-        });
         window.addEventListener('load', function () {
           navigator.serviceWorker.register('/sw.js').catch(function () {});
         });

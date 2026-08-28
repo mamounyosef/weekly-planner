@@ -161,7 +161,6 @@
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
-    transition: background-color 300ms ease, color 300ms ease;
   }
 }
 
@@ -218,9 +217,8 @@
   .transition-smooth {
     transition-property:
       color, background-color, border-color, border-radius, outline-color,
-      text-decoration-color, fill, stroke, opacity, box-shadow, filter,
-      transform, translate, scale, rotate,
-      width, height, top, right, bottom, left;
+      text-decoration-color, fill, stroke, opacity, box-shadow,
+      transform, translate, scale, rotate;
     transition-timing-function: var(--ease-out-app);
     transition-duration: var(--dur-fast);
   }
@@ -353,45 +351,106 @@ body {
 .touch-scroll {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
 }
 
-/* For a strip that scrolls SIDEWAYS only.
-   `overscroll-behavior` applies to a box the moment it is a scroll container in
-   ANY axis — and `overflow-x: auto` with `overflow-y: visible` is not a legal
-   pair, so the browser silently promotes the y axis to `auto` as well. Put
-   plain `.touch-scroll` on such a strip and it becomes a vertical scroll
-   container that cannot scroll vertically AND refuses to hand the gesture to
-   the page behind it: every downward swipe over it does nothing at all. This
-   contains the sideways bounce and leaves the vertical gesture to chain. */
+/* For a strip that scrolls SIDEWAYS only. */
 .touch-scroll-x {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
   overscroll-behavior-y: auto;
+  touch-action: pan-x pan-y;
 }
 
 @media (pointer: coarse), (max-width: 768px) {
-  /* Compositor layer promotion for silky 60/120 FPS scrolling */
+  /* Compositor layer promotion for silky 60/120 FPS scrolling without VRAM exhaustion */
   .touch-scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
-    transform: translate3d(0, 0, 0);
+    touch-action: pan-x pan-y;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
   }
   .touch-scroll-x {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
     overscroll-behavior-y: auto;
-    transform: translate3d(0, 0, 0);
+    touch-action: pan-x pan-y;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
   }
 
   /* Eliminate expensive full-screen rasterization blur on lower-end mobile GPUs */
-  .backdrop-blur-md, .backdrop-blur-sm, .backdrop-blur-lg, .backdrop-blur-xl {
+  .backdrop-blur, .backdrop-blur-xs, .backdrop-blur-sm, .backdrop-blur-md, .backdrop-blur-lg, .backdrop-blur-xl, .backdrop-blur-2xl, .backdrop-blur-3xl {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
 
-  /* Disable heavy 160px blur filter convolution on mobile GPUs: radial gradients provide smooth falloff naturally */
+  /* Disable heavy blur filter convolutions on mobile GPUs */
   .ambient-aura-blob {
     filter: none !important;
     -webkit-filter: none !important;
   }
+
+  /* Replace heavy GPU-taxing shadows on mobile with lightweight crisp shadows */
+  .shadow-2xl {
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22) !important;
+  }
+  .shadow-xl {
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18) !important;
+  }
+  .shadow-lg {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14) !important;
+  }
+
+  /* Instant, tactile mobile active feedback without layout/paint cost */
+  button, [role="button"], label[for], input, select, textarea {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button, [role="button"], label[for] {
+    transition: transform 60ms cubic-bezier(0.22, 1, 0.36, 1), opacity 60ms ease;
+  }
+  button:not(:disabled):active,
+  [role="button"]:not([aria-disabled="true"]):active {
+    transform: scale(0.96);
+    opacity: 0.88;
+  }
+
+  /* Prevent sticky hover styles on touch screens */
+  @media (hover: none) {
+    button:hover:not(:active),
+    [role="button"]:hover:not(:active) {
+      background-color: inherit;
+    }
+  }
+}
+
+/* Rendering performance utilities for mobile phone */
+.content-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 48px;
+  contain: layout style paint;
+}
+
+.content-auto-task {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 44px;
+  contain: layout style paint;
+}
+
+.contain-paint {
+  contain: paint layout;
+}
+
+.contain-content {
+  contain: content;
+}
+
+.contain-strict {
+  contain: strict;
 }
 
 /* Hardware accelerated layer promotion */
@@ -432,7 +491,7 @@ body {
   to   { transform: translate3d(0, 0, 0); }
 }
 .animate-sheet-up {
-  animation: sheet-up 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: sheet-up 180ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform;
 }
 

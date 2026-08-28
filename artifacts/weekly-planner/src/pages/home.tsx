@@ -491,7 +491,9 @@ function yToMin(y: number, interval: IntervalMin, dayStartH: number): number {
 }
 
 // â”€â”€â”€ All-Day Layout Stacking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-function layoutAllDay(events: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }>): Map<string, { row: number }> {
+function layoutAllDay(
+  events: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }>,
+): Map<string, { row: number; visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }> {
   const sorted = [...events].sort((a, b) => {
     const spanA = a.visibleDaysSpan;
     const spanB = b.visibleDaysSpan;
@@ -500,7 +502,7 @@ function layoutAllDay(events: Array<PlannerEvent & { visibleDayIndex: number; vi
   });
 
   const rowTracking: number[][] = [];
-  const layoutMap = new Map<string, number>();
+  const layoutMap = new Map<string, { row: number; visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }>();
 
   for (const ev of sorted) {
     const start = ev.visibleDayIndex;
@@ -516,18 +518,20 @@ function layoutAllDay(events: Array<PlannerEvent & { visibleDayIndex: number; vi
         for (let d = start; d < end; d++) {
           rowTracking[assignedRow].push(d);
         }
-        layoutMap.set(ev.id, assignedRow);
+        layoutMap.set(ev.id, {
+          row: assignedRow,
+          visibleDayIndex: ev.visibleDayIndex,
+          visibleDaysSpan: ev.visibleDaysSpan,
+          isContinuationLeft: ev.isContinuationLeft,
+          isContinuationRight: ev.isContinuationRight,
+        });
         break;
       }
       assignedRow++;
     }
   }
 
-  const result = new Map<string, { row: number }>();
-  for (const [id, r] of layoutMap.entries()) {
-    result.set(id, { row: r });
-  }
-  return result;
+  return layoutMap;
 }
 
 
@@ -704,13 +708,31 @@ export default function DailyPlanner() {
 
   const [currentDate, setCurrentDate] = useState(new Date());
   const [interval, setIntervalOpt]    = useState<IntervalMin>(initialSettings.interval);
-  const [events, setEvents]           = useState<PlannerData>({});
+  const [events, setEvents]           = useState<PlannerData>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) return migrateEvents(JSON.parse(saved) as PlannerData).events;
+    } catch (_) {}
+    return {};
+  });
   // Tasks live in their own store (database/tasks.json) and sync to Google TASKS,
   // never to Google Calendar. See lib/tasks.ts for why they aren't PlannerEvents.
-  const [tasks, setTasks]             = useState<TaskData>({});
+  const [tasks, setTasks]             = useState<TaskData>(() => {
+    try {
+      const savedTasks = localStorage.getItem(TASKS_STORAGE_KEY);
+      if (savedTasks) return coerceTasks(JSON.parse(savedTasks));
+    } catch (_) {}
+    return {};
+  });
   // True until the first load (localStorage or backend) has resolved, so the grid
   // can show a skeleton instead of flashing an empty week.
-  const [eventsLoading, setEventsLoading] = useState(true);
+  const [eventsLoading, setEventsLoading] = useState<boolean>(() => {
+    try {
+      return !localStorage.getItem(STORAGE_KEY);
+    } catch (_) {
+      return true;
+    }
+  });
   // Automated backups — the dev server writes snapshots into <root>/backups on
   // this schedule; these are just the knobs, persisted with the other settings.
   type AutoBackupCfg = { enabled: boolean; intervalHours: number; keep: number };
@@ -1328,15 +1350,22 @@ export default function DailyPlanner() {
     }
     if (!monthDragRef.current) return;
     const touch = e.touches[0];
-    const targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
-    const cellEl = targetEl?.closest('[data-month-cell-date]');
-    const dateStr = cellEl?.getAttribute('data-month-cell-date');
-    if (dateStr) {
-      const hoveredDate = parseDate(dateStr);
-      if (!isSameDay(hoveredDate, monthDragRef.current.currentDay)) {
-        monthDragRef.current.currentDay = hoveredDate;
-        monthDragRef.current.moved = true;
-        setMonthSelectionRange({ start: monthDragRef.current.startDay, end: hoveredDate });
+    const dist = Math.hypot(touch.clientX - monthDragRef.current.startX, touch.clientY - monthDragRef.current.startY);
+    if (dist < 18) return;
+
+    const gridEl = monthGridRef.current;
+    if (gridEl) {
+      const rect = gridEl.getBoundingClientRect();
+      const col = Math.floor(((touch.clientX - rect.left) / rect.width) * 7);
+      const rowCount = monthMatrix.length || 5;
+      const row = Math.floor(((touch.clientY - rect.top) / rect.height) * rowCount);
+      if (row >= 0 && row < monthMatrix.length && col >= 0 && col < 7) {
+        const hoveredDate = monthMatrix[row]?.cells[col]?.date;
+        if (hoveredDate && !isSameDay(hoveredDate, monthDragRef.current.currentDay)) {
+          monthDragRef.current.currentDay = hoveredDate;
+          monthDragRef.current.moved = true;
+          setMonthSelectionRange({ start: monthDragRef.current.startDay, end: hoveredDate });
+        }
       }
     }
   };
@@ -1477,13 +1506,18 @@ export default function DailyPlanner() {
     monthItemDragRef.current.currentX = touch.clientX;
     monthItemDragRef.current.currentY = touch.clientY;
 
-    const targetEl = document.elementFromPoint(touch.clientX, touch.clientY);
-    const cellEl = targetEl?.closest('[data-month-cell-date]');
-    const dateStr = cellEl?.getAttribute('data-month-cell-date');
-
-    if (dateStr) {
-      const hoveredDate = parseDate(dateStr);
-      monthItemDragRef.current.targetDate = hoveredDate;
+    const gridEl = monthGridRef.current;
+    if (gridEl) {
+      const rect = gridEl.getBoundingClientRect();
+      const col = Math.floor(((touch.clientX - rect.left) / rect.width) * 7);
+      const rowCount = monthMatrix.length || 5;
+      const row = Math.floor(((touch.clientY - rect.top) / rect.height) * rowCount);
+      if (row >= 0 && row < monthMatrix.length && col >= 0 && col < 7) {
+        const cellDate = monthMatrix[row]?.cells[col]?.date;
+        if (cellDate) {
+          monthItemDragRef.current.targetDate = cellDate;
+        }
+      }
     }
 
     if (monthItemDragRef.current.moved) {
@@ -1555,6 +1589,7 @@ export default function DailyPlanner() {
   const mainRef      = useRef<HTMLDivElement>(null);
   const nowLineRef   = useRef<HTMLDivElement>(null);
   const [showLiveBtn, setShowLiveBtn] = useState(false);
+  const showLiveBtnRef = useRef(false);
   const editRef      = useRef<HTMLTextAreaElement>(null);
   const menuRef      = useRef<HTMLDivElement>(null);
   const settingsRef    = useRef<HTMLDivElement>(null);
@@ -1726,15 +1761,16 @@ export default function DailyPlanner() {
 
   const scrollSaveTimeoutRef = useRef<number | null>(null);
   const isScrolledStateRef = useRef(false);
+  const cachedGridTopRef = useRef(0);
+  const scrollRafPendingRef = useRef(false);
 
   const updateScrollState = useCallback(() => {
     if (!mainRef.current) return;
     const scrollTop = mainRef.current.scrollTop;
-    let gridTop = 0;
-    if (gridCardRef.current && mainRef.current) {
-      const mainRect = mainRef.current.getBoundingClientRect();
-      const gridRect = gridCardRef.current.getBoundingClientRect();
-      gridTop = Math.max(0, gridRect.top - mainRect.top + scrollTop);
+    let gridTop = cachedGridTopRef.current;
+    if (gridTop === 0 && gridCardRef.current) {
+      gridTop = gridCardRef.current.offsetTop;
+      cachedGridTopRef.current = gridTop;
     }
 
     // Hysteresis window to prevent rapid toggling/blinking at the scroll boundary.
@@ -1757,8 +1793,16 @@ export default function DailyPlanner() {
   }, []);
 
   const handleMainScroll = useCallback(() => {
-    repositionMenu();
-    updateScrollState();
+    if (!isPhoneRef.current && menuIdRef.current) {
+      repositionMenu();
+    }
+    if (!scrollRafPendingRef.current) {
+      scrollRafPendingRef.current = true;
+      requestAnimationFrame(() => {
+        scrollRafPendingRef.current = false;
+        updateScrollState();
+      });
+    }
     // The grid moved, so whatever the finger is resting on, this gesture is a
     // scroll. Drop any hold still ripening — otherwise it arms a few hundred
     // pixels into the swipe and yanks a block out of the day you scrolled past.
@@ -2481,6 +2525,15 @@ export default function DailyPlanner() {
     () => Object.values(weekEvents).filter(ev => !ev.allDay),
     [weekEvents],
   );
+  const timedEventsByDay = useMemo(() => {
+    const map = new Map<number, PlannerEvent[]>();
+    for (const ev of weekTimedEvents) {
+      const arr = map.get(ev.dayIndex) ?? [];
+      arr.push(ev);
+      map.set(ev.dayIndex, arr);
+    }
+    return map;
+  }, [weekTimedEvents]);
   const weekAllDayEvents = useMemo(() => {
     const rawAllDays = Object.values(weekEvents).filter(ev => ev.allDay && !ev.deleted);
     const mapped: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
@@ -2655,18 +2708,23 @@ export default function DailyPlanner() {
   // so the strip is desktop-only.
   const focusMiniEnabled = isTimelineView && !isPhone;
   const focusMiniBarH    = focusMiniEnabled && focusMiniMode === 'mini' ? 34 : 0;
-  const stickyHeaderH  = isScrolled ? HEADER_COMPACT_PX : HEADER_PX;
+  const stickyHeaderH  = isPhone ? HEADER_COMPACT_PX : (isScrolled ? HEADER_COMPACT_PX : HEADER_PX);
   const stickyAllDayH  = isScrolled && !hasAnyAllDayEvents ? 0 : allDayHeight;
   const stickyTasksH   = isScrolled && !hasAnyDatedTasks ? 0 : taskRowHeight;
 
   // Month overview: full weeks covering the current month, each day resolved to the
   // events actually visible that week (recurring versions + single-week overrides).
   const monthMatrix = useMemo(() => {
-    if (calendarView !== 'month') return [] as Array<{ weekKey: string; cells: Array<{ date: Date; events: PlannerEvent[] }> }>;
     const gridStart = startOfWeek(startOfMonth(currentDate), { weekStartsOn });
     const gridEnd   = endOfWeek(endOfMonth(currentDate), { weekStartsOn });
     const allDays   = eachDayOfInterval({ start: gridStart, end: gridEnd });
-    const weeks: Array<{ weekKey: string; cells: Array<{ date: Date; events: PlannerEvent[] }> }> = [];
+    const weeks: Array<{
+      weekKey: string;
+      cells: Array<{ date: Date; events: PlannerEvent[] }>;
+      weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }>;
+      allDayLayoutMap: Map<string, { row: number; visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }>;
+      allDayRowCount: number;
+    }> = [];
     const hiddenSet = new Set(hiddenCategoryIds);
     for (let i = 0; i < allDays.length; i += 7) {
       const chunk = allDays.slice(i, i + 7);
@@ -2686,10 +2744,31 @@ export default function DailyPlanner() {
           })
           .sort((a, b) => timeToMin(a.startTime) - timeToMin(b.startTime)),
       }));
-      weeks.push({ weekKey: wkey, cells });
+
+      const rawAllDays = Object.values(resolved)
+        .filter(ev => ev.allDay && !ev.deleted && (!hiddenCategoryIds.length || !hiddenSet.has(ev.categoryId || UNCATEGORISED)));
+      const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
+      for (const ev of rawAllDays) {
+        const overlap = getEventWeekOverlap(ev, weekStartDate);
+        if (overlap) {
+          weekAllDays.push({
+            ...ev,
+            visibleDayIndex: overlap.dayIndex,
+            visibleDaysSpan: overlap.daysSpan,
+          });
+        }
+      }
+      const allDayLayoutMap = layoutAllDay(weekAllDays);
+      let maxAllDayRow = -1;
+      for (const info of allDayLayoutMap.values()) {
+        if (info.row > maxAllDayRow) maxAllDayRow = info.row;
+      }
+      const allDayRowCount = maxAllDayRow + 1;
+
+      weeks.push({ weekKey: wkey, cells, weekAllDays, allDayLayoutMap, allDayRowCount });
     }
     return weeks;
-  }, [calendarView, currentDate, weekStartsOn, events, hiddenCategoryIds]);
+  }, [currentDate, weekStartsOn, events, hiddenCategoryIds]);
 
   // Year overview: 12 mini months. Resolving every week of the year is the
   // expensive bit, so each week is resolved once and shared across its days.
@@ -3468,14 +3547,24 @@ export default function DailyPlanner() {
   // visible area (mirrors the widget). Clicking it scrolls the line back into view.
   const recomputeLiveBtn = useCallback(() => {
     const line = nowLineRef.current;
-    if (!line) { setShowLiveBtn(false); return; }
+    if (!line) {
+      if (showLiveBtnRef.current) {
+        showLiveBtnRef.current = false;
+        setShowLiveBtn(false);
+      }
+      return;
+    }
     const lineRect = line.getBoundingClientRect();
     // Fixed viewport bounds: below the sticky app header (~56px), above the bottom (including mobile nav bar).
     const topBound = 96;
     const bottomNavH = isPhoneRef.current ? 90 : 36;
     const bottomBound = window.innerHeight - bottomNavH;
     const visible = lineRect.top >= topBound && lineRect.top <= bottomBound;
-    setShowLiveBtn(!visible);
+    const nextShow = !visible;
+    if (showLiveBtnRef.current !== nextShow) {
+      showLiveBtnRef.current = nextShow;
+      setShowLiveBtn(nextShow);
+    }
   }, []);
 
   // Away from "now" entirely -> the pill is the way back, so it should always be
@@ -3486,8 +3575,20 @@ export default function DailyPlanner() {
     : viewedWeekKey !== currentRealWeekKey;
 
   useEffect(() => {
-    if (viewingAnotherWeek) { setShowLiveBtn(true); return; }
-    if (!liveLineOnScreen) { setShowLiveBtn(false); return; }
+    if (viewingAnotherWeek) {
+      if (!showLiveBtnRef.current) {
+        showLiveBtnRef.current = true;
+        setShowLiveBtn(true);
+      }
+      return;
+    }
+    if (!liveLineOnScreen) {
+      if (showLiveBtnRef.current) {
+        showLiveBtnRef.current = false;
+        setShowLiveBtn(false);
+      }
+      return;
+    }
     recomputeLiveBtn();
     let liveRaf = 0;
     const onScroll = () => {
@@ -3796,7 +3897,21 @@ export default function DailyPlanner() {
         return Math.floor(prev / 60_000) === Math.floor(now / 60_000) ? prev : now;
       });
     }, 1000);
-    return () => clearInterval(id);
+
+    const onWake = () => {
+      setNowTick(Date.now());
+    };
+    window.addEventListener('focus', onWake);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onWake();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', onWake);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   useEffect(() => {
@@ -3838,7 +3953,22 @@ export default function DailyPlanner() {
         });
     };
 
+    const loadTasks = () => {
+      if (uiBusyRef.current) return;
+      if (Date.now() - lastLocalTasksWriteRef.current < 3000) return;
+      fetch('/api/tasks')
+        .then(r => r.json())
+        .then(data => {
+          if (!data || typeof data !== 'object') return;
+          const next = coerceTasks(data);
+          if (JSON.stringify(next) === JSON.stringify(tasksRef.current)) return;
+          writeTasks(next);
+        })
+        .catch(() => {});
+    };
+
     loadFocusSessions();
+    loadTasks();
 
     // Live push of the shared file database, so a change made in the widget shows
     // up here at once instead of on the next poll. Events are only adopted when
@@ -3886,8 +4016,26 @@ export default function DailyPlanner() {
     } catch (_) { /* fall back to the poll */ }
 
     // Safety net only — the stream is what makes this feel instant.
-    const focusPollId = setInterval(loadFocusSessions, 15000);
-    return () => { clearInterval(focusPollId); if (dbStream) dbStream.close(); };
+    const focusPollId = setInterval(() => {
+      loadFocusSessions();
+      loadTasks();
+    }, 15000);
+
+    const onWakeTasks = () => {
+      loadTasks();
+    };
+    window.addEventListener('focus', onWakeTasks);
+    const onVisChange = () => {
+      if (document.visibilityState === 'visible') loadTasks();
+    };
+    document.addEventListener('visibilitychange', onVisChange);
+
+    return () => {
+      clearInterval(focusPollId);
+      if (dbStream) dbStream.close();
+      window.removeEventListener('focus', onWakeTasks);
+      document.removeEventListener('visibilitychange', onVisChange);
+    };
   }, [writeEvents, writeTasks, adoptNotificationFrame]);
 
   // The running timer is shared through the backend so the main window and the
@@ -6359,12 +6507,29 @@ export default function DailyPlanner() {
     const dist = (t: TouchList) =>
       Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
 
+    let pinchRaf = 0;
+    const onMove = (e: TouchEvent) => {
+      const p = pinchRef.current;
+      if (!p || e.touches.length !== 2) return;
+      if (e.cancelable) e.preventDefault();
+      if (pinchRaf) return;
+      const currentDist = dist(e.touches);
+      pinchRaf = requestAnimationFrame(() => {
+        pinchRaf = 0;
+        if (!pinchRef.current) return;
+        const ratio = currentDist / (p.startDist || 1);
+        if (isPhoneRef.current) {
+          setMobileContentZoom(clampZoom(p.startZoom * ratio));
+        } else {
+          setAppZoom(clampZoom(p.startZoom * ratio));
+        }
+      });
+    };
+
     const onStart = (e: TouchEvent) => {
       if (e.touches.length !== 2) return;
       // A second finger arriving mid-drag means "zoom", not "drag": abandon the
       // grab so the block doesn't fly across the grid as the fingers spread.
-      // endTouchDrag (not just cancelPendingTouch) so an ALREADY-armed drag is
-      // torn down too, instead of leaving the grid pinned at touch-action:none.
       endTouchDrag();
       setDragDisp(null);
       setDragDelta(null);
@@ -6382,27 +6547,24 @@ export default function DailyPlanner() {
         startDist: dist(e.touches),
         startZoom: isPhoneRef.current ? mobileContentZoomRef.current : appZoomRef.current,
       };
+      // Dynamically attach non-passive touchmove ONLY while a 2-finger pinch is active.
+      // This keeps 100% of single-finger scrolling non-blocking and GPU-accelerated.
+      window.addEventListener('touchmove', onMove, { passive: false });
     };
-    const onMove = (e: TouchEvent) => {
-      const p = pinchRef.current;
-      if (!p || e.touches.length !== 2) return;
-      if (e.cancelable) e.preventDefault();
-      const ratio = dist(e.touches) / (p.startDist || 1);
-      if (isPhoneRef.current) {
-        setMobileContentZoom(clampZoom(p.startZoom * ratio));
-      } else {
-        setAppZoom(clampZoom(p.startZoom * ratio));
-      }
-    };
+
     const onEnd = (e: TouchEvent) => {
-      if (e.touches.length < 2) pinchRef.current = null;
+      if (pinchRaf) { cancelAnimationFrame(pinchRaf); pinchRaf = 0; }
+      if (e.touches.length < 2) {
+        pinchRef.current = null;
+        window.removeEventListener('touchmove', onMove);
+      }
     };
 
     window.addEventListener('touchstart', onStart, { passive: true });
-    window.addEventListener('touchmove', onMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
-    window.addEventListener('touchcancel', onEnd);
+    window.addEventListener('touchend', onEnd, { passive: true });
+    window.addEventListener('touchcancel', onEnd, { passive: true });
     return () => {
+      if (pinchRaf) cancelAnimationFrame(pinchRaf);
       window.removeEventListener('touchstart', onStart);
       window.removeEventListener('touchmove', onMove);
       window.removeEventListener('touchend', onEnd);
@@ -6423,7 +6585,7 @@ export default function DailyPlanner() {
     swipeJustEndedRef.current = true;
     window.setTimeout(() => {
       swipeJustEndedRef.current = false;
-    }, 200);
+    }, 140);
 
     if (monthDragRef.current) {
       monthDragRef.current = null;
@@ -6432,7 +6594,12 @@ export default function DailyPlanner() {
     cancelPendingTouch();
 
     const current = activeCalendarViewRef.current;
-    const targetView: CalendarView = current === 'custom' ? 'month' : current === 'month' ? 'custom' : (current === 'day' || current === 'week' ? 'month' : 'custom');
+    let targetView: CalendarView;
+    if (dir === 'left') {
+      targetView = current === 'custom' ? 'month' : current === 'month' ? 'custom' : 'month';
+    } else {
+      targetView = current === 'month' ? 'custom' : current === 'custom' ? 'month' : 'custom';
+    }
 
     haptic(10);
     switchCalendarView(targetView, dir);
@@ -6454,8 +6621,8 @@ export default function DailyPlanner() {
       }
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // Only ignore text fields, open dialog popovers, and bottom nav bar
-      if (target.closest('input, textarea, select, [role="dialog"], nav')) {
+      // Ignore interactive inputs, buttons, day events, and timeline handles
+      if (target.closest('input, textarea, select, [role="dialog"], nav, button, [data-event], [data-timeline-handle]')) {
         touchSwipeRef.current = null;
         return;
       }
@@ -6485,17 +6652,10 @@ export default function DailyPlanner() {
       const absDx = Math.abs(dx);
       const absDy = Math.abs(dy);
 
-      // If vertical scroll is dominating, cancel horizontal swipe
-      if (absDy > 16 && absDy > absDx * 1.15) {
+      // Cancel horizontal swipe if vertical scroll clearly dominates after leaving the deadzone
+      if (absDy > 24 && absDy > absDx * 1.35) {
         sw.valid = false;
         return;
-      }
-
-      // Fast trigger: once 35px horizontal travel is reached, trigger immediately
-      if (absDx >= 35 && absDx > absDy * 1.15) {
-        sw.triggered = true;
-        sw.valid = false;
-        executeSwipeSwitch(dx < 0 ? 'left' : 'right');
       }
     };
 
@@ -6517,7 +6677,8 @@ export default function DailyPlanner() {
       const absDy = Math.abs(dy);
       const dt = Date.now() - sw.startTime;
 
-      if (absDx >= 30 && absDx > absDy * 1.1 && dt < 800) {
+      // Clean natural horizontal swipe detection: crisp, natural, and highly responsive
+      if ((absDx >= 36 && absDx > absDy * 1.15 && dt < 450) || (absDx >= 65 && absDx > absDy * 1.05 && dt < 700)) {
         sw.triggered = true;
         executeSwipeSwitch(dx < 0 ? 'left' : 'right');
       }
@@ -7430,13 +7591,13 @@ export default function DailyPlanner() {
         }}
         onScroll={handleMainScroll}
       >
-        <AnimatePresence mode="wait" initial={false}>
+        <AnimatePresence initial={false} mode={isPhone ? "popLayout" : "popLayout"}>
           {!showFocusAnalysis ? (
             <motion.div
               key={`calendar-view-${calendarView}`}
               initial={{
                 opacity: 0,
-                x: swipeAnimDir === 'left' ? 32 : swipeAnimDir === 'right' ? -32 : 0,
+                x: swipeAnimDir === 'left' ? (isPhone ? 12 : 24) : swipeAnimDir === 'right' ? (isPhone ? -12 : -24) : 0,
               }}
               animate={{
                 opacity: 1,
@@ -7444,17 +7605,23 @@ export default function DailyPlanner() {
               }}
               exit={{
                 opacity: 0,
-                x: swipeAnimDir === 'left' ? -32 : swipeAnimDir === 'right' ? 32 : 0,
+                x: swipeAnimDir === 'left' ? (isPhone ? -12 : -24) : swipeAnimDir === 'right' ? (isPhone ? 12 : 24) : 0,
               }}
               transition={{
-                duration: 0.18,
-                ease: [0.22, 1, 0.36, 1],
+                duration: isPhone ? 0.08 : 0.14,
+                ease: [0.16, 1, 0.3, 1],
+              }}
+              style={{
+                willChange: 'transform, opacity',
+                transform: 'translate3d(0,0,0)',
+                backfaceVisibility: 'hidden',
+                WebkitBackfaceVisibility: 'hidden',
               }}
               // The 900px floor is a desktop guard against the toolbar wrapping
               // into a mess; on a phone it would simply force a sideways scroll
               // of the entire page, so a narrow screen drops it and tightens the
               // padding — every pixel of width is a pixel of the day.
-              className={isCompact ? 'w-full max-w-full px-1.5 py-2' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
+              className={isCompact ? 'w-full max-w-full px-1.5 py-2 flex flex-col min-h-0 flex-1' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
             >
           {/* ── Focus banner ────────────────────────────────────────────────
               Expanded it is ~200px — a quarter of a phone screen spent before
@@ -8044,34 +8211,30 @@ export default function DailyPlanner() {
               </AnimatePresence>
             </div>
           )}
-          <AnimatePresence mode="wait">
             {isTimelineView ? (
-              <motion.div
-                key="week-view-wrapper"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.05, ease: 'easeOut' }}
-              >
-                <AnimatePresence initial={false} custom={direction} mode="wait">
+              <div key="week-view-wrapper" className="w-full flex flex-col min-h-0">
+                <AnimatePresence initial={false} custom={direction} mode="sync">
             <motion.div
               // Day view slides per day; week view per week; custom view per range.
               key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : isCustomView ? `c:${weekStart.toISOString()}:${customFrom}:${customTo}` : `w:${weekStart.toISOString()}`}
               custom={direction}
               variants={{
-                enter: (d: number) => (d !== 0 ? { x: d > 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
+                enter: (d: number) => (d !== 0 ? { x: d > 0 ? (isPhone ? 8 : 12) : (isPhone ? -8 : -12), opacity: 0 } : { opacity: 0 }),
                 center: { x: 0, opacity: 1 },
-                exit: (d: number) => (d !== 0 ? { x: d < 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
+                exit: (d: number) => (d !== 0 ? { x: d < 0 ? (isPhone ? 8 : 12) : (isPhone ? -8 : -12), opacity: 0 } : { opacity: 0 }),
               }}
               initial="enter"
               animate="center"
               exit="exit"
-              transition={{
+              transition={isPhone ? {
+                x: { duration: 0.08, ease: [0.22, 1, 0.36, 1] },
+                opacity: { duration: 0.06, ease: 'easeOut' },
+              } : {
                 x: { type: 'spring', stiffness: 2600, damping: 75, mass: 0.15 },
                 opacity: { duration: 0.04, ease: 'easeOut' },
               }}
               ref={gridCardRef}
-              className={`flex border border-border/60 rounded-xl shadow-md relative z-10 ${
+              className={`flex border border-border/60 rounded-xl shadow-md relative z-10 gpu-layer ${
                 scrollsSideways ? 'overflow-x-auto overflow-y-visible no-scrollbar touch-scroll-x' : 'overflow-clip'
               }`}
               style={{
@@ -8211,7 +8374,10 @@ export default function DailyPlanner() {
 
                     type RenderItem = { ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' };
                     const renderItems: RenderItem[] = [];
-                    for (const ev of weekTimedEvents) {
+                    const candidateEvents = (dragDisp || batchDisp || resizeDisp)
+                      ? weekTimedEvents
+                      : (timedEventsByDay.get(colIdx) ? [...(timedEventsByDay.get(colIdx) || []), ...(timedEventsByDay.get(colIdx - 1) || [])] : (timedEventsByDay.get(colIdx - 1) || []));
+                    for (const ev of candidateEvents) {
 
                       const isDrag      = dragDisp?.id === ev.id;
                       const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
@@ -8839,6 +9005,8 @@ export default function DailyPlanner() {
                           const isMoving = isDrag || isResize || isBatchDrag;
                           const blockTransition = isMoving
                             ? 'none'
+                            : isTouch
+                            ? 'transform 70ms ease, opacity 70ms ease'
                             : 'box-shadow 140ms ease, outline-color 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), filter 140ms ease';
                           const { bg, border, text, textMuted, boxShadow, accentBar } = chipColors(ev);
                           const tooShort = height < 60;
@@ -8960,8 +9128,8 @@ export default function DailyPlanner() {
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.95 : isTouchHolding ? 0.88 : 1,
                                 touchAction: isTouch ? 'manipulation' : undefined,
-                                // A touch more saturation on hover so the block "wakes up".
-                                filter: lift ? 'saturate(1.12) brightness(1.03)' : undefined,
+                                // A touch more saturation on hover so the block "wakes up" (desktop only).
+                                filter: (!isTouch && lift) ? 'saturate(1.12) brightness(1.03)' : undefined,
                                 outline: isMenu ? `2px solid ${text}` : isSelected ? `2px solid ${darkMode ? 'rgba(255,255,255,0.65)' : 'rgba(0,0,0,0.45)'}` : 'none',
                                 outlineOffset: 1,
                                 pointerEvents: isMoving ? (isTouch ? 'auto' : 'none') : undefined,
@@ -9594,7 +9762,7 @@ export default function DailyPlanner() {
               </div>
             </motion.div>
           </AnimatePresence>
-        </motion.div>
+        </div>
         ) : calendarView === 'year' ? (
         /* â”€â”€ Year overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
         (() => {
@@ -9620,7 +9788,7 @@ export default function DailyPlanner() {
                 title={`Open ${format(m.monthStart, 'MMMM yyyy')}`}
                 // self-start so months with 5 week-rows don't float vertically
                 // centred next to months with 6.
-                className="rounded-lg p-2.5 text-left transition-smooth duration-150 hover:-translate-y-[2px] self-start w-full"
+                className="rounded-lg p-2.5 text-left transition-smooth duration-150 hover:-translate-y-[2px] active:scale-[0.98] self-start w-full cursor-pointer"
                 style={{
                   background: m.isCurrent ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)') : surfaceBg,
                   border: `1px solid ${m.isCurrent ? 'rgba(96,165,250,0.45)' : surfaceBdr}`,
@@ -9687,13 +9855,9 @@ export default function DailyPlanner() {
           } : null;
 
           return (
-            <motion.div
+            <div
               ref={monthGridRef}
               key="month-view-wrapper"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.05, ease: 'easeOut' }}
               onTouchMove={(e) => {
                 handleMonthCellTouchMove(e);
                 handleMonthItemTouchMove(e);
@@ -9702,9 +9866,13 @@ export default function DailyPlanner() {
                 handleMonthCellTouchEnd(e);
                 handleMonthItemTouchEnd(e);
               }}
-              className={`rounded-lg border border-border/60 overflow-hidden shadow-md relative z-10 flex flex-col min-h-0 ${monthGridSize ? 'mx-auto' : 'flex-1'}`}
+              className={`rounded-lg border border-border/60 overflow-hidden shadow-md relative z-10 flex flex-col min-h-0 gpu-layer ${monthGridSize ? 'mx-auto' : 'flex-1'}`}
               style={{
                 background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
+                transform: 'translate3d(0,0,0)',
+                backfaceVisibility: 'hidden',
+                WebkitBackfaceVisibility: 'hidden',
+                contain: 'paint',
                 ...(monthGridSize ? {
                   width: monthGridSize.width,
                   height: monthGridSize.height,
@@ -9724,25 +9892,7 @@ export default function DailyPlanner() {
               {/* Week rows */}
               {monthMatrix.map(week => {
                 const weekStartDate = parseDate(week.weekKey);
-                const rawAllDays = Object.values(resolveWeek(events, week.weekKey, undefined, weekStartsOn))
-                  .filter(ev => ev.allDay && !ev.deleted && (!hiddenCategoryIds.length || !hiddenCategoryIds.includes(ev.categoryId || UNCATEGORISED)));
-                const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
-                for (const ev of rawAllDays) {
-                  const overlap = getEventWeekOverlap(ev, weekStartDate);
-                  if (overlap) {
-                    weekAllDays.push({
-                      ...ev,
-                      visibleDayIndex: overlap.dayIndex,
-                      visibleDaysSpan: overlap.daysSpan,
-                    });
-                  }
-                }
-                const allDayLayoutMap = layoutAllDay(weekAllDays);
-                let maxAllDayRow = -1;
-                for (const info of allDayLayoutMap.values()) {
-                  if (info.row > maxAllDayRow) maxAllDayRow = info.row;
-                }
-                const allDayRowCount = maxAllDayRow + 1;
+                const { weekAllDays, allDayLayoutMap, allDayRowCount } = week;
 
                 const selWeekOverlap = selRange ? getEventWeekOverlap({
                   id: 'drag-preview',
@@ -9858,7 +10008,7 @@ export default function DailyPlanner() {
                                       type="button"
                                       key={ev.id}
                                       data-event="1"
-                                      className={`w-4 h-4 rounded-full inline-flex items-center justify-center cursor-grab active:cursor-grabbing ${isBeingDragged ? 'opacity-25' : ''}`}
+                                      className={`w-5 h-5 rounded-full inline-flex items-center justify-center cursor-grab active:cursor-grabbing active:scale-90 transition-transform ${isBeingDragged ? 'opacity-25' : ''}`}
                                       onMouseDown={(e) => handleMonthItemMouseDown(ev, date, e)}
                                       onTouchStart={(e) => handleMonthItemTouchStart(ev, date, e)}
                                       onClick={(e) => {
@@ -9870,7 +10020,7 @@ export default function DailyPlanner() {
                                     >
                                       <span
                                         className="rounded-full flex-shrink-0"
-                                        style={{ width: 7.5, height: 7.5, background: accentBar || border }}
+                                        style={{ width: 8, height: 8, background: accentBar || border }}
                                       />
                                     </button>
                                   );
@@ -10090,11 +10240,10 @@ export default function DailyPlanner() {
                   </svg>
                 </div>
               )}
-            </motion.div>
+            </div>
           );
         })()
           )}
-        </AnimatePresence>
       </motion.div>
       ) : (
         <motion.div
@@ -10705,6 +10854,7 @@ export default function DailyPlanner() {
           open={isPhone ? mobileTab === 'tasks' : (tasksPanelOpen && !showFocusAnalysis)}
           width={tasksPanelWidth}
           tasks={tasks}
+          today={format(nowDate, 'yyyy-MM-dd')}
           filters={taskFilters}
           timeFormat={timeFormat}
           weekStartsOn={weekStartsOn}
@@ -11901,9 +12051,9 @@ export default function DailyPlanner() {
           animate={isPhone ? { y: 0 } : { opacity: 1, scale: 1 }}
           exit={isPhone ? { y: '100%' } : { opacity: 0, scale: 0.96 }}
           transition={isPhone
-            ? { type: 'spring', stiffness: 460, damping: 42 }
-            : { duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-          className={`fixed z-[200] overflow-hidden flex flex-col touch-scroll ${isPhone ? '' : 'rounded-xl shadow-2xl'}`}
+            ? { duration: 0.14, ease: [0.22, 1, 0.36, 1] }
+            : { duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+          className={`fixed z-[200] overflow-hidden flex flex-col touch-scroll gpu-layer ${isPhone ? '' : 'rounded-xl shadow-2xl'}`}
           style={isPhone ? {
             left: 0, right: 0,
             bottom: vp.keyboardInset > 0 ? `${vp.keyboardInset}px` : 0,
@@ -11916,7 +12066,7 @@ export default function DailyPlanner() {
             borderTop: `1px solid ${menuBdr}`,
             boxShadow: '0 -6px 18px rgba(0,0,0,0.34)',
             willChange: 'transform',
-            contain: 'paint',
+            contain: 'paint layout',
           } : {
             left: menuPos.x,
             top:  menuPos.y,
@@ -13051,17 +13201,17 @@ export default function DailyPlanner() {
             {mobileTab === 'calendar' && !showFocusAnalysis && !mobileMenuOpen && !mobileViewPickerOpen && !mobilePrayerOpen && (
               <motion.button
                 key="fab"
-                initial={{ opacity: 0, scale: 0.6, y: 12 }}
+                initial={{ opacity: 0, scale: 0.7, y: 8 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.6, y: 12 }}
-                transition={{ type: 'spring', stiffness: 520, damping: 30 }}
+                exit={{ opacity: 0, scale: 0.7, y: 8 }}
+                transition={{ duration: 0.10, ease: [0.16, 1, 0.3, 1] }}
                 onClick={() => { haptic(8); handleHeaderCreateClick(); }}
-                className="fixed z-[70] w-14 h-14 rounded-full flex items-center justify-center text-white active:scale-90 transition-transform"
+                className="fixed z-[70] w-14 h-14 rounded-full flex items-center justify-center text-white active:scale-90 transition-transform gpu-layer"
                 style={{
                   right: 'calc(16px + var(--safe-right))',
                   bottom: 'calc(var(--bottom-nav-h) + 16px)',
                   background: 'linear-gradient(140deg, #3b82f6, #2563eb)',
-                  boxShadow: '0 8px 26px rgba(37,99,235,0.45)',
+                  boxShadow: '0 4px 16px rgba(37,99,235,0.40)',
                 }}
                 title="New event"
               >
@@ -13072,7 +13222,7 @@ export default function DailyPlanner() {
 
           {/* ── Bottom tab bar ───────────────────────────────────────────────*/}
           <nav
-            className="fixed inset-x-0 bottom-0 z-[85] flex items-stretch border-t"
+            className="fixed inset-x-0 bottom-0 z-[85] flex items-stretch border-t gpu-layer"
             style={{
               height: `calc(${BOTTOM_NAV_H}px + var(--safe-bottom))`,
               paddingBottom: 'var(--safe-bottom)',
@@ -13108,24 +13258,15 @@ export default function DailyPlanner() {
                     setShowFocusAnalysis(false);
                     setMobileTab(item.id);
                   }}
-                  className="flex-1 flex flex-col items-center justify-center gap-0.5 relative active:opacity-60 transition-opacity"
+                  className="flex-1 flex flex-col items-center justify-center gap-0.5 relative active:scale-95 transition-transform duration-70"
                   style={{ color: active ? '#3b82f6' : headerInactive }}
                 >
                   {/* The active pill, not just a colour change: on a small bar
                       colour alone is easy to miss at a glance. */}
                   {active && (
-                    <motion.span
-                      // Deliberately NOT a shared `layoutId` pill. That makes
-                      // framer measure both tabs with getBoundingClientRect on
-                      // the frame you tap — a forced synchronous layout of the
-                      // whole calendar, on top of the re-render the tap already
-                      // triggered. A local fade/scale looks nearly identical and
-                      // never touches layout.
-                      initial={{ opacity: 0, scale: 0.86 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="absolute inset-x-3 top-1 bottom-1 rounded-xl -z-10"
+                    <span
+                      className="absolute inset-x-3 top-1 bottom-1 rounded-xl -z-10 transition-opacity duration-100 ease-out"
                       style={{ background: darkMode ? 'rgba(59,130,246,0.16)' : 'rgba(37,99,235,0.10)' }}
-                      transition={{ duration: 0.16, ease: 'easeOut' }}
                     />
                   )}
                   <span className="relative">
@@ -13187,7 +13328,6 @@ export default function DailyPlanner() {
                         if (calendarView !== 'custom') {
                           switchCalendarView('custom');
                         }
-                        setMobileViewPickerOpen(false);
                       } else {
                         switchCalendarView(opt.id as CalendarView);
                         setMobileViewPickerOpen(false);
@@ -14192,11 +14332,13 @@ function MobileSheet({
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const startRef = useRef<number | null>(null);
   const currentDragRef = useRef(0);
+  const rafPendingRef = useRef(false);
 
   useEffect(() => {
     if (!open) {
       startRef.current = null;
       currentDragRef.current = 0;
+      rafPendingRef.current = false;
       return;
     }
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -14213,7 +14355,7 @@ function MobileSheet({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.16, ease: 'easeOut' }}
+            transition={{ duration: 0.08, ease: 'easeOut' }}
             onClick={onClose}
             className="fixed inset-0 z-[90]"
             style={{ background: 'rgba(0,0,0,0.52)', willChange: 'opacity' }}
@@ -14224,7 +14366,7 @@ function MobileSheet({
             initial={{ transform: 'translate3d(0, 100%, 0)' }}
             animate={{ transform: 'translate3d(0, 0%, 0)' }}
             exit={{ transform: 'translate3d(0, 100%, 0)' }}
-            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
             className="fixed inset-x-0 bottom-0 z-[91] flex flex-col overflow-hidden gpu-layer"
             style={{
               maxHeight: '85dvh',
@@ -14245,6 +14387,7 @@ function MobileSheet({
                 (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
                 startRef.current = e.clientY;
                 currentDragRef.current = 0;
+                rafPendingRef.current = false;
                 if (sheetRef.current) {
                   sheetRef.current.style.transition = 'none';
                 }
@@ -14253,16 +14396,26 @@ function MobileSheet({
                 if (startRef.current === null || !sheetRef.current) return;
                 const dy = Math.max(0, e.clientY - startRef.current);
                 currentDragRef.current = dy;
-                sheetRef.current.style.transform = `translate3d(0, ${dy}px, 0)`;
+                if (!rafPendingRef.current) {
+                  rafPendingRef.current = true;
+                  requestAnimationFrame(() => {
+                    rafPendingRef.current = false;
+                    if (sheetRef.current && startRef.current !== null) {
+                      sheetRef.current.style.transform = `translate3d(0, ${currentDragRef.current}px, 0)`;
+                    }
+                  });
+                }
               }}
               onPointerUp={() => {
+                rafPendingRef.current = false;
                 if (startRef.current === null) return;
                 const travelled = currentDragRef.current;
                 startRef.current = null;
                 currentDragRef.current = 0;
                 if (sheetRef.current) {
-                  sheetRef.current.style.transition = 'transform 0.2s cubic-bezier(0.22, 1, 0.36, 1)';
-                  if (travelled > 80) {
+                  sheetRef.current.style.transition = 'transform 0.14s cubic-bezier(0.16, 1, 0.3, 1)';
+                  if (travelled > 60) {
+                    haptic(8);
                     sheetRef.current.style.transform = 'translate3d(0, 100%, 0)';
                     onClose();
                   } else {
@@ -14271,10 +14424,11 @@ function MobileSheet({
                 }
               }}
               onPointerCancel={() => {
+                rafPendingRef.current = false;
                 startRef.current = null;
                 currentDragRef.current = 0;
                 if (sheetRef.current) {
-                  sheetRef.current.style.transition = 'transform 0.2s cubic-bezier(0.22, 1, 0.36, 1)';
+                  sheetRef.current.style.transition = 'transform 0.14s cubic-bezier(0.16, 1, 0.3, 1)';
                   sheetRef.current.style.transform = 'translate3d(0, 0%, 0)';
                 }
               }}

@@ -66,6 +66,8 @@ interface TasksPanelProps {
   width: number;
   tasks: TaskData;
   filters: TaskFilter[];
+  /** Optional explicit today date ('yyyy-MM-dd') from parent clock */
+  today?: string;
   timeFormat: TimeFormat;
   weekStartsOn: WeekStartsOn;
   taskColor: string;
@@ -157,6 +159,7 @@ function useTaskRows(tasks: TaskData, today: string, autoRollRecurringTasks = tr
 function TasksPanel({
   open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle',
   autoRollRecurringTasks = true, theme,
+  today: propToday,
   lists, activeListId, onActiveListChange, onListsChange, onDeleteList, onMoveTaskToList,
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
   sheet = false,
@@ -164,7 +167,54 @@ function TasksPanel({
   zoom,
 }: TasksPanelProps) {
   const vp = useViewport();
-  const today = todayYmd();
+
+  // Self-refreshing today date: updates on midnight rollover, periodic check, and tab focus / wake-up
+  const [liveToday, setLiveToday] = useState<string>(() => propToday || todayYmd());
+
+  useEffect(() => {
+    if (propToday && propToday !== liveToday) {
+      setLiveToday(propToday);
+    }
+  }, [propToday, liveToday]);
+
+  useEffect(() => {
+    const updateDay = () => {
+      const current = propToday || todayYmd();
+      setLiveToday(prev => (prev === current ? prev : current));
+    };
+
+    // 1. Regular 10-second check in case of drift, sleep resume, or system clock changes
+    const intervalId = window.setInterval(updateDay, 10_000);
+
+    // 2. Precise midnight schedule
+    let midnightTimer: number | null = null;
+    const scheduleMidnight = () => {
+      const now = new Date();
+      const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 50);
+      const ms = Math.max(500, nextMidnight.getTime() - now.getTime());
+      midnightTimer = window.setTimeout(() => {
+        updateDay();
+        scheduleMidnight();
+      }, ms);
+    };
+    scheduleMidnight();
+
+    // 3. Tab visibility & window focus triggers
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') updateDay();
+    };
+    window.addEventListener('focus', updateDay);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      if (midnightTimer !== null) window.clearTimeout(midnightTimer);
+      window.removeEventListener('focus', updateDay);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [propToday]);
+
+  const today = propToday || liveToday;
   const tomorrow = useMemo(() => format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd'), [today]);
 
   const allRows = useTaskRows(tasks, today, autoRollRecurringTasks);
@@ -217,6 +267,17 @@ function TasksPanel({
   const [composerTitle, setComposerTitle] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerDate, setComposerDate] = useState<string | null>(today);
+  const prevTodayRef = useRef(today);
+
+  useEffect(() => {
+    const prev = prevTodayRef.current;
+    if (prev !== today) {
+      // If composer date was sitting on previous today, advance to the new today automatically
+      setComposerDate(current => (current === prev ? today : current));
+      prevTodayRef.current = today;
+    }
+  }, [today]);
+
   const [composerTime, setComposerTime] = useState<string | null>(null);
   const [composerRecur, setComposerRecur] = useState<Recurrence | undefined>(undefined);
   const [composerNotes, setComposerNotes] = useState('');
@@ -446,13 +507,22 @@ function TasksPanel({
     onMoveTaskToList(targetOccId, listId);
   }, [allRows, tasks, listOfTask, onMoveTaskToList]);
 
-  // Phone sheet: how far the grab handle has been pulled down, so the sheet can
-  // follow the finger and spring back if the pull wasn't far enough to dismiss.
   const [sheetDragY, setSheetDragY] = useState(0);
   const [sheetDragging, setSheetDragging] = useState(false);
   const sheetStartRef = useRef<number | null>(null);
+  const sheetDragRafRef = useRef<number | null>(null);
   // A sheet reopened after being dragged must start flush, never mid-pull.
-  useEffect(() => { if (!open) { setSheetDragY(0); setSheetDragging(false); sheetStartRef.current = null; } }, [open]);
+  useEffect(() => {
+    if (!open) {
+      if (sheetDragRafRef.current !== null) {
+        cancelAnimationFrame(sheetDragRafRef.current);
+        sheetDragRafRef.current = null;
+      }
+      setSheetDragY(0);
+      setSheetDragging(false);
+      sheetStartRef.current = null;
+    }
+  }, [open]);
 
   // Resize drag handle
   const dragRef = useRef<{ startX: number; startW: number } | null>(null);
@@ -573,7 +643,7 @@ function TasksPanel({
           transform: open ? `translateY(${sheetDragY}px)` : 'translateY(110%)',
           // No transition while a finger is on the handle — the sheet has to
           // track the drag exactly, or it feels like it's on elastic.
-          transition: sheetDragging ? 'none' : 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)',
+          transition: sheetDragging ? 'none' : 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)',
           visibility: open ? 'visible' : 'hidden',
           // Keep the sheet on its own compositor layer and stop its contents from
           // participating in the page's layout/paint while it slides.
@@ -616,9 +686,19 @@ function TasksPanel({
             }}
             onPointerMove={e => {
               if (sheetStartRef.current === null) return;
-              setSheetDragY(Math.max(0, e.clientY - sheetStartRef.current));
+              const dy = Math.max(0, e.clientY - sheetStartRef.current);
+              if (sheetDragRafRef.current === null) {
+                sheetDragRafRef.current = requestAnimationFrame(() => {
+                  sheetDragRafRef.current = null;
+                  setSheetDragY(dy);
+                });
+              }
             }}
             onPointerUp={e => {
+              if (sheetDragRafRef.current !== null) {
+                cancelAnimationFrame(sheetDragRafRef.current);
+                sheetDragRafRef.current = null;
+              }
               if (sheetStartRef.current === null) return;
               const travelled = e.clientY - sheetStartRef.current;
               sheetStartRef.current = null;
@@ -626,7 +706,15 @@ function TasksPanel({
               setSheetDragY(0);
               if (travelled > (e.currentTarget as HTMLElement).ownerDocument.defaultView!.innerHeight * 0.18) onClose();
             }}
-            onPointerCancel={() => { sheetStartRef.current = null; setSheetDragging(false); setSheetDragY(0); }}
+            onPointerCancel={() => {
+              if (sheetDragRafRef.current !== null) {
+                cancelAnimationFrame(sheetDragRafRef.current);
+                sheetDragRafRef.current = null;
+              }
+              sheetStartRef.current = null;
+              setSheetDragging(false);
+              setSheetDragY(0);
+            }}
           >
             <div className="w-10 h-1 rounded-full" style={{ background: theme.surfaceBdr, opacity: 0.9 }} />
           </div>
@@ -1179,7 +1267,10 @@ function TasksPanel({
         </div>
 
         {/* Task List */}
-        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden touch-scroll px-2.5 py-3 space-y-3">
+        <div
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden touch-scroll px-2.5 py-3 space-y-3 gpu-layer"
+          style={{ overscrollBehavior: 'contain', contain: 'content', paddingBottom: page ? 'calc(var(--safe-bottom) + 24px)' : undefined }}
+        >
           {visibleCount === 0 && (
             <div
               className="flex flex-col items-center justify-center gap-3 py-14 text-center px-6 rounded-2xl border"
@@ -2583,6 +2674,7 @@ function TaskRow({
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
   onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
 }) {
+  const vp = useViewport();
   const { task: t, done, due } = row;
   const swatch = t.color || null;
   const overdue = !done && !!due && due < today;
@@ -2598,14 +2690,10 @@ function TaskRow({
 
   return (
     <motion.div
-      // While the finger has hold of this row, framer must not also be animating
-      // it into a layout slot — the two fight and the row appears to fly off on
-      // its own, which is exactly the "it spun off somewhere else" complaint.
-      layout={lifted ? false : 'position'}
-      initial={{ opacity: 0, y: -6, scale: 0.98 }}
+      initial={vp.isPhone ? false : { opacity: 0, y: -4, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -6, scale: 0.96 }}
-      transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+      exit={vp.isPhone ? { opacity: 0 } : { opacity: 0, y: -4, scale: 0.96 }}
+      transition={{ duration: vp.isPhone ? 0.08 : 0.14, ease: [0.16, 1, 0.3, 1] }}
       draggable
       onDragStart={(e: any) => {
         rowDragStartedRef.current = true;
@@ -2631,13 +2719,14 @@ function TaskRow({
         e.stopPropagation?.();
         onDrop?.(edgeFromEvent(e));
       }}
-      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-smooth cursor-grab active:cursor-grabbing border overflow-hidden ${
+      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-smooth cursor-grab active:cursor-grabbing border overflow-hidden content-auto-task ${
         lifted ? '' : isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:shadow-md hover:-translate-y-px'
       }`}
       style={{
         background: visualDone ? `${theme.accent}10` : overdue ? `${dangerHue}08` : theme.surfaceBg,
         borderColor: overdue ? `${dangerHue}40` : theme.surfaceBdr,
         boxShadow: lifted ? '0 12px 30px rgba(0,0,0,0.38)' : '0 1px 0 rgba(0,0,0,0.03)',
+        contain: lifted ? undefined : 'layout paint',
         // Carried by the finger: off the page, above its neighbours, and
         // transparent to hit-testing so elementFromPoint reads what is BELOW it.
         ...(lifted ? {
@@ -2671,7 +2760,7 @@ function TaskRow({
             initial={{ x: '-110%', opacity: 0 }}
             animate={{ x: '115%', opacity: [0, 0.22, 0] }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: vp.isPhone ? 0.24 : 0.38, ease: [0.16, 1, 0.3, 1] }}
             className="absolute inset-y-0 left-0 w-2/3 pointer-events-none"
             style={{
               background: `linear-gradient(90deg, transparent, ${theme.accent}55, transparent)`,
@@ -2682,11 +2771,11 @@ function TaskRow({
       {/* Checkbox with generous hit target and compact spring animation */}
       <button
         onClick={e => { e.stopPropagation(); onToggleDone(row.occId, done); }}
-        className="relative p-1.5 -m-1.5 rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer group/chk transition-smooth"
+        className="relative p-1.5 -m-1.5 rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer group/chk transition-smooth touch-target"
         title={done ? 'Mark as incomplete' : 'Mark as completed'}
       >
         <AnimatePresence>
-          {visualDone && (
+          {visualDone && !vp.isPhone && (
             <motion.span
               key="complete-burst"
               initial={{ scale: 0.3, opacity: 0.9 }}
@@ -2705,8 +2794,8 @@ function TaskRow({
         </AnimatePresence>
         <motion.div
           whileTap={{ scale: 0.8 }}
-          animate={visualDone ? { scale: [1, 1.22, 1] } : { scale: 1 }}
-          transition={{ type: 'spring', stiffness: 450, damping: 20 }}
+          animate={visualDone ? { scale: [1, 1.15, 1] } : { scale: 1 }}
+          transition={vp.isPhone ? { duration: 0.1 } : { type: 'spring', stiffness: 450, damping: 20 }}
           className={`relative z-10 w-4 h-4 ${isCircle ? 'rounded-full' : 'rounded'} flex items-center justify-center transition-smooth ${
             visualDone ? 'shadow-sm' : 'group-hover/chk:scale-110'
           }`}
@@ -2723,7 +2812,7 @@ function TaskRow({
                 initial={{ scale: 0, rotate: -45, opacity: 0 }}
                 animate={{ scale: 1, rotate: 0, opacity: 1 }}
                 exit={{ scale: 0, rotate: 45, opacity: 0 }}
-                transition={{ type: 'spring', stiffness: 500, damping: 22 }}
+                transition={vp.isPhone ? { duration: 0.08 } : { type: 'spring', stiffness: 500, damping: 22 }}
               >
                 <Check size={10} strokeWidth={3.2} color={theme.darkMode ? '#0b1220' : '#ffffff'} />
               </motion.div>

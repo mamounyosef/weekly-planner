@@ -9,6 +9,11 @@ import {
   formatRecurrenceLabel,
   parseDate,
   weekKeyOf,
+  getEventWeekOverlap,
+  normalizeAnchor,
+  stampNewItem,
+  makeOccId,
+  parseOccId,
   type RecurFields,
   type WeekStartsOn,
   type Weekday,
@@ -84,13 +89,6 @@ function testRfc5545TimezoneParsing() {
 function testWeeklyIntervalGroupingWithWeekStartsOn() {
   console.log('Testing weekly interval grouping with weekStartsOn...');
 
-  // Master anchored on Wednesday 2025-01-08 (weekKey = 2025-01-06, dayIndex = 2)
-  // Repeating every 2 weeks on Monday and Sunday (byWeekday: [1, 0])
-  // With weekStartsOn = 1 (Monday):
-  // Week 1: Mon 2025-01-06 to Sun 2025-01-12 (Anchor is Wed 2025-01-08, so only Sun 2025-01-12 occurs in Week 1)
-  // Week 2: Mon 2025-01-13 to Sun 2025-01-19 (Skipped due to interval: 2)
-  // Week 3: Mon 2025-01-20 to Sun 2025-01-26 (Both Mon 2025-01-20 and Sun 2025-01-26 occur)
-
   const master: RecurFields = {
     id: 'ev-biweekly-1',
     weekKey: '2025-01-06',
@@ -141,8 +139,6 @@ function testWeeklyIntervalGroupingWithWeekStartsOn() {
 function testDeleteFirstOccurrenceScoped() {
   console.log('Testing deleteScoped on first occurrence...');
 
-  // Weekly series on Tuesday (2) and Thursday (4) anchored on Sunday 2025-01-05
-  // First active occurrence is Tuesday 2025-01-07
   const master: RecurFields = {
     id: 'master-1',
     weekKey: '2025-01-05',
@@ -187,7 +183,6 @@ function testDeleteFirstOccurrenceScoped() {
 function testMonthlyYearlyDragAnchorStability() {
   console.log('Testing monthly/yearly drag anchor stability...');
 
-  // Master created in 2025 on the 15th
   const master: RecurFields = {
     id: 'monthly-1',
     weekKey: '2025-01-12',
@@ -203,7 +198,7 @@ function testMonthlyYearlyDragAnchorStability() {
 
   const res = editSeries(
     raw,
-    'monthly-1', // no occDate in ID
+    'monthly-1',
     { weekKey: '2026-08-17', dayIndex: 1 },
     '2026-08-10',
     1 as WeekStartsOn,
@@ -220,7 +215,6 @@ function testMonthlyYearlyDragAnchorStability() {
 function testSafeModuloCustomViews() {
   console.log('Testing safe positive modulo for custom views...');
 
-  // Range -100 to +100 across all weekStartsOn (0..6)
   const refDate = new Date(2026, 7, 21);
   for (let wkst = 0; wkst < 7; wkst++) {
     const weekStartsOn = wkst as WeekStartsOn;
@@ -239,7 +233,6 @@ function testSafeModuloCustomViews() {
 function testMonthEndAndLeapYearRecurrence() {
   console.log('Testing month-end and leap-year recurrence expansion...');
 
-  // Monthly on 31st starting Jan 31, 2024 (2024 is a leap year)
   const monthly31: RecurFields = {
     id: 'monthly-31',
     weekKey: '2024-01-28',
@@ -257,7 +250,6 @@ function testMonthEndAndLeapYearRecurrence() {
     '2024-05-31',
   ]);
 
-  // Yearly on Feb 29 starting Feb 29, 2024
   const yearlyLeap: RecurFields = {
     id: 'yearly-leap',
     weekKey: '2024-02-25',
@@ -284,7 +276,7 @@ function testTaskCompletionRollForward() {
     id: 'task-daily-3',
     title: 'Water plants every 3 days',
     weekKey: '2026-08-17',
-    dayIndex: 1, // 2026-08-18 (Tue) -> Occurrences: 2026-08-18, 2026-08-21, 2026-08-24...
+    dayIndex: 1,
     recur: { freq: 'daily', interval: 3 },
   };
 
@@ -296,7 +288,6 @@ function testTaskCompletionRollForward() {
   assert.deepEqual(tasks['task-daily-3'].completedDates, ['2026-08-21']);
   assert.equal(currentOpenOccurrence(tasks['task-daily-3'], today, true), '2026-08-24');
 
-  // Multi-occurrence COUNT test
   const taskBiweeklyCount: Task = {
     id: 'task-count',
     title: 'Gym session',
@@ -314,6 +305,141 @@ function testTaskCompletionRollForward() {
   console.log('✓ Task completion roll-forward tests passed');
 }
 
+function testEventWeekOverlapAndCustomRanges() {
+  console.log('Testing getEventWeekOverlap with standard and custom ranges...');
+
+  const weekStart = new Date(2026, 7, 24); // Mon Aug 24, 2026
+
+  // 1. Event fully within week (Wed Aug 26, 2-day span -> Wed & Thu)
+  const ev1: RecurFields = { id: 'ev1', weekKey: '2026-08-24', dayIndex: 2, daysSpan: 2 };
+  const overlap1 = getEventWeekOverlap(ev1, weekStart);
+  assert.deepEqual(overlap1, { dayIndex: 2, daysSpan: 2 });
+
+  // 2. Event spanning across week start (started Fri before, span 5 days -> Fri, Sat, Sun, Mon, Tue)
+  const ev2: RecurFields = { id: 'ev2', weekKey: '2026-08-17', dayIndex: 4, daysSpan: 5 };
+  const overlap2 = getEventWeekOverlap(ev2, weekStart);
+  assert.deepEqual(overlap2, { dayIndex: 0, daysSpan: 2 }, 'Clips to visible week start with daysSpan 2');
+
+  // 3. Event completely outside week
+  const ev3: RecurFields = { id: 'ev3', weekKey: '2026-08-17', dayIndex: 0, daysSpan: 2 };
+  assert.equal(getEventWeekOverlap(ev3, weekStart), null);
+
+  // 4. Custom range (-2 to 5 -> Sat Aug 22 to Sat Aug 29)
+  const customRange = { from: -2, to: 5 };
+  const overlapCustom = getEventWeekOverlap(ev2, weekStart, customRange);
+  assert.ok(overlapCustom !== null);
+  assert.equal(overlapCustom?.dayIndex, -2, 'Starts on Saturday in custom view');
+  assert.equal(overlapCustom?.daysSpan, 4, 'Spans 4 visible days (Sat, Sun, Mon, Tue)');
+
+  console.log('✓ Event week overlap tests passed');
+}
+
+function testNormalizeAnchorAndStamping() {
+  console.log('Testing normalizeAnchor, stampNewItem, and occId parsing...');
+
+  // normalizeAnchor when dayIndex is out of range (< 0 or > 6)
+  const outOfRangeItem: RecurFields = { id: 'item-1', weekKey: '2026-08-24', dayIndex: 9 };
+  const normalized = normalizeAnchor(outOfRangeItem, 1 as WeekStartsOn);
+  assert.equal(normalized.weekKey, '2026-08-31');
+  assert.equal(normalized.dayIndex, 2);
+
+  const negativeItem: RecurFields = { id: 'item-2', weekKey: '2026-08-24', dayIndex: -2 };
+  const normalizedNeg = normalizeAnchor(negativeItem, 1 as WeekStartsOn);
+  assert.equal(normalizedNeg.weekKey, '2026-08-17');
+  assert.equal(normalizedNeg.dayIndex, 5);
+
+  // stampNewItem
+  const stamped = stampNewItem({ id: 'item-new', content: 'New Event' }, '2026-08-24', 1 as WeekStartsOn);
+  assert.equal(stamped.weekKey, '2026-08-24');
+  assert.equal(stamped.deleted, false);
+  assert.ok(stamped.updatedAt !== undefined);
+
+  // makeOccId & parseOccId
+  const occId = makeOccId('master-123', '2026-08-25');
+  assert.equal(occId, 'master-123::2026-08-25');
+  const parsed = parseOccId(occId);
+  assert.equal(parsed.masterId, 'master-123');
+  assert.equal(parsed.occDate, '2026-08-25');
+
+  const plainParsed = parseOccId('single-id');
+  assert.equal(plainParsed.masterId, 'single-id');
+  assert.equal(plainParsed.occDate, null);
+
+  console.log('✓ Anchor normalization and occId tests passed');
+}
+
+function testResolveWeekSpillInAndDeduping() {
+  console.log('Testing resolveWeek overnight spill-in and duplicate gCal deduplication...');
+
+  const viewedWeek = '2026-08-24'; // Mon Aug 24
+
+  // 1. Overnight timed item starting on Sunday Aug 23 (23:00 to 01:00)
+  const rawEvents: Record<string, RecurFields> = {
+    'ev-overnight': {
+      id: 'ev-overnight',
+      weekKey: '2026-08-17',
+      dayIndex: 6, // Sunday Aug 23
+      startTime: '23:00',
+      endTime: '01:00',
+      allDay: false,
+    },
+    // Duplicate Google event with same gCalId
+    'ev-gcal-old': {
+      id: 'ev-gcal-old',
+      gCalId: 'gcal-dup-1',
+      weekKey: '2026-08-24',
+      dayIndex: 1,
+      lastSyncedAt: 1000,
+    },
+    'ev-gcal-fresh': {
+      id: 'ev-gcal-fresh',
+      gCalId: 'gcal-dup-1',
+      weekKey: '2026-08-24',
+      dayIndex: 1,
+      lastSyncedAt: 2000,
+    },
+  };
+
+  const resolved = resolveWeek(rawEvents, viewedWeek, undefined, 1 as WeekStartsOn);
+  // Overnight event is included with negative dayIndex
+  assert.ok(resolved['ev-overnight'], 'Overnight event from Sunday included in Monday view');
+  assert.equal(resolved['ev-overnight'].dayIndex, -1);
+
+  // Duplicate Google event: only freshest kept
+  assert.equal(resolved['ev-gcal-old'], undefined, 'Old duplicate Google event must be discarded');
+  assert.ok(resolved['ev-gcal-fresh'], 'Freshest duplicate Google event must be kept');
+
+  console.log('✓ Resolve week spill-in and deduping tests passed');
+}
+
+function testBuildGoogleRecurrenceAndLabels() {
+  console.log('Testing buildGoogleRecurrence and formatRecurrenceLabel...');
+
+  const master: RecurFields = {
+    id: 'm1',
+    startTime: '10:00',
+    endTime: '11:00',
+    allDay: false,
+    recur: { freq: 'weekly', interval: 2, byWeekday: [1, 3] },
+    exdates: ['2026-08-26'],
+  };
+
+  const gRecur = buildGoogleRecurrence(master, 'Asia/Amman');
+  assert.ok(gRecur && gRecur.length === 2);
+  assert.ok(gRecur[0].includes('RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE'));
+  assert.ok(gRecur[1].includes('EXDATE;TZID=Asia/Amman:20260826T100000'));
+
+  // Recurrence labels
+  assert.equal(formatRecurrenceLabel(undefined), "Doesn't repeat");
+  assert.equal(formatRecurrenceLabel({ freq: 'daily', interval: 1 }), 'Daily');
+  assert.equal(formatRecurrenceLabel({ freq: 'daily', interval: 3 }), 'Every 3 days');
+  assert.equal(formatRecurrenceLabel({ freq: 'weekly', interval: 1, byWeekday: [1, 2, 3, 4, 5] }), 'Weekdays');
+  assert.equal(formatRecurrenceLabel({ freq: 'monthly', interval: 1 }), 'Monthly');
+  assert.equal(formatRecurrenceLabel({ freq: 'yearly', interval: 1 }), 'Yearly');
+
+  console.log('✓ buildGoogleRecurrence and formatRecurrenceLabel tests passed');
+}
+
 function runAllTests() {
   console.log('--- RUNNING COMPLETE RECURRENCE ENGINE TEST SUITE ---');
   testRfc5545TimezoneParsing();
@@ -323,6 +449,10 @@ function runAllTests() {
   testSafeModuloCustomViews();
   testMonthEndAndLeapYearRecurrence();
   testTaskCompletionRollForward();
+  testEventWeekOverlapAndCustomRanges();
+  testNormalizeAnchorAndStamping();
+  testResolveWeekSpillInAndDeduping();
+  testBuildGoogleRecurrenceAndLabels();
   console.log('====================================================');
   console.log('ALL RECURRENCE TESTS PASSED SUCCESSFULLY!');
 }
