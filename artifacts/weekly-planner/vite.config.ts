@@ -2593,6 +2593,9 @@ export default defineConfig({
             settingsPath: userPaths.settingsPath,
             // The focus history, so the phone can show how the time went.
             focusPath: userPaths.focusPath,
+            prayerDonePath: userPaths.donePath,
+            // Global rather than per-user: a public timetable, not anyone's data.
+            prayerTimesPath: path.resolve(rootDir, 'database', 'prayer-times.json'),
           });
 
           const sendSyncJson = (res: any, status: number, payload: unknown) => {

@@ -48,6 +48,7 @@
     "test:settings-roundtrip": "tsx src/lib/settingsRoundTrip.test.ts",
     "test:focus-stats": "tsx src/lib/focusStats.test.ts",
     "test:grid": "tsx src/lib/grid.test.ts",
+    "test:prayer-sync": "tsx src/lib/prayerSync.test.ts",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
     "test:alarms": "tsx src/lib/alarmPlan.test.ts",
     "test:agenda": "tsx src/lib/agenda.test.ts",

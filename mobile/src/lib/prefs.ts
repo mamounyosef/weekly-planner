@@ -5,6 +5,7 @@
 
 import * as SecureStore from 'expo-secure-store';
 import { makeDeviceId } from './syncStorage';
+import { isThemeMode, type ThemeMode } from '../theme';
 
 const KEY_SERVER = 'planner.serverUrl';
 const KEY_SESSION = 'planner.session';
@@ -12,6 +13,9 @@ const KEY_DEVICE = 'planner.deviceId';
 const KEY_USER = 'planner.username';
 const KEY_VIEW = 'planner.calendarView';
 const KEY_INTERVAL = 'planner.interval';
+const KEY_THEME = 'planner.themeMode';
+const KEY_CUSTOM_BEFORE = 'planner.customDaysBefore';
+const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
 
 async function read(key: string): Promise<string | null> {
   try {
@@ -83,6 +87,39 @@ export const prefs = {
     return n === 5 || n === 10 || n === 15 || n === 30 || n === 60 ? n : 30;
   },
   setInterval: (minutes: number) => write(KEY_INTERVAL, String(minutes)),
+
+  /**
+   * The Custom view's window: how many days back, and how many forward.
+   *
+   * Per device, like the view itself. A phone wants a narrower window than a
+   * 27-inch monitor, and the PC keeps `customDaysBefore` and `customDaysAfter`
+   * in its own device-scoped settings for exactly that reason.
+   */
+  async getCustomWindow(): Promise<{ before: number; after: number }> {
+    const [b, a] = await Promise.all([read(KEY_CUSTOM_BEFORE), read(KEY_CUSTOM_AFTER)]);
+    const clamp = (raw: string | null, fallback: number) => {
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 && n <= 14 ? Math.floor(n) : fallback;
+    };
+    return { before: clamp(b, 1), after: clamp(a, 3) };
+  },
+  async setCustomWindow(before: number, after: number): Promise<void> {
+    await write(KEY_CUSTOM_BEFORE, String(before));
+    await write(KEY_CUSTOM_AFTER, String(after));
+  },
+
+  /**
+   * Light, dark, or whatever the phone is set to.
+   *
+   * Per device, like the view and the interval, and deliberately NOT in the
+   * synced settings: appearance is a property of the screen in your hand, not of
+   * the planner, so the PC must never be able to push its choice here.
+   */
+  async getThemeMode(): Promise<ThemeMode> {
+    const raw = await read(KEY_THEME);
+    return isThemeMode(raw) ? raw : 'system';
+  },
+  setThemeMode: (mode: ThemeMode) => write(KEY_THEME, mode),
 
   async signOut(): Promise<void> {
     await write(KEY_SESSION, null);

@@ -162,8 +162,8 @@ function main() {
 
   console.log('--- 8. DURATIONS READ LIKE ENGLISH ---');
   {
-    assert.equal(describeDuration(0), '—');
-    assert.equal(describeDuration(-5), '—', 'and nonsense does not print a negative');
+    assert.equal(describeDuration(0), 'None');
+    assert.equal(describeDuration(-5), 'None', 'and nonsense does not print a negative');
     assert.equal(describeDuration(45 * 60), '45m');
     assert.equal(describeDuration(60 * 60), '1h', 'A round hour drops the minutes');
     assert.equal(describeDuration(135 * 60), '2h 15m');

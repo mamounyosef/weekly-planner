@@ -112,3 +112,24 @@ export const HIT = 48;
 
 /** The primary actions live in the lower third, within one thumb's reach. */
 export const THUMB_ZONE_BOTTOM = 96;
+
+/**
+ * How the app picks between the two palettes.
+ *
+ * Per device on purpose: the phone is used in bed with the lights off far more
+ * than the PC ever is, so forcing dark there while the desk follows the system
+ * is a legitimate combination rather than a disagreement to reconcile.
+ */
+export type ThemeMode = 'system' | 'light' | 'dark';
+
+export function isThemeMode(value: unknown): value is ThemeMode {
+  return value === 'system' || value === 'light' || value === 'dark';
+}
+
+/** `scheme` is whatever the OS reports, which is not always one of the two. */
+export function resolvePalette(mode: ThemeMode, scheme: string | null | undefined): Palette {
+  if (mode === 'light') return light;
+  if (mode === 'dark') return dark;
+  // Undecided reads as dark, matching the value this app has always defaulted to.
+  return scheme === 'light' ? light : dark;
+}

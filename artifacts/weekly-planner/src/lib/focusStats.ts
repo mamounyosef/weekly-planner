@@ -148,9 +148,9 @@ export function summariseFocus(
   };
 }
 
-/** "2h 15m", "45m", "—". Short enough to sit under a bar on a phone. */
+/** "2h 15m", "45m", "None". Short enough to sit under a bar on a phone. */
 export function describeDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'None';
   const mins = Math.round(seconds / 60);
   const h = Math.floor(mins / 60);
   const m = mins % 60;

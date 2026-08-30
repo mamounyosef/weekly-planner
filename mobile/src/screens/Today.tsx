@@ -62,7 +62,17 @@ import {
   type AgendaItem,
 } from '../lib/agenda';
 
-type ViewMode = 'day' | 'week' | 'month' | 'year' | 'agenda';
+type ViewMode = 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year';
+
+/** Short enough to fit six chips across a phone without wrapping. */
+const VIEW_LABELS: Record<ViewMode, string> = {
+  agenda: 'List',
+  day: 'Day',
+  custom: 'Span',
+  week: 'Week',
+  month: 'Month',
+  year: 'Year',
+};
 
 export function Today({ onOpenConflicts }: {
   onOpenConflicts: () => void;
@@ -71,6 +81,7 @@ export function Today({ onOpenConflicts }: {
   const insets = useSafeAreaInsets();
   const {
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
+    prayersOn, isPrayerDone, togglePrayer, customWindow,
   } = usePlanner();
 
   const today = ymd(new Date());
@@ -88,10 +99,8 @@ export function Today({ onOpenConflicts }: {
   const [view, setView] = useState<ViewMode>('day');
   useEffect(() => {
     void prefs.getCalendarView().then(saved => {
-      if (saved === 'agenda' || saved === 'day' || saved === 'week'
-        || saved === 'month' || saved === 'year') {
-        setView(saved as ViewMode);
-      }
+      const known: string[] = ['agenda', 'day', 'custom', 'week', 'month', 'year'];
+      if (saved && known.includes(saved)) setView(saved as ViewMode);
     });
   }, []);
   const chooseView = (next: ViewMode) => {
@@ -134,6 +143,19 @@ export function Today({ onOpenConflicts }: {
     () => Array.from({ length: 7 }, (_, i) => addDays(selected, i - 3)),
     [selected],
   );
+
+  /**
+   * The Custom view's dates: a window around the chosen day.
+   *
+   * This is the view the other four cannot be. A week is a week whether or not
+   * you care about the weekend, and a month is far too much; "the next four
+   * days" is what a person actually plans in, and it is the only window that
+   * stays useful on a narrow screen because you choose how many columns it has.
+   */
+  const customDates = useMemo(() => {
+    const total = customWindow.before + customWindow.after + 1;
+    return Array.from({ length: total }, (_, i) => addDays(selected, i - customWindow.before));
+  }, [selected, customWindow]);
 
   /** The selected day's own week, for the week view. */
   const weekDates = useMemo(() => {
@@ -182,6 +204,12 @@ export function Today({ onOpenConflicts }: {
   const anytime = agenda.allDay;
   const timed = agenda.timed;
 
+  const prayers = useMemo(() => prayersOn(selected), [prayersOn, selected]);
+  /** The next one still to come, for the highlight and the countdown. */
+  const nextPrayer = showingToday
+    ? prayers.find(pr => pr.minutes > nowMin && !isPrayerDone(selected, pr.key))
+    : undefined;
+
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
 
@@ -222,8 +250,16 @@ export function Today({ onOpenConflicts }: {
 
         {/* Day / Week / Month. Small, because it is a mode switch rather than
             an action, and it must not compete with the date itself. */}
-        <Row gap={space.xs} style={{ paddingHorizontal: space.xl, marginTop: space.sm }}>
-          {(['agenda', 'day', 'week', 'month', 'year'] as ViewMode[]).map(mode => {
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{
+            gap: space.xs,
+            paddingHorizontal: space.xl,
+            marginTop: space.sm,
+          }}
+        >
+          {(['agenda', 'day', 'custom', 'week', 'month', 'year'] as ViewMode[]).map(mode => {
             const on = mode === view;
             return (
               <Pressable
@@ -243,19 +279,16 @@ export function Today({ onOpenConflicts }: {
                 }}
               >
                 <Text variant="caption" tone={on ? 'accent' : 'faint'}>
-                  {mode === 'agenda' ? 'List'
-                    : mode === 'day' ? 'Day'
-                      : mode === 'week' ? 'Week'
-                        : mode === 'month' ? 'Month' : 'Year'}
+                  {VIEW_LABELS[mode]}
                 </Text>
               </Pressable>
             );
           })}
-        </Row>
+        </ScrollView>
 
         {/* The strip belongs to the single-day views; the others draw their own
             dates and a second row of them would only compete. */}
-        {view === 'day' || view === 'agenda' ? (
+        {view === 'day' || view === 'agenda' || view === 'custom' ? (
           <Row gap={0} style={{ paddingHorizontal: space.md, marginTop: space.md }}>
             {strip.map(date => (
               <DayCell
@@ -297,6 +330,18 @@ export function Today({ onOpenConflicts }: {
           detailed
           onOpenItem={open}
           onOpenDay={() => chooseView('agenda')}
+        />
+      ) : view === 'custom' ? (
+        <WeekView
+          dates={customDates}
+          dayOf={eventsOf}
+          today={today}
+          nowMin={customDates.includes(today) ? nowMin : null}
+          clock={timeFormat}
+          interval={interval}
+          detailed={customDates.length <= 2}
+          onOpenItem={open}
+          onOpenDay={date => { setSelected(date); chooseView('day'); }}
         />
       ) : view === 'month' ? (
         <MonthView
@@ -370,6 +415,26 @@ export function Today({ onOpenConflicts }: {
           </Group>
         ) : null}
 
+        {prayers.length > 0 ? (
+          <Group
+            title="Prayers"
+            hint={nextPrayer
+              ? `${nextPrayer.label} in ${untilText(nextPrayer.minutes - nowMin)}`
+              : undefined}
+          >
+            {prayers.map(pr => (
+              <PrayerRow
+                key={pr.id}
+                prayer={pr}
+                clock={timeFormat}
+                done={isPrayerDone(selected, pr.key)}
+                next={nextPrayer?.key === pr.key}
+                past={showingToday && pr.minutes <= nowMin}
+                onToggle={() => void togglePrayer(selected, pr.key)}
+              />
+            ))}
+          </Group>
+        ) : null}
       </ScrollView>
       )}
 
@@ -706,6 +771,85 @@ function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
       <View style={{ flex: 1, height: 1, backgroundColor: p.danger, opacity: 0.45 }} />
     </Row>
   );
+}
+
+/**
+ * One prayer.
+ *
+ * Its own row shape rather than an event's, because a prayer is not an
+ * appointment: it has a time and no length, nobody created it, and it cannot be
+ * edited. What it needs is the time, the name in both scripts, and a way to mark
+ * it prayed. The next one due carries the accent, so "what is next" is answered
+ * before anything is read.
+ */
+function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
+  prayer: { key: string; label: string; arabic: string; minutes: number };
+  clock?: string;
+  done: boolean;
+  next: boolean;
+  past: boolean;
+  onToggle: () => void;
+}) {
+  const p = useTheme();
+
+  return (
+    <Pressable
+      onPress={onToggle}
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: done }}
+      accessibilityLabel={`${prayer.label}, ${done ? 'prayed' : 'not yet'}`}
+      android_ripple={{ color: p.accentSoft }}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.md,
+        paddingVertical: space.sm,
+        paddingHorizontal: space.md,
+        borderRadius: radius.md,
+        backgroundColor: next ? p.accentSoft : p.surface,
+        borderWidth: 1,
+        borderColor: next ? p.accent : p.line,
+        opacity: pressed ? 0.9 : done ? 0.55 : past && !next ? 0.75 : 1,
+      })}
+    >
+      <View style={{ width: 52 }}>
+        <Text variant="clock" tone={next ? 'accent' : done ? 'faint' : 'ink'}>
+          {formatClock(prayer.minutes, clock)}
+        </Text>
+      </View>
+
+      <View style={{ flex: 1 }}>
+        <Text variant="bodyStrong" tone={done ? 'faint' : next ? 'accent' : 'ink'}>
+          {prayer.label}
+        </Text>
+      </View>
+
+      <Text variant="body" tone="faint" style={{ fontSize: 15 }}>{prayer.arabic}</Text>
+
+      <View style={{
+        width: 20, height: 20, borderRadius: 10,
+        borderWidth: 2,
+        borderColor: done ? p.ok : p.inkFaint,
+        backgroundColor: done ? p.ok : 'transparent',
+        alignItems: 'center', justifyContent: 'center',
+      }}>
+        {done ? (
+          <Text style={{ color: p.accentInk, fontSize: 11, lineHeight: 13, fontWeight: '900' }}>
+            ✓
+          </Text>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
+/** "1h 20m", "8m". How long until something, said the short way. */
+function untilText(minutes: number): string {
+  const m = Math.max(0, Math.round(minutes));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem === 0 ? `${h}h` : `${h}h ${rem}m`;
 }
 
 function EmptyDay({ showingToday }: { showingToday: boolean }) {

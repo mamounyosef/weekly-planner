@@ -3940,7 +3940,11 @@ export default function DailyPlanner() {
       const settingsOpen = settingsRouteOpenRef.current;
       const onTasks = mobileTabRef.current === 'tasks';
 
-      if (hidden || settingsOpen || onTasks) {
+      // Desktop keeps a 1s Home tick while focus runs (hardware LCD).
+      // We must not return early for these states if the hardware needs the tick.
+      const hardwareNeedsTick = running && !isPhoneRef.current;
+
+      if ((hidden || settingsOpen || onTasks) && !hardwareNeedsTick) {
         if (running && getFocusTimerElapsedSeconds(timer, now) >= timer.plannedSeconds) {
           setNowTick(now);
         }
@@ -3951,7 +3955,7 @@ export default function DailyPlanner() {
         // Desktop keeps a 1s Home tick while focus runs (hardware LCD).
         // On the phone, only commit when the minute turns, analysis is open,
         // or the session is about to complete — countdown leaves use liveClock.
-        if (running && !isPhoneRef.current) return now;
+        if (hardwareNeedsTick) return now;
         if (running && showFocusAnalysisRef.current) return now;
         if (running) {
           const elapsed = getFocusTimerElapsedSeconds(timer, now);

@@ -52,10 +52,15 @@ export type SyncStore =
   | 'categories'
   | 'settings'
   | 'prayerDone'
+  | 'prayerTimes'
   | 'focusSessions';
 
 /** Fields that are merged as add-wins sets rather than registers. */
 export const SET_FIELDS: ReadonlySet<string> = new Set([
+  // The prayers ticked off on a given day. A set for the same reason
+  // `completedDates` is one: two devices ticking different prayers on the same
+  // day must both be remembered, not fight over one value.
+  'prayerDone.done',
   'events.exdates',
   'events.completedDates',
   'tasks.exdates',

@@ -555,7 +555,7 @@ console.log('--- 16. THE STATUS LINE NEVER LEAVES YOU GUESSING ---');
 
   // But once nothing has got through for a while, say so plainly.
   const stale = 1_000 + OFFLINE_AFTER_MS + 1;
-  assert.equal(describeStatus(d, 'offline', stale).label, '2 changes waiting — PC offline',
+  assert.equal(describeStatus(d, 'offline', stale).label, '2 changes waiting, PC offline',
     'and once it really is out of reach, it says so');
   assert.equal(describeStatus(d, 'idle', stale).label, '2 changes to send',
     'while a healthy phase never claims it, however long ago the last sync was');
@@ -564,7 +564,7 @@ console.log('--- 16. THE STATUS LINE NEVER LEAVES YOU GUESSING ---');
   const never = applyLocalChange(
     emptyClientData(PH), { store: 'events', entityId: 'e', at: 1, changes: { title: 'x' } },
   );
-  assert.equal(describeStatus(never, 'offline', 2_000).label, '1 change waiting — PC offline',
+  assert.equal(describeStatus(never, 'offline', 2_000).label, '1 change waiting, PC offline',
     'A phone that has never reached the PC is offline from the start');
 
   const synced = { ...emptyClientData(PH), lastSyncedAt: 0 };

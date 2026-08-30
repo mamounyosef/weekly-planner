@@ -28,6 +28,7 @@ import { Tasks } from './src/screens/Tasks';
 import { Focus } from './src/screens/Focus';
 import { Conflicts } from './src/screens/Conflicts';
 import { Settings } from './src/screens/Settings';
+import { Categories } from './src/screens/Categories';
 import { space } from './src/theme';
 
 export default function App() {
@@ -47,6 +48,7 @@ function Shell() {
   const { ready, signedIn, conflicts } = usePlanner();
   const [tab, setTab] = useState<TabId>('calendar');
   const [showConflicts, setShowConflicts] = useState(false);
+  const [showCategories, setShowCategories] = useState(false);
 
   // The splash lasts only as long as opening SQLite; there is no network in this
   // path, so it is over before it registers even on a slow phone.
@@ -71,6 +73,10 @@ function Shell() {
         <Connect />
       ) : showConflicts ? (
         <Conflicts onClose={() => setShowConflicts(false)} />
+      ) : showCategories ? (
+        // Over the settings tab rather than a tab of its own: categories are
+        // configuration you visit occasionally, not a place you live in.
+        <Categories onClose={() => setShowCategories(false)} />
       ) : (
         <>
           <View style={{ flex: 1 }}>
@@ -81,7 +87,10 @@ function Shell() {
             ) : tab === 'focus' ? (
               <Focus />
             ) : (
-              <Settings onClose={() => setTab('calendar')} />
+              <Settings
+                onClose={() => setTab('calendar')}
+                onOpenCategories={() => setShowCategories(true)}
+              />
             )}
           </View>
 

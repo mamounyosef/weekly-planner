@@ -229,7 +229,7 @@ export function describeStatus(data: ClientData, phase: SyncPhase, now: number):
     label = 'Syncing…';
   } else if (pending > 0) {
     label = reallyOffline
-      ? `${pending} ${pending === 1 ? 'change' : 'changes'} waiting — PC offline`
+      ? `${pending} ${pending === 1 ? 'change' : 'changes'} waiting, PC offline`
       : `${pending} ${pending === 1 ? 'change' : 'changes'} to send`;
   } else if (data.lastSyncedAt === null) {
     label = 'Not synced yet';

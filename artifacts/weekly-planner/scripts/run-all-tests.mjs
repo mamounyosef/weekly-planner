@@ -55,6 +55,7 @@ const testFiles = [
   'src/lib/settingsRoundTrip.test.ts',
   'src/lib/focusStats.test.ts',
   'src/lib/grid.test.ts',
+  'src/lib/prayerSync.test.ts',
 ];
 
 console.log(`\n======================================================`);

@@ -52,11 +52,16 @@ export const SYNCED_STORES: Record<SyncStore, string | null> = {
   taskLists: null,       // lives inside settings.json
   settings: 'settings.json',
   prayerDone: 'prayer-done.json',
-  focusSessions: null,   // append-only history; synced separately, not merged
+  // The Aladhan month cache. Global rather than per-user, and synced so the
+  // phone knows the times with no signal, which is when they are most wanted.
+  prayerTimes: 'prayer-times.json',
+  focusSessions: 'focus-sessions.json',
 };
 
 /** Stores whose whole content is one JSON object keyed by id. */
-export const FILE_STORES: SyncStore[] = ['events', 'tasks', 'settings', 'focusSessions'];
+export const FILE_STORES: SyncStore[] = [
+  'events', 'tasks', 'settings', 'focusSessions', 'prayerDone', 'prayerTimes',
+];
 
 export interface DeviceRecord {
   deviceId: string;

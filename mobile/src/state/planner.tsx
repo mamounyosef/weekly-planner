@@ -52,6 +52,13 @@ import {
 } from '../lib/draft';
 import { DELETED_FIELD } from '../lib/sync';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
+import {
+  buildPrayerDay,
+  coercePrayerSettings,
+  prayerQueryKey,
+  prayerOccId,
+  type PrayerOccurrence,
+} from '../lib/prayerTimes';
 
 /**
  * The settings the PC shares, as the phone reads them.
@@ -204,6 +211,14 @@ interface PlannerContextValue {
   /** Minutes each time step moves. This device's own: 5, 10, 15, 30 or 60. */
   interval: number;
   setInterval(minutes: number): void;
+  /** The Custom view's window, in days either side of the chosen day. */
+  customWindow: { before: number; after: number };
+  setCustomWindow(before: number, after: number): void;
+  /** The prayers of one day, already offset, filtered and sorted. */
+  prayersOn(date: string): PrayerOccurrence[];
+  /** Whether a given prayer has been marked as prayed. */
+  isPrayerDone(date: string, key: string): boolean;
+  togglePrayer(date: string, key: string): Promise<void>;
   answerConflict(conflict: SyncConflict, choice: ResolveChoice): Promise<void>;
   resetLocal(): Promise<void>;
   lastError: string | null;
@@ -226,6 +241,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const [lastError, setLastError] = useState<string | null>(null);
   const [alarmSummary, setAlarmSummary] = useState('No reminders scheduled yet');
   const [interval, setIntervalState] = useState(30);
+  const [customWindow, setCustomWindowState] = useState({ before: 1, after: 3 });
 
   const storageRef = useRef<SyncStorage | null>(null);
   const transportRef = useRef<PlannerTransport | null>(null);
@@ -265,10 +281,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         const deviceId = await prefs.getDeviceId();
         await storage.setDeviceId(deviceId);
 
-        const [url, session, user, savedInterval] = await Promise.all([
-          prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(), prefs.getInterval(),
+        const [url, session, user, savedInterval, savedWindow] = await Promise.all([
+          prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(),
+          prefs.getInterval(), prefs.getCustomWindow(),
         ]);
         setIntervalState(savedInterval);
+        setCustomWindowState(savedWindow);
         const loaded = await storage.load(deviceId);
         if (cancelled) return;
 
@@ -593,6 +611,51 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       .sort((a, b) => String(a.startedAt ?? '').localeCompare(String(b.startedAt ?? '')));
   }, [data]);
 
+  /**
+   * Prayer times for a day, computed from the month cache the PC keeps.
+   *
+   * The cache syncs like everything else, so the times are known with no signal
+   * at all. That matters more here than anywhere: a prayer time you can only
+   * look up online is one you cannot look up in the places you most need it.
+   */
+  const prayerSettings = useMemo(
+    () => coercePrayerSettings((shared as any).prayer),
+    [shared],
+  );
+
+  const prayerMonths = useMemo(
+    () => readClientStore(data, 'prayerTimes') as Record<string, any>,
+    [data],
+  );
+
+  const prayersOn = useCallback((date: string): PrayerOccurrence[] => {
+    if (!prayerSettings.enabled) return [];
+    // The cache is keyed by city, country, method and month, so the key has to
+    // be rebuilt from the settings exactly as the PC built it.
+    const key = `${prayerQueryKey(prayerSettings)}|${date.slice(0, 4)}-${Number(date.slice(5, 7))}`;
+    const entry = prayerMonths?.[key];
+    const times = entry?.days?.[date];
+    return buildPrayerDay(date, times, prayerSettings);
+  }, [prayerSettings, prayerMonths]);
+
+  const prayerDone = useMemo(
+    () => readClientStore(data, 'prayerDone') as Record<string, any>,
+    [data],
+  );
+
+  const isPrayerDone = useCallback((date: string, key: string): boolean => {
+    const entry = prayerDone?.[date];
+    const done = entry?.done;
+    return Array.isArray(done) && done.includes(key);
+  }, [prayerDone]);
+
+  const togglePrayer = useCallback(async (date: string, key: string) => {
+    const entry = (readClientStore(dataRef.current, 'prayerDone') as any)?.[date];
+    const done: string[] = Array.isArray(entry?.done) ? [...entry.done] : [];
+    const next = done.includes(key) ? done.filter(k => k !== key) : [...done, key];
+    await edit('prayerDone', date, { done: next });
+  }, [edit]);
+
   /** The user's own categories, for colours. Defaults only until they arrive. */
   const categories = useMemo(
     () => ((shared as any).categories as any[] | undefined) ?? DEFAULT_CATEGORIES,
@@ -713,10 +776,18 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     timeFormat: shared.timeFormat,
     taskLists: (shared.taskLists as any[]) ?? [],
     focusSessions,
+    prayersOn,
+    isPrayerDone,
+    togglePrayer,
     interval,
     setInterval: (minutes: number) => {
       setIntervalState(minutes);
       void prefs.setInterval(minutes);
+    },
+    customWindow,
+    setCustomWindow: (before: number, after: number) => {
+      setCustomWindowState({ before, after });
+      void prefs.setCustomWindow(before, after);
     },
     answerConflict,
     resetLocal,

@@ -11,18 +11,24 @@ import { Alert, Linking, Pressable, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Updates from 'expo-updates';
 
-import { Button, Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
-import { space, HIT } from '../theme';
+import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
+import { space, HIT, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import { checkPermissions, requestPermissions, type PermissionState } from '../lib/notify';
 
-export function Settings({ onClose }: { onClose: () => void }) {
+export function Settings({ onClose, onOpenCategories }: {
+  onClose: () => void;
+  onOpenCategories?: () => void;
+}) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
   const {
     username, serverUrl, status, data, alarmSummary, lastError,
     signOut, syncNow, resetLocal, interval, setInterval,
+    customWindow, setCustomWindow,
   } = usePlanner();
+
+  const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
 
   const [perm, setPerm] = useState<PermissionState | null>(null);
   const [checking, setChecking] = useState(false);
@@ -172,6 +178,40 @@ export function Settings({ onClose }: { onClose: () => void }) {
           ) : null}
         </Section>
 
+        {/* ── Appearance ── */}
+        <Section title="Appearance">
+          <Text variant="body">Theme</Text>
+          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+            Kept on this phone only. Your PC keeps its own.
+          </Text>
+          <Spacer size={space.sm} />
+          <Row gap={space.xs}>
+            {THEME_CHOICES.map(choice => {
+              const on = choice.mode === themeMode;
+              return (
+                <Pressable
+                  key={choice.mode}
+                  onPress={() => setThemeMode(choice.mode)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: on }}
+                  style={{
+                    flex: 1,
+                    height: 40,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderRadius: 10,
+                    backgroundColor: on ? p.accentSoft : p.surfaceAlt,
+                    borderWidth: 1,
+                    borderColor: on ? p.accent : p.line,
+                  }}
+                >
+                  <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{choice.label}</Text>
+                </Pressable>
+              );
+            })}
+          </Row>
+        </Section>
+
         {/* ── This device ── */}
         <Section title="This device">
           <Text variant="body">Time slot snap interval</Text>
@@ -206,6 +246,55 @@ export function Settings({ onClose }: { onClose: () => void }) {
               );
             })}
           </Row>
+
+          <Spacer size={space.lg} />
+          <Divider />
+          <Spacer size={space.lg} />
+
+          <Text variant="body">Span view</Text>
+          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+            How many days the Span view shows either side of the one you are on.
+          </Text>
+          <Spacer size={space.sm} />
+          <Row gap={space.md} style={{ alignItems: 'center' }}>
+            <Text variant="caption" tone="soft" style={{ width: 52 }}>Before</Text>
+            <DayCount
+              value={customWindow.before}
+              onChange={n => setCustomWindow(n, customWindow.after)}
+            />
+          </Row>
+          <Spacer size={space.sm} />
+          <Row gap={space.md} style={{ alignItems: 'center' }}>
+            <Text variant="caption" tone="soft" style={{ width: 52 }}>After</Text>
+            <DayCount
+              value={customWindow.after}
+              onChange={n => setCustomWindow(customWindow.before, n)}
+            />
+          </Row>
+          <Spacer size={space.sm} />
+          <Text variant="caption" tone="faint">
+            {customWindow.before + customWindow.after + 1} columns in total.
+          </Text>
+        </Section>
+
+        {/* ── Your planner's own settings ── */}
+        <Section title="Planner">
+          <Pressable
+            onPress={onOpenCategories}
+            accessibilityRole="button"
+            style={{
+              flexDirection: 'row', alignItems: 'center',
+              minHeight: HIT, gap: space.md,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="body">Categories</Text>
+              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+                Names, colours and the defaults new items start with. Shared with your PC.
+              </Text>
+            </View>
+            <Text variant="title" tone="faint">›</Text>
+          </Pressable>
         </Section>
 
         {/* ── App ── */}
@@ -248,6 +337,51 @@ export function Settings({ onClose }: { onClose: () => void }) {
         </Section>
       </ScrollView>
     </View>
+  );
+}
+
+/** "System" first, because it is the default and the one most people leave on. */
+const THEME_CHOICES: { mode: ThemeMode; label: string }[] = [
+  { mode: 'system', label: 'System' },
+  { mode: 'light', label: 'Light' },
+  { mode: 'dark', label: 'Dark' },
+];
+
+/**
+ * A small count of days.
+ *
+ * Buttons rather than a slider or a text field: the useful range is nought to
+ * six, every value is one tap away, and nothing has to be typed on a phone
+ * keyboard to change a number by one.
+ */
+function DayCount({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const p = useTheme();
+  return (
+    <Row gap={space.xs} style={{ flex: 1 }}>
+      {[0, 1, 2, 3, 4, 5, 6].map(n => {
+        const on = n === value;
+        return (
+          <Pressable
+            key={n}
+            onPress={() => onChange(n)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: on }}
+            style={{
+              flex: 1,
+              height: 34,
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 8,
+              backgroundColor: on ? p.accentSoft : p.surfaceAlt,
+              borderWidth: 1,
+              borderColor: on ? p.accent : p.line,
+            }}
+          >
+            <Text variant="caption" tone={on ? 'accent' : 'soft'}>{n}</Text>
+          </Pressable>
+        );
+      })}
+    </Row>
   );
 }
 

@@ -2,7 +2,7 @@
 // Small, unopinionated pieces that every screen shares, so spacing and type stay
 // consistent without each screen re-deciding them.
 
-import React, { createContext, useContext } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -14,19 +14,57 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
-import { dark, light, radius, space, type as typeScale, HIT, type Palette } from '../theme';
+import { dark, radius, resolvePalette, space, type as typeScale, HIT, type Palette, type ThemeMode } from '../theme';
+import { prefs } from '../lib/prefs';
 
 const ThemeContext = createContext<Palette>(dark);
 
+interface ThemeModeValue {
+  mode: ThemeMode;
+  setMode(next: ThemeMode): void;
+}
+
+const ThemeModeContext = createContext<ThemeModeValue>({ mode: 'system', setMode: () => {} });
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const scheme = useColorScheme();
+  const [mode, setModeState] = useState<ThemeMode>('system');
+
+  // Read once at launch rather than gating the first render on it: this provider
+  // wraps the splash, and a keystore that is slow to answer must never be able to
+  // hold the whole app on a blank screen. The worst case is one frame of the
+  // system theme before the saved choice lands.
+  useEffect(() => {
+    let cancelled = false;
+    void prefs.getThemeMode().then(saved => {
+      if (!cancelled) setModeState(saved);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const setMode = useCallback((next: ThemeMode) => {
+    // Paint first, persist after. Nothing downstream depends on the write, and
+    // a tap on a theme button should never feel like it is waiting on storage.
+    setModeState(next);
+    void prefs.setThemeMode(next);
+  }, []);
+
   // The planner is checked last thing at night as often as first thing in the
   // morning, so both themes are real designs rather than one plus an inversion.
-  const palette = scheme === 'light' ? light : dark;
-  return <ThemeContext.Provider value={palette}>{children}</ThemeContext.Provider>;
+  const palette = resolvePalette(mode, scheme);
+  const modeValue = useMemo(() => ({ mode, setMode }), [mode, setMode]);
+
+  return (
+    <ThemeModeContext.Provider value={modeValue}>
+      <ThemeContext.Provider value={palette}>{children}</ThemeContext.Provider>
+    </ThemeModeContext.Provider>
+  );
 }
 
 export const useTheme = (): Palette => useContext(ThemeContext);
+
+/** The appearance choice itself, for the one screen that lets you change it. */
+export const useThemeMode = (): ThemeModeValue => useContext(ThemeModeContext);
 
 type TextVariant = keyof typeof typeScale;
 

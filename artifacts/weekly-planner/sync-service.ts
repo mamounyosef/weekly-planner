@@ -61,6 +61,18 @@ export interface UserSyncPaths {
   settingsPath?: string;
   /** Focus session history. An array file, so it needs its own adapter. */
   focusPath?: string;
+  /** Which prayers have been ticked off, per day. */
+  prayerDonePath?: string;
+  /**
+   * The Aladhan month cache.
+   *
+   * Shared by every user rather than per-user, because it is a cache of a public
+   * timetable rather than anyone's data. It syncs so the phone has the times
+   * OFFLINE: prayer times are most wanted exactly where there is no signal, and
+   * an app that needs the internet to tell you when Maghrib is has missed the
+   * point.
+   */
+  prayerTimesPath?: string;
 }
 
 /**
@@ -82,6 +94,8 @@ export function storeFileOf(paths: UserSyncPaths, store: SyncStore): string | nu
   if (store === 'tasks') return paths.tasksPath;
   if (store === 'settings') return paths.settingsPath ?? null;
   if (store === 'focusSessions') return paths.focusPath ?? null;
+  if (store === 'prayerDone') return paths.prayerDonePath ?? null;
+  if (store === 'prayerTimes') return paths.prayerTimesPath ?? null;
   return null;
 }
 
@@ -643,6 +657,8 @@ export function createSyncService(opts: SyncServiceOptions = {}) {
           tasks: opsToSnapshot(bundle.state, 'tasks'),
           settings: opsToSnapshot(bundle.state, 'settings'),
           focusSessions: opsToSnapshot(bundle.state, 'focusSessions'),
+          prayerDone: opsToSnapshot(bundle.state, 'prayerDone'),
+          prayerTimes: opsToSnapshot(bundle.state, 'prayerTimes'),
         };
         // The cursor is a LOG POSITION, never the lamport clock. Handing back a
         // lamport made the phone skip every op whose position happened to be
@@ -855,7 +871,8 @@ export function validateOp(raw: unknown): SyncOp | null {
   if (o.present !== undefined && typeof o.present !== 'boolean') return null;
 
   const allowed: SyncStore[] = [
-    'events', 'tasks', 'taskLists', 'categories', 'settings', 'prayerDone', 'focusSessions',
+    'events', 'tasks', 'taskLists', 'categories', 'settings',
+    'prayerDone', 'prayerTimes', 'focusSessions',
   ];
   if (!allowed.includes(o.store as SyncStore)) return null;
 
