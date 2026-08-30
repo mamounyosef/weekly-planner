@@ -17,13 +17,13 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Text, useTheme } from '../../ui/kit';
 import { radius, space } from '../../theme';
 import { monthGrid } from '../../lib/grid';
-import type { AgendaDay } from '../../lib/agenda';
+import { countsForRange } from '../../lib/agenda';
 
 export function YearView({
-  anchor, dayOf, today, weekStartsOn, onOpenMonth,
+  anchor, events, today, weekStartsOn, onOpenMonth,
 }: {
   anchor: string;
-  dayOf: (date: string) => AgendaDay;
+  events: Record<string, Record<string, unknown>>;
   today: string;
   weekStartsOn: number;
   onOpenMonth: (date: string) => void;
@@ -36,6 +36,19 @@ export function YearView({
     [year],
   );
 
+  /**
+   * The whole year counted once.
+   *
+   * The obvious version asks for a day's agenda per square: three hundred and
+   * sixty-five walks of the planner, each expanding every repeat, to draw a wall
+   * of tinted boxes. That took roughly half a second, which is a long time to
+   * hold a screen still after a tap.
+   */
+  const counts = useMemo(
+    () => countsForRange(events, `${year}-01-01`, `${year}-12-31`, weekStartsOn as any),
+    [events, year, weekStartsOn],
+  );
+
   return (
     <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: space.xxl }}>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
@@ -43,7 +56,7 @@ export function YearView({
           <MiniMonth
             key={first}
             first={first}
-            dayOf={dayOf}
+            counts={counts}
             today={today}
             weekStartsOn={weekStartsOn}
             onPress={() => onOpenMonth(first)}
@@ -54,9 +67,9 @@ export function YearView({
   );
 }
 
-function MiniMonth({ first, dayOf, today, weekStartsOn, onPress }: {
+function MiniMonth({ first, counts, today, weekStartsOn, onPress }: {
   first: string;
-  dayOf: (date: string) => AgendaDay;
+  counts: Record<string, number>;
   today: string;
   weekStartsOn: number;
   onPress: () => void;
@@ -102,9 +115,7 @@ function MiniMonth({ first, dayOf, today, weekStartsOn, onPress }: {
           <View key={wi} style={{ flexDirection: 'row' }}>
             {week.map(date => {
               const inMonth = new Date(`${date}T00:00:00`).getMonth() === month;
-              const count = inMonth
-                ? dayOf(date).all.filter(i => i.store === 'events').length
-                : 0;
+              const count = inMonth ? (counts[date] ?? 0) : 0;
               const isToday = date === today;
               return (
                 <View

@@ -29,6 +29,7 @@ import { Focus } from './src/screens/Focus';
 import { Conflicts } from './src/screens/Conflicts';
 import { Settings } from './src/screens/Settings';
 import { Categories } from './src/screens/Categories';
+import { Reminders } from './src/screens/Reminders';
 import { space } from './src/theme';
 
 export default function App() {
@@ -49,6 +50,7 @@ function Shell() {
   const [tab, setTab] = useState<TabId>('calendar');
   const [showConflicts, setShowConflicts] = useState(false);
   const [showCategories, setShowCategories] = useState(false);
+  const [showReminders, setShowReminders] = useState(false);
 
   // The splash lasts only as long as opening SQLite; there is no network in this
   // path, so it is over before it registers even on a slow phone.
@@ -77,6 +79,8 @@ function Shell() {
         // Over the settings tab rather than a tab of its own: categories are
         // configuration you visit occasionally, not a place you live in.
         <Categories onClose={() => setShowCategories(false)} />
+      ) : showReminders ? (
+        <Reminders onClose={() => setShowReminders(false)} />
       ) : (
         <>
           <View style={{ flex: 1 }}>
@@ -90,6 +94,7 @@ function Shell() {
               <Settings
                 onClose={() => setTab('calendar')}
                 onOpenCategories={() => setShowCategories(true)}
+                onOpenReminders={() => setShowReminders(true)}
               />
             )}
           </View>

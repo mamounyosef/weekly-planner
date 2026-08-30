@@ -16,9 +16,10 @@ import { space, HIT, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import { checkPermissions, requestPermissions, type PermissionState } from '../lib/notify';
 
-export function Settings({ onClose, onOpenCategories }: {
+export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
   onClose: () => void;
   onOpenCategories?: () => void;
+  onOpenReminders?: () => void;
 }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
@@ -291,6 +292,25 @@ export function Settings({ onClose, onOpenCategories }: {
               <Text variant="body">Categories</Text>
               <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
                 Names, colours and the defaults new items start with. Shared with your PC.
+              </Text>
+            </View>
+            <Text variant="title" tone="faint">›</Text>
+          </Pressable>
+
+          <Divider />
+
+          <Pressable
+            onPress={onOpenReminders}
+            accessibilityRole="button"
+            style={{
+              flexDirection: 'row', alignItems: 'center',
+              minHeight: HIT, gap: space.md,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="body">Reminders</Text>
+              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+                How early things alert, quiet hours and snoozing. Shared with your PC.
               </Text>
             </View>
             <Text variant="title" tone="faint">›</Text>

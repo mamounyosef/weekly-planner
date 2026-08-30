@@ -38,10 +38,8 @@ import {
   applyCategoryDefaults,
   blankDraft,
   describeNotify,
-  describeOffset,
   describeRecur,
   draftFromRecord,
-  OFFSET_CHOICES,
   toTimeString,
   validateDraft,
   weekdayName,
@@ -49,7 +47,12 @@ import {
   type DraftProblem,
 } from '../lib/draft';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
+// The engine's own wording and presets, never a second copy: a duplicate had
+// the sign backwards, so a reminder labelled "before" fired after.
+import { offsetLabel, OFFSET_PRESETS_TIMED } from '../lib/notifications';
 import { addDays, ymd } from '../lib/agenda';
+import { GENERAL_LIST_ID, resolveListId, type TaskList } from '../lib/taskLists';
+import { ListChips } from '../ui/ListChips';
 import type { Recurrence, RecurFreq, Weekday } from '../lib/recurrence';
 import type { SyncStore } from '../lib/sync';
 
@@ -58,6 +61,12 @@ export interface EditorTarget {
   /** Absent when creating. */
   id?: string;
   date: string;
+  /**
+   * Which task list a NEW task starts on. Set by the Tasks screen when a list is
+   * being viewed, because adding something while looking at one list and having
+   * it land somewhere else is the surprise that makes lists feel unreliable.
+   */
+  listId?: string;
 }
 
 const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
@@ -82,7 +91,9 @@ export function Editor({ target, onClose }: {
 function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { events, tasks, saveDraft, removeItem, categories, interval } = usePlanner();
+  const {
+    events, tasks, saveDraft, removeItem, edit, categories, interval, taskLists,
+  } = usePlanner();
 
   const existing = useMemo(() => {
     if (!target.id) return undefined;
@@ -103,6 +114,24 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
   const [busy, setBusy] = useState(false);
   const [more, setMore] = useState(false);
 
+  const lists = useMemo<TaskList[]>(() => (
+    (taskLists as any[])
+      .filter(l => l && typeof l === 'object' && typeof l.id === 'string')
+      .map(l => ({ id: l.id, name: String(l.name ?? 'Untitled'), color: String(l.color ?? '') }))
+  ), [taskLists]);
+
+  /**
+   * Which list this task is filed on.
+   *
+   * Kept beside the draft rather than inside it: `DraftInput` is the shared,
+   * tested shape both halves of the planner build records from, and a field only
+   * the phone's task form knows about does not belong in it. It is written as
+   * its own edit after the save instead, which the per-field sync layer merges
+   * exactly the same way.
+   */
+  const existingListId = typeof existing?.listId === 'string' ? existing.listId : undefined;
+  const [listId, setListId] = useState<string | undefined>(existingListId ?? target.listId);
+
   const isNew = !target.id;
   const set = (patch: Partial<DraftInput>) => setDraft(d => ({ ...d, ...patch }));
   const problemFor = (f: DraftProblem['field']) => problems.find(x => x.field === f)?.message;
@@ -115,7 +144,16 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
     if (found.length > 0) return;
     setBusy(true);
     try {
-      await saveDraft(store as SyncStore, draft, target.id);
+      const id = await saveDraft(store as SyncStore, draft, target.id);
+      if (store === 'tasks' && lists.length > 0 && listId !== existingListId) {
+        // General is the ABSENCE of a list, so choosing it CLEARS the field
+        // rather than storing the word: every task written before lists existed
+        // is on General by having no `listId` at all, and the two have to mean
+        // the same thing or the same tasks would answer to two different ids.
+        await edit('tasks', id, {
+          listId: !listId || listId === GENERAL_LIST_ID ? undefined : listId,
+        });
+      }
       onClose();
     } catch (err) {
       Alert.alert('Could not save', err instanceof Error ? err.message : String(err));
@@ -274,6 +312,16 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
                 categories={categories as any}
               />
             </Field>
+
+            {store === 'tasks' && lists.length > 0 ? (
+              <Field label="List" hint="Which part of the board it sits on">
+                <ListChips
+                  options={lists}
+                  value={resolveListId(listId, lists)}
+                  onChange={next => setListId(next ?? undefined)}
+                />
+              </Field>
+            ) : null}
 
             {/* ── Everything else, folded but stated ── */}
             <Pressable
@@ -602,7 +650,7 @@ function ReminderEditor({ value, onChange }: {
             <Pressable
               onPress={() => onChange({
                 ...value,
-                rules: [...rules, { id: `r${Date.now()}`, offsetMin: 15 }],
+                rules: [...rules, { id: `r${Date.now()}`, offsetMin: -15 }],
               })}
               style={{ paddingVertical: space.sm }}
             >
@@ -632,7 +680,7 @@ function OffsetPicker({ value, onChange }: {
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ gap: space.xs, paddingRight: space.lg }}
     >
-      {OFFSET_CHOICES.map(off => {
+      {OFFSET_PRESETS_TIMED.map(off => {
         const on = off === value;
         return (
           <Pressable
@@ -649,7 +697,7 @@ function OffsetPicker({ value, onChange }: {
             }}
           >
             <Text variant="caption" tone={on ? 'accent' : 'soft'}>
-              {describeOffset(off)}
+              {offsetLabel(off)}
             </Text>
           </Pressable>
         );

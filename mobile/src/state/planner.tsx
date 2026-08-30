@@ -734,19 +734,32 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   }, [commit, syncNow]);
 
   // ── Derived ──
-  const events = useCallback(() => readClientStore(data, 'events'), [data]);
-  const tasks = useCallback(() => readClientStore(data, 'tasks'), [data]);
+  /**
+   * The stores, materialised ONCE per change rather than per call.
+   *
+   * `readClientStore` walks every entity and every field to rebuild a plain
+   * record. As a callback that ran on every call, so a screen that asked for the
+   * events three times in a render rebuilt them three times, and the month view
+   * asking inside a loop rebuilt them per cell. Memoising makes the cost
+   * proportional to how often the data changes, which is what it should have
+   * been proportional to all along.
+   */
+  const eventsMap = useMemo(() => readClientStore(data, 'events'), [data]);
+  const tasksMap = useMemo(() => readClientStore(data, 'tasks'), [data]);
+
+  const events = useCallback(() => eventsMap, [eventsMap]);
+  const tasks = useCallback(() => tasksMap, [tasksMap]);
 
   const day = useCallback((date: string) => buildDay({
-    events: readClientStore(data, 'events'),
-    tasks: readClientStore(data, 'tasks'),
+    events: eventsMap,
+    tasks: tasksMap,
     date,
     // Both taken from the PC rather than guessed: a repeat expands against the
     // week start, and an item's colour comes from its category.
     weekStartsOn,
     categories,
     includeUndatedTasks: date === ymd(new Date()),
-  }), [data, weekStartsOn, categories]);
+  }), [eventsMap, tasksMap, weekStartsOn, categories]);
 
   const status = useMemo(() => describeStatus(data, phase, Date.now()), [data, phase]);
 

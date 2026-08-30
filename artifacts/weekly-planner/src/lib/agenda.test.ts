@@ -14,6 +14,7 @@ import {
   addDays,
   buildDay,
   compareItems,
+  countsForRange,
   currentItem,
   dayLabel,
   daysAround,
@@ -557,5 +558,73 @@ console.log('--- 18. COLOURS ARE SWATCH NAMES, NOT HEX ---');
   });
   assert.ok(day.all[0].colour?.startsWith('#'), 'Every item hands the screen a paintable colour');
 }
+
+  console.log('--- COUNTS FOR A RANGE MATCH BUILDING EVERY DAY ---');
+  {
+    // The month and year views count with this instead of building an agenda per
+    // cell, which was a visible pause. A faster answer is only worth having if
+    // it is the SAME answer, so it is checked against the slow one day by day.
+    const events: Record<string, any> = {
+      once: { id: 'once', content: 'One off', weekKey: '2026-08-24', dayIndex: 1,
+        startTime: '09:00', endTime: '10:00' },
+      weekly: { id: 'weekly', content: 'Lecture', weekKey: '2026-08-24', dayIndex: 1,
+        startTime: '11:00', endTime: '12:00', recur: { freq: 'weekly', interval: 1 } },
+      daily: { id: 'daily', content: 'Standup', weekKey: '2026-08-24', dayIndex: 0,
+        startTime: '08:00', endTime: '08:15', recur: { freq: 'daily', interval: 1 } },
+      spanning: { id: 'spanning', content: 'Trip', weekKey: '2026-08-24', dayIndex: 3,
+        allDay: true, daysSpan: 3 },
+      gone: { id: 'gone', content: 'Deleted', weekKey: '2026-08-24', dayIndex: 1,
+        startTime: '15:00', deleted: true },
+      skipping: { id: 'skipping', content: 'Skips one', weekKey: '2026-08-24', dayIndex: 2,
+        startTime: '14:00', endTime: '15:00',
+        recur: { freq: 'weekly', interval: 1 }, exdates: ['2026-09-02'] },
+    };
+
+    const from = '2026-08-20';
+    const to = '2026-09-20';
+    const counts = countsForRange(events, from, to, 1);
+
+    let checked = 0;
+    const cursor = new Date(`${from}T00:00:00`);
+    const end = new Date(`${to}T00:00:00`);
+    while (cursor <= end) {
+      const date = ymd(cursor);
+      const slow = buildDay({ events, tasks: {}, date, weekStartsOn: 1 })
+        .all.filter(i => i.store === 'events').length;
+      assert.equal(counts[date] ?? 0, slow, `${date}: the fast count matches the slow one`);
+      checked += 1;
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    assert.ok(checked > 30, 'and a whole month of days was compared');
+
+    // The exdate is genuinely honoured rather than merely counted the same.
+    assert.equal(counts['2026-09-02'] ?? 0,
+      buildDay({ events, tasks: {}, date: '2026-09-02', weekStartsOn: 1 })
+        .all.filter(i => i.store === 'events').length,
+      'An excluded occurrence is not counted');
+
+    // A deleted item is in neither.
+    const onlyDeleted = countsForRange({ gone: events.gone }, from, to, 1);
+    assert.deepEqual(onlyDeleted, {}, 'A deleted event counts nowhere');
+  }
+
+  console.log('--- COUNTS ARE BOUNDED AND SURVIVE NONSENSE ---');
+  {
+    assert.deepEqual(countsForRange(undefined, '2026-08-01', '2026-08-07', 1), {},
+      'No events, no counts');
+    assert.deepEqual(countsForRange({}, 'nonsense', '2026-08-07', 1), {},
+      'An unparseable range yields nothing rather than looping');
+    assert.deepEqual(countsForRange({}, '2026-08-07', '2026-08-01', 1), {},
+      'and so does a backwards one');
+
+    const junk = {
+      a: null, b: 42, c: 'event',
+      d: { id: 'd', content: 'No anchor' },
+      e: { id: 'e', content: 'Fine', weekKey: '2026-08-24', dayIndex: 1, startTime: '09:00' },
+    } as any;
+    const counts = countsForRange(junk, '2026-08-24', '2026-08-31', 1);
+    assert.equal(counts['2026-08-25'], 1, 'Only the sound record counted');
+    assert.equal(Object.keys(counts).length, 1, 'and nothing else appeared');
+  }
 
 console.log('\nALL PASS (agenda: occurrence, ordering, edges)');

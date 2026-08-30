@@ -262,6 +262,68 @@ export interface BuildDayInput {
   categories?: EventCategory[];
 }
 
+/**
+ * How many items fall on each day of a range, in ONE pass.
+ *
+ * WHY THIS EXISTS. The month and year views were asking `buildDay` per cell:
+ * forty-two calls for a month, three hundred and sixty-five for a year, each one
+ * walking every event in the planner and expanding its recurrence. That is a
+ * hundred thousand recurrence expansions to draw a grid of squares, and it was
+ * plainly visible as a delay when opening either view.
+ *
+ * This walks the events ONCE and expands each into the range, which is the same
+ * work the day view already does but not repeated per cell. Counts only: a cell
+ * that small has nothing to draw but a number and a tint.
+ */
+export function countsForRange(
+  events: Record<string, Record<string, unknown>> | undefined,
+  from: string,
+  to: string,
+  weekStartsOn: WeekStartsOn = 0,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!events) return out;
+
+  const start = parseDate(from);
+  const end = parseDate(to);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return out;
+
+  // The range as a half-open window for the expansion, which takes an exclusive
+  // end. Asking a repeat for all its occurrences ONCE is the whole point: the
+  // obvious version calls `occursOn` per event per date, which for a year is
+  // sixty thousand recurrence expansions to count some squares.
+  const rangeEnd = new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1);
+
+  for (const id of Object.keys(events)) {
+    const raw = events[id];
+    if (!raw || typeof raw !== 'object') continue;
+    if (raw.deleted === true) continue;
+    const rec = raw as unknown as RecurFields;
+
+    if (!rec.recur) {
+      // A one-off touches at most `daysSpan` days, so there is no need to ask
+      // about every date in the range.
+      if (!rec.weekKey) continue;
+      const first = new Date(parseDate(rec.weekKey).getTime() + (rec.dayIndex ?? 0) * DAY_MS);
+      const span = Math.max(1, rec.daysSpan ?? 1);
+      for (let i = 0; i < span; i += 1) {
+        const d = new Date(first.getFullYear(), first.getMonth(), first.getDate() + i);
+        const key = ymd(d);
+        if (key < from || key > to) continue;
+        out[key] = (out[key] ?? 0) + 1;
+      }
+      continue;
+    }
+
+    for (const at of occurrenceStarts(rec, start, rangeEnd, weekStartsOn)) {
+      const key = ymd(at);
+      if (key < from || key > to) continue;
+      out[key] = (out[key] ?? 0) + 1;
+    }
+  }
+  return out;
+}
+
 export function buildDay(input: BuildDayInput): AgendaDay {
   const { events, tasks, date, weekStartsOn = 0, includeUndatedTasks = false, categories } = input;
 

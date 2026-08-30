@@ -11,7 +11,7 @@
 
 import { parseDate, weekKeyOf, type Recurrence, type WeekStartsOn } from './recurrence';
 import type { EventCategory } from './categories';
-import type { NotifySpec } from './notifications';
+import { offsetLabel, type NotifySpec } from './notifications';
 
 /** Minutes from midnight → "HH:MM". */
 export function toTimeString(minutes: number): string {
@@ -420,34 +420,16 @@ export function describeNotify(notify: NotifySpec | undefined): string {
   if (!notify.enabled) return 'Off';
   if (!notify.rules?.length) return 'On';
 
+  // The ENGINE's own wording, never a second copy of it. A duplicate got the
+  // sign backwards once already: it called a positive offset "before" while
+  // `computeSchedule` fires at `anchor + offsetMin`, so a reminder that said
+  // "15 minutes before" arrived fifteen minutes late. One function, one truth.
   const parts = notify.rules
     .slice(0, 3)
-    .map(r => describeOffset(r.offsetMin ?? 0));
+    .map(r => offsetLabel(r.offsetMin ?? 0));
   const extra = notify.rules.length - parts.length;
   return parts.join(', ') + (extra > 0 ? ` +${extra}` : '');
 }
-
-export function describeOffset(offsetMin: number): string {
-  if (!Number.isFinite(offsetMin) || offsetMin === 0) return 'At the time';
-  const mins = Math.abs(Math.round(offsetMin));
-  const ago = offsetMin > 0;
-
-  let amount: string;
-  if (mins % 1440 === 0) {
-    const d = mins / 1440;
-    amount = `${d} day${d === 1 ? '' : 's'}`;
-  } else if (mins % 60 === 0) {
-    const h = mins / 60;
-    amount = `${h} hour${h === 1 ? '' : 's'}`;
-  } else {
-    amount = `${mins} min`;
-  }
-  return `${amount} ${ago ? 'before' : 'after'}`;
-}
-
-/** The offsets the editor offers. Anything else keeps working, it is just not
- *  reachable from a phone — the PC's own editor has the full range. */
-export const OFFSET_CHOICES = [0, 5, 10, 15, 30, 60, 120, 1440] as const;
 
 export { ordinal };
 

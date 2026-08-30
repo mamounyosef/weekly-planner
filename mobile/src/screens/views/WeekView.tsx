@@ -25,7 +25,7 @@ import { radius, space } from '../../theme';
 import { layoutDay, hourMarks, yOf } from '../../lib/grid';
 import { formatClock, type AgendaDay, type AgendaItem } from '../../lib/agenda';
 
-const RAIL = 38;
+const RAIL = 48;
 
 /**
  * How tall one slot is drawn, per snap interval.
@@ -47,7 +47,8 @@ function slotHeight(interval: number): number {
 }
 
 export function WeekView({
-  dates, dayOf, today, nowMin, clock, interval = 30, detailed, onOpenItem, onOpenDay,
+  dates, dayOf, today, nowMin, clock, interval = 30, detailed,
+  prayersOn, onOpenItem, onOpenDay,
 }: {
   dates: string[];
   dayOf: (date: string) => AgendaDay;
@@ -58,6 +59,8 @@ export function WeekView({
   interval?: number;
   /** One column: there is room for a title and a time inside each block. */
   detailed?: boolean;
+  /** Prayer times for a day, drawn across the grid as markers. */
+  prayersOn?: (date: string) => { key: string; label: string; minutes: number }[];
   onOpenItem: (item: AgendaItem) => void;
   onOpenDay: (date: string) => void;
 }) {
@@ -70,8 +73,9 @@ export function WeekView({
       date,
       allDay: agenda.allDay.filter(i => i.store === 'events'),
       timed: agenda.timed.filter(i => i.store === 'events' && i.startMin !== null),
+      prayers: prayersOn ? prayersOn(date) : [],
     };
-  }), [dates, dayOf]);
+  }), [dates, dayOf, prayersOn]);
 
   // The window of hours worth drawing: from an hour before the earliest thing to
   // an hour after the latest, never less than a working day.
@@ -82,6 +86,13 @@ export function WeekView({
       for (const i of d.timed) {
         min = Math.min(min, i.startMin!);
         max = Math.max(max, i.endMin ?? i.startMin! + 60);
+      }
+      // Prayers stretch the window too. Fajr is often hours before the first
+      // event, and a marker drawn above the top of the grid is not a subtle
+      // problem: it is simply missing, with nothing to say it was ever there.
+      for (const pr of d.prayers) {
+        min = Math.min(min, pr.minutes);
+        max = Math.max(max, pr.minutes + 30);
       }
     }
     return {
@@ -209,9 +220,7 @@ export function WeekView({
                     opacity: onHour ? 1 : 0.8,
                   }}
                 >
-                  {onHour
-                    ? formatClock(m, clock).replace(':00', '')
-                    : minuteLabel(m)}
+                  {formatClock(m, clock)}
                 </Text>
               );
             })}
@@ -229,6 +238,7 @@ export function WeekView({
               slots={slots}
               detailed={detailed}
               clock={clock}
+              prayers={d.prayers}
               isToday={d.date === today}
               nowMin={d.date === today ? nowMin : null}
               onOpenItem={onOpenItem}
@@ -241,13 +251,8 @@ export function WeekView({
   );
 }
 
-/** ":05", ":30" — enough to read the subdivision without repeating the hour. */
-function minuteLabel(minutes: number): string {
-  return `:${String(minutes % 60).padStart(2, '0')}`;
-}
-
 function DayColumn({
-  items, fromHour, height, pxPerHour, marks, slots, detailed, clock,
+  items, fromHour, height, pxPerHour, marks, slots, detailed, clock, prayers,
   isToday, nowMin, onOpenItem, onOpenDay,
 }: {
   items: AgendaItem[];
@@ -258,6 +263,7 @@ function DayColumn({
   slots: number[];
   detailed?: boolean;
   clock?: string;
+  prayers: { key: string; label: string; minutes: number }[];
   isToday: boolean;
   nowMin: number | null;
   onOpenItem: (item: AgendaItem) => void;
@@ -359,6 +365,32 @@ function DayColumn({
           </Pressable>
         );
       })}
+
+      {/* Prayers, as lines across the grid rather than blocks in it. A prayer
+          has a time and no length, so a block would be a lie about its shape,
+          and it would take a column from the events it sits beside. */}
+      {prayers.map(pr => (
+        <View
+          key={pr.key}
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            top: yOf(pr.minutes, pxPerHour, fromHour),
+            left: 0, right: 0,
+            flexDirection: 'row',
+            alignItems: 'center',
+          }}
+        >
+          <View style={{ flex: 1, height: 1, backgroundColor: p.ok, opacity: 0.45 }} />
+          {detailed ? (
+            <Text style={{
+              color: p.ok, fontSize: 9, lineHeight: 11, marginLeft: 4, opacity: 0.9,
+            }}>
+              {pr.label}
+            </Text>
+          ) : null}
+        </View>
+      ))}
 
       {nowMin !== null ? (
         <View style={{

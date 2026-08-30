@@ -21,6 +21,7 @@ import {
   buildEventRecord,
   buildTaskRecord,
   dateOfAnchor,
+  describeNotify,
   draftFromRecord,
   fromTimeString,
   inferWeekStartsOn,
@@ -29,6 +30,7 @@ import {
   type DraftInput,
 } from './draft';
 import { occursOn } from './agenda';
+import { offsetLabel, OFFSET_PRESETS_TIMED } from './notifications';
 
 const META = { id: 'new1', now: 1_700_000_000_000, weekStartsOn: 1 as const };
 
@@ -386,6 +388,40 @@ function main() {
 
     const back = draftFromRecord(t, 'tasks', '2026-01-01');
     assert.deepEqual(back.recur, t.recur, 'reading back the same');
+  }
+
+  console.log('--- 18. A REMINDER SAYS WHAT IT WILL ACTUALLY DO ---');
+  {
+    // THE SIGN IS THE WHOLE TEST. `computeSchedule` fires at
+    // `anchor + offsetMin`, so a NEGATIVE offset is before and a positive one is
+    // after. A duplicate of this wording once had it the other way round, which
+    // made a reminder set on the phone as "15 minutes before" arrive fifteen
+    // minutes late: the label was reassuring and wrong, which is worse than no
+    // label at all. So the description comes from the engine's own
+    // `offsetLabel`, and this asserts the two agree about direction.
+    assert.equal(offsetLabel(-15), '15 minutes before', 'Negative is before');
+    assert.equal(offsetLabel(15), '15 minutes after', 'and positive is after');
+    assert.equal(offsetLabel(0), 'At the time');
+
+    // Every preset the phone offers for a timed item must be one the engine
+    // understands, and the ones meant as "before" must be negative.
+    assert.ok(OFFSET_PRESETS_TIMED.includes(0), 'At the time is offered');
+    assert.ok(OFFSET_PRESETS_TIMED.some(o => o < 0), 'and some are before');
+    for (const off of OFFSET_PRESETS_TIMED) {
+      const label = offsetLabel(off);
+      if (off < 0) assert.ok(label.endsWith('before'), `${off} reads as before`);
+      if (off > 0) assert.ok(label.endsWith('after'), `${off} reads as after`);
+    }
+
+    // And the description of a whole spec uses the same wording.
+    const spec = {
+      enabled: true,
+      rules: [{ id: 'a', offsetMin: -15 }, { id: 'b', offsetMin: 0 }],
+      priority: 'normal' as const,
+    };
+    const described = describeNotify(spec);
+    assert.ok(described.includes('before'), `"${described}" says before`);
+    assert.ok(!described.includes('after'), 'and does not claim after');
   }
 
   console.log('\nALL PASS (draft: anchors, week start, field names, validation)');

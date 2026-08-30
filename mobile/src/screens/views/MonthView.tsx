@@ -18,13 +18,13 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Text, useTheme } from '../../ui/kit';
 import { radius, space } from '../../theme';
 import { monthGrid } from '../../lib/grid';
-import type { AgendaDay } from '../../lib/agenda';
+import { countsForRange } from '../../lib/agenda';
 
 export function MonthView({
-  anchor, dayOf, today, weekStartsOn, onOpenDay,
+  anchor, events, today, weekStartsOn, onOpenDay,
 }: {
   anchor: string;
-  dayOf: (date: string) => AgendaDay;
+  events: Record<string, Record<string, unknown>>;
   today: string;
   weekStartsOn: number;
   onOpenDay: (date: string) => void;
@@ -33,6 +33,18 @@ export function MonthView({
   const { weeks, month } = useMemo(
     () => monthGrid(anchor, weekStartsOn),
     [anchor, weekStartsOn],
+  );
+
+  /**
+   * Every cell's count, in ONE pass over the events.
+   *
+   * It used to build a whole agenda per cell: forty-two calls, each walking the
+   * planner and expanding every repeat. That was a visible pause every time this
+   * view was opened, for a grid whose cells show a number and a tint.
+   */
+  const counts = useMemo(
+    () => countsForRange(events, weeks[0][0], weeks[5][6], weekStartsOn as any),
+    [events, weeks, weekStartsOn],
   );
 
   const headings = useMemo(() => {
@@ -68,7 +80,7 @@ export function MonthView({
               <Cell
                 key={date}
                 date={date}
-                agenda={dayOf(date)}
+                count={counts[date] ?? 0}
                 inMonth={new Date(`${date}T00:00:00`).getMonth() === month}
                 isToday={date === today}
                 onPress={() => onOpenDay(date)}
@@ -81,24 +93,23 @@ export function MonthView({
   );
 }
 
-function Cell({ date, agenda, inMonth, isToday, onPress }: {
+function Cell({ date, count, inMonth, isToday, onPress }: {
   date: string;
-  agenda: AgendaDay;
+  count: number;
   inMonth: boolean;
   isToday: boolean;
   onPress: () => void;
 }) {
   const p = useTheme();
-  const events = agenda.all.filter(i => i.store === 'events');
-  // At most three marks: beyond that the count says it better than the dots do.
-  const marks = events.slice(0, 3);
+  // At most three marks: beyond that the count says it better than the bars do.
+  const marks = Math.min(3, count);
   const day = new Date(`${date}T00:00:00`).getDate();
 
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={`${date}, ${events.length === 0 ? 'nothing' : `${events.length} items`}`}
+      accessibilityLabel={`${date}, ${count === 0 ? 'nothing' : `${count} items`}`}
       android_ripple={{ color: p.accentSoft }}
       style={{
         flex: 1,
@@ -119,20 +130,20 @@ function Cell({ date, agenda, inMonth, isToday, onPress }: {
       </Text>
 
       <View style={{ gap: 2, marginTop: 3 }}>
-        {marks.map(item => (
+        {Array.from({ length: marks }, (_, i) => (
           <View
-            key={item.id}
+            key={i}
             style={{
               height: 4,
               borderRadius: 2,
-              backgroundColor: item.colour ?? p.accent,
-              opacity: item.completed ? 0.4 : 1,
+              backgroundColor: p.accent,
+              opacity: 1 - i * 0.22,
             }}
           />
         ))}
-        {events.length > 3 ? (
+        {count > 3 ? (
           <Text variant="caption" tone="faint" style={{ fontSize: 9, lineHeight: 11 }}>
-            +{events.length - 3}
+            +{count - 3}
           </Text>
         ) : null}
       </View>

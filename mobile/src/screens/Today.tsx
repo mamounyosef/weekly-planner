@@ -37,6 +37,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  PanResponder,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -68,7 +69,7 @@ type ViewMode = 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year';
 const VIEW_LABELS: Record<ViewMode, string> = {
   agenda: 'List',
   day: 'Day',
-  custom: 'Span',
+  custom: 'Custom',
   week: 'Week',
   month: 'Month',
   year: 'Year',
@@ -81,7 +82,7 @@ export function Today({ onOpenConflicts }: {
   const insets = useSafeAreaInsets();
   const {
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
-    prayersOn, isPrayerDone, togglePrayer, customWindow,
+    prayersOn, isPrayerDone, togglePrayer, customWindow, events,
   } = usePlanner();
 
   const today = ymd(new Date());
@@ -189,6 +190,35 @@ export function Today({ onOpenConflicts }: {
       : status.phase === 'syncing' ? 'busy'
         : status.phase === 'offline' || status.phase === 'error' ? 'offline'
           : 'ok';
+
+  // How many days a swipe moves: one in the single-day views, a whole window in
+  // the multi-day ones, so the gesture always means "the next screenful".
+  const swipeStepRef = React.useRef(1);
+  swipeStepRef.current = view === 'week' ? 7
+    : view === 'custom' ? customWindow.before + customWindow.after + 1
+      : 1;
+
+  /**
+   * Swipe sideways to move a day.
+   *
+   * PanResponder rather than a gesture library: this app updates over the air,
+   * and a gesture library is a native module, which would end that. It is also
+   * ample for one axis.
+   *
+   * The claim is deliberately fussy. It takes the gesture only once the finger
+   * has travelled meaningfully sideways AND clearly more sideways than up, so a
+   * vertical scroll through a long day is never stolen mid-flick, and neither is
+   * a horizontal scroll of the chips or the date strip above.
+   */
+  const swipe = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_e, g) =>
+      Math.abs(g.dx) > 24 && Math.abs(g.dx) > Math.abs(g.dy) * 2,
+    onPanResponderRelease: (_e, g) => {
+      if (Math.abs(g.dx) < 48) return;
+      const step = g.dx < 0 ? 1 : -1;   // drag left, go forward
+      setSelected(current => addDays(current, step * swipeStepRef.current));
+    },
+  }), []);
 
   const open = (item: AgendaItem) =>
     setEditing({ store: item.store, id: item.masterId, date: item.date });
@@ -305,6 +335,9 @@ export function Today({ onOpenConflicts }: {
       </View>
 
       {/* ── The body ───────────────────────────────────────────────────── */}
+      {/* The swipe lives on the body only. Putting it on the whole screen would
+          fight the horizontal strips in the header above. */}
+      <View style={{ flex: 1 }} {...(view === 'month' || view === 'year' ? {} : swipe.panHandlers)}>
       {view === 'week' ? (
         <WeekView
           dates={weekDates}
@@ -313,6 +346,7 @@ export function Today({ onOpenConflicts }: {
           nowMin={weekDates.includes(today) ? nowMin : null}
           clock={timeFormat}
           interval={interval}
+          prayersOn={prayersOn}
           onOpenItem={open}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
         />
@@ -328,6 +362,7 @@ export function Today({ onOpenConflicts }: {
           clock={timeFormat}
           interval={interval}
           detailed
+          prayersOn={prayersOn}
           onOpenItem={open}
           onOpenDay={() => chooseView('agenda')}
         />
@@ -340,13 +375,14 @@ export function Today({ onOpenConflicts }: {
           clock={timeFormat}
           interval={interval}
           detailed={customDates.length <= 2}
+          prayersOn={prayersOn}
           onOpenItem={open}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
         />
       ) : view === 'month' ? (
         <MonthView
           anchor={selected}
-          dayOf={eventsOf}
+          events={events()}
           today={today}
           weekStartsOn={weekStartsOn}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
@@ -354,7 +390,7 @@ export function Today({ onOpenConflicts }: {
       ) : view === 'year' ? (
         <YearView
           anchor={selected}
-          dayOf={eventsOf}
+          events={events()}
           today={today}
           weekStartsOn={weekStartsOn}
           onOpenMonth={date => { setSelected(date); chooseView('month'); }}
@@ -437,6 +473,7 @@ export function Today({ onOpenConflicts }: {
         ) : null}
       </ScrollView>
       )}
+      </View>
 
       {/* ── Add ────────────────────────────────────────────────────────── */}
       <Pressable
