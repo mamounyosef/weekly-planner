@@ -192,21 +192,6 @@ export function NotificationPanel({
 
   return (
     <>
-      <style>{`
-        @keyframes planner-notify-pulse {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.18); opacity: 0.82; }
-        }
-        @keyframes planner-notify-slide {
-          from { transform: translateX(24px); opacity: 0; }
-          to { transform: translateX(0); opacity: 1; }
-        }
-        @keyframes planner-notify-drop {
-          from { transform: translateY(-14px) scale(0.98); opacity: 0; }
-          to { transform: translateY(0) scale(1); opacity: 1; }
-        }
-      `}</style>
-
       <div
         className="fixed inset-0 z-[85]"
         style={{ background: 'rgba(0,0,0,0.52)' }}
@@ -339,10 +324,11 @@ export function NotificationPanel({
                   <article
                     key={rec.key}
                     id={`notif-${cssId(rec.key)}`}
-                    className="group relative px-3 py-2.5 transition-colors cursor-pointer"
+                    className="group relative px-3 py-2.5 transition-colors cursor-pointer content-auto"
                     style={{
                       borderBottom: `1px solid ${theme.bdr}`,
                       background: highlighted ? `${theme.accent}14` : rec.read ? 'transparent' : `${art.color}0d`,
+                      contain: 'paint layout',
                     }}
                     onClick={e => {
                       if ((e.target as HTMLElement).closest('button, [role="button"], a, input, select, textarea')) {

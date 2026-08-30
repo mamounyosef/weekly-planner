@@ -1,0 +1,32 @@
+{
+  // Typechecking for the sync engine's server half.
+  //
+  // `tsconfig.json` includes only `src/**/*`, so `sync-server.ts` and
+  // `sync-service.ts` — the files that decide what reaches the phone — were
+  // checked by nothing. Tests caught what they exercised; a type error on a
+  // branch no test took would simply have shipped.
+  //
+  // `vite.config.ts` is deliberately left out for now: it carries a large body
+  // of older Google-sync code with implicit `any` throughout, and fixing that is
+  // its own job rather than a condition of touching sync.
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "sync-server.ts",
+    "sync-service.ts",
+    "ota-server.ts",
+    "app-delivery.ts",
+    "src/lib/sync*.ts",
+    "src/lib/settingsScope.ts",
+    "src/lib/draft.ts",
+    "src/lib/agenda.ts",
+    "src/lib/alarmPlan.ts"
+  ],
+  "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["esnext", "dom"],
+    "resolveJsonModule": true,
+    "moduleResolution": "bundler",
+    "types": ["node"]
+  }
+}

@@ -6903,7 +6903,7 @@ export default function DailyPlanner() {
   return (
     <div
       className={`flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
-        darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
+        darkMode ? 'dark text-foreground' : 'text-foreground'
       } ${touchDragging ? 'dragging-touch' : ''}`}
       style={{
         cursor: globalCursor,
@@ -8339,7 +8339,7 @@ export default function DailyPlanner() {
                     overflow: 'hidden',
                     transition: 'height 0.15s ease',
                   }}
-                  className={`border-b border-border/50 flex items-center justify-center ${stickyAllDayMain ? 'sticky z-35' : ''}`}
+                  className={`border-b border-border/50 flex items-center justify-center ${stickyAllDayMain ? 'sticky z-[35]' : ''}`}
                 >
                   {stickyAllDayH > 0 && (
                     <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-wider text-center">All Day</span>
@@ -8354,7 +8354,7 @@ export default function DailyPlanner() {
                       overflow: 'hidden',
                       transition: 'height 0.15s ease',
                     }}
-                    className={`border-b border-border/50 flex items-center justify-center gap-1 ${stickyTasksMain ? 'sticky z-34' : ''}`}
+                    className={`border-b border-border/50 flex items-center justify-center gap-1 ${stickyTasksMain ? 'sticky z-[34]' : ''}`}
                   >
                     {stickyTasksH > 0 && (
                       <>
@@ -8469,18 +8469,18 @@ export default function DailyPlanner() {
                           }
                         }
 
-                        // 2. Active floating element anchored to its original position (translated via dragDelta 1:1 with mouse)
-                        const origSpanning = origS < dayStartMin + 1440 && origE > dayStartMin + 1440;
-                        if (origSpanning) {
-                          if (ev.dayIndex === colIdx) {
-                            renderItems.push({ ev, key: `${ev.id}__tail_drag`, startMin: origS, endMin: dayStartMin + 1440, segKind: 'tail' });
+                        // 2. Active floating element rendered at the exact target location (snaps to grid)
+                        // This allows it to wrap perfectly across midnight, replacing the buggy CSS dragDelta translation.
+                        if (phSpanning) {
+                          if (targetDayIndex === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__tail_drag`, startMin: targetS, endMin: dayStartMin + 1440, segKind: 'tail' });
                           }
-                          if (ev.dayIndex + 1 === colIdx) {
-                            renderItems.push({ ev, key: `${ev.id}__head_drag`, startMin: dayStartMin, endMin: origE - 1440, segKind: 'head' });
+                          if (targetDayIndex + 1 === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__head_drag`, startMin: dayStartMin, endMin: targetE - 1440, segKind: 'head' });
                           }
                         } else {
-                          if (ev.dayIndex === colIdx) {
-                            renderItems.push({ ev, key: `${ev.id}__drag`, startMin: origS, endMin: origE, segKind: 'normal' });
+                          if (targetDayIndex === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__drag`, startMin: targetS, endMin: targetE, segKind: 'normal' });
                           }
                         }
                       } else if (isResizing) {
@@ -8632,7 +8632,7 @@ export default function DailyPlanner() {
                           overflow: 'hidden',
                           transition: 'height 0.15s ease',
                         }}
-                        className={`flex-shrink-0 border-b border-border/50 relative group ${stickyAllDayMain ? 'sticky z-35' : ''}`}
+                        className={`flex-shrink-0 border-b border-border/50 relative group ${stickyAllDayMain ? 'sticky z-[35]' : ''}`}
                       >
                         {/* "+" add button on hover */}
                         {stickyAllDayH > 0 && (
@@ -8673,7 +8673,7 @@ export default function DailyPlanner() {
                             overflow: 'hidden',
                             transition: 'height 0.15s ease',
                           }}
-                          className={`flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] ${stickyTasksMain ? 'sticky z-34' : ''}`}
+                          className={`flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] ${stickyTasksMain ? 'sticky z-[34]' : ''}`}
                           onDragOver={(e) => {
                             if (!taskDragId) return;
                             e.preventDefault();                       // required, or the drop never fires
@@ -8910,7 +8910,7 @@ export default function DailyPlanner() {
                         {isNowCol && nowInView && (() => {
                           const lineTop = minToY(nowMin, interval, dayStartH);
                           return (
-                            <div ref={nowLineRef} className="absolute left-0 right-0 z-15 pointer-events-none" style={{ top: lineTop, height: 0 }}>
+                            <div ref={nowLineRef} className="absolute left-0 right-0 z-[15] pointer-events-none" style={{ top: lineTop, height: 0 }}>
                               {/* Soft glow behind the line so it reads without shouting */}
                               <div
                                 className="absolute left-0 right-0"
@@ -9132,7 +9132,8 @@ export default function DailyPlanner() {
                           const isTouchHolding = touchHoldingId === ev.id;
                           const lift = isDrag ? 0 : isTouchHolding ? -1 : (!isMoving && (isHov || isMenu || isEdit) ? -1.5 : 0);
                           const scale = isDrag ? (isTouch ? 1.04 : 1.02) : isTouchHolding ? 0.96 : 1;
-                          const transform = (isMoving && dragDelta)
+                          const isActiveDrag = itemKey.endsWith('__drag');
+                          const transform = (isMoving && dragDelta && !isActiveDrag)
                             ? `translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0) scale(${scale})`
                             : `translate3d(0, ${lift}px, 0) scale(${scale})`;
 
@@ -9603,7 +9604,7 @@ export default function DailyPlanner() {
                   const layoutMap = layoutAllDay(weekAllDayEvents);
                   return (
                     <div
-                      className={`left-0 right-0 pointer-events-none ${stickyAllDayMain ? 'sticky z-36' : 'absolute z-36'}`}
+                      className={`left-0 right-0 pointer-events-none ${stickyAllDayMain ? 'sticky z-[36]' : 'absolute z-[36]'}`}
                       style={{
                         gridColumn: '1 / -1',
                         gridRow: '1',

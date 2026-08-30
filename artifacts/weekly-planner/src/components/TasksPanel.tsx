@@ -613,7 +613,7 @@ function TasksPanel({
       )}
     <aside
       className={page
-        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden'
+        ? 'fixed inset-x-0 top-0 z-[81] overflow-hidden gpu-layer'
         : sheet
         ? 'fixed inset-x-0 bottom-0 z-[81] overflow-hidden shadow-2xl gpu-layer'
         : 'flex-shrink-0 overflow-hidden relative shadow-lg'}
@@ -627,6 +627,7 @@ function TasksPanel({
           paddingTop: 'var(--safe-top)',
           background: theme.menuBg,
           display: open ? undefined : 'none',
+          contain: 'paint layout',
         } : sheet ? {
           // Stops at the tab bar rather than sliding under it: the bar stays
           // usable (tap Calendar to get straight back) and the composer at the
@@ -732,7 +733,7 @@ function TasksPanel({
         {/* Header */}
         <div
           className="min-h-14 flex-shrink-0 flex items-center justify-between gap-3 px-3.5 py-2.5 border-b"
-          style={{ borderColor: theme.surfaceBdr, background: theme.surfaceBg + '30' }}
+          style={{ borderColor: theme.surfaceBdr, background: theme.surfaceBg }}
         >
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="p-1.5 rounded-lg flex-shrink-0" style={{ background: `${headerTone}18`, color: headerTone }}>
@@ -829,7 +830,7 @@ function TasksPanel({
           <div
             ref={rail.containerRef}
             className="flex gap-1.5 px-3 py-2 overflow-x-auto overflow-y-hidden no-scrollbar touch-scroll-x"
-            style={{ background: theme.surfaceBg + '22' }}
+            style={{ background: theme.surfaceBg }}
           >
             <ListPill
               label="All"
@@ -980,7 +981,7 @@ function TasksPanel({
                 {/* Schedule Card Container */}
                 <div
                   className="rounded-xl p-2.5 flex flex-col gap-2.5"
-                  style={{ background: theme.surfaceBg + '70', border: `1px solid ${theme.surfaceBdr}` }}
+                  style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}` }}
                 >
                   {/* Date selection row */}
                   <div className="flex items-center gap-1.5 flex-wrap">
@@ -1274,7 +1275,7 @@ function TasksPanel({
           {visibleCount === 0 && (
             <div
               className="flex flex-col items-center justify-center gap-3 py-14 text-center px-6 rounded-2xl border"
-              style={{ background: theme.surfaceBg + '55', borderColor: theme.surfaceBdr }}
+              style={{ background: theme.surfaceBg, borderColor: theme.surfaceBdr }}
             >
               <div className="p-3 rounded-2xl" style={{ background: `${theme.accent}14`, border: `1px solid ${theme.accent}30` }}>
                 <Sparkles size={26} style={{ color: theme.accent }} />
@@ -2176,7 +2177,7 @@ function Section({ name, label, count, danger, collapsed, theme, onToggle, child
       <button
         onClick={onToggle}
         className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-colors group mb-1"
-        style={{ background: `${theme.surfaceBg}55`, border: `1px solid ${theme.surfaceBdr}` }}
+        style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}` }}
       >
         <div className="flex items-center gap-1.5">
           {collapsed ? <ChevronRight size={13} style={{ color: theme.menuSub }} />
@@ -2852,25 +2853,25 @@ function TaskRow({
           {showDate && due && (
             <span
               className="text-[10.5px] font-semibold tabular-nums flex items-center gap-1 px-1.5 py-0.5 rounded-md"
-              style={{ color: overdue ? dangerHue : theme.menuSub, background: overdue ? `${dangerHue}12` : `${theme.surfaceBg}80` }}
+              style={{ color: overdue ? dangerHue : theme.menuSub, background: overdue ? `${dangerHue}12` : theme.surfaceBg }}
             >
               {overdue && <AlertCircle size={10} />}
               {format(new Date(`${due}T00:00:00`), 'EEE, MMM d')}
             </span>
           )}
           {t.startTime && (
-            <span className="text-[10.5px] font-medium tabular-nums flex items-center gap-1 px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: `${theme.surfaceBg}80` }}>
+            <span className="text-[10.5px] font-medium tabular-nums flex items-center gap-1 px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: theme.surfaceBg }}>
               <Clock size={10} />
               {fmtTime(t.startTime, timeFormat)}
             </span>
           )}
           {t.recur && (
-            <span className="flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: `${theme.surfaceBg}80` }}>
+            <span className="flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: theme.surfaceBg }}>
               <Repeat size={10} />
             </span>
           )}
           {t.notes && (
-            <span className="flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: `${theme.surfaceBg}80` }}>
+            <span className="flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: theme.surfaceBg }}>
               <StickyNote size={10} />
             </span>
           )}

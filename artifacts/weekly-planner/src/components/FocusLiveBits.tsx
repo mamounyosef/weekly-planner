@@ -17,13 +17,15 @@ export function FocusLiveCountdown({
 export function FocusLiveStartingLabel({
   timer,
   hardwareArmSeconds,
+  accentColor,
 }: {
   timer: FocusTimerState;
   hardwareArmSeconds: number;
+  accentColor?: string;
 }) {
   const now = useLiveClock(timer.isRunning && hardwareArmSeconds <= 0);
   if (hardwareArmSeconds > 0) {
-    return <span className="text-base font-semibold whitespace-nowrap" style={{ color: '#60a5fa' }}>Starting in {hardwareArmSeconds}s</span>;
+    return <span className="text-base font-semibold whitespace-nowrap" style={{ color: accentColor || '#60a5fa' }}>Starting in {hardwareArmSeconds}s</span>;
   }
   const remaining = Math.max(0, timer.plannedSeconds - getFocusTimerElapsedSeconds(timer, now));
   return <>{formatCountdown(remaining)}</>;

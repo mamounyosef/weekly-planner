@@ -53,12 +53,20 @@
     <script>
       (function() {
         try {
+          var ds = localStorage.getItem('planner-device-settings-v1');
           var s = localStorage.getItem('planner-settings-v1');
-          if (s) {
+          var darkMode = null;
+          if (ds) {
+            var parsedDs = JSON.parse(ds);
+            if (typeof parsedDs.darkMode === 'boolean') darkMode = parsedDs.darkMode;
+          }
+          if (darkMode === null && s) {
             var parsed = JSON.parse(s);
-            if (parsed.darkMode) document.documentElement.classList.add('dark');
-            else if (parsed.darkMode === false) document.documentElement.classList.remove('dark');
-          } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            if (typeof parsed.darkMode === 'boolean') darkMode = parsed.darkMode;
+          }
+          if (darkMode === true) document.documentElement.classList.add('dark');
+          else if (darkMode === false) document.documentElement.classList.remove('dark');
+          else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
             document.documentElement.classList.add('dark');
           }
         } catch (_) {}

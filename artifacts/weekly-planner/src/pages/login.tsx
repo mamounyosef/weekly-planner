@@ -116,12 +116,13 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
-            <label className="text-[11px] font-semibold tracking-wide uppercase text-zinc-400 px-1">
+            <label htmlFor="username" className="text-[11px] font-semibold tracking-wide uppercase text-zinc-400 px-1">
               Username
             </label>
             <div className="relative flex items-center">
               <User className="absolute left-3.5 w-4 h-4 text-zinc-500 pointer-events-none" />
               <input
+                id="username"
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -139,12 +140,13 @@ export default function LoginPage() {
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-[11px] font-semibold tracking-wide uppercase text-zinc-400 px-1">
+            <label htmlFor="password" className="text-[11px] font-semibold tracking-wide uppercase text-zinc-400 px-1">
               Password
             </label>
             <div className="relative flex items-center">
               <Lock className="absolute left-3.5 w-4 h-4 text-zinc-500 pointer-events-none" />
               <input
+                id="password"
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

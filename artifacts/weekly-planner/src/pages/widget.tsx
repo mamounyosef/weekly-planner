@@ -691,15 +691,6 @@ export default function Widget() {
   const todayFocusSessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === focusTodayKey && isCompletedFocusSession(session)).length;
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
-  // An event "spans the day boundary" when it starts before the configured day-start
-  // hour and ends after it (e.g. sleep from 1:15am to 9:45am with a 7am day cutoff) —
-  // it renders as a linked tail (in its own day) + head (in the next day) segment.
-  const isBoundarySpanning = useCallback((ev: PlannerEvent) => {
-    const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
-    let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
-    if (e <= s) e += 1440;
-    return s < dayStartMin + 1440 && e > dayStartMin + 1440;
-  }, [dayStartH, dayStartMin]);
 
   const colEvents = useMemo(() => {
     if (todayColIdx === -1) return [];
@@ -1565,7 +1556,7 @@ export default function Widget() {
             <button
               onClick={() => adjustFocusMinutes(-5)}
               className="w-8 h-8 rounded-md flex items-center justify-center transition-smooth active:scale-[0.96]"
-              title="Decrease focus duration by 5 minutes (A)"
+              title={`Decrease focus duration by 5 minutes (${formatCombo(shortcuts.widgetMinus)})`}
               style={{
                 background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
                 border: `1px solid ${surfaceBdr}`,
@@ -1611,7 +1602,7 @@ export default function Widget() {
             <button
               onClick={() => adjustFocusMinutes(5)}
               className="w-8 h-8 rounded-md flex items-center justify-center transition-smooth active:scale-[0.96]"
-              title="Increase focus duration by 5 minutes (D)"
+              title={`Increase focus duration by 5 minutes (${formatCombo(shortcuts.widgetPlus)})`}
               style={{
                 background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
                 border: `1px solid ${surfaceBdr}`,
@@ -1708,7 +1699,7 @@ export default function Widget() {
               {/* All-Day row */}
               {todayAllDay.length > 0 && (
                 <div
-                  className={`flex border-b border-border/50 flex-shrink-0 ${stickyAllDayWidget ? 'sticky top-0 z-30 shadow-xs backdrop-blur-md' : ''}`}
+                  className={`flex border-b border-border/50 flex-shrink-0 ${stickyAllDayWidget ? 'sticky top-0 z-40 shadow-xs backdrop-blur-md' : ''}`}
                   style={{ background: darkMode ? (widgetTheme.cardBg || 'rgba(15,16,18,0.95)') : 'rgba(255,255,255,0.95)' }}
                 >
                   {/* Axis spacer */}
@@ -1777,7 +1768,7 @@ export default function Widget() {
               {/* Tasks row */}
               {showTaskRow && todayTasks.length > 0 && (
                 <div
-                  className={`flex border-b border-border/50 flex-shrink-0 ${stickyTasksWidget ? 'sticky z-25 shadow-xs backdrop-blur-md' : ''}`}
+                  className={`flex border-b border-border/50 flex-shrink-0 ${stickyTasksWidget ? 'sticky z-[35] shadow-xs backdrop-blur-md' : ''}`}
                   style={{
                     top: stickyTasksWidget ? (stickyAllDayWidget ? allDayRowH : 0) : undefined,
                     background: darkMode ? (widgetTheme.cardBg || 'rgba(15,16,18,0.95)') : 'rgba(255,255,255,0.95)'
@@ -2042,7 +2033,6 @@ export default function Widget() {
             const sNormEv      = normalizeMin(fullStartMin, dayStartH);
             let eNormEv        = normalizeMin(fullEndMin, dayStartH);
             if (eNormEv <= sNormEv) eNormEv += 1440;
-            const spansBoundary = sNormEv < dayStartMin + 1440 && eNormEv > dayStartMin + 1440;
             // "Live" is scoped to this segment's own on-screen range (each segment lives in a
             // different day column, so at most one of tail/head is ever the active one).
             const isLive       = normNowMin >= item.startMin && normNowMin < item.endMin;

@@ -1,0 +1,727 @@
+// ─── The one place the app keeps its planner ─────────────────────────────────
+// Loads from SQLite, runs the sync loop, keeps alarms in step, and hands the
+// screens plain data. Every decision it makes lives in a tested pure module —
+// this file is wiring, timers and React.
+//
+// THE LOOP
+//   • On launch: load local data (instantly, offline) → paint → then sync.
+//   • On every edit: write locally, paint immediately, queue for the server.
+//   • On a timer, on app foreground, and after every edit: try to sync.
+//   • After any change to the data: re-plan the OS alarms.
+//
+// Nothing in the render path awaits the network. If the PC is off, the only
+// visible difference is one line in the header.
+
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
+
+import {
+  applyLocalChange,
+  applyLocalRecord,
+  applyLocalResolution,
+  backoffDelay,
+  describeStatus,
+  emptyClientData,
+  readClientStore,
+  reconcileAfterSync,
+  syncOnce,
+  withJitter,
+  type ClientData,
+  type ResolveChoice,
+  type SyncPhase,
+  type SyncStatus,
+} from '../lib/syncClient';
+import { createStorage, type SyncStorage } from '../lib/syncStorage';
+import { createExpoRunner, openPlannerDatabase } from '../lib/sqlite';
+import { createTransport, isAuthError, type PlannerTransport } from '../lib/syncTransport';
+import { prefs } from '../lib/prefs';
+import { buildDay, ymd, type AgendaDay } from '../lib/agenda';
+import {
+  buildEventRecord,
+  buildTaskRecord,
+  inferWeekStartsOn,
+  type DraftInput,
+} from '../lib/draft';
+import { DELETED_FIELD } from '../lib/sync';
+import { SETTINGS_ENTITY } from '../lib/syncBridge';
+
+/**
+ * The settings the PC shares, as the phone reads them.
+ *
+ * Typed loosely and on purpose. The authoritative list lives on the PC in
+ * `settingsScope.ts`, and importing it here would drag in the desk-only
+ * machinery it references — focus sessions, keyboard shortcuts, the ESP32
+ * controller — none of which exists on a phone. The server already guarantees
+ * that nothing outside the shared list can arrive, so the phone's job is to read
+ * what it is given, not to re-derive the rule.
+ */
+export interface SharedSettings {
+  weekStartsOn?: number;
+  timeFormat?: string;
+  categories?: unknown[];
+  taskLists?: unknown[];
+  prayer?: unknown;
+  notifications?: unknown;
+  taskColor?: string;
+  taskCheckboxShape?: string;
+  taskFilters?: string[];
+  autoRollRecurringTasks?: boolean;
+  focusDayStartHour?: number;
+  focusChime?: string;
+  focusCues?: unknown;
+}
+import { DEFAULT_NOTIFICATION_SETTINGS, computeSchedule } from '../lib/notifications';
+import { DEFAULT_CATEGORIES } from '../lib/categories';
+import { collectMissed, prepareNotifications, syncAlarms } from '../lib/notify';
+import { applyUpdateIfAny } from '../lib/updates';
+import type { SyncConflict, SyncStore } from '../lib/sync';
+
+/**
+ * How often to try while everything is healthy.
+ *
+ * Ten seconds, not sixty. This only runs while the app is in the FOREGROUND --
+ * the timer stops the moment Android suspends the runtime, and coming back to
+ * the app syncs immediately anyway -- so the battery cost is bounded by how long
+ * you are actually looking at the screen.
+ *
+ * A minute was measurably the wrong number. Tick something off on the PC, pick
+ * up the phone, and the change is simply not there; you tap around, conclude
+ * sync is broken, and put it down again before it ever arrives. Being wrong for
+ * up to a minute every time is indistinguishable from being broken.
+ */
+/**
+ * A new item's id.
+ *
+ * Shaped like the v4 uuids the PC generates, so nothing downstream has to care
+ * which device created a record. Built from Math.random rather than
+ * crypto.randomUUID, which is not present on every Android runtime this ships
+ * to; ample here, since a collision would need two draws from 2^122 to coincide
+ * on one person's two devices.
+ */
+function newId(): string {
+  const hex = (n: number) => Array.from(
+    { length: n }, () => Math.floor(Math.random() * 16).toString(16),
+  ).join('');
+  const variant = '89ab'[Math.floor(Math.random() * 4)];
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${variant}${hex(3)}-${hex(12)}`;
+}
+
+const POLL_MS = 60_000;
+
+/**
+ * How long the server may hold an idle pull open before answering "nothing".
+ *
+ * This is what replaced the fast timer. A change made HERE syncs the instant it
+ * is made — nothing was ever waiting on a tick for that. The timer only ever
+ * existed for the other direction, because the PC cannot reach the phone, and
+ * polling for that meant a full cycle six times a minute forever while still
+ * being up to ten seconds stale.
+ *
+ * Parking the request inverts it: the server answers the moment its log moves,
+ * so a change made on the PC lands at once and an idle planner costs one held
+ * connection. The timer above is now only a safety net for a hold that was cut
+ * short by something in the middle of the network.
+ */
+const PULL_WAIT_MS = 15_000;
+
+/**
+ * After a hold is refused, stop asking for one for this long.
+ *
+ * Not every path to the PC will carry a request that deliberately stays silent:
+ * a tunnel, a proxy or a phone radio may close it early. That is harmless in
+ * itself — the client retries at once without the hold — but continuing to ask
+ * would spend an extra round trip on every single cycle. So the app stops
+ * asking for a while, then tries again, because the network the phone is on
+ * changes all day.
+ */
+const HOLD_COOLDOWN_MS = 10 * 60_000;
+
+/**
+ * When an in-flight sync is presumed dead.
+ *
+ * Comfortably past the longest a real cycle can take — the hold, plus the
+ * transport's own timeout, plus room for a slow round trip — so this can only
+ * ever fire on a cycle that genuinely is not coming back.
+ */
+const STUCK_AFTER_MS = PULL_WAIT_MS + 60_000;
+
+/**
+ * How often to retry while changes are still unsent.
+ *
+ * The general backoff exists to stop a phone hammering a PC that is switched
+ * off. That reasoning does not apply while the user is standing there having
+ * just made an edit, so a queue that has not drained is retried on a short fixed
+ * interval instead — which is what makes walking back into Wi-Fi look automatic.
+ */
+const RETRY_WITH_PENDING_MS = 8_000;
+
+export type Screen = 'connect' | 'today' | 'conflicts' | 'settings';
+
+interface PlannerContextValue {
+  ready: boolean;
+  signedIn: boolean;
+  username: string | null;
+  serverUrl: string | null;
+  data: ClientData;
+  status: SyncStatus;
+  conflicts: SyncConflict[];
+  alarmSummary: string;
+
+  day(date: string): AgendaDay;
+  events(): Record<string, Record<string, unknown>>;
+  tasks(): Record<string, Record<string, unknown>>;
+
+  connect(serverUrl: string, username: string, password: string): Promise<void>;
+  signOut(): Promise<void>;
+  syncNow(): Promise<void>;
+  edit(store: SyncStore, entityId: string, changes: Record<string, unknown>): Promise<void>;
+  saveRecord(store: SyncStore, entityId: string, record: Record<string, unknown>): Promise<void>;
+  toggleDone(store: SyncStore, item: { masterId: string; date: string; repeating: boolean; completed: boolean }): Promise<void>;
+  /** Create or update one item from the editor. Returns the id it wrote. */
+  saveDraft(store: SyncStore, draft: DraftInput, editingId?: string): Promise<string>;
+  /** Remove an item everywhere. A tombstone, never a local hide. */
+  removeItem(store: SyncStore, id: string): Promise<void>;
+  /** Which weekday this planner's weeks start on. From the PC once synced. */
+  weekStartsOn: 0 | 1 | 2 | 3 | 4 | 5 | 6;
+  /** The settings the PC shares. Empty until the first sync brings them. */
+  shared: Partial<SharedSettings>;
+  /** The user's categories, or the defaults until they arrive. */
+  categories: any[];
+  /** '12h' or '24h', from the PC. Undefined until settings have synced. */
+  timeFormat: string | undefined;
+  /** The sections tasks belong to, from the PC. Empty until settings sync. */
+  taskLists: any[];
+  /** Focus history from the PC, newest last. Empty until it syncs. */
+  focusSessions: any[];
+  /** Minutes each time step moves. This device's own: 5, 10, 15, 30 or 60. */
+  interval: number;
+  setInterval(minutes: number): void;
+  answerConflict(conflict: SyncConflict, choice: ResolveChoice): Promise<void>;
+  resetLocal(): Promise<void>;
+  lastError: string | null;
+}
+
+const PlannerContext = createContext<PlannerContextValue | null>(null);
+
+export function usePlanner(): PlannerContextValue {
+  const ctx = useContext(PlannerContext);
+  if (!ctx) throw new Error('usePlanner must be used inside <PlannerProvider>');
+  return ctx;
+}
+
+export function PlannerProvider({ children }: { children: React.ReactNode }) {
+  const [ready, setReady] = useState(false);
+  const [data, setData] = useState<ClientData>(() => emptyClientData('pending'));
+  const [phase, setPhase] = useState<SyncPhase>('idle');
+  const [serverUrl, setServerUrl] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [alarmSummary, setAlarmSummary] = useState('No reminders scheduled yet');
+  const [interval, setIntervalState] = useState(30);
+
+  const storageRef = useRef<SyncStorage | null>(null);
+  const transportRef = useRef<PlannerTransport | null>(null);
+  const dataRef = useRef(data);
+  const failuresRef = useRef(0);
+  /** Guards against two sync cycles overlapping, which would double-send. */
+  const syncingRef = useRef(false);
+  /** When the in-flight cycle began, for the watchdog below. */
+  const syncStartedAtRef = useRef(0);
+  /** A sync was requested while one was already running; run it straight after. */
+  const pendingSyncRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** True while the loop is idling and may park; false for anything urgent. */
+  const waitRef = useRef(false);
+  /** When holds may be attempted again, after this path refused one. */
+  const holdBlockedUntilRef = useRef(0);
+
+  dataRef.current = data;
+
+  const commit = useCallback((next: ClientData) => {
+    dataRef.current = next;
+    setData(next);
+  }, []);
+
+  // ── Launch ──
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        await prepareNotifications();
+        const db = await openPlannerDatabase();
+        const storage = createStorage(createExpoRunner(db));
+        await storage.init();
+        storageRef.current = storage;
+
+        const deviceId = await prefs.getDeviceId();
+        await storage.setDeviceId(deviceId);
+
+        const [url, session, user, savedInterval] = await Promise.all([
+          prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(), prefs.getInterval(),
+        ]);
+        setIntervalState(savedInterval);
+        const loaded = await storage.load(deviceId);
+        if (cancelled) return;
+
+        commit(loaded);
+        setServerUrl(url);
+        setUsername(user);
+
+        if (url && session) {
+          transportRef.current = buildTransport(url, session);
+        }
+        setReady(true);
+      } catch (err) {
+        // A failure here means the local database is unusable. Say so rather
+        // than showing an empty planner that looks like lost data.
+        setLastError(err instanceof Error ? err.message : String(err));
+        setReady(true);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [commit]);
+
+  function buildTransport(url: string, session: string | null): PlannerTransport {
+    return createTransport({
+      baseUrl: url,
+      session,
+      fetchImpl: fetch as any,
+      onSession: s => { void prefs.setSession(s); },
+    });
+  }
+
+  // ── Alarms follow the data ──
+  const replanAlarms = useCallback(async (current: ClientData) => {
+    try {
+      const events = readClientStore(current, 'events');
+      const tasks = readClientStore(current, 'tasks');
+      const now = Date.now();
+      // Read from the data being planned against, not from the render's copy:
+      // this runs straight after a sync, when `shared` is still a render behind.
+      const currentShared = ((readClientStore(current, 'settings') as any)?.[SETTINGS_ENTITY]
+        ?? {}) as Partial<SharedSettings>;
+      const told = (currentShared as any).weekStartsOn;
+      const currentWeekStart = (typeof told === 'number' && told >= 0 && told <= 6)
+        ? (told as 0 | 1 | 2 | 3 | 4 | 5 | 6)
+        : inferWeekStartsOn(events as any, tasks as any);
+
+      // The window is deliberately wider than the alarm horizon: planAlarms
+      // trims it back, and asking for slightly more costs nothing while making
+      // sure nothing falls between the two ranges.
+      // The user's OWN rules, not the defaults. Reminders fired from default
+      // settings are worse than none: they arrive at times nobody chose, for
+      // categories the user had switched off.
+      const schedule = computeSchedule({
+        events: events as any,
+        tasks: tasks as any,
+        categories: (currentShared.categories as any) ?? DEFAULT_CATEGORIES,
+        settings: (currentShared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
+        weekStartsOn: currentWeekStart,
+        prayerDone: {},
+        from: now,
+        to: now + 48 * 60 * 60 * 1000,
+      });
+
+      const plan = await syncAlarms(schedule, { now });
+      setAlarmSummary(
+        plan.keep.length + plan.schedule.length === 0
+          ? 'Nothing to remind you about yet'
+          : `${plan.keep.length + plan.schedule.length} reminders armed on this phone`,
+      );
+    } catch {
+      // Alarm planning must never take the app down; the next sync retries it.
+      setAlarmSummary('Reminders could not be scheduled — check permissions');
+    }
+  }, []);
+
+  // ── Sync ──
+  const syncNow = useCallback(async () => {
+    const storage = storageRef.current;
+    const transport = transportRef.current;
+    if (!storage || !transport) return;
+    // THE WATCHDOG. A cycle that never finishes used to wedge the app for good:
+    // every later sync — including the one that follows an edit — saw the guard
+    // still set and returned immediately, so changes queued up behind a request
+    // that was never coming back. It happens for real, because a held pull can
+    // be suspended mid-flight when Android freezes the app on screen-off, and
+    // the socket then neither completes nor errors.
+    //
+    // So the guard expires. Past the point where any legitimate cycle must have
+    // finished, the old one is presumed dead and abandoned rather than waited
+    // on. Its result is ignored if it ever does arrive: every cycle folds its
+    // outcome onto current data, so a late one cannot resurrect stale state.
+    const inFlightFor = Date.now() - syncStartedAtRef.current;
+    if (syncingRef.current && inFlightFor < STUCK_AFTER_MS) {
+      pendingSyncRef.current = true;
+      return;
+    }
+
+    syncingRef.current = true;
+    const startedAt = Date.now();
+    syncStartedAtRef.current = startedAt;
+    // Consumed here, so a request that arrives during this cycle is served
+    // promptly rather than inheriting permission to park.
+    const mayWait = waitRef.current;
+    waitRef.current = false;
+    setPhase('syncing');
+    try {
+      // The cycle works on a COPY taken now. Anything the user types during the
+      // round trip lands in `dataRef` and is not in the outcome, so the outcome
+      // is folded back onto current data rather than assigned over it. Assigning
+      // it used to wipe the edit from the screen while still sending it, so the
+      // PC had the new value and the phone showed the old one, forever.
+      const before = dataRef.current;
+      // Only the idle loop waits. A sync the user is standing in front of —
+      // pull-to-refresh, opening the app, or one that follows an edit — wants an
+      // answer now, not the freshest possible one twenty seconds later.
+      const canHold = mayWait && Date.now() >= holdBlockedUntilRef.current;
+      const outcome = await syncOnce(before, transport, Date.now(), canHold ? PULL_WAIT_MS : 0);
+      if (outcome.holdRejected) {
+        // The sync itself succeeded; only the waiting was rejected. Back to
+        // plain polling on the safety timer for a while.
+        holdBlockedUntilRef.current = Date.now() + HOLD_COOLDOWN_MS;
+      }
+      const merged: ClientData = reconcileAfterSync(before, dataRef.current, outcome);
+
+      await storage.saveSynced(merged);
+      commit(merged);
+      setPhase(outcome.phase);
+
+      if (outcome.error) {
+        failuresRef.current += 1;
+        setLastError(outcome.error);
+      } else {
+        failuresRef.current = 0;
+        setLastError(null);
+        await replanAlarms(merged);
+      }
+    } catch (err) {
+      failuresRef.current += 1;
+      if (isAuthError(err)) {
+        transportRef.current = null;
+        setUsername(null);
+        setPhase('error');
+        setLastError('Signed out — please sign in again.');
+      } else {
+        setPhase('offline');
+        setLastError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      // Only if this cycle still owns the guard. A cycle the watchdog gave up on
+      // may finish later, and clearing the flag then would let it cancel a
+      // healthy cycle that had already started.
+      if (syncStartedAtRef.current === startedAt) syncingRef.current = false;
+      // Something asked for a sync while this one was in flight (an edit, almost
+      // always). Serve it now rather than making the user wait out the poll --
+      // that delay is most of what "the phone did not send it" felt like.
+      if (pendingSyncRef.current) {
+        pendingSyncRef.current = false;
+        setTimeout(() => { void syncNow(); }, 0);
+      } else {
+        scheduleNextSync();
+      }
+    }
+  }, [commit, replanAlarms]);
+
+  const scheduleNextSync = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    const failures = failuresRef.current;
+    // Keenest exactly when something is waiting. Nothing tells the app that
+    // Wi-Fi came back, so the delay it is sitting in IS how long a reconnect
+    // takes to notice — and with unsent changes the user is watching for it.
+    const waiting = dataRef.current.outbox.length > 0;
+    const delay = failures === 0
+      ? POLL_MS
+      : Math.min(
+        withJitter(backoffDelay(failures), failures),
+        waiting ? RETRY_WITH_PENDING_MS : Number.POSITIVE_INFINITY,
+      );
+    timerRef.current = setTimeout(() => {
+      waitRef.current = true;
+      void syncNow();
+    }, Math.max(1_000, delay));
+  }, [syncNow]);
+
+  // Kick the loop once we are ready and signed in.
+  useEffect(() => {
+    if (!ready || !transportRef.current) return;
+    void syncNow();
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [ready, syncNow, username]);
+
+  // Coming back to the app is the strongest signal that a sync is worth trying:
+  // the phone may have been on Wi-Fi for hours with the screen off.
+  useEffect(() => {
+    const handler = (state: AppStateStatus) => {
+      if (state !== 'active') return;
+      failuresRef.current = 0;
+      // A new foreground is usually a new network, so give holding another go.
+      holdBlockedUntilRef.current = 0;
+      // Newer code first. If the PC has published a fix, coming back to the app
+      // is the moment to pick it up -- otherwise the fix sits downloaded and
+      // unused until the app is killed, which is how "it is still broken"
+      // survives being fixed. This never blocks: it reloads or it does nothing.
+      void applyUpdateIfAny();
+      void syncNow();
+      void (async () => {
+        const missed = await collectMissed(Date.now());
+        if (missed.length > 0) void replanAlarms(dataRef.current);
+      })();
+    };
+    const sub = AppState.addEventListener('change', handler);
+    return () => sub.remove();
+  }, [syncNow, replanAlarms]);
+
+  // ── Editing ──
+  const persistEdit = useCallback(async (next: ClientData, previous: ClientData) => {
+    const storage = storageRef.current;
+    const newOps = next.outbox.slice(previous.outbox.length);
+    commit(next);
+    if (storage) await storage.saveLocalEdit(next, newOps);
+    void replanAlarms(next);
+    void syncNow();
+  }, [commit, replanAlarms, syncNow]);
+
+  const edit = useCallback(async (
+    store: SyncStore, entityId: string, changes: Record<string, unknown>,
+  ) => {
+    const previous = dataRef.current;
+    const next = applyLocalChange(previous, { store, entityId, changes, at: Date.now() });
+    if (next === previous) return;
+    await persistEdit(next, previous);
+  }, [persistEdit]);
+
+  const saveRecord = useCallback(async (
+    store: SyncStore, entityId: string, record: Record<string, unknown>,
+  ) => {
+    const previous = dataRef.current;
+    const next = applyLocalRecord(previous, { store, entityId, record, at: Date.now() });
+    if (next === previous) return;
+    await persistEdit(next, previous);
+  }, [persistEdit]);
+
+  /**
+   * Tick something off.
+   *
+   * WHICH FIELD depends on the store, not on whether it repeats:
+   *   events -> always `completedDates`, per date
+   *   tasks  -> `completedDates` when repeating, the `completed` flag otherwise
+   *
+   * An earlier version branched on `repeating` alone, so ticking a one-off event
+   * wrote a `completed` flag. It synced perfectly and the PC ignored it, which
+   * looked exactly like sync being broken.
+   */
+  const toggleDone = useCallback(async (
+    store: SyncStore,
+    item: { masterId: string; date: string; repeating: boolean; completed: boolean },
+  ) => {
+    const current = readClientStore(dataRef.current, store)[item.masterId] ?? {};
+    const done = Array.isArray(current.completedDates)
+      ? [...(current.completedDates as string[])]
+      : [];
+    const nextDates = item.completed
+      ? done.filter(d => d !== item.date)
+      : [...new Set([...done, item.date])];
+
+    if (store === 'events' || item.repeating) {
+      await edit(store, item.masterId, { completedDates: nextDates });
+      return;
+    }
+    // A one-off task: keep the flag and the date list agreeing, so whichever the
+    // PC happens to read gives the same answer.
+    await edit(store, item.masterId, {
+      completed: !item.completed,
+      completedDates: nextDates,
+      completedAt: item.completed ? undefined : Date.now(),
+    });
+  }, [edit]);
+
+  /**
+   * The settings the PC shares with this phone.
+   *
+   * Only ever the shared half — week start, categories, prayer and notification
+   * rules. How this device draws the planner is its own business and is not in
+   * here by construction, so nothing on the desk can reshape the phone.
+   */
+  const shared = useMemo<Partial<SharedSettings>>(
+    () => ((readClientStore(data, 'settings') as any)?.[SETTINGS_ENTITY] ?? {}),
+    [data],
+  );
+
+  /**
+   * Which weekday weeks start on, taken from the records themselves.
+   *
+   * NOT hardcoded, and not guessed. An item is stored as a week anchor plus an
+   * offset, so writing the anchor for the wrong week start drops it into the
+   * wrong column of the PC's grid while still resolving to the right date --
+   * which reads as sync corrupting data rather than as a bad record. The
+   * existing records already state the answer, so they are asked.
+   */
+  const weekStartsOn = useMemo(() => {
+    // The PC's own answer, once it has reached us. Inference stays as the
+    // fallback for a phone that has not synced settings yet — a first run, or an
+    // older PC that does not send them — because writing an item against the
+    // wrong week start puts it in the wrong column and looks like corruption.
+    const told = (shared as any).weekStartsOn;
+    if (typeof told === 'number' && told >= 0 && told <= 6) return told as 0 | 1 | 2 | 3 | 4 | 5 | 6;
+    return inferWeekStartsOn(
+      readClientStore(data, 'events') as any,
+      readClientStore(data, 'tasks') as any,
+    );
+  }, [shared, data]);
+
+  /**
+   * The focus history, as a list.
+   *
+   * Stored as records keyed by id so the merge can work per session; the screen
+   * wants a list, and sorting by start makes it the same list the PC shows.
+   */
+  const focusSessions = useMemo(() => {
+    const byId = readClientStore(data, 'focusSessions') as Record<string, any>;
+    return Object.values(byId ?? {})
+      .filter(s => s && typeof s === 'object')
+      .sort((a, b) => String(a.startedAt ?? '').localeCompare(String(b.startedAt ?? '')));
+  }, [data]);
+
+  /** The user's own categories, for colours. Defaults only until they arrive. */
+  const categories = useMemo(
+    () => ((shared as any).categories as any[] | undefined) ?? DEFAULT_CATEGORIES,
+    [shared],
+  );
+
+  const saveDraft = useCallback(async (
+    store: SyncStore, draftInput: DraftInput, editingId?: string,
+  ): Promise<string> => {
+    const id = editingId ?? newId();
+    // Read through the REF, not `data`: the editor may have been open while a
+    // sync landed, and merging onto a stale copy would drop whatever arrived.
+    const existing = editingId
+      ? (readClientStore(dataRef.current, store) as any)[editingId]
+      : undefined;
+
+    const meta = { id, now: Date.now(), weekStartsOn };
+    const record = store === 'events'
+      ? buildEventRecord(draftInput, meta, existing)
+      : buildTaskRecord(draftInput, meta, existing);
+
+    await saveRecord(store, id, record);
+    return id;
+  }, [saveRecord, weekStartsOn]);
+
+  const removeItem = useCallback(async (store: SyncStore, id: string) => {
+    // A TOMBSTONE, not a local removal. Dropping the record here would leave the
+    // PC holding it, and the next sync would hand it straight back.
+    await edit(store, id, { [DELETED_FIELD]: true });
+  }, [edit]);
+
+  const answerConflict = useCallback(async (conflict: SyncConflict, choice: ResolveChoice) => {
+    const previous = dataRef.current;
+    const next = applyLocalResolution(previous, conflict, choice, Date.now());
+    await persistEdit(next, previous);
+    // Tell the server too, so the card closes on the PC as well.
+    void transportRef.current?.resolve(previous.deviceId, conflict.id, choice).catch(() => {});
+  }, [persistEdit]);
+
+  // ── Account ──
+  const connect = useCallback(async (url: string, user: string, password: string) => {
+    const transport = createTransport({
+      baseUrl: url,
+      fetchImpl: fetch as any,
+      onSession: s => { void prefs.setSession(s); },
+    });
+    const who = await transport.login(user, password);
+
+    await prefs.setServerUrl(url);
+    await prefs.setUsername(who.username);
+    transportRef.current = transport;
+    setServerUrl(url);
+    setUsername(who.username);
+    failuresRef.current = 0;
+    setLastError(null);
+    await syncNow();
+  }, [syncNow]);
+
+  const signOut = useCallback(async () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    transportRef.current = null;
+    await prefs.signOut();
+    setUsername(null);
+    setPhase('idle');
+  }, []);
+
+  const resetLocal = useCallback(async () => {
+    const storage = storageRef.current;
+    if (!storage) return;
+    await storage.reset();
+    const deviceId = await prefs.getDeviceId();
+    const fresh = await storage.load(deviceId);
+    commit(fresh);
+    failuresRef.current = 0;
+    await syncNow();
+  }, [commit, syncNow]);
+
+  // ── Derived ──
+  const events = useCallback(() => readClientStore(data, 'events'), [data]);
+  const tasks = useCallback(() => readClientStore(data, 'tasks'), [data]);
+
+  const day = useCallback((date: string) => buildDay({
+    events: readClientStore(data, 'events'),
+    tasks: readClientStore(data, 'tasks'),
+    date,
+    // Both taken from the PC rather than guessed: a repeat expands against the
+    // week start, and an item's colour comes from its category.
+    weekStartsOn,
+    categories,
+    includeUndatedTasks: date === ymd(new Date()),
+  }), [data, weekStartsOn, categories]);
+
+  const status = useMemo(() => describeStatus(data, phase, Date.now()), [data, phase]);
+
+  const value: PlannerContextValue = {
+    ready,
+    signedIn: Boolean(username && transportRef.current),
+    username,
+    serverUrl,
+    data,
+    status,
+    conflicts: data.conflicts,
+    alarmSummary,
+    day,
+    events,
+    tasks,
+    connect,
+    signOut,
+    syncNow,
+    edit,
+    saveRecord,
+    toggleDone,
+    saveDraft,
+    removeItem,
+    weekStartsOn,
+    shared,
+    categories,
+    timeFormat: shared.timeFormat,
+    taskLists: (shared.taskLists as any[]) ?? [],
+    focusSessions,
+    interval,
+    setInterval: (minutes: number) => {
+      setIntervalState(minutes);
+      void prefs.setInterval(minutes);
+    },
+    answerConflict,
+    resetLocal,
+    lastError,
+  };
+
+  return <PlannerContext.Provider value={value}>{children}</PlannerContext.Provider>;
+}

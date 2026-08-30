@@ -175,8 +175,6 @@
 ::-webkit-scrollbar-thumb {
   background-color: hsl(var(--border));
   border-radius: 10px;
-}
-::-webkit-scrollbar-thumb {
   transition: background-color 160ms ease;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -301,6 +299,23 @@ html[data-app-hidden] .grid-shimmer {
   }
 }
 
+/* ── Notification keyframes ──────────────────────────────────────────────────
+   These live here rather than in NotificationCenter's inline <style> because
+   that block unmounts when the panel closes — which starves the bell badge
+   pulse and the banner drop-in of their keyframes. */
+@keyframes planner-notify-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.82; }
+}
+@keyframes planner-notify-slide {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes planner-notify-drop {
+  from { transform: translateY(-14px) scale(0.98); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
 /* ══ Mobile / touch foundation ════════════════════════════════════════════
    Everything below exists because a phone browser is not a small desktop: it
    has a moving viewport, a notch, a home bar, a 300ms tap delay, a rubber-band
@@ -386,13 +401,13 @@ body {
 }
 
 @media (pointer: coarse), (max-width: 768px) {
-  /* Native scrolling — do NOT promote every nested scroller to its own layer
-     (that exhausts fill-rate on a weak GPU). The main calendar scroller
-     opts into a layer via .touch-scroll-main. */
+  /* Native scrolling — promote main containers to independent compositor layers
+     without layer exhaustion. */
   .touch-scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
     touch-action: pan-x pan-y;
+    scroll-behavior: smooth;
   }
   .touch-scroll-x {
     -webkit-overflow-scrolling: touch;
@@ -401,9 +416,11 @@ body {
     touch-action: pan-x pan-y;
   }
   .touch-scroll-main {
-    transform: translateZ(0);
+    transform: translate3d(0, 0, 0);
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
+    will-change: transform;
+    contain: content;
   }
 
   /* Eliminate expensive full-screen rasterization blur on lower-end mobile GPUs */
@@ -429,22 +446,28 @@ body {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14) !important;
   }
 
-  /* Instant, tactile mobile active feedback without layout/paint cost */
+  /* Instant, tactile mobile active feedback without layout/paint cost.
+     Only composite properties (transform, opacity) are transitioned. */
   button, [role="button"], label[for], input, select, textarea {
     touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
+    -webkit-tap-highlight-color: transparent !important;
   }
   button, [role="button"], label[for] {
-    transition: transform 60ms cubic-bezier(0.22, 1, 0.36, 1), opacity 60ms ease;
+    transition: transform 60ms cubic-bezier(0.22, 1, 0.36, 1), opacity 60ms ease !important;
+    will-change: transform;
+  }
+  input, textarea, select {
+    transition: border-color 60ms ease, opacity 60ms ease !important;
   }
 
   /* Do not animate shadows/backgrounds on chips while the page is scrolling */
   [data-event="1"], .content-auto-task {
-    transition-property: transform, opacity !important;
+    transition: transform 60ms ease, opacity 60ms ease !important;
+    contain: layout style;
   }
   button:not(:disabled):active,
   [role="button"]:not([aria-disabled="true"]):active {
-    transform: scale(0.96);
+    transform: scale3d(0.96, 0.96, 1);
     opacity: 0.88;
   }
 
@@ -470,6 +493,18 @@ body {
   contain: layout style paint;
 }
 
+.content-auto-month-cell {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 80px;
+  contain: layout style paint;
+}
+
+.content-auto-year-month {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 160px;
+  contain: layout style paint;
+}
+
 .contain-paint {
   contain: paint layout;
 }
@@ -487,6 +522,13 @@ body {
   transform: translate3d(0, 0, 0);
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
+}
+
+.gpu-composited {
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  will-change: transform;
 }
 
 /* Applied to the grid while a touch drag is armed: without it the browser
@@ -521,6 +563,8 @@ body {
 }
 .animate-sheet-up {
   animation: sheet-up 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
 }
 @keyframes scrim-in {
   from { opacity: 0; }
@@ -528,6 +572,7 @@ body {
 }
 .animate-scrim-in {
   animation: scrim-in 80ms ease-out;
+  will-change: opacity;
 }
 @keyframes fab-in {
   from { opacity: 0; transform: translate3d(0, 8px, 0) scale(0.92); }
@@ -535,6 +580,7 @@ body {
 }
 .animate-fab-in {
   animation: fab-in 100ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
 }
 @keyframes overlay-in {
   from { opacity: 0; transform: translate3d(0, 4px, 0); }
@@ -542,6 +588,7 @@ body {
 }
 .animate-overlay-in {
   animation: overlay-in 100ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
 }
 
 /* The finger-sized minimum. Applied to icon buttons on touch devices so a
@@ -561,6 +608,14 @@ body {
     min-width: 44px;
     min-height: 44px;
     transform: translate(-50%, -50%);
+  }
+}
+
+/* PWA standalone display mode enhancements */
+@media (display-mode: standalone) {
+  html, body {
+    overscroll-behavior: none;
+    -webkit-touch-callout: none;
   }
 }
 

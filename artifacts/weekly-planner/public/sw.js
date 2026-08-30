@@ -15,7 +15,7 @@
  * passed through untouched — intercepting an SSE stream would break the live
  * sync between the phone, the desktop window and the widget.
  */
-const VERSION = 'planner-v4';
+const VERSION = 'planner-v6';
 const SHELL_CACHE = `${VERSION}-shell`;
 const ASSET_CACHE = `${VERSION}-assets`;
 const SHELL_URL = '/index.html';
@@ -90,6 +90,13 @@ async function staleWhileRevalidate(request, cacheName) {
 }
 
 /**
+ * Windows already reloaded for this shell change. Without it a page could be
+ * navigated repeatedly while several requests are in flight, and the user would
+ * watch it flicker.
+ */
+const reloadedClients = new Set();
+
+/**
  * The shell, served from cache first so the app paints without waiting for the
  * network at all. The background copy is compared against what was served; if
  * the build changed, open pages are told to reload themselves once, so a fresh
@@ -105,9 +112,28 @@ async function shellFirst(request) {
       const fresh = await response.clone().text();
       const previous = cached ? await cached.clone().text() : null;
       await cache.put(SHELL_URL, response);
-      if (previous !== null && previous !== fresh) {
-        const clients = await self.clients.matchAll({ type: 'window' });
-        for (const client of clients) client.postMessage({ type: 'planner-shell-updated' });
+      if (previous === null || previous === fresh) return;
+
+      // The build changed under a page that was served the OLD shell. That page
+      // is not merely out of date, it is BROKEN: the script tag in the shell we
+      // just handed it names a hashed bundle that no longer exists, so nothing
+      // on it ever ran -- which also means it cannot receive a message asking it
+      // to reload. It renders as a blank screen that never recovers.
+      //
+      // So the worker navigates it itself. postMessage first, for any page that
+      // IS alive and would rather handle this gracefully; navigate immediately
+      // after, because a page that is already blank has nothing to preserve.
+      const clients = await self.clients.matchAll({ type: 'window' });
+      for (const client of clients) {
+        client.postMessage({ type: 'planner-shell-updated' });
+        if (reloadedClients.has(client.id)) continue;
+        reloadedClients.add(client.id);
+        try {
+          await client.navigate(client.url);
+        } catch (_) {
+          // Some browsers refuse navigate() for clients they did not control
+          // from the start; the postMessage above is the fallback there.
+        }
       }
     })
     .catch(() => {});
@@ -138,6 +164,12 @@ function shouldHandleFetch(request, origin = (typeof self !== 'undefined' && sel
 }
 
 if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
+  /** Paths the dev server answers itself; the worker must stay out of the way. */
+  function isServerRoute(url) {
+    const p = url.pathname.replace(/\/+$/, '');
+    return p === '/app' || p === '/app.apk';
+  }
+
   self.addEventListener('fetch', (event) => {
     const request = event.request;
     if (!shouldHandleFetch(request, self.location.origin)) return;
@@ -153,6 +185,13 @@ if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') 
       event.respondWith(cacheFirst(request, ASSET_CACHE));
       return;
     }
+
+    // Routes the SERVER owns, which must never be answered from the app shell.
+    // Every navigation used to be served the cached single-page app, so opening
+    // /app got index.html and the router's "no such route" page instead of the
+    // installer -- in every browser, no matter how many times the server was
+    // restarted. Anything added here must be a real server route.
+    if (isServerRoute(url)) return;
 
     if (request.mode === 'navigate') {
       event.respondWith(shellFirst(request));

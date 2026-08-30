@@ -26,6 +26,38 @@ import {
   type AppUser,
 } from './server-user-db';
 import { createNotificationEngine } from './notification-engine';
+// Offline sync for the Android app. The PC keeps writing whole files exactly as
+// it always has; this service diffs each save into operations at one choke point
+// so nothing in the app itself had to change to gain offline sync.
+import {
+  createSyncService,
+  handleSyncRequest,
+  type UserSyncPaths,
+} from './sync-service';
+// Serving the Android app from the planner itself, so installing and updating
+// never needs a cable or a cloud drive.
+import {
+  chooseApk,
+  formatBytes,
+  isApk,
+  listForDisplay,
+  safeApkName,
+  abiOf,
+  type ApkFile,
+} from './app-delivery';
+// Over-the-air updates, so a fix reaches the phone without reinstalling.
+import {
+  assetRootFor,
+  contentTypeFor,
+  encodeMultipart,
+  makeBoundary,
+  makeFsDeps,
+  newestFolder,
+  resolveUpdate,
+  safeAssetPath,
+  safePlatform,
+  safeRuntimeVersion,
+} from './ota-server';
 import { createFunnelWatchdog } from './funnel-watchdog';
 
 // Keep the persisted shortcut migration in step with src/lib/shortcuts.ts.
@@ -2453,6 +2485,13 @@ export default defineConfig({
                     kind: 'object',
                     force: true
                   });
+                  // Google sync is the OTHER writer of this file. Nothing here
+                  // went through /api/events, so without this the phone never
+                  // learned about an event imported from Google — and the next
+                  // rebuild after a phone push had no record of it at all.
+                  syncService
+                    .refresh(auth.user.username, syncPathsOf(userPaths))
+                    .catch(err => console.error('[sync] gcal refresh failed:', err));
                 }
 
                 res.end(JSON.stringify({
@@ -2506,6 +2545,9 @@ export default defineConfig({
                     kind: 'object',
                     force: true,
                   });
+                  syncService
+                    .refresh(auth.user.username, syncPathsOf(userPaths))
+                    .catch(err => console.error('[sync] gtasks refresh failed:', err));
                 }
 
                 res.end(JSON.stringify({
@@ -2523,6 +2565,485 @@ export default defineConfig({
             });
           });
 
+          // --- Offline sync for the phone --------------------------------
+          // Every route below is thin on purpose: parse, validate, hand to the
+          // service, serialise the answer. All the reasoning lives in
+          // sync-service.ts / sync-server.ts / src/lib/sync.ts, which are pure
+          // and covered by four test suites.
+          // ── Sync trace ────────────────────────────────────────────────
+          // One line per sync request and per planner save, appended to
+          // database/sync-trace.log. Reasoning about what the phone "must" be
+          // doing has been wrong three times now; this makes it observable.
+          // Cheap (one short line, fire and forget) and safe to leave on.
+          const tracePath = path.resolve(rootDir, 'database', 'sync-trace.log');
+          const trace = (line: string) => {
+            const stamp = new Date().toTimeString().slice(0, 8);
+            fsp.appendFile(tracePath, `${stamp}  ${line}\n`, 'utf-8').catch(() => {});
+          };
+
+          const syncService = createSyncService();
+
+          const syncPathsOf = (userPaths: any): UserSyncPaths => ({
+            dbDir: userPaths.dbDir,
+            dbPath: userPaths.dbPath,
+            tasksPath: userPaths.tasksPath,
+            // Only the SHARED half of this file travels; the per-device and
+            // desk-only keys in it are carried through untouched. See
+            // settingsScope.ts for which is which.
+            settingsPath: userPaths.settingsPath,
+            // The focus history, so the phone can show how the time went.
+            focusPath: userPaths.focusPath,
+          });
+
+          const sendSyncJson = (res: any, status: number, payload: unknown) => {
+            res.statusCode = status;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(payload));
+          };
+
+          // --- Restarting the planner ------------------------------------
+          // Closing the app window does not stop the server: the launcher starts
+          // it in its own process group precisely so it survives the window. That
+          // is right for normal use and wrong when the server's own code has
+          // changed, which previously left no way to restart it without hunting
+          // for a process.
+          //
+          // LOOPBACK ONLY, on top of the login. Restarting is not destructive,
+          // but it is an action on the machine itself rather than on the planner
+          // data, and nothing reachable from the public URL should be able to
+          // take the server down.
+          server.middlewares.use('/api/restart', async (req, res, next) => {
+            if (req.method !== 'POST') return next();
+
+            res.setHeader('Content-Type', 'application/json');
+            if (!isLocalDesktopRequest(req)) {
+              res.statusCode = 403;
+              res.end(JSON.stringify({
+                error: 'The planner can only be restarted from the PC it runs on.',
+              }));
+              return;
+            }
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+
+            const script = path.resolve(rootDir, 'tools', 'restart-planner.pyw');
+            const pythonw = path.resolve(rootDir, '.venv-launcher', 'Scripts', 'pythonw.exe');
+
+            try {
+              await fsp.access(script);
+            } catch {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'The restart helper is missing.' }));
+              return;
+            }
+
+            try {
+              const { spawn } = await import('child_process');
+              let usable = pythonw;
+              try {
+                await fsp.access(pythonw);
+              } catch {
+                // Fall back to whatever pythonw is on PATH. Never `python`:
+                // that one opens a console window, which is the single thing
+                // this whole launcher chain exists to avoid.
+                usable = 'pythonw.exe';
+              }
+
+              // Detached and unref'd on purpose. The child has to outlive this
+              // process — it is about to kill it.
+              const child = spawn(usable, [script], {
+                cwd: rootDir,
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: true,
+              });
+              child.unref();
+
+              console.log('[restart] handed over to tools/restart-planner.pyw');
+              res.end(JSON.stringify({
+                ok: true,
+                message: 'Restarting. The planner will reopen in a few seconds.',
+              }));
+            } catch (err) {
+              console.error('[restart] failed to start the helper:', err);
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'Could not start the restart helper.' }));
+            }
+          });
+
+          // --- Over-the-air updates --------------------------------------
+          // These two routes are the ONLY ones on this server that are not
+          // behind the login. They have to be: expo-updates checks for a new
+          // bundle before the app has a session, and often before the user has
+          // ever signed in. What they expose is the app's own JavaScript, which
+          // is already on every phone that installed it -- but that is exactly
+          // why the path handling below is strict rather than convenient.
+          const otaDeps = makeFsDeps(rootDir);
+
+          const originOf = (req: any): string => {
+            const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim()
+              || 'http';
+            const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost');
+            return `${proto}://${host}`;
+          };
+
+          server.middlewares.use('/api/ota/manifest', async (req, res, next) => {
+            trace(`OTA manifest asked (platform=${req.headers['expo-platform'] ?? '?'} runtime=${req.headers['expo-runtime-version'] ?? '?'})`);
+            if (req.method !== 'GET') return next();
+            const url = new URL(req.url || '/', 'http://localhost');
+            const header = (n: string) => {
+              const v = req.headers[n];
+              return Array.isArray(v) ? v[0] : v;
+            };
+
+            const protocolVersion = Number(header('expo-protocol-version') ?? 0) || 0;
+            const outcome = await resolveUpdate({
+              platform: header('expo-platform') ?? url.searchParams.get('platform'),
+              runtimeVersion: header('expo-runtime-version')
+                ?? url.searchParams.get('runtime-version'),
+              protocolVersion,
+              currentUpdateId: header('expo-current-update-id') ?? null,
+              origin: originOf(req),
+            }, otaDeps);
+
+            res.setHeader('expo-protocol-version', String(protocolVersion));
+            res.setHeader('expo-sfv-version', '0');
+            res.setHeader('cache-control', 'private, max-age=0');
+
+            if (outcome.kind === 'error') {
+              res.statusCode = outcome.status;
+              res.setHeader('content-type', 'application/json');
+              res.end(JSON.stringify({ error: outcome.message }));
+              return;
+            }
+
+            if (outcome.kind === 'no-update') {
+              // Protocol 1 has a directive for this; protocol 0 has no way to
+              // say it, and 204 is what the client treats as "nothing new".
+              if (protocolVersion === 0) {
+                res.statusCode = 204;
+                res.end();
+                return;
+              }
+              const boundary = makeBoundary('no-update');
+              const body = encodeMultipart([{
+                name: 'directive',
+                body: JSON.stringify({ type: 'noUpdateAvailable' }),
+                contentType: 'application/json; charset=utf-8',
+              }], boundary);
+              res.statusCode = 200;
+              res.setHeader('content-type', `multipart/mixed; boundary=${boundary}`);
+              res.end(body);
+              return;
+            }
+
+            const boundary = makeBoundary(outcome.manifest.id);
+            const body = encodeMultipart([{
+              name: 'manifest',
+              body: JSON.stringify(outcome.manifest),
+              contentType: 'application/json; charset=utf-8',
+            }], boundary);
+            res.statusCode = 200;
+            res.setHeader('content-type', `multipart/mixed; boundary=${boundary}`);
+            res.end(body);
+          });
+
+          server.middlewares.use('/api/ota/assets', async (req, res, next) => {
+            if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+            const url = new URL(req.url || '/', 'http://localhost');
+
+            const runtimeVersion = safeRuntimeVersion(url.searchParams.get('runtimeVersion'));
+            const platform = safePlatform(url.searchParams.get('platform'));
+            const asset = url.searchParams.get('asset');
+            if (!runtimeVersion || !platform || !asset) {
+              res.statusCode = 400;
+              res.end('Bad asset request.');
+              return;
+            }
+
+            const names = await otaDeps.listUpdates(runtimeVersion);
+            const newest = newestFolder(names);
+            if (!newest) {
+              res.statusCode = 404;
+              res.end('No update published.');
+              return;
+            }
+
+            // The only thing standing between a query string and the rest of the
+            // disk. Never inline this.
+            const root = assetRootFor(rootDir, runtimeVersion, newest);
+            const full = safeAssetPath(root, asset);
+            if (!full) {
+              res.statusCode = 400;
+              res.end('Bad asset path.');
+              return;
+            }
+
+            try {
+              const bytes = await fsp.readFile(full);
+              const ext = path.extname(full);
+              res.statusCode = 200;
+              res.setHeader('content-type', contentTypeFor(ext));
+              res.setHeader('content-length', String(bytes.length));
+              // Assets are addressed by content hash, so they never change.
+              res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+              if (req.method === 'HEAD') { res.end(); return; }
+              res.end(bytes);
+            } catch {
+              res.statusCode = 404;
+              res.end('Asset not found.');
+            }
+          });
+
+          // --- The Android app -------------------------------------------
+          // GET /app       a small page listing the builds
+          // GET /app.apk   the right build for whatever asked
+          //
+          // Behind the same login as everything else. The APK is not secret, but
+          // this server is reachable from the public internet and there is no
+          // reason to hand a build to anyone who has not signed in.
+          const APK_DIR = path.resolve(
+            rootDir, 'mobile', 'android', 'app', 'build', 'outputs', 'apk', 'release',
+          );
+
+          const listApks = async (): Promise<ApkFile[]> => {
+            try {
+              const names = await fsp.readdir(APK_DIR);
+              const files: ApkFile[] = [];
+              for (const name of names) {
+                if (!isApk(name)) continue;
+                const stat = await fsp.stat(path.join(APK_DIR, name));
+                files.push({ name, size: stat.size, modified: stat.mtimeMs });
+              }
+              return files;
+            } catch {
+              // Not built yet. The page says so rather than 500-ing.
+              return [];
+            }
+          };
+
+          server.middlewares.use('/app.apk', async (req, res, next) => {
+            if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+
+            const files = await listApks();
+            if (files.length === 0) {
+              res.statusCode = 404;
+              res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+              res.end('The Android app has not been built yet.');
+              return;
+            }
+
+            const url = new URL(req.url || '/', 'http://localhost');
+            const explicit = safeApkName(url.searchParams.get('file'), files);
+            const chosen = explicit
+              ? files.find(f => f.name === explicit)!
+              : chooseApk(files, {
+                  preferred: url.searchParams.get('abi'),
+                  userAgent: req.headers['user-agent'] as string | undefined,
+                })?.file;
+
+            if (!chosen) {
+              res.statusCode = 404;
+              res.end('No suitable build.');
+              return;
+            }
+
+            const full = path.join(APK_DIR, chosen.name);
+            res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+            res.setHeader('Content-Length', String(chosen.size));
+            // A plain name, so the phone's downloads list is readable.
+            res.setHeader('Content-Disposition', 'attachment; filename="daily-planner.apk"');
+            // Never cached: an update must not be shadowed by yesterday's build.
+            res.setHeader('Cache-Control', 'no-store');
+            if (req.method === 'HEAD') { res.end(); return; }
+
+            const stream = (await import('fs')).createReadStream(full);
+            stream.on('error', () => { res.statusCode = 500; res.end(); });
+            stream.pipe(res);
+          });
+
+          server.middlewares.use('/app', async (req, res, next) => {
+            const url = new URL(req.url || '/', 'http://localhost');
+            // Connect strips the mounted prefix, so this normally arrives as '/'.
+            // It does NOT always: behind the Funnel the original path can survive,
+            // and an earlier version fell through to the single-page app here,
+            // which answered with its own "no such route" page. Accept every form
+            // this can legitimately take rather than guessing which one it is.
+            const tail = url.pathname.replace(/^\/?app/, '').replace(/\/+$/, '');
+            if (req.method !== 'GET' || (tail !== '' && tail !== '/')) return next();
+
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+
+            try {
+            const files = listForDisplay(await listApks());
+            const recommended = chooseApk(files, {
+              userAgent: req.headers['user-agent'] as string | undefined,
+            });
+
+            const rows = files.map(f => {
+              const abi = abiOf(f.name);
+              const isPick = recommended?.file.name === f.name;
+              return `<li class="${isPick ? 'pick' : ''}">
+                <a href="/app.apk?file=${encodeURIComponent(f.name)}">
+                  <span class="abi">${abi === 'universal' ? 'Any phone' : abi}</span>
+                  <span class="size">${formatBytes(f.size)}</span>
+                </a>
+              </li>`;
+            }).join('');
+
+            const body = files.length === 0
+              ? `<p class="empty">The app has not been built yet. Build it on the PC with
+                 <code>cd mobile/android &amp;&amp; ./gradlew assembleRelease</code>.</p>`
+              : `<a class="cta" href="/app.apk">Install Daily Planner</a>
+                 <p class="hint">${recommended?.reason ?? ''}
+                 ${recommended ? formatBytes(recommended.file.size) : ''}</p>
+                 <p class="note">Android will ask you to allow installing from your browser.
+                 That prompt is expected — this file comes from your own PC.</p>
+                 <details><summary>Other builds</summary><ul>${rows}</ul></details>`;
+
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-store');
+            res.end(`<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Install Daily Planner</title><style>
+:root{color-scheme:dark light}
+body{margin:0;min-height:100vh;display:grid;place-items:center;
+ background:#0D0D14;color:#ECECF5;font:16px/1.5 system-ui,sans-serif;padding:24px}
+main{max-width:420px;width:100%;text-align:center}
+h1{font-size:28px;letter-spacing:-.02em;margin:0 0 8px}
+.sub{color:#A6A6BA;margin:0 0 32px}
+.cta{display:block;background:#8C88FF;color:#0D0D14;text-decoration:none;
+ font-weight:600;padding:18px;border-radius:999px;margin-bottom:12px}
+.hint{color:#A6A6BA;font-size:14px;margin:0 0 24px}
+.note{color:#6E6E85;font-size:13px;border-left:2px solid #272733;padding-left:12px;text-align:left}
+.empty{color:#A6A6BA}
+code{background:#16161F;padding:2px 6px;border-radius:4px;font-size:13px}
+details{margin-top:24px;text-align:left}
+summary{color:#A6A6BA;cursor:pointer;font-size:14px}
+ul{list-style:none;padding:0;margin:12px 0 0}
+li a{display:flex;justify-content:space-between;padding:14px;margin-bottom:8px;
+ background:#16161F;border:1px solid #272733;border-radius:12px;
+ color:#ECECF5;text-decoration:none}
+li.pick a{border-color:#8C88FF}
+.size{color:#6E6E85}
+@media (prefers-color-scheme:light){
+ body{background:#F5F5FA;color:#15151E}.cta{background:#4F46D6;color:#fff}
+ .sub,.hint{color:#5A5A70}li a{background:#fff;border-color:#E1E1EC;color:#15151E}
+ code{background:#EDEDF4}}
+</style></head><body><main>
+<h1>Daily Planner</h1>
+<p class="sub">The app for your phone. Works with this PC switched off.</p>
+${body}
+</main></body></html>`);
+            } catch (err) {
+              // Falling through to next() here is what produced the confusing
+              // "no such route" page, so the failure is reported instead.
+              console.error('[app] download page failed:', err);
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+              res.end(`The install page failed: ${(err as Error)?.message || err}`);
+            }
+          });
+
+          server.middlewares.use('/api/sync', async (req, res, next) => {
+            const auth = await requireAuth(req, res);
+            if (!auth) return;
+
+            // Did the phone hang up before we answered? This is the difference
+            // between "the server never replied" and "the device gave up", and
+            // guessing which was costing whole rounds of diagnosis. A held pull
+            // that the phone abandons shows up here and nowhere else.
+            const askedAt = Date.now();
+            let answered = false;
+            req.on('close', () => {
+              if (answered || res.writableEnded) return;
+              trace(`ABORTED   ${req.url} after ${Date.now() - askedAt}ms — the device closed it`);
+            });
+
+            try {
+              const url = new URL(req.url || '/', 'http://localhost');
+              const body = req.method === 'POST' ? await readJsonBody(req) : {};
+              const answer = await handleSyncRequest(
+                syncService,
+                auth.user.username,
+                syncPathsOf(auth.userPaths),
+                { action: url.pathname, method: req.method || 'GET', body },
+              );
+              if (!answer.handled) return next();
+              const p: any = answer.payload ?? {};
+              const who = String((body as any)?.deviceId ?? '?').slice(0, 24);
+              const bits = [
+                `dev=${who}`,
+                typeof (body as any)?.since === 'number' ? `since=${(body as any).since}` : '',
+                // Whether the device asked us to hold the request. This is the
+                // only reliable way to tell which bundle a phone is running:
+                // an older one simply never sends it.
+                typeof (body as any)?.wait === 'number' ? `wait=${(body as any).wait}` : '',
+                Array.isArray(p.ops) ? `ops=${p.ops.length}` : '',
+                Array.isArray((body as any)?.ops) ? `sent=${(body as any).ops.length}` : '',
+                typeof p.cursor === 'number' ? `cursor=${p.cursor}` : '',
+                typeof p.lamport === 'number' ? `L=${p.lamport}` : '',
+                p.needsFullResync ? 'FULLRESYNC' : '',
+              ].filter(Boolean).join(' ');
+              answered = true;
+              const slow = Date.now() - askedAt;
+              trace(`${url.pathname.padEnd(10)} ${bits}${slow > 1000 ? ` took=${slow}ms` : ''}`);
+              return sendSyncJson(res, answer.status, answer.payload);
+            } catch (err) {
+              console.error('[sync] request failed:', err);
+              return sendSyncJson(res, 500, { error: 'Sync failed on the server.' });
+            }
+          });
+
+          /**
+           * Fold a file the PC just wrote into the operation log.
+           *
+           * Deliberately fire-and-forget: a sync failure must never make a normal
+           * save fail. The log catches up on the next write, whereas a save that
+           * errored would lose the user's edit outright.
+           */
+          const ingestAfterWrite = (
+            username: string,
+            userPaths: any,
+            store: 'events' | 'tasks' | 'settings',
+            body: string,
+            baseId?: string,
+          ) => {
+            let snapshot: any;
+            try {
+              snapshot = JSON.parse(body);
+            } catch {
+              return;
+            }
+            if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return;
+            syncService
+              .ingestFile(username, syncPathsOf(userPaths), store, snapshot, baseId)
+              .catch(err => console.error('[sync] ingest failed:', err));
+          };
+
+          /**
+           * Register a version of a store we are handing to the app, so that the
+           * save the app builds from it can be merged against the right
+           * baseline rather than against whatever is on disk by then.
+           */
+          const noteServed = (username: string, store: 'events' | 'tasks', raw: string) => {
+            try {
+              const parsed = JSON.parse(raw);
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+              syncService.noteBase(username, store, parsed);
+            } catch { /* not JSON yet */ }
+          };
+
+          /** The base id the client stamped onto this save, if any. */
+          const baseIdHeader = (req: any): string | undefined => {
+            const v = req.headers['x-planner-base'];
+            const id = Array.isArray(v) ? v[0] : v;
+            return typeof id === 'string' && id.length > 0 && id.length <= 64 ? id : undefined;
+          };
+
           server.middlewares.use('/api/events', async (req, res, next) => {
             if (req.method !== 'GET' && req.method !== 'POST') return next();
             const auth = await requireAuth(req, res);
@@ -2533,6 +3054,7 @@ export default defineConfig({
             if (req.method === 'GET') {
               try {
                 const data = await fs.readFile(userPaths.dbPath, 'utf-8');
+                noteServed(auth.user.username, 'events', data);
                 res.setHeader('Content-Type', 'application/json');
                 res.end(data);
               } catch (err) {
@@ -2554,6 +3076,8 @@ export default defineConfig({
                     res.end(JSON.stringify({ error: result.error }));
                     return;
                   }
+                  trace(`SAVE events   bytes=${body.length}`);
+                  ingestAfterWrite(auth.user.username, userPaths, 'events', body, baseIdHeader(req));
                   res.end(JSON.stringify({ success: true }));
                 } catch (err) {
                   res.statusCode = 500;
@@ -2577,6 +3101,7 @@ export default defineConfig({
             if (req.method === 'GET') {
               try {
                 const data = await fs.readFile(userPaths.tasksPath, 'utf-8');
+                noteServed(auth.user.username, 'tasks', data);
                 res.setHeader('Content-Type', 'application/json');
                 res.end(data);
               } catch {
@@ -2596,6 +3121,8 @@ export default defineConfig({
                     res.end(JSON.stringify({ error: result.error }));
                     return;
                   }
+                  trace(`SAVE tasks    bytes=${body.length}`);
+                  ingestAfterWrite(auth.user.username, userPaths, 'tasks', body, baseIdHeader(req));
                   res.end(JSON.stringify({ success: true }));
                 } catch {
                   res.statusCode = 500;
@@ -3013,6 +3540,8 @@ export default defineConfig({
                   res.end(JSON.stringify({ error: result.error }));
                   return;
                 }
+                trace(`SAVE settings bytes=${body.length}`);
+                ingestAfterWrite(auth.user.username, userPaths, 'settings', body);
                 res.end(JSON.stringify({ success: true }));
               } catch (err) {
                 res.statusCode = 500;
@@ -3234,6 +3763,9 @@ export default defineConfig({
               const data = await fsp.readFile(path.join(userPaths.dbDir, file), 'utf-8');
               if (data === lastSent[name]) return;
               lastSent[name] = data;
+              // The app builds its next save from this frame, so this version
+              // has to be one the merge can look up later.
+              if (name === 'events' || name === 'tasks') noteServed(user.username, name, data);
               res.write(`event: ${name}\ndata: ${formatSsePayload(data)}\n\n`);
             } catch (_) { /* not written yet */ }
           };

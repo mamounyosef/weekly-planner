@@ -90,7 +90,7 @@ export function NotifyEditor({
 
   const addCustom = () => {
     const n = Math.abs(Math.round(Number(customValue) || 0));
-    if (!n && customDir === 'after') return;
+    if (!n) return;
     const mult = customUnit === 'minutes' ? 1 : customUnit === 'hours' ? 60 : customUnit === 'days' ? 1440 : 10080;
     addRule((customDir === 'before' ? -1 : 1) * n * mult);
   };

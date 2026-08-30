@@ -1,0 +1,58 @@
+{
+  "expo": {
+    "name": "Daily Planner",
+    "slug": "daily-planner",
+    "scheme": "dailyplanner",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.mamoun.dailyplanner"
+    },
+    "android": {
+      "package": "com.mamoun.dailyplanner",
+      "adaptiveIcon": {
+        "backgroundColor": "#265cf4",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.USE_EXACT_ALARM",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.WAKE_LOCK"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "color": "#3F3AD8",
+          "defaultChannel": "reminders"
+        }
+      ],
+      "./plugins/with-release-signing"
+    ],
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://mamoun.tail27d0a5.ts.net/api/ota/manifest"
+    },
+    "runtimeVersion": "1.0.0",
+    "extra": {
+      "plannerServerUrl": "https://mamoun.tail27d0a5.ts.net"
+    }
+  }
+}

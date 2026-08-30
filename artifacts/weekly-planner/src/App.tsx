@@ -22,7 +22,7 @@ function AuthenticatedApp() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen w-full bg-[#0a0b0d] flex items-center justify-center">
+      <div className="min-h-screen w-full bg-background flex items-center justify-center">
         <div className="w-6 h-6 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
       </div>
     );

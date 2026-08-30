@@ -67,3 +67,4 @@ __pycache__/
 firmware/.pio/
 firmware/src/secrets.h
 .agents
+database/ota/

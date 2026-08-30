@@ -54,6 +54,7 @@ import {
   Send,
   Activity,
   ShieldAlert,
+  RotateCw,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import {
@@ -807,7 +808,7 @@ function CategoryRow({
               e.preventDefault();
               controls.start(e);
             }}
-            className="cursor-grab active:cursor-grabbing p-1.5 -m-1.5 touch-none rounded-lg hover:bg-white/10 transition-colors flex items-center justify-center"
+            className="cursor-grab active:cursor-grabbing p-1.5 -m-1.5 touch-none rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors flex items-center justify-center"
             title="Drag to reorder"
           >
             <GripVertical
@@ -851,7 +852,7 @@ function CategoryRow({
             <button
               type="button"
               onClick={onSetDefault}
-              className="px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
+              className="px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-black/5 dark:hover:bg-white/5"
               style={{ borderColor: cardBdr, color: textSecondary }}
               title="Set as default category for new items"
             >
@@ -863,7 +864,7 @@ function CategoryRow({
           <button
             type="button"
             onClick={onOpenEdit}
-            className="touch-target px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-white/5"
+            className="touch-target px-2.5 h-7 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition-smooth hover:bg-black/5 dark:hover:bg-white/5"
             style={{ borderColor: cardBdr, color: textPrimary }}
           >
             <Edit2 size={11} />
@@ -1020,7 +1021,7 @@ function TaskListRow({
             e.preventDefault();
             controls.start(e);
           }}
-          className="cursor-grab active:cursor-grabbing p-1.5 -m-1.5 touch-none rounded-lg hover:bg-white/10 transition-colors flex items-center justify-center"
+          className="cursor-grab active:cursor-grabbing p-1.5 -m-1.5 touch-none rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors flex items-center justify-center"
           title="Drag to reorder"
         >
           <GripVertical
@@ -1119,7 +1120,16 @@ function TaskListRow({
 }
 
 function TabPanel({ isPhone, children, className, ...rest }: HTMLMotionProps<'div'> & { isPhone: boolean }) {
-  if (isPhone) return <div className={className}>{children as React.ReactNode}</div>;
+  if (isPhone) {
+    return (
+      <div
+        className={`${className ?? ''} gpu-layer`}
+        style={{ transform: 'translate3d(0, 0, 0)', contain: 'paint layout' }}
+      >
+        {children as React.ReactNode}
+      </div>
+    );
+  }
   return <motion.div className={className} {...rest}>{children}</motion.div>;
 }
 
@@ -2120,8 +2130,8 @@ export default function SettingsPage() {
   // felt like it was dropping frames on a mid-range phone.
   const headerBg = isPhone ? activeTheme.cardBg : `${activeTheme.cardBg}d9`;
   const cardBdr = activeTheme.surfaceBdr;
-  const textPrimary = darkMode ? '#f1f5f9' : '#0f172a';
-  const textSecondary = darkMode ? '#94a3b8' : '#64748b';
+  const textPrimary = 'hsl(var(--foreground))';
+  const textSecondary = 'hsl(var(--muted-foreground))';
   const accentColor = '#3b82f6';
   const accentLight = darkMode ? 'rgba(59, 130, 246, 0.15)' : 'rgba(59, 130, 246, 0.08)';
 
@@ -2137,6 +2147,30 @@ export default function SettingsPage() {
     hover: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
     accent: accentColor,
   }), [darkMode, textPrimary, textSecondary, activeTheme.cardBg, activeTheme.surfaceBg, cardBdr, accentColor]);
+
+  // Restarting the planner. `restarting` never returns to false on success:
+  // the server is going away, so the button must stay disabled until the page
+  // itself is replaced by the relaunched app.
+  const [restarting, setRestarting] = React.useState(false);
+  const [restartError, setRestartError] = React.useState<string | null>(null);
+
+  const restartPlanner = React.useCallback(async () => {
+    setRestartError(null);
+    setRestarting(true);
+    try {
+      const res = await fetch('/api/restart', { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `The server answered ${res.status}.`);
+      }
+      // Nothing else to do. The helper closes this window and opens a fresh one.
+    } catch (err) {
+      // A failure here is worth showing: the alternative is a button that looks
+      // like it worked while the server carries on running the old code.
+      setRestartError(err instanceof Error ? err.message : String(err));
+      setRestarting(false);
+    }
+  }, []);
 
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
@@ -2160,7 +2194,7 @@ export default function SettingsPage() {
       // `fixed inset-0` scroller, which is the URL-bar-shown height — so on a
       // phone min-h-screen alone adds ~60px of empty scroll under the content.
       className={`${isPhone ? 'min-h-full' : 'min-h-screen'} flex flex-col font-sans transition-colors duration-300 relative ${
-        darkMode ? 'dark text-[#f1f5f9]' : 'text-[#0f172a]'
+        darkMode ? 'dark text-foreground' : 'text-foreground'
       }`}
       style={{ backgroundColor: pageBg }}
     >
@@ -2282,6 +2316,20 @@ export default function SettingsPage() {
                 </button>
               );
             })}
+            <button
+              type="button"
+              onClick={restartPlanner}
+              disabled={restarting}
+              className="flex items-center gap-1.5 px-3 h-10 rounded-xl text-[12px] font-bold whitespace-nowrap flex-shrink-0 active:scale-95 transition-transform disabled:opacity-50"
+              style={{
+                background: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)',
+                color: textSecondary,
+                border: `1px solid ${cardBdr}`,
+              }}
+            >
+              <RotateCw size={15} className={restarting ? 'animate-spin' : undefined} />
+              {restarting ? 'Restarting\u2026' : 'Restart'}
+            </button>
           </div>
         ) : (
           <aside className="w-64 flex-shrink-0 flex flex-col gap-1.5">
@@ -2314,6 +2362,54 @@ export default function SettingsPage() {
                 </button>
               );
             })}
+
+            {/* Restart sits at the FOOT of the rail, not inside a section.
+                It is not a setting — it acts on the machine rather than on the
+                planner — and it is what you come looking for after the app has
+                changed under you. `mt-auto` pins it to the bottom so it never
+                moves as sections are added above it. */}
+            <div className="mt-auto pt-4 flex flex-col gap-2">
+              <div className="h-px mx-3" style={{ background: cardBdr }} />
+              <button
+                type="button"
+                onClick={restartPlanner}
+                disabled={restarting}
+                title="Closes the server, this window and the widget, then opens them all again."
+                className="flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-smooth duration-200 text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{
+                  background: restarting ? accentLight : 'transparent',
+                  color: restarting ? accentColor : textSecondary,
+                  border: '1px solid transparent',
+                }}
+                onMouseEnter={e => {
+                  if (restarting) return;
+                  e.currentTarget.style.background = darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)';
+                }}
+                onMouseLeave={e => {
+                  if (restarting) return;
+                  e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <RotateCw
+                  size={17}
+                  style={{ color: restarting ? accentColor : textSecondary }}
+                  className={restarting ? 'animate-spin' : undefined}
+                />
+                <span>{restarting ? 'Restarting\u2026' : 'Restart planner'}</span>
+              </button>
+
+              {restartError ? (
+                <span className="text-[10px] leading-snug px-3.5" style={{ color: '#ef4444' }}>
+                  {restartError}
+                </span>
+              ) : (
+                <span className="text-[10px] leading-snug px-3.5" style={{ color: textSecondary, opacity: 0.7 }}>
+                  {restarting
+                    ? 'This window will close and reopen on its own.'
+                    : 'Closing the window alone leaves the server running.'}
+                </span>
+              )}
+            </div>
           </aside>
         )}
 
@@ -3344,7 +3440,7 @@ export default function SettingsPage() {
                           <button
                             type="button"
                             onClick={closeCategoryModal}
-                            className="touch-target w-7 h-7 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 flex-shrink-0"
+                            className="touch-target w-7 h-7 rounded-full flex items-center justify-center transition-colors hover:bg-black/5 dark:hover:bg-white/10 flex-shrink-0"
                             style={{ color: textSecondary }}
                           >
                             <X size={16} />
@@ -3653,7 +3749,7 @@ export default function SettingsPage() {
                           <button
                             type="button"
                             onClick={closeCategoryModal}
-                            className="px-4 py-2 rounded-xl text-xs font-semibold border transition-colors hover:bg-white/5"
+                            className="px-4 py-2 rounded-xl text-xs font-semibold border transition-colors hover:bg-black/5 dark:hover:bg-white/5"
                             style={{ borderColor: cardBdr, color: textSecondary }}
                           >
                             {editingCategory ? 'Done / Close' : 'Cancel'}
@@ -5618,21 +5714,24 @@ export default function SettingsPage() {
                             />
                             <button
                               onClick={() => {
-                                if (!clientIdInput || !clientSecretInput) return;
+                                if (!clientIdInput.trim() || !clientSecretInput.trim()) return;
                                 fetch('/api/google-auth/setup', {
                                   method: 'POST',
                                   headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ clientId: clientIdInput, clientSecret: clientSecretInput, autoSync: true }),
+                                  body: JSON.stringify({ clientId: clientIdInput.trim(), clientSecret: clientSecretInput.trim(), autoSync: true }),
                                 })
                                   .then(r => r.json())
                                   .then(res => {
                                     if (res.success) {
                                       setGCalStatus(prev => ({ ...prev, configured: true, autoSync: true }));
                                       showToast('Credentials saved successfully!', 'success');
+                                    } else {
+                                      showToast('Failed to save credentials', 'error');
                                     }
-                                  });
+                                  })
+                                  .catch(() => showToast('Failed to save credentials', 'error'));
                               }}
-                              disabled={!clientIdInput || !clientSecretInput}
+                              disabled={!clientIdInput.trim() || !clientSecretInput.trim()}
                               className="w-full py-2.5 px-4 rounded-xl text-xs font-bold transition-smooth text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
                             >
                               Save OAuth Credentials
@@ -5687,8 +5786,11 @@ export default function SettingsPage() {
                                         if (res.success) {
                                           setGCalStatus({ configured: false, authenticated: false, autoSync: false });
                                           showToast('Google Account disconnected.', 'info');
+                                        } else {
+                                          showToast('Failed to disconnect', 'error');
                                         }
-                                      });
+                                      })
+                                      .catch(() => showToast('Failed to disconnect', 'error'));
                                   }}
                                   className="px-4 py-2.5 rounded-xl text-xs font-bold transition-smooth border text-red-400 border-red-500/20 hover:bg-red-500/10"
                                 >
@@ -6005,7 +6107,7 @@ export default function SettingsPage() {
                   <div className="p-4 rounded-2xl border flex flex-col gap-2" style={{ background: darkMode ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.015)', borderColor: cardBdr }}>
                     <span className="text-xs font-bold" style={{ color: textPrimary }}>Adding or Managing Users</span>
                     <p className="text-xs leading-relaxed" style={{ color: textSecondary }}>
-                      Usernames and passwords are stored securely in <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-white/5" style={{ color: textPrimary }}>database/users.json</code> on the host PC. To add a friend or update a password, edit that file on your PC — new users take effect immediately without restarting.
+                      Usernames and passwords are stored securely in <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5" style={{ color: textPrimary }}>database/users.json</code> on the host PC. To add a friend or update a password, edit that file on your PC — new users take effect immediately without restarting.
                     </p>
                   </div>
 
@@ -6034,7 +6136,7 @@ export default function SettingsPage() {
                             navigator.clipboard.writeText('https://mamoun.tail27d0a5.ts.net/');
                             showToast('Link copied to clipboard!', 'success');
                           }}
-                          className="p-2 rounded-lg border hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
+                          className="p-2 rounded-lg border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
                           style={{ borderColor: cardBdr, color: textSecondary }}
                           title="Copy Link"
                         >
@@ -6062,7 +6164,7 @@ export default function SettingsPage() {
                                 navigator.clipboard.writeText(localLanUrl);
                                 showToast('Local Wi-Fi link copied to clipboard!', 'success');
                               }}
-                              className="p-2 rounded-lg border hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
+                              className="p-2 rounded-lg border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
                               style={{ borderColor: cardBdr, color: textSecondary }}
                               title="Copy Local Link"
                             >

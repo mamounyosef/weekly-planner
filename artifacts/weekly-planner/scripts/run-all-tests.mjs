@@ -1,4 +1,4 @@
-// Runner script that runs all 20 automated unit test suites sequentially and fast.
+// Runner script that runs all automated unit test suites sequentially and fast.
 // Run with: node scripts/run-all-tests.mjs
 
 import { spawnSync } from 'node:child_process';
@@ -30,6 +30,31 @@ const testFiles = [
   'src/lib/notificationEngine.test.ts',
   'src/lib/auth.test.ts',
   'src/lib/migration.test.ts',
+  'src/lib/sync.test.ts',
+  'src/lib/syncBridge.test.ts',
+  'src/lib/syncServer.test.ts',
+  'src/lib/syncService.test.ts',
+  'src/lib/syncEndpoints.test.ts',
+  'src/lib/syncClient.test.ts',
+  'src/lib/syncStorage.test.ts',
+  'src/lib/alarmPlan.test.ts',
+  'src/lib/agenda.test.ts',
+  'src/lib/appDelivery.test.ts',
+  'src/lib/ota.test.ts',
+  'src/lib/syncTransport.test.ts',
+  'src/lib/syncEquality.test.ts',
+  'src/lib/syncIntegration.test.ts',
+  'src/lib/syncDivergence.test.ts',
+  'src/lib/syncClock.test.ts',
+  'src/lib/syncSetOps.test.ts',
+  'src/lib/syncCursor.test.ts',
+  'src/lib/syncLifecycle.test.ts',
+  'src/lib/draft.test.ts',
+  'src/lib/syncWaiting.test.ts',
+  'src/lib/settingsScope.test.ts',
+  'src/lib/settingsRoundTrip.test.ts',
+  'src/lib/focusStats.test.ts',
+  'src/lib/grid.test.ts',
 ];
 
 console.log(`\n======================================================`);
@@ -74,6 +99,6 @@ console.log(`======================================================\n`);
 if (failed > 0) {
   process.exit(1);
 } else {
-  console.log('ALL 20 TEST SUITES PASSED CLEANLY WITH 100% SUCCESS!');
+  console.log(`ALL ${testFiles.length} TEST SUITES PASSED CLEANLY WITH 100% SUCCESS!`);
   process.exit(0);
 }
