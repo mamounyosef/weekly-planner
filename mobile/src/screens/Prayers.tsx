@@ -401,8 +401,8 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
               <Text variant="label" tone="faint">ON THIS PHONE</Text>
               <Card style={{ gap: space.lg }}>
                 <Toggle
-                  label="Show on the calendar"
-                  hint="Draws each prayer across the day, week and custom grids."
+                  label="Show on the time grid"
+                  hint="Draws each prayer on the day, week and custom grids. The List view always shows them, since that is where you tick one off."
                   value={appearance.showOnCalendar}
                   onChange={v => setAppearance({ ...appearance, showOnCalendar: v })}
                 />

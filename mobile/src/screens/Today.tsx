@@ -54,6 +54,7 @@ import { MonthView } from './views/MonthView';
 import { YearView } from './views/YearView';
 import { prefs } from '../lib/prefs';
 import { daysBetween } from '../lib/monthDrag';
+import { shiftMonths } from '../lib/grid';
 import { ItemMenu, type ItemMenuTarget } from '../ui/ItemMenu';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
 import { anchorFor, describeRecur, draftFromRecord, toTimeString } from '../lib/draft';
@@ -232,12 +233,24 @@ export function Today({
         : status.phase === 'offline' || status.phase === 'error' ? 'offline'
           : 'ok';
 
-  // How many days a swipe moves: one in the single-day views, a whole window in
-  // the multi-day ones, so the gesture always means "the next screenful".
-  const swipeStepRef = React.useRef(1);
-  swipeStepRef.current = view === 'week' ? 7
-    : view === 'custom' ? customWindow.before + customWindow.after + 1
-      : 1;
+  /**
+   * What a swipe moves: always "the next screenful", whatever is on screen.
+   *
+   * A month view that moved by one day would be a gesture that appears to do
+   * nothing, since the same month is still drawn. So the unit changes with the
+   * view rather than the distance changing, and month and year move by calendar
+   * months and years rather than by a fixed number of days: months are not all
+   * the same length, and stepping 30 days from the 31st lands in the wrong one.
+   */
+  const swipeStepRef = React.useRef<{ unit: 'day' | 'month' | 'year'; size: number }>({
+    unit: 'day', size: 1,
+  });
+  swipeStepRef.current = view === 'year' ? { unit: 'year', size: 1 }
+    : view === 'month' ? { unit: 'month', size: 1 }
+      : view === 'week' ? { unit: 'day', size: 7 }
+        : view === 'custom'
+          ? { unit: 'day', size: customWindow.before + customWindow.after + 1 }
+          : { unit: 'day', size: 1 };
 
   /**
    * Swipe sideways to move a day.
@@ -257,7 +270,10 @@ export function Today({
     onPanResponderRelease: (_e, g) => {
       if (Math.abs(g.dx) < 48) return;
       const step = g.dx < 0 ? 1 : -1;   // drag left, go forward
-      setSelected(current => addDays(current, step * swipeStepRef.current));
+      const { unit, size } = swipeStepRef.current;
+      setSelected(current => (unit === 'day'
+        ? addDays(current, step * size)
+        : shiftMonths(current, step * size * (unit === 'year' ? 12 : 1))));
     },
   }), []);
 
@@ -453,8 +469,36 @@ export function Today({
                 </Text>
               </Row>
             </Pressable>
-            <Text variant="display" numberOfLines={1}>{dayLabel(selected, now)}</Text>
+            <Pressable
+              onPress={() => setSelected(today)}
+              disabled={showingToday}
+              accessibilityRole="button"
+              accessibilityLabel={showingToday ? dayLabel(selected, now) : 'Back to today'}
+            >
+              <Text variant="display" numberOfLines={1}>{dayLabel(selected, now)}</Text>
+            </Pressable>
           </View>
+
+          {/* Only when you have wandered off. A permanent button would be a
+              control that does nothing most of the time, and the title itself
+              is the obvious thing to press to get back. */}
+          {!showingToday ? (
+            <Pressable
+              onPress={() => setSelected(today)}
+              accessibilityRole="button"
+              accessibilityLabel="Back to today"
+              hitSlop={space.sm}
+              style={{
+                paddingHorizontal: space.md, height: 30,
+                borderRadius: radius.pill,
+                alignItems: 'center', justifyContent: 'center',
+                borderWidth: 1, borderColor: p.accent,
+                backgroundColor: p.accentSoft,
+              }}
+            >
+              <Text variant="caption" tone="accent" style={{ fontWeight: '700' }}>Today</Text>
+            </Pressable>
+          ) : null}
 
           {/* Settings has a tab of its own now, so the gear that used to sit
               here would be a second door to the same room. Conflicts stay,
@@ -543,7 +587,7 @@ export function Today({
       {/* ── The body ───────────────────────────────────────────────────── */}
       {/* The swipe lives on the body only. Putting it on the whole screen would
           fight the horizontal strips in the header above. */}
-      <View style={{ flex: 1 }} {...(view === 'month' || view === 'year' || !swipeViewSwitch ? {} : swipe.panHandlers)}>
+      <View style={{ flex: 1 }} {...(swipeViewSwitch ? swipe.panHandlers : {})}>
       {view === 'week' ? (
         <WeekView
           dates={weekDates}
@@ -725,6 +769,11 @@ export function Today({
       {/* ── Add ────────────────────────────────────────────────────────── */}
       <Pressable
         onPress={() => setEditing({ store: 'events', date: selected })}
+        // The same button, held: typing one line is often faster than filling a
+        // sheet, and the two belong on the same control rather than making the
+        // header carry a second plus.
+        onLongPress={onOpenQuickAdd}
+        delayLongPress={300}
         accessibilityRole="button"
         accessibilityLabel="Add to this day"
         android_ripple={{ color: p.accentSoft, radius: 34 }}

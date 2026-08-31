@@ -177,3 +177,24 @@ export function prayerChipMode(columnWidth: number): PrayerChipMode {
   if (columnWidth >= 78) return 'name';
   return 'dot';
 }
+
+/**
+ * The same day of the month, a number of months away.
+ *
+ * CLAMPED, NOT ROLLED OVER. JavaScript turns 31 January plus one month into 3
+ * March, because it accepts a day-of-month that does not exist and carries the
+ * overflow into the next month. A calendar that skips February when you swipe
+ * forward from the 31st is not a subtle bug, and it only shows up on seven days
+ * of the year, which is exactly the kind of thing that ships.
+ */
+export function shiftMonths(date: string, months: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return date;
+  const step = Number.isFinite(months) ? Math.trunc(months) : 0;
+
+  const target = new Date(y, (m - 1) + step, 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(d, lastDay));
+
+  return `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
+}

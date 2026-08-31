@@ -15,6 +15,7 @@ import {
   monthGrid,
   yOf,
   prayerChipMode,
+  shiftMonths,
   MIN_BLOCK_MINUTES,
   type Placeable,
 } from './grid';
@@ -221,6 +222,60 @@ function main() {
       const here = rank[prayerChipMode(w)];
       assert.ok(here >= last, `width ${w} does not go backwards`);
       last = here;
+    }
+  }
+
+
+  console.log('--- 11. A MONTH AWAY IS STILL A REAL DATE ---');
+  {
+    // THE ONE THAT MATTERS. JavaScript turns 31 January plus one month into 3
+    // March, so a swipe forward from the 31st skips February altogether. It goes
+    // wrong on seven days of the year, which is why it ships.
+    assert.equal(shiftMonths('2026-01-31', 1), '2026-02-28', 'clamped, not rolled over');
+    assert.equal(shiftMonths('2028-01-31', 1), '2028-02-29', 'and a leap year has one more');
+    assert.equal(shiftMonths('2026-03-31', -1), '2026-02-28', 'backwards too');
+    assert.equal(shiftMonths('2026-05-31', 1), '2026-06-30', 'thirty day months as well');
+
+    // The ordinary cases stay ordinary.
+    assert.equal(shiftMonths('2026-08-15', 1), '2026-09-15');
+    assert.equal(shiftMonths('2026-08-15', -1), '2026-07-15');
+    assert.equal(shiftMonths('2026-08-15', 0), '2026-08-15', 'nowhere is where it started');
+
+    // Year boundaries, in both directions and by whole years.
+    assert.equal(shiftMonths('2026-12-15', 1), '2027-01-15');
+    assert.equal(shiftMonths('2026-01-15', -1), '2025-12-15');
+    assert.equal(shiftMonths('2026-08-31', 12), '2027-08-31', 'a year is twelve months');
+    assert.equal(shiftMonths('2028-02-29', 12), '2029-02-28', 'a leap day has no anniversary');
+    assert.equal(shiftMonths('2026-08-31', -24), '2024-08-31');
+
+    // Every month of a year, stepped one at a time, always lands in the month
+    // it should and never skips one.
+    for (const day of ['01', '15', '28', '29', '30', '31']) {
+      let cursor = `2026-01-${day}`;
+      if (Number(day) > 31) continue;
+      for (let step = 1; step <= 12; step += 1) {
+        const next = shiftMonths(`2026-01-${day}`, step);
+        const month = Number(next.split('-')[1]);
+        const expected = ((0 + step) % 12) + 1;
+        assert.equal(month, expected, `${day} plus ${step} months lands in month ${expected}`);
+      }
+      void cursor;
+    }
+
+    // Stepping forward then back returns the same date, EXCEPT where clamping
+    // legitimately lost a day. Asserted rather than assumed.
+    assert.equal(shiftMonths(shiftMonths('2026-08-15', 1), -1), '2026-08-15');
+    assert.equal(shiftMonths(shiftMonths('2026-01-31', 1), -1), '2026-01-28',
+      'a clamp is not reversible, and pretending otherwise would be worse');
+
+    // Rubbish in, the same date out, rather than a thrown error or "NaN-NaN-NaN".
+    for (const bad of ['', 'not a date', '2026-13-40', 'x-y-z']) {
+      const out = shiftMonths(bad, 1);
+      assert.ok(!out.includes('NaN'), `${JSON.stringify(bad)} does not produce NaN`);
+    }
+    for (const months of [NaN, Infinity, -Infinity, 1.7]) {
+      const out = shiftMonths('2026-08-15', months as number);
+      assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(out), `${months} still gives a date, got ${out}`);
     }
   }
 

@@ -1,27 +1,41 @@
 // ─── Conflicts ───────────────────────────────────────────────────────────────
 // The screen you only see when two devices genuinely disagreed.
 //
-// It shows both values side by side with WHERE and WHEN each came from, because
-// that is what actually makes the choice obvious — not the values alone. One tap
-// answers it, and the card goes away on both devices.
+// WHY WE GROUP BY ITEM: A raw conflict exists per field. If you edit a title,
+// time, and category offline, and the PC edits them too, the engine raises
+// three conflicts. Presenting them as three separate cards is exhausting and
+// loses context. Grouping them by item lets you see the whole disagreement and
+// optionally resolve all fields with a single tap.
 //
 // What the app has already done for you is stated explicitly ("everything else
 // merged automatically"), so a single card does not read as "your sync broke".
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Button, Card, Divider, Empty, Row, Spacer, Text, useTheme } from '../ui/kit';
+import { Button, Card, Divider, Empty, Row, Text, useTheme } from '../ui/kit';
 import { radius, space, HIT } from '../theme';
 import { usePlanner } from '../state/planner';
-import { describeAgo } from '../lib/syncClient';
 import type { SyncConflict } from '../lib/sync';
+import { groupConflicts, type GroupedConflict } from '../lib/conflictText';
 
 export function Conflicts({ onClose }: { onClose: () => void }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { conflicts, answerConflict, status } = usePlanner();
+  const { conflicts, answerConflict, status, events, tasks } = usePlanner();
+
+  const now = Date.now();
+  
+  // Recompute groups whenever conflicts change. `events` and `tasks` are passed
+  // solely to look up the item's title, making the cards human-readable.
+  const groups = useMemo(() => {
+    return groupConflicts(conflicts, now, (store, id) => {
+      if (store === 'events') return events()[id]?.title as string | undefined;
+      if (store === 'tasks') return tasks()[id]?.title as string | undefined;
+      return undefined;
+    });
+  }, [conflicts, now, events, tasks]);
 
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
@@ -54,7 +68,7 @@ export function Conflicts({ onClose }: { onClose: () => void }) {
         paddingBottom: insets.bottom + space.xxl,
         gap: space.lg,
       }}>
-        {conflicts.length === 0 ? (
+        {groups.length === 0 ? (
           <Empty
             title="Everything agrees"
             hint="When your phone and PC change the same thing at the same time, the choice appears here. Everything else merges on its own."
@@ -65,11 +79,11 @@ export function Conflicts({ onClose }: { onClose: () => void }) {
               These are the only changes the app could not merge on its own. Everything else
               from both devices has already been kept.
             </Text>
-            {conflicts.map(card => (
-              <ConflictCard
-                key={card.id}
-                card={card}
-                onChoose={choice => answerConflict(card, choice)}
+            {groups.map(group => (
+              <GroupCard
+                key={`${group.store}:${group.entityId}`}
+                group={group}
+                onAnswer={(conflict, choice) => answerConflict(conflict, choice)}
               />
             ))}
           </>
@@ -79,78 +93,118 @@ export function Conflicts({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ConflictCard({
-  card,
-  onChoose,
+function GroupCard({
+  group,
+  onAnswer,
 }: {
-  card: SyncConflict;
-  onChoose: (choice: 'winner' | 'loser' | 'delete' | 'keep') => void;
+  group: GroupedConflict;
+  onAnswer: (conflict: SyncConflict, choice: 'winner' | 'loser' | 'delete' | 'keep') => void;
 }) {
   const p = useTheme();
-  const now = Date.now();
-  const isDelete = card.kind === 'delete';
+
+  // Resolve all non-delete fields at once with a single choice.
+  // Deletes are excluded because their choices ('keep' / 'delete') are incompatible
+  // with field choices ('winner' / 'loser'), and a delete naturally overrides
+  // field edits anyway.
+  const handleKeepAll = (choice: 'winner' | 'loser') => {
+    group.conflicts.forEach(c => {
+      if (!c.isDelete) {
+        onAnswer(c.raw, choice as any);
+      }
+    });
+  };
+
+  const hasFieldConflicts = group.conflicts.some(c => !c.isDelete);
+  
+  // Find the common device labels to make the "Keep for all" buttons read naturally.
+  const winnerLabels = new Set(group.conflicts.filter(c => !c.isDelete).map(c => c.winnerLabel));
+  const loserLabels = new Set(group.conflicts.filter(c => !c.isDelete).map(c => c.loserLabel));
+  const commonWinner = winnerLabels.size === 1 ? Array.from(winnerLabels)[0] : 'winner';
+  const commonLoser = loserLabels.size === 1 ? Array.from(loserLabels)[0] : 'loser';
 
   return (
     <Card style={{ padding: 0, overflow: 'hidden' }}>
       <View style={{
         paddingHorizontal: space.lg,
         paddingVertical: space.md,
-        backgroundColor: p.warnSoft,
+        backgroundColor: p.surfaceAlt,
       }}>
-        <Text variant="label" tone="warn">
-          {isDelete ? 'Deleted here, edited there' : `Two versions of ${fieldLabel(card.field)}`}
+        <Text variant="label" tone="ink">{group.itemTitle}</Text>
+        <Text variant="caption" tone="faint">
+          {group.store === 'tasks' ? 'Task' : 'Event'} edited on both devices
         </Text>
       </View>
 
-      <View style={{ padding: space.lg, gap: space.md }}>
-        <Text variant="caption" tone="faint">
-          {card.store === 'tasks' ? 'Task' : 'Event'} · edited on both devices while they were apart
-        </Text>
+      <View style={{ padding: space.lg, gap: space.xl }}>
+        {group.conflicts.map(c => (
+          <View key={c.fieldFriendlyName} style={{ gap: space.md }}>
+            <Text variant="label" tone="warn">
+              {c.isDelete ? 'Deleted here, edited there' : `Disagreement on ${c.fieldFriendlyName}`}
+            </Text>
+            
+            {c.isDelete ? (
+              <Text variant="body">
+                One device deleted this while the other was still changing it. The delete has
+                been applied for now, so it is hidden on both devices. Nothing is lost, and
+                "Keep it" brings it back with your change.
+              </Text>
+            ) : (
+              <Row gap={space.sm} align="stretch">
+                <Side
+                  label={c.winnerLabel}
+                  when={c.winnerTime}
+                  value={c.winnerValue}
+                  highlight
+                />
+                <Side
+                  label={c.loserLabel}
+                  when={c.loserTime}
+                  value={c.loserValue}
+                />
+              </Row>
+            )}
 
-        {isDelete ? (
-          <Text variant="body">
-            One device deleted this while the other was still changing it. The delete has
-            been applied for now, so it is hidden on both devices — nothing is lost, and
-            “Keep it” brings it back with your change.
-          </Text>
-        ) : (
-          <Row gap={space.sm} align="stretch">
-            <Side
-              label={deviceLabel(card.winner.device)}
-              when={describeAgo(now - card.winner.at)}
-              value={card.winner.value}
-              highlight
-            />
-            <Side
-              label={deviceLabel(card.loser.device)}
-              when={describeAgo(now - card.loser.at)}
-              value={card.loser.value}
-            />
-          </Row>
+            {c.isDelete ? (
+              <Row gap={space.sm}>
+                <Button label="Keep it" onPress={() => onAnswer(c.raw, 'keep')} style={{ flex: 1 }} />
+                <Button label="Delete it" variant="danger" onPress={() => onAnswer(c.raw, 'delete')} style={{ flex: 1 }} />
+              </Row>
+            ) : (
+              <View style={{ gap: space.sm }}>
+                <Button
+                  label={c.choices[0].label}
+                  onPress={() => onAnswer(c.raw, c.choices[0].value as any)}
+                />
+                <Button
+                  label={c.choices[1].label}
+                  variant="secondary"
+                  onPress={() => onAnswer(c.raw, c.choices[1].value as any)}
+                />
+              </View>
+            )}
+          </View>
+        ))}
+
+        {hasFieldConflicts && group.conflicts.length > 1 && (
+          <View style={{ marginTop: space.sm, paddingTop: space.md, borderTopWidth: 1, borderColor: p.line }}>
+            <Text variant="caption" tone="faint" style={{ marginBottom: space.md }}>
+              Resolve all {group.conflicts.filter(c => !c.isDelete).length} fields at once:
+            </Text>
+            <Row gap={space.sm}>
+              <Button 
+                label={`Keep ${commonWinner} for all`} 
+                onPress={() => handleKeepAll('winner')} 
+                style={{ flex: 1 }} 
+              />
+              <Button 
+                label={`Keep ${commonLoser} for all`} 
+                variant="secondary" 
+                onPress={() => handleKeepAll('loser')} 
+                style={{ flex: 1 }} 
+              />
+            </Row>
+          </View>
         )}
-
-        {isDelete ? (
-          <Row gap={space.sm}>
-            <Button label="Keep it" onPress={() => onChoose('keep')} style={{ flex: 1 }} />
-            <Button label="Delete it" variant="danger" onPress={() => onChoose('delete')} style={{ flex: 1 }} />
-          </Row>
-        ) : (
-          <>
-            <Button
-              label={`Keep ${deviceLabel(card.winner.device)}`}
-              onPress={() => onChoose('winner')}
-            />
-            <Button
-              label={`Keep ${deviceLabel(card.loser.device)}`}
-              variant="secondary"
-              onPress={() => onChoose('loser')}
-            />
-          </>
-        )}
-
-        <Text variant="caption" tone="faint">
-          Whichever you pick is applied on both devices.
-        </Text>
       </View>
     </Card>
   );
@@ -159,7 +213,7 @@ function ConflictCard({
 function Side({
   label, when, value, highlight,
 }: {
-  label: string; when: string; value: unknown; highlight?: boolean;
+  label: string; when: string; value: string; highlight?: boolean;
 }) {
   const p = useTheme();
   return (
@@ -171,51 +225,8 @@ function Side({
       gap: 4,
     }}>
       <Text variant="label" tone={highlight ? 'accent' : 'faint'}>{label}</Text>
-      <Text variant="bodyStrong" numberOfLines={3}>{renderValue(value)}</Text>
+      <Text variant="bodyStrong" numberOfLines={3}>{value}</Text>
       <Text variant="caption" tone="faint">{when}</Text>
     </View>
   );
-}
-
-/** Values are arbitrary JSON; show something a person can compare at a glance. */
-function renderValue(value: unknown): string {
-  if (value === undefined || value === null) return '(empty)';
-  if (typeof value === 'string') return value.length === 0 ? '(empty)' : value;
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number') return String(value);
-  if (Array.isArray(value)) return value.length === 0 ? '(none)' : value.join(', ');
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '(unreadable)';
-  }
-}
-
-/** Field names are internal; the card must speak the user's language. */
-function fieldLabel(field: string): string {
-  const map: Record<string, string> = {
-    title: 'the title',
-    startTime: 'the start time',
-    endTime: 'the end time',
-    notes: 'the notes',
-    categoryId: 'the category',
-    weekKey: 'the date',
-    dayIndex: 'the date',
-    allDay: 'all-day',
-    daysSpan: 'the length',
-    color: 'the colour',
-    notify: 'the reminder',
-    completed: 'whether it is done',
-    listId: 'the list',
-    recur: 'how it repeats',
-    locked: 'the repeat setting',
-  };
-  return map[field] ?? `"${field}"`;
-}
-
-function deviceLabel(device: string): string {
-  if (device.startsWith('pc')) return 'PC';
-  if (device.startsWith('android') || device.startsWith('phone')) return 'phone';
-  if (device.startsWith('tablet')) return 'tablet';
-  return device;
 }

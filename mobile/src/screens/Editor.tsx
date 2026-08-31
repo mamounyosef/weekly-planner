@@ -816,10 +816,23 @@ function DateStrip({ value, onChange, from, days = 14 }: {
   const p = useTheme();
   const today = ymd(new Date());
   const start = from ?? today;
-  const list = useMemo(
-    () => Array.from({ length: days }, (_, i) => addDays(start, i)),
-    [start, days],
-  );
+  /**
+   * The days on offer, and always the one already chosen.
+   *
+   * The strip runs a fixed number of days from `from`, which is fine for a
+   * fresh rule but wrong for an existing one: a repeat that ends in two years
+   * had its own date sitting outside the window, so the strip showed nothing
+   * selected and the date read as unset. It is appended when it falls outside,
+   * so what is stored is always visible and always shown as chosen.
+   */
+  const list = useMemo(() => {
+    const days_ = Array.from({ length: days }, (_, i) => addDays(start, i));
+    if (value && !days_.includes(value)) {
+      days_.push(value);
+      days_.sort();
+    }
+    return days_;
+  }, [start, days, value]);
 
   return (
     <ScrollView
