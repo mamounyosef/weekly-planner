@@ -40,6 +40,7 @@ export const SHARED_SETTING_KEYS = [
   'taskFilters',
   'autoRollRecurringTasks',
   'focusDayStartHour',
+  'focusDailyGoalSeconds',
   'focusChime',
   'focusCues',
 ] as const satisfies ReadonlyArray<keyof AppSettings>;

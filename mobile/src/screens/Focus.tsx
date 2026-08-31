@@ -63,6 +63,12 @@ import {
   type FocusTimerAction,
   type FocusTimerState,
 } from '../lib/focusTimer';
+import {
+  computeGoalStats,
+  adjustDayTotal,
+  editSingleSession,
+} from '../lib/focusGoals';
+import { Stepper } from '../ui/Fields';
 
 type Range = 'week' | 'month' | 'year';
 
@@ -102,8 +108,13 @@ export function Focus() {
   const wired = typeof bridge.runFocusTimer === 'function';
 
   const [range, setRange] = useState<Range>('week');
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
+
+  const focusDailyGoalSeconds = typeof (shared as any).focusDailyGoalSeconds === 'number'
+    ? (shared as any).focusDailyGoalSeconds
+    : 0;
 
   // Only ever used until the context owns the timer. Kept in a ref as well as in
   // state because an action has to read the CURRENT state, and a callback that
@@ -195,6 +206,19 @@ export function Focus() {
     return logged + (phase === 'running' ? focusUncreditedSeconds(timer, now) : 0);
   }, [focusSessions, dayStartHour, now, phase, timer]);
 
+  const goalStats = useMemo(() => {
+    return computeGoalStats(focusSessions as FocusSessionRecord[], {
+      now: new Date(now).toISOString(),
+      goalSeconds: focusDailyGoalSeconds,
+      dayStartHour,
+      // The running session, so the bar and the streak move with the clock
+      // rather than sitting frozen until it is stopped. Uncredited, for the
+      // same reason `todaySeconds` above uses it: time already banked into the
+      // day by an edit must not be counted twice.
+      liveSeconds: phase === 'running' ? focusUncreditedSeconds(timer, now) : 0,
+    });
+  }, [focusSessions, now, focusDailyGoalSeconds, dayStartHour, phase, timer]);
+
   const refresh = async () => {
     setRefreshing(true);
     try { await syncNow(); } finally { setRefreshing(false); }
@@ -219,12 +243,22 @@ export function Focus() {
         borderBottomWidth: 1,
         borderBottomColor: p.line,
       }}>
-        <Row style={{ justifyContent: 'space-between' }}>
+        <Row style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <View>
             <Text variant="caption" tone="faint">
               {phase === 'idle' ? 'HOW THE TIME GOES' : 'SESSION IN PROGRESS'}
             </Text>
             <Text variant="display">Focus</Text>
+            {focusDailyGoalSeconds > 0 && (
+              <Row gap={space.xs} style={{ marginTop: space.xs }}>
+                <View style={{ width: 48, height: 4, backgroundColor: p.surfaceAlt, borderRadius: 2, overflow: 'hidden' }}>
+                  <View style={{ width: `${goalStats.todayProgress * 100}%`, height: '100%', backgroundColor: goalStats.todayProgress >= 1 ? p.accent : p.inkSoft }} />
+                </View>
+                <Text variant="caption" tone={goalStats.todayProgress >= 1 ? 'accent' : 'soft'}>
+                  {Math.round(goalStats.todayProgress * 100)}% of goal
+                </Text>
+              </Row>
+            )}
           </View>
           <View style={{ alignItems: 'flex-end' }}>
             <Text variant="caption" tone="faint">TODAY</Text>
@@ -343,7 +377,7 @@ export function Focus() {
             return (
               <Pressable
                 key={r.id}
-                onPress={() => setRange(r.id)}
+                onPress={() => { setRange(r.id); setSelectedDay(null); }}
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
                 style={{
@@ -385,7 +419,7 @@ export function Focus() {
               </Text>
             </View>
 
-            <Chart days={bars} peak={peak} compact={range !== 'week'} />
+            <Chart days={bars} peak={peak} compact={range !== 'week'} selectedDay={selectedDay} onSelect={setSelectedDay} />
 
             <Row gap={space.sm} style={{ marginTop: space.xl }}>
               <Stat label="Average day" value={describeDuration(summary.averageSeconds)}
@@ -396,16 +430,50 @@ export function Focus() {
 
             <Row gap={space.sm} style={{ marginTop: space.sm }}>
               <Stat
-                label="Streak"
-                value={summary.streak === 0 ? 'None' : `${summary.streak} day${summary.streak === 1 ? '' : 's'}`}
-                hint={summary.streak === 0 ? 'nothing today yet' : 'in a row, up to today'}
+                label="Current streak"
+                value={goalStats.currentStreak === 0 ? 'None' : `${goalStats.currentStreak} day${goalStats.currentStreak === 1 ? '' : 's'}`}
+                hint={goalStats.currentStreak === 0 ? 'nothing today yet' : 'in a row'}
               />
               <Stat
-                label="Days worked"
-                value={`${summary.days.filter(d => d.seconds > 0).length}`}
-                hint={`of ${summary.days.length}`}
+                label="Best streak"
+                value={`${goalStats.bestStreak} day${goalStats.bestStreak === 1 ? '' : 's'}`}
+                hint="all time"
               />
             </Row>
+
+            {selectedDay ? (
+              <DayDetail
+                date={selectedDay}
+                sessions={focusSessions as FocusSessionRecord[]}
+                dayStartHour={dayStartHour}
+                onClose={() => setSelectedDay(null)}
+                onEditTotal={(newTotal: number) => {
+                  const activeKey = timer.sessionStartedAt ? focusDayKey(timer.sessionStartedAt, dayStartHour) : '';
+                  if (activeKey && activeKey === selectedDay) {
+                    const elaps = focusElapsedSeconds(timer, now);
+                    const cred = Math.max(0, timer.creditedSeconds ?? 0);
+                    if (elaps !== cred) {
+                      run({ kind: 'credit', seconds: elaps });
+                    }
+                  }
+                  const { mutated, deletedIds } = adjustDayTotal(focusSessions as FocusSessionRecord[], {
+                    dateKeyVal: selectedDay,
+                    newTotalSeconds: newTotal,
+                    dayStartHour
+                  });
+                  mutated.forEach(s => void saveRecord('focusSessions', s.id, { ...s }));
+                  deletedIds.forEach(id => void saveRecord('focusSessions', id, { __deleted: true }));
+                }}
+                onEditSession={(id: string, newDur: number) => {
+                  const s = (focusSessions as FocusSessionRecord[]).find(x => x.id === id);
+                  if (s) {
+                    const { mutated, deletedIds } = editSingleSession(s, newDur);
+                    mutated.forEach(m => void saveRecord('focusSessions', m.id, { ...m }));
+                    deletedIds.forEach(did => void saveRecord('focusSessions', did, { __deleted: true }));
+                  }
+                }}
+              />
+            ) : null}
           </>
         )}
       </ScrollView>
@@ -644,10 +712,12 @@ function Confirm({ kind, elapsed, onCancel, onConfirm }: {
  * because the question is "how did this day compare with my others", not "how
  * many hours is that" — the number is already stated above.
  */
-function Chart({ days, peak, compact }: {
+function Chart({ days, peak, compact, selectedDay, onSelect }: {
   days: { date: string; seconds: number }[];
   peak: number;
   compact: boolean;
+  selectedDay?: string | null;
+  onSelect?: (date: string) => void;
 }) {
   const p = useTheme();
   const H = 120;
@@ -665,7 +735,7 @@ function Chart({ days, peak, compact }: {
           const ratio = peak > 0 ? d.seconds / peak : 0;
           const isToday = d.date === today;
           return (
-            <View key={d.date} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end' }}>
+            <Pressable key={d.date} onPress={() => onSelect?.(d.date)} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', opacity: selectedDay && selectedDay !== d.date ? 0.4 : 1 }}>
               <View
                 style={{
                   width: '100%',
@@ -680,7 +750,7 @@ function Chart({ days, peak, compact }: {
                   borderColor: p.accent,
                 }}
               />
-            </View>
+            </Pressable>
           );
         })}
       </View>

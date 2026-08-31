@@ -36,7 +36,9 @@ import {
   WEEK_START_LABELS,
   coerceDisplaySettings,
   describeFocusDay,
+  describeFocusGoal,
   displayPatch,
+  FOCUS_GOAL_CHOICES,
   type DisplaySettings,
 } from '../lib/displaySettings';
 
@@ -228,6 +230,47 @@ export function Planner({ onClose }: { onClose?: () => void }) {
             <Text variant="caption" tone="soft">
               {describeFocusDay(s.focusDayStartHour, s.timeFormat)}
             </Text>
+
+            <Divider />
+
+            {/* The goal the streak is measured against. Zero is a real answer
+                rather than a missing one: with no goal, any day you focused at
+                all counts, which is what someone who has not set one expects. */}
+            <Field
+              label="Daily goal"
+              hint="What the progress bar and the streak on the Focus screen are measured against."
+            >
+              <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
+                {FOCUS_GOAL_CHOICES.map(goal => {
+                  const on = goal === s.focusDailyGoalSeconds;
+                  return (
+                    <Pressable
+                      key={goal}
+                      onPress={() => set({ focusDailyGoalSeconds: goal })}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: on }}
+                      accessibilityLabel={describeFocusGoal(goal)}
+                      style={{
+                        paddingHorizontal: space.md, paddingVertical: 7,
+                        borderRadius: radius.sm,
+                        borderWidth: 1,
+                        borderColor: on ? p.accent : p.line,
+                        backgroundColor: on ? p.accentSoft : 'transparent',
+                      }}
+                    >
+                      <Text
+                        variant="caption"
+                        tone={on ? 'accent' : 'soft'}
+                        style={{ fontWeight: on ? '700' : '400' }}
+                      >
+                        {goal === 0 ? 'None' : goal < 3600 ? `${goal / 60}m` : `${goal / 3600}h`}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </Row>
+            </Field>
+            <Text variant="caption" tone="soft">{describeFocusGoal(s.focusDailyGoalSeconds)}</Text>
           </Card>
         </View>
 

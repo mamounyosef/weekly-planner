@@ -168,6 +168,71 @@ function main() {
     assert.equal(tot1, tot2);
   }
 
+  console.log('--- 16. A RUNNING SESSION COUNTS WHILE IT RUNS ---');
+  {
+    // THE ONE THIS SECTION EXISTS FOR. A session is not in the store until it
+    // stops, so a goal computed from logged sessions alone sits frozen for an
+    // hour and then jumps, while the timer beside it counts up. The header total
+    // already included the live time; the bar and the streak did not, so the two
+    // disagreed on screen for the whole session.
+    const day = '2026-08-31';
+    const at = (h: number) => new Date(`${day}T${String(h).padStart(2, '0')}:00:00`).toISOString();
+    const nowIso = at(12);
+    const goal = 3600;
+
+    const none = computeGoalStats([], { now: nowIso, goalSeconds: goal, dayStartHour: 0 });
+    assert.equal(none.todayTotal, 0);
+    assert.equal(none.todayProgress, 0);
+    assert.equal(none.currentStreak, 0, 'nothing logged and nothing running');
+
+    const running = computeGoalStats([], {
+      now: nowIso, goalSeconds: goal, dayStartHour: 0, liveSeconds: 1800,
+    });
+    assert.equal(running.todayTotal, 1800, 'the live half hour counts');
+    assert.equal(running.todayProgress, 0.5, 'and the bar moves with it');
+
+    // Once the live time alone meets the goal, today joins the streak, rather
+    // than waiting for the session to be stopped.
+    const met = computeGoalStats([], {
+      now: nowIso, goalSeconds: goal, dayStartHour: 0, liveSeconds: goal,
+    });
+    assert.equal(met.currentStreak, 1, 'today counts while it is still running');
+    assert.ok(met.todayProgress >= 1);
+
+    // Live time adds to what is already logged, never replaces it.
+    const logged = [{
+      id: 's1', startedAt: at(9), endedAt: at(10), durationSeconds: 1800,
+    }] as any;
+    const both = computeGoalStats(logged, {
+      now: nowIso, goalSeconds: goal, dayStartHour: 0, liveSeconds: 1800,
+    });
+    assert.equal(both.todayTotal, 3600, 'logged plus live');
+    assert.equal(both.currentStreak, 1);
+
+    // Absent, zero and nonsense all mean "nothing running", and none of them
+    // may reduce a total that is already there.
+    for (const bad of [undefined, 0, -1, -99999, NaN, Infinity, -Infinity]) {
+      const got = computeGoalStats(logged, {
+        now: nowIso, goalSeconds: goal, dayStartHour: 0, liveSeconds: bad as number,
+      });
+      assert.equal(got.todayTotal, 1800, `${String(bad)} leaves the logged total alone`);
+      assert.ok(got.todayProgress >= 0 && got.todayProgress <= 1, `${String(bad)} is in range`);
+    }
+
+    // Live time belongs to TODAY only. It must never leak into a past day and
+    // invent a streak that never happened.
+    const yesterday = [{
+      id: 's0', startedAt: '2026-08-29T09:00:00.000Z', endedAt: '2026-08-29T10:00:00.000Z',
+      durationSeconds: goal,
+    }] as any;
+    const gap = computeGoalStats(yesterday, {
+      now: nowIso, goalSeconds: goal, dayStartHour: 0, liveSeconds: goal,
+    });
+    assert.equal(gap.currentStreak, 1,
+      'a day was missed in between, so today starts a new streak of one');
+  }
+
+
   console.log('\nALL PASS (focusGoals)');
 }
 

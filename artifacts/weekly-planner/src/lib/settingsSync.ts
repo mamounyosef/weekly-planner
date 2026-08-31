@@ -183,6 +183,11 @@ export interface AppSettings {
   customAnchor?: 'day' | 'week';
   mobileSwipeViewSwitch?: boolean; // Swipe horizontally on mobile to switch Custom <-> Month views
   focusDayStartHour: number;
+  /**
+   * How long a focus day is meant to be, in seconds. Zero means no goal at all,
+   * in which case any focused day counts.
+   */
+  focusDailyGoalSeconds: number;
   focusChime: FocusChimeId;
   focusCues: Record<FocusCueSlot, FocusCueId>;
   shortcuts: ShortcutMap;
@@ -243,6 +248,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   customAnchor: 'day',
   mobileSwipeViewSwitch: true,
   focusDayStartHour: 4,
+  focusDailyGoalSeconds: 0,
   focusChime: 'breath',
   focusCues: DEFAULT_FOCUS_CUES,
   shortcuts: DEFAULT_SHORTCUTS,
@@ -330,6 +336,11 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = Math.max(-14, Math.min(14, Math.round(r.customDaysAfter)));
   if (r.customAnchor === 'day' || r.customAnchor === 'week') s.customAnchor = r.customAnchor;
   if (typeof r.mobileSwipeViewSwitch === 'boolean') s.mobileSwipeViewSwitch = r.mobileSwipeViewSwitch;
+  if (typeof r.focusDailyGoalSeconds === 'number' && Number.isFinite(r.focusDailyGoalSeconds)) {
+    // Capped at a day. A goal longer than the day it is measured against can
+    // never be met, so it is not a goal, it is a permanently empty bar.
+    s.focusDailyGoalSeconds = Math.max(0, Math.min(24 * 3600, Math.round(r.focusDailyGoalSeconds)));
+  }
   if (typeof r.focusDayStartHour === 'number') {
     s.focusDayStartHour = Math.max(0, Math.min(23, Math.round(r.focusDayStartHour)));
   }

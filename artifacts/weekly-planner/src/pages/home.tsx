@@ -2931,7 +2931,7 @@ export default function DailyPlanner() {
       sidebarStyle: true, timeFormat: true, weekStartsOn: true, dayStartH: true,
       dayEndH: true, calendarView: true, customDaysBefore: true, customDaysAfter: true,
       customAnchor: true,
-      focusDayStartHour: true, focusChime: true, focusCues: true, shortcutDefaultsVersion: true, shortcuts: true,
+      focusDayStartHour: true, focusDailyGoalSeconds: true, focusChime: true, focusCues: true, shortcutDefaultsVersion: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
       taskColor: true, taskCheckboxShape: true, taskFilters: true, autoRollRecurringTasks: true, googleSyncEnabled: true, googleTasksSync: true,
       stickyAllDayMain: true, stickyTasksMain: true, stickyAllDayWidget: true, stickyTasksWidget: true,

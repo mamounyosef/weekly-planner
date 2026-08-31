@@ -1240,6 +1240,12 @@ export default function SettingsPage() {
   const [mobileContentZoom, setMobileContentZoom] = useState<number>(1);
   const [mobileUiZoom, setMobileUiZoom] = useState<number>(1);
   const [focusDayStartHour, setFocusDayStartHour] = useState<number>(initialSettings.focusDayStartHour);
+  // Read only on the desk: the control for it lives on the phone's Focus
+  // screen. Held in state so a save from here carries it through untouched
+  // rather than dropping it back to zero.
+  const [focusDailyGoalSeconds, setFocusDailyGoalSeconds] = useState<number>(
+    initialSettings.focusDailyGoalSeconds,
+  );
   const [focusChime, setFocusChime] = useState<FocusChimeId>(initialSettings.focusChime);
   const [chimeCategory, setChimeCategory] = useState<'all' | FocusChimeCategory>('all');
   const [previewingChimeId, setPreviewingChimeId] = useState<string | null>(null);
@@ -1686,6 +1692,7 @@ export default function SettingsPage() {
       setTimeFormat(s.timeFormat);
       setWeekStartsOn(s.weekStartsOn);
       setFocusDayStartHour(s.focusDayStartHour);
+      setFocusDailyGoalSeconds(s.focusDailyGoalSeconds);
       setFocusChime(s.focusChime);
       setFocusCues(s.focusCues);
       setShortcuts(s.shortcuts);
@@ -1734,6 +1741,7 @@ export default function SettingsPage() {
           setTimeFormat(coerced.timeFormat);
           setWeekStartsOn(coerced.weekStartsOn);
           setFocusDayStartHour(coerced.focusDayStartHour);
+          setFocusDailyGoalSeconds(coerced.focusDailyGoalSeconds);
           setFocusChime(coerced.focusChime);
           setFocusCues(coerced.focusCues);
           setShortcuts(coerced.shortcuts);
@@ -1924,6 +1932,9 @@ export default function SettingsPage() {
     dayStartH,
     dayEndH,
     focusDayStartHour,
+    // Set on the phone's Focus screen; carried through here untouched so a
+    // desk save cannot wipe it.
+    focusDailyGoalSeconds,
     focusChime,
     focusCues,
     shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,

@@ -102,6 +102,7 @@ export interface SharedSettings {
   taskFilters?: string[];
   autoRollRecurringTasks?: boolean;
   focusDayStartHour?: number;
+  focusDailyGoalSeconds?: number;
   focusChime?: string;
   focusCues?: unknown;
 }

@@ -30,6 +30,9 @@ import {
   isHexColour,
   isTimeFormat,
   isWeekStart,
+  isFocusGoalSeconds,
+  describeFocusGoal,
+  FOCUS_GOAL_CHOICES,
   type DisplaySettings,
 } from './displaySettings';
 import { SHARED_SETTING_KEYS } from './settingsScope';
@@ -77,6 +80,16 @@ function main() {
       assert.ok(!isHexColour(bad), `${String(bad)} is not a colour`);
     }
 
+    // A GOAL LONGER THAN A DAY IS NOT A GOAL, it is a bar that is always empty.
+    for (const good of [0, 1, 1800, 3600, 24 * 3600, ...FOCUS_GOAL_CHOICES]) {
+      assert.ok(isFocusGoalSeconds(good), `${good} is a goal`);
+    }
+    for (const bad of [-1, 24 * 3600 + 1, 1e9, 0.5, NaN, Infinity, '3600', null, {}]) {
+      assert.ok(!isFocusGoalSeconds(bad), `${String(bad)} is not a goal`);
+    }
+    assert.equal(FOCUS_GOAL_CHOICES[0], 0, 'the first choice is no goal at all');
+    assert.equal(new Set(FOCUS_GOAL_CHOICES).size, FOCUS_GOAL_CHOICES.length, 'no duplicates');
+
     // A FOCUS DAY MAY NOT ROLL OVER IN THE AFTERNOON. Past midday it stops
     // meaning "the small hours of yesterday" and starts cutting ordinary days
     // in half.
@@ -96,6 +109,7 @@ function main() {
       assert.ok(isCheckboxShape(got.taskCheckboxShape), `${String(raw)} gives a shape`);
       assert.equal(typeof got.autoRollRecurringTasks, 'boolean');
       assert.ok(isFocusDayStartHour(got.focusDayStartHour));
+      assert.ok(isFocusGoalSeconds(got.focusDailyGoalSeconds), `${String(raw)} gives a goal`);
     }
 
     // The defaults are themselves legal, which is not automatic.
@@ -189,6 +203,15 @@ function main() {
       });
       assert.equal(applied.focusDayStartHour, h, `focus hour ${h} round trips`);
     }
+    for (const goal of FOCUS_GOAL_CHOICES) {
+      const applied = coerceDisplaySettings({
+        ...base, ...displayPatch(base, { focusDailyGoalSeconds: goal }),
+      });
+      assert.equal(applied.focusDailyGoalSeconds, goal, `goal ${goal} round trips`);
+    }
+    // An impossible goal is not written at all, rather than written as a default.
+    assert.deepEqual(displayPatch(base, { focusDailyGoalSeconds: 99 * 3600 }), {});
+    assert.deepEqual(displayPatch(base, { focusDailyGoalSeconds: -1 }), {});
 
     // A patch is idempotent: applying it twice changes nothing the second time.
     const after = coerceDisplaySettings({ ...base, ...displayPatch(base, { timeFormat: '24h' }) });
@@ -231,6 +254,21 @@ function main() {
     assert.ok(describeFocusDay(4).includes('4am'));
     // An impossible hour still produces the sentence for a sane one.
     assert.equal(describeFocusDay(99), describeFocusDay(DEFAULT_DISPLAY_SETTINGS.focusDayStartHour));
+
+    // "No goal" is a sentence, not an empty string.
+    assert.equal(describeFocusGoal(0), 'No goal');
+    assert.equal(describeFocusGoal(3600), '1 hour a day');
+    assert.equal(describeFocusGoal(7200), '2 hours a day');
+    assert.equal(describeFocusGoal(1800), '30 minutes a day');
+    assert.equal(describeFocusGoal(5400), '1h 30m a day');
+    for (const bad of [-1, NaN, Infinity, 99 * 3600]) {
+      assert.equal(describeFocusGoal(bad as number), 'No goal', `${bad} reads as no goal`);
+    }
+    for (const goal of FOCUS_GOAL_CHOICES) {
+      const line = describeFocusGoal(goal);
+      assert.ok(line.length > 0 && !line.includes('NaN'), `${goal} reads as "${line}"`);
+      assert.ok(!line.includes('—') && !line.includes('–'), `no dash in "${line}"`);
+    }
 
     assert.ok(describeDisplaySettings(DEFAULT_DISPLAY_SETTINGS).includes('Monday'));
     assert.ok(describeDisplaySettings({ ...DEFAULT_DISPLAY_SETTINGS, weekStartsOn: 0 })

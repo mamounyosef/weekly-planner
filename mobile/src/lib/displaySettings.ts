@@ -47,6 +47,14 @@ export interface DisplaySettings {
    * belongs to the day that has not ended yet, not to the one just started.
    */
   focusDayStartHour: number;
+  /**
+   * How long a focus day is meant to be, in seconds.
+   *
+   * Zero means no goal, and that is a real answer rather than a missing one:
+   * with no goal any focused day counts towards a streak, which is what someone
+   * who has not set one would expect.
+   */
+  focusDailyGoalSeconds: number;
 }
 
 /** The desk's own defaults, so a phone with nothing synced yet agrees with it. */
@@ -57,6 +65,7 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   taskCheckboxShape: 'circle',
   autoRollRecurringTasks: true,
   focusDayStartHour: 4,
+  focusDailyGoalSeconds: 0,
 };
 
 export const WEEK_START_LABELS: { id: WeekStart; label: string; short: string }[] = [
@@ -111,6 +120,22 @@ export function isFocusDayStartHour(raw: unknown): raw is number {
   return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 11;
 }
 
+/** The goals worth offering, in seconds. Zero is the first, and means none. */
+export const FOCUS_GOAL_CHOICES: readonly number[] = [
+  0, 1800, 3600, 5400, 7200, 10800, 14400, 21600, 28800,
+];
+
+/**
+ * A daily goal, from nothing up to a whole day.
+ *
+ * Capped at twenty four hours because a goal longer than the day it is measured
+ * against can never be met, so it is not a goal, it is a bar that is always
+ * empty.
+ */
+export function isFocusGoalSeconds(raw: unknown): raw is number {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 24 * 3600;
+}
+
 /**
  * Read whatever is stored, field by field.
  *
@@ -133,6 +158,9 @@ export function coerceDisplaySettings(raw: unknown): DisplaySettings {
     out.autoRollRecurringTasks = r.autoRollRecurringTasks;
   }
   if (isFocusDayStartHour(r.focusDayStartHour)) out.focusDayStartHour = r.focusDayStartHour;
+  if (isFocusGoalSeconds(r.focusDailyGoalSeconds)) {
+    out.focusDailyGoalSeconds = r.focusDailyGoalSeconds;
+  }
   return out;
 }
 
@@ -172,6 +200,16 @@ export function describeFocusDay(hour: number, clock: TimeFormat = '12h'): strin
   if (!isFocusDayStartHour(hour)) return describeFocusDay(DEFAULT_DISPLAY_SETTINGS.focusDayStartHour, clock);
   if (hour === 0) return 'A focus day runs from midnight to midnight.';
   return `Work before ${describeHour(hour, clock)} counts towards the day before.`;
+}
+
+/** A goal a person can read. "No goal" is a sentence, not an empty string. */
+export function describeFocusGoal(seconds: number): string {
+  if (!isFocusGoalSeconds(seconds) || seconds === 0) return 'No goal';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  if (hours === 0) return `${minutes} minutes a day`;
+  if (minutes === 0) return `${hours} ${hours === 1 ? 'hour' : 'hours'} a day`;
+  return `${hours}h ${minutes}m a day`;
 }
 
 /** One line summarising the lot, for a settings row that is not open. */

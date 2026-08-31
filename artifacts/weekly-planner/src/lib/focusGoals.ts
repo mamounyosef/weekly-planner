@@ -14,9 +14,29 @@ export interface FocusGoalStats {
  */
 export function computeGoalStats(
   sessions: readonly FocusSessionRecord[],
-  opts: { now: string; goalSeconds: number; dayStartHour?: number }
+  opts: {
+    now: string;
+    goalSeconds: number;
+    dayStartHour?: number;
+    /**
+     * Time already run by a session that has not been logged yet.
+     *
+     * WITHOUT THIS THE BAR IS FROZEN WHILE YOU WORK. A running session is not in
+     * the store until it stops, so a goal computed from logged sessions alone
+     * sits still for an hour and then jumps, and the streak says "nothing today
+     * yet" while the timer beside it is counting.
+     *
+     * It must be the UNCREDITED elapsed time, never the raw elapsed: editing a
+     * day's figure while a session runs banks what has run so far into the day
+     * directly, and counting it here as well would show the same minutes twice.
+     */
+    liveSeconds?: number;
+  }
 ): FocusGoalStats {
   const { now, goalSeconds, dayStartHour = 0 } = opts;
+  const live = typeof opts.liveSeconds === 'number' && Number.isFinite(opts.liveSeconds)
+    ? Math.max(0, opts.liveSeconds)
+    : 0;
   const totals = new Map<string, number>();
 
   for (const s of sessions) {
@@ -42,7 +62,7 @@ export function computeGoalStats(
 
   for (let i = 0; i < days.length; i++) {
     const day = days[i];
-    const secs = totals.get(day) ?? 0;
+    const secs = (totals.get(day) ?? 0) + (day === today ? live : 0);
     
     if (meetsGoal(secs)) {
       currentRun++;
@@ -56,7 +76,7 @@ export function computeGoalStats(
     }
   }
 
-  const todayTotal = totals.get(today) ?? 0;
+  const todayTotal = (totals.get(today) ?? 0) + live;
   const todayProgress = validGoal > 0 ? Math.min(1, Math.max(0, todayTotal / validGoal)) : (todayTotal > 0 ? 1 : 0);
   const streak = meetsGoal(todayTotal) ? currentRun : yesterdayRun;
 
