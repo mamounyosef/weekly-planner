@@ -64,6 +64,7 @@ const testFiles = [
   'src/lib/focusTimer.test.ts',
   'src/lib/notifyCentre.test.ts',
   'src/lib/search.test.ts',
+  'src/lib/taskBoard.test.ts',
 ];
 
 console.log(`\n======================================================`);

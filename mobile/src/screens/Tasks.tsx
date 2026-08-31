@@ -34,7 +34,7 @@
 // looks identical until the first move.
 
 import React, { useMemo, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { Pressable, RefreshControl, ScrollView, View, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
@@ -45,6 +45,9 @@ import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { dueDateOf, isTaskDone, taskBucket, todayYmd, type Task } from '../lib/tasks';
 import { GENERAL_LIST_ID, resolveListId, type TaskList } from '../lib/taskLists';
+import { buildTaskRows, groupTasks, type SortMode } from '../lib/taskBoard';
+import type { TaskFilter } from '../lib/tasks';
+
 import { formatClock } from '../lib/agenda';
 import { fromTimeString } from '../lib/draft';
 
@@ -57,12 +60,13 @@ interface Node {
   children: Task[];
 }
 
-const ORDER: { key: SectionKey; title: string; tone: 'danger' | 'accent' | 'ink' | 'faint' }[] = [
-  { key: 'overdue', title: 'Overdue', tone: 'danger' },
-  { key: 'today', title: 'Today', tone: 'accent' },
-  { key: 'upcoming', title: 'Upcoming', tone: 'ink' },
-  { key: 'general', title: 'Anytime', tone: 'faint' },
-  { key: 'done', title: 'Done', tone: 'faint' },
+const ORDER: { key: string; title: string; tone: 'danger' | 'accent' | 'ink' | 'faint' }[] = [
+  { key: 'Overdue', title: 'Overdue', tone: 'danger' },
+  { key: 'Today', title: 'Today', tone: 'accent' },
+  { key: 'Tomorrow', title: 'Tomorrow', tone: 'ink' },
+  { key: 'Upcoming', title: 'Upcoming', tone: 'ink' },
+  { key: 'General', title: 'Anytime', tone: 'faint' },
+  { key: 'Done', title: 'Done', tone: 'faint' },
 ];
 
 /**
@@ -82,7 +86,7 @@ const byHand = (a: Task, b: Task): number => orderKey(a) - orderKey(b);
 export function Tasks() {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { tasks, syncNow, edit, saveDraft, timeFormat, taskLists } = usePlanner();
+  const { tasks, syncNow, edit, saveDraft, removeItem, timeFormat, taskLists } = usePlanner();
 
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
@@ -91,6 +95,9 @@ export function Tasks() {
   const [listFilter, setListFilter] = useState<string | null>(null);
   /** Which task, if any, has its "add a step" line open. */
   const [composingFor, setComposingFor] = useState<string | null>(null);
+  const [sortMode, setSortMode] = useState<SortMode>('datetime');
+  const [filters, setFilters] = useState<TaskFilter[]>([]);
+
 
   const today = todayYmd();
 
@@ -109,97 +116,38 @@ export function Tasks() {
   // but General has one possible answer, and a filter with one option is noise.
   const showChips = lists.filter(l => l.id !== GENERAL_LIST_ID).length > 0;
 
+  
   const grouped = useMemo(() => {
-    const all = (Object.values(tasks() as Record<string, unknown>) as Task[])
-      .filter(t => t && typeof t === 'object' && (t as any).deleted !== true);
-    const byId = new Map(all.map(t => [t.id, t]));
+    const rawTasks = tasks() as unknown as Record<string, Task>;
+    const rows = buildTaskRows(rawTasks, today, true);
+    return groupTasks(rows, rawTasks, lists, filter, filters, today, sortMode);
+  }, [tasks, today, filter, lists, filters, sortMode]);
 
-    /**
-     * The parent a task should be drawn under, or null if it is a root.
-     *
-     * ONE LEVEL, EVER. A step of a step is drawn as a task of its own rather
-     * than indented twice: a third column of indentation does not fit a phone,
-     * and the PC's model does not have one either. A subtask whose parent has
-     * been deleted is promoted the same way, so nothing can become invisible by
-     * losing the row it was hanging from.
-     */
-    const parentOf = (t: Task): Task | null => {
-      if (!t.parentId || t.parentId === t.id) return null;
-      const parent = byId.get(t.parentId);
-      if (!parent || parent.parentId) return null;
-      return parent;
-    };
 
-    const roots: Task[] = [];
-    const kids = new Map<string, Task[]>();
-    for (const t of all) {
-      const parent = parentOf(t);
-      if (!parent) { roots.push(t); continue; }
-      const siblings = kids.get(parent.id);
-      if (siblings) siblings.push(t); else kids.set(parent.id, [t]);
-    }
+  
+  const openNodes = grouped.Overdue.length + grouped.Today.length + grouped.Tomorrow.length + grouped.Upcoming.length + grouped.General.length;
 
-    // The filter is applied to ROOTS only. A step belongs to its parent, not to
-    // a list of its own, so filing a parent elsewhere takes its steps with it.
-    const visible = filter
-      ? roots.filter(t => resolveListId(t.listId, lists) === filter)
-      : roots;
-
-    const out: Record<SectionKey, Node[]> = {
-      overdue: [], today: [], upcoming: [], general: [], done: [],
-    };
-
-    for (const t of visible) {
-      const due = dueDateOf(t);
-      const node: Node = {
-        task: t,
-        children: (kids.get(t.id) ?? []).sort((a, b) =>
-          byHand(a, b) || (a.title ?? '').localeCompare(b.title ?? '')),
-      };
-      if (isTaskDone(t, due)) out.done.push(node);
-      else out[taskBucket(t, due, today)].push(node);
-    }
-
-    // A hand-made order wins where there is one. Otherwise the dated buckets
-    // read best in date order, and the undated one by name, since there is
-    // nothing else to go on and alphabetical is at least predictable.
-    for (const key of ['overdue', 'today', 'upcoming'] as const) {
-      out[key].sort((a, b) => byHand(a.task, b.task)
-        || (dueDateOf(a.task) ?? '').localeCompare(dueDateOf(b.task) ?? '')
-        || (a.task.title ?? '').localeCompare(b.task.title ?? ''));
-    }
-    out.general.sort((a, b) => byHand(a.task, b.task)
-      || (a.task.title ?? '').localeCompare(b.task.title ?? ''));
-    // Most recently finished first, the useful order for "did I do that?".
-    out.done.sort((a, b) => (b.task.completedAt ?? 0) - (a.task.completedAt ?? 0));
-    return out;
-  }, [tasks, today, filter, lists]);
-
-  const openNodes = grouped.overdue.length + grouped.today.length
-    + grouped.upcoming.length + grouped.general.length;
-
-  // Steps count towards "still to do" as much as their parents: three unticked
-  // boxes are three unticked boxes, whichever card they are drawn in.
   const open = useMemo(() => {
     let n = 0;
-    for (const key of ['overdue', 'today', 'upcoming', 'general'] as const) {
+    for (const key of ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'General'] as const) {
       for (const node of grouped[key]) {
         n += 1;
-        n += node.children.filter(c => !isTaskDone(c, dueDateOf(c))).length;
+        n += node.children.filter(c => !c.done).length;
       }
     }
     return n;
   }, [grouped]);
 
-  const nothingAtAll = openNodes === 0 && grouped.done.length === 0;
+  const nothingAtAll = openNodes === 0 && grouped.Done.length === 0;
+
 
   const refresh = async () => {
     setRefreshing(true);
     try { await syncNow(); } finally { setRefreshing(false); }
   };
 
-  const toggle = (t: Task) => {
-    const due = dueDateOf(t);
+  const toggle = (t: Task, occDate?: string | null) => {
+    const due = occDate !== undefined ? (occDate ?? null) : dueDateOf(t);
     const done = isTaskDone(t, due);
     const dates: string[] = Array.isArray(t.completedDates) ? [...t.completedDates] : [];
 
@@ -309,6 +257,7 @@ export function Tasks() {
           </Row>
         </View>
 
+        
         {showChips ? (
           <ListChips
             options={lists}
@@ -318,6 +267,45 @@ export function Tasks() {
             inset={space.xl}
           />
         ) : null}
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xl, paddingVertical: space.sm, gap: space.sm }}>
+          {['datetime', 'manual', 'title'].map((mode) => (
+            <Pressable
+              key={mode}
+              onPress={() => setSortMode(mode as SortMode)}
+              style={{
+                paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
+                backgroundColor: sortMode === mode ? p.accentSoft : p.surfaceAlt,
+                borderWidth: 1, borderColor: sortMode === mode ? p.accent : p.line
+              }}
+            >
+              <Text variant="caption" tone={sortMode === mode ? 'accent' : 'faint'}>
+                {mode === 'datetime' ? 'Date' : mode === 'manual' ? 'Manual' : 'Title'}
+              </Text>
+            </Pressable>
+          ))}
+          <View style={{ width: 1, backgroundColor: p.line, marginVertical: 4 }} />
+          {(['today', 'overdue', 'upcoming', 'general', 'completed'] as TaskFilter[]).map((f) => {
+            const labels = { today: 'Today', overdue: 'Overdue', upcoming: 'Upcoming', general: 'General', completed: 'Done' };
+            const active = filters.includes(f);
+            return (
+              <Pressable
+                key={f}
+                onPress={() => setFilters(active ? filters.filter(x => x !== f) : [...filters, f])}
+                style={{
+                  paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
+                  backgroundColor: active ? p.accentSoft : 'transparent',
+                  borderWidth: 1, borderColor: active ? p.accent : p.line
+                }}
+              >
+                <Text variant="caption" tone={active ? 'accent' : 'faint'}>
+                  {labels[f as keyof typeof labels]}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
       </View>
 
       {reordering ? (
@@ -356,11 +344,12 @@ export function Tasks() {
           </View>
         ) : null}
 
+        
         {ORDER.map(section => {
-          const nodes = grouped[section.key];
+          const nodes = grouped[section.key as keyof typeof grouped] ?? [];
           if (!nodes || nodes.length === 0) return null;
 
-          const collapsible = section.key === 'done';
+          const collapsible = section.key === 'Done';
           const visible = collapsible && !showDone ? [] : nodes;
           const movable = reordering && !collapsible;
 
@@ -383,34 +372,75 @@ export function Tasks() {
                   >
                     {section.title.toUpperCase()}
                   </Text>
-                  <Text variant="caption" tone="faint">
-                    {collapsible ? `${nodes.length} ${showDone ? '▾' : '▸'}` : nodes.length}
-                  </Text>
+                  <Row gap={space.md} style={{ alignItems: 'center' }}>
+                    {collapsible && nodes.length > 0 && (
+                      <Pressable 
+                        onPress={(e) => { 
+                          e.stopPropagation();
+// A REPEATING task is never cleared here. Its row carries the
+                          // master's id, so deleting it would take the whole
+                          // series with it: one tap on "Clear" and every future
+                          // Tuesday is gone. Ticking one occurrence of a repeat
+                          // is not something there is anything to clean up from,
+                          // so those rows are simply left alone.
+                          const clearable = nodes.filter(n => !n.row.task.recur);
+                          if (clearable.length === 0) {
+                            Alert.alert(
+                              'Nothing to clear',
+                              'These are all repeating tasks, so there is nothing here to delete.',
+                            );
+                            return;
+                          }
+                          const kept = nodes.length - clearable.length;
+                          Alert.alert(
+                            'Clear completed?',
+                            kept > 0
+                              ? `This deletes ${clearable.length} finished ${clearable.length === 1 ? 'task' : 'tasks'}. ${kept} repeating ${kept === 1 ? 'one stays' : 'ones stay'}.`
+                              : `This deletes ${clearable.length} finished ${clearable.length === 1 ? 'task' : 'tasks'} for good.`,
+                            [
+                              { text: 'Cancel', style: 'cancel' },
+                              { text: 'Clear', style: 'destructive', onPress: () => {
+                                // A tombstone through `removeItem`, not a local
+                                // field: dropping the record here would leave the
+                                // PC holding it and the next sync would hand it
+                                // straight back.
+                                clearable.forEach(n => { void removeItem('tasks', n.row.task.id); });
+                              }},
+                            ],
+                          );
+                        }}
+                        hitSlop={space.sm}
+                      >
+                        <Text variant="caption" tone="accent">Clear</Text>
+                      </Pressable>
+                    )}
+                    <Text variant="caption" tone="faint">
+                      {collapsible ? `${nodes.length} ${showDone ? '▾' : '▸'}` : nodes.length}
+                    </Text>
+                  </Row>
                 </Row>
               </Pressable>
 
               <View style={{ gap: space.sm, marginTop: space.sm }}>
                 {visible.map((node, index) => (
                   <TaskCard
-                    key={node.task.id}
-                    node={node}
+                    key={node.row.occId}
+                    node={{ task: node.row.task, children: node.children.map(c => c.task) }}
                     today={today}
                     clock={timeFormat}
-                    // Already filtered to one list: repeating its name on every
-                    // row would say only what the chip above already says.
-                    list={filter ? null : listOf(node.task)}
+                    list={filter ? null : listOf(node.row.task)}
                     reordering={movable}
-                    composing={composingFor === node.task.id}
-                    onCompose={next => setComposingFor(next ? node.task.id : null)}
-                    onAddSubtask={title => addSubtask(node.task, title, node.children)}
+                    composing={composingFor === node.row.task.id}
+                    onCompose={next => setComposingFor(next ? node.row.task.id : null)}
+                    onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
                     canMoveUp={index > 0}
                     canMoveDown={index < visible.length - 1}
-                    onMove={dir => move(visible.map(n => n.task), index, dir)}
-                    onMoveChild={(childIndex, dir) => move(node.children, childIndex, dir)}
-                    onToggle={toggle}
+                    onMove={dir => move(visible.map(n => n.row.task), index, dir)}
+                    onMoveChild={(childIndex, dir) => move(node.children.map(c => c.task), childIndex, dir)}
+                    onToggle={t => toggle(t, t.id === node.row.task.id ? node.row.due : undefined)}
                     onStartReorder={() => setReordering(true)}
                     onOpen={t => setEditing({
-                      store: 'tasks', id: t.id, date: dueDateOf(t) ?? today,
+                      store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
                     })}
                   />
                 ))}
