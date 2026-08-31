@@ -63,12 +63,6 @@ import {
   type FocusTimerAction,
   type FocusTimerState,
 } from '../lib/focusTimer';
-import {
-  computeGoalStats,
-  adjustDayTotal,
-  editSingleSession,
-} from '../lib/focusGoals';
-import { Field, Stepper } from '../ui/Fields';
 
 type Range = 'week' | 'month' | 'year';
 
@@ -108,13 +102,8 @@ export function Focus() {
   const wired = typeof bridge.runFocusTimer === 'function';
 
   const [range, setRange] = useState<Range>('week');
-  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
-
-  const focusDailyGoalSeconds = typeof (shared as any).focusDailyGoalSeconds === 'number'
-    ? (shared as any).focusDailyGoalSeconds
-    : 0;
 
   // Only ever used until the context owns the timer. Kept in a ref as well as in
   // state because an action has to read the CURRENT state, and a callback that
@@ -206,14 +195,6 @@ export function Focus() {
     return logged + (phase === 'running' ? focusUncreditedSeconds(timer, now) : 0);
   }, [focusSessions, dayStartHour, now, phase, timer]);
 
-  const goalStats = useMemo(() => {
-    return computeGoalStats(focusSessions as FocusSessionRecord[], {
-      now: new Date(now).toISOString(),
-      goalSeconds: focusDailyGoalSeconds,
-      dayStartHour,
-    });
-  }, [focusSessions, now, focusDailyGoalSeconds, dayStartHour]);
-
   const refresh = async () => {
     setRefreshing(true);
     try { await syncNow(); } finally { setRefreshing(false); }
@@ -238,22 +219,12 @@ export function Focus() {
         borderBottomWidth: 1,
         borderBottomColor: p.line,
       }}>
-        <Row style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <Row style={{ justifyContent: 'space-between' }}>
           <View>
             <Text variant="caption" tone="faint">
               {phase === 'idle' ? 'HOW THE TIME GOES' : 'SESSION IN PROGRESS'}
             </Text>
             <Text variant="display">Focus</Text>
-            {focusDailyGoalSeconds > 0 && (
-              <Row gap={space.xs} style={{ marginTop: space.xs }}>
-                <View style={{ width: 48, height: 4, backgroundColor: p.surfaceAlt, borderRadius: 2, overflow: 'hidden' }}>
-                  <View style={{ width: `${goalStats.todayProgress * 100}%`, height: '100%', backgroundColor: goalStats.todayProgress >= 1 ? p.accent : p.inkSoft }} />
-                </View>
-                <Text variant="caption" tone={goalStats.todayProgress >= 1 ? 'accent' : 'soft'}>
-                  {Math.round(goalStats.todayProgress * 100)}% of goal
-                </Text>
-              </Row>
-            )}
           </View>
           <View style={{ alignItems: 'flex-end' }}>
             <Text variant="caption" tone="faint">TODAY</Text>
@@ -372,7 +343,7 @@ export function Focus() {
             return (
               <Pressable
                 key={r.id}
-                onPress={() => { setRange(r.id); setSelectedDay(null); }}
+                onPress={() => setRange(r.id)}
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
                 style={{
@@ -425,51 +396,16 @@ export function Focus() {
 
             <Row gap={space.sm} style={{ marginTop: space.sm }}>
               <Stat
-                label="Current streak"
-                value={goalStats.currentStreak === 0 ? 'None' : `${goalStats.currentStreak} day${goalStats.currentStreak === 1 ? '' : 's'}`}
-                hint={goalStats.currentStreak === 0 ? 'nothing today yet' : 'in a row'}
+                label="Streak"
+                value={summary.streak === 0 ? 'None' : `${summary.streak} day${summary.streak === 1 ? '' : 's'}`}
+                hint={summary.streak === 0 ? 'nothing today yet' : 'in a row, up to today'}
               />
               <Stat
-                label="Best streak"
-                value={`${goalStats.bestStreak} day${goalStats.bestStreak === 1 ? '' : 's'}`}
-                hint="all time"
+                label="Days worked"
+                value={`${summary.days.filter(d => d.seconds > 0).length}`}
+                hint={`of ${summary.days.length}`}
               />
             </Row>
-
-            {selectedDay ? (
-              <DayDetail
-                date={selectedDay}
-                sessions={focusSessions as FocusSessionRecord[]}
-                dayStartHour={dayStartHour}
-                onClose={() => setSelectedDay(null)}
-                onEditTotal={(newTotal: number) => {
-                  const activeKey = timer.sessionStartedAt ? focusDayKey(timer.sessionStartedAt, dayStartHour) : '';
-                  if (activeKey && activeKey === selectedDay) {
-                    const elaps = focusElapsedSeconds(timer, now);
-                    const cred = Math.max(0, timer.creditedSeconds ?? 0);
-                    if (elaps !== cred) {
-                      run({ kind: 'credit', seconds: elaps });
-                    }
-                  }
-                  const { mutated, deletedIds } = adjustDayTotal(focusSessions as FocusSessionRecord[], {
-                    dateKeyVal: selectedDay,
-                    newTotalSeconds: newTotal,
-                    dayStartHour
-                  });
-                  mutated.forEach(s => void saveRecord('focusSessions', s.id, { ...s }));
-                  // use delete_field for deletions
-                  deletedIds.forEach(id => void saveRecord('focusSessions', id, { __deleted: true }));
-                }}
-                onEditSession={(id: string, newDur: number) => {
-                  const s = (focusSessions as FocusSessionRecord[]).find(x => x.id === id);
-                  if (s) {
-                    const { mutated, deletedIds } = editSingleSession(s, newDur);
-                    mutated.forEach(m => void saveRecord('focusSessions', m.id, { ...m }));
-                    deletedIds.forEach(did => void saveRecord('focusSessions', did, { __deleted: true }));
-                  }
-                }}
-              />
-            ) : null}
           </>
         )}
       </ScrollView>
@@ -802,6 +738,3 @@ function niceDate(date: string | undefined): string {
   return new Date(`${date}T00:00:00`)
     .toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
-     ) ;  
- }  
- 
