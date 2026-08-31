@@ -18,6 +18,7 @@
 
 import * as SecureStore from 'expo-secure-store';
 import { makeDeviceId } from './syncStorage';
+import { FULL_DAY, normaliseRanges, type HourRange } from './dayWindows';
 import { isThemeMode, type ThemeMode } from '../theme';
 import {
   DEFAULT_SWIPE_VIEW_SWITCH,
@@ -46,6 +47,7 @@ const KEY_THEME = 'planner.themeMode';
 const KEY_FOCUS_TIMER = 'planner.focusTimer';
 const KEY_NOTIFY_CENTRE = 'planner.notifyCentre';
 const KEY_PRAYER_LOOK = 'planner.prayerAppearance';
+const KEY_VISIBLE_HOURS = 'planner.visibleHours';
 const KEY_CUSTOM_BEFORE = 'planner.customDaysBefore';
 const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
 const KEY_DAY_START = 'planner.dayStartH';
@@ -273,6 +275,33 @@ export const prefs = {
   },
   setPrayerAppearance: (look: PrayerAppearance) =>
     write(KEY_PRAYER_LOOK, JSON.stringify(coercePrayerAppearance(look))),
+
+  /**
+   * Which hours of the day this phone's grid draws.
+   *
+   * A LIST of stretches, not a start and an end. "Everything except the middle
+   * of the night" is a perfectly ordinary wish that no single pair of numbers
+   * can express, and the pair was also being quietly overruled: the grid used to
+   * stretch itself open for any content outside it, and with dawn prayer at
+   * 04:19 that meant every day reopened at 3am no matter what was set.
+   *
+   * Falls back to the older `dayStartH`/`dayEndH` pair when nothing has been
+   * stored here yet, so an existing phone keeps the window it already had.
+   */
+  async getVisibleHours(): Promise<HourRange[]> {
+    const raw = await read(KEY_VISIBLE_HOURS);
+    if (raw) {
+      try {
+        return normaliseRanges(JSON.parse(raw));
+      } catch {
+        return [...FULL_DAY];
+      }
+    }
+    const legacy = await prefs.getDayWindow();
+    return normaliseRanges([{ from: legacy.start, to: legacy.end }]);
+  },
+  setVisibleHours: (ranges: HourRange[]) =>
+    write(KEY_VISIBLE_HOURS, JSON.stringify(normaliseRanges(ranges))),
 
   async signOut(): Promise<void> {
     await write(KEY_SESSION, null);

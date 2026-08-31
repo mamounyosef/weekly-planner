@@ -48,6 +48,7 @@ import {
   withDayEnd, withDayStart,
   type DayWindow, type PrayerAppearance,
 } from '../lib/viewPrefs';
+import { FULL_DAY, normaliseRanges, type HourRange } from '../lib/dayWindows';
 import {
   planOccurrenceDelete, planOccurrenceEdit, type OccurrenceScope,
 } from '../lib/occurrence';
@@ -280,6 +281,14 @@ interface PlannerContextValue {
   dayWindow: DayWindow;
   setDayStart(hour: number): void;
   setDayEnd(hour: number): void;
+  /**
+   * Which hours the grid draws, as a list of stretches.
+   *
+   * Supersedes the start and end pair, which could not say "everything except
+   * the middle of the night" and was in any case being overruled by content.
+   */
+  visibleHours: HourRange[];
+  setVisibleHours(ranges: HourRange[]): void;
   /** Whether a sideways swipe changes the view as well as the date. */
   swipeViewSwitch: boolean;
   setSwipeViewSwitch(on: boolean): void;
@@ -353,6 +362,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const [notifyClock, setNotifyClock] = useState(() => Date.now());
   const [swipeViewSwitch, setSwipeState] = useState(DEFAULT_SWIPE_VIEW_SWITCH);
   const [prayerAppearance, setPrayerLook] = useState<PrayerAppearance>(DEFAULT_PRAYER_APPEARANCE);
+  const [visibleHours, setVisibleHoursState] = useState<HourRange[]>(FULL_DAY);
 
   const storageRef = useRef<SyncStorage | null>(null);
   const transportRef = useRef<PlannerTransport | null>(null);
@@ -400,6 +410,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
           prefs.getDayWindow(), prefs.getSwipeViewSwitch(),
         ]);
         setPrayerLook(await prefs.getPrayerAppearance());
+        setVisibleHoursState(await prefs.getVisibleHours());
         setIntervalState(savedInterval);
         setCustomWindowState(savedWindow);
         setDayWindowState(savedDayWindow);
@@ -1266,6 +1277,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     setSwipeViewSwitch: (on: boolean) => {
       setSwipeState(on);
       void prefs.setSwipeViewSwitch(on);
+    },
+    visibleHours,
+    setVisibleHours: (ranges: HourRange[]) => {
+      const clean = normaliseRanges(ranges);
+      setVisibleHoursState(clean);
+      void prefs.setVisibleHours(clean);
     },
     prayerAppearance,
     setPrayerAppearance: (look: PrayerAppearance) => {

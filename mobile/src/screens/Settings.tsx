@@ -13,8 +13,11 @@ import * as Updates from 'expo-updates';
 
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
 import { Stepper, Toggle } from '../ui/Fields';
-import { space, HIT, type ThemeMode } from '../theme';
+import { HIT, radius, space, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
+import {
+  describeRanges, hiddenHours, rangesFromHidden, type HourRange,
+} from '../lib/dayWindows';
 import { checkPermissions, requestPermissions, type PermissionState } from '../lib/notify';
 import { prefs } from '../lib/prefs';
 import {
@@ -44,7 +47,7 @@ export function Settings({
     username, serverUrl, status, data, alarmSummary, lastError,
     signOut, syncNow, resetLocal, interval, setInterval,
     customWindow, setCustomWindow, timeFormat,
-    dayWindow, setDayStart, setDayEnd, swipeViewSwitch, setSwipeViewSwitch,
+    visibleHours, setVisibleHours, swipeViewSwitch, setSwipeViewSwitch,
   } = usePlanner();
 
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
@@ -249,37 +252,46 @@ export function Settings({
         <Section title="View">
           <Text variant="body">Visible hours</Text>
           <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-            The slice of the day the time grid draws. Kept on this phone only, because a
-            window that reads well on a monitor is a wall of slivers on a phone.
+            Tap an hour to stop drawing it. They do not have to join up, so you can hide
+            the middle of the night and keep both ends. Kept on this phone only.
           </Text>
 
           <Spacer size={space.md} />
-          <Row gap={space.md} style={{ alignItems: 'center' }}>
-            <Text variant="caption" tone="soft" style={{ width: 44 }}>Start</Text>
-            <Stepper
-              value={dayWindow.start}
-              min={DAY_HOUR_MIN}
-              max={DAY_HOUR_MAX - 1}
-              onChange={setDayStart}
-              format={h => formatHour(h, clock)}
-            />
-          </Row>
+          <HourStrip
+            ranges={visibleHours}
+            clock={clock}
+            onToggle={hour => setVisibleHours(rangesFromHidden(
+              hiddenHours(visibleHours).includes(hour)
+                ? hiddenHours(visibleHours).filter((h: number) => h !== hour)
+                : [...hiddenHours(visibleHours), hour],
+            ))}
+          />
+
           <Spacer size={space.sm} />
-          <Row gap={space.md} style={{ alignItems: 'center' }}>
-            <Text variant="caption" tone="soft" style={{ width: 44 }}>End</Text>
-            <Stepper
-              value={dayWindow.end}
-              min={DAY_HOUR_MIN + 1}
-              max={DAY_HOUR_MAX}
-              onChange={setDayEnd}
-              format={h => formatHour(h, clock)}
-            />
-          </Row>
+          <Text variant="caption" tone="soft">{describeRanges(visibleHours, clock)}</Text>
 
           <Spacer size={space.md} />
-          <DayWindowPreview window={dayWindow} clock={clock} />
-          <Spacer size={space.sm} />
-          <Text variant="caption" tone="soft">{describeDayWindow(dayWindow, clock)}</Text>
+          <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
+            {([
+              ['Whole day', () => [{ from: 0, to: 24 }]],
+              ['Waking hours', () => [{ from: 6, to: 24 }]],
+              ['Working day', () => [{ from: 8, to: 18 }]],
+              ['Hide 2am to 6am', () => rangesFromHidden([2, 3, 4, 5])],
+            ] as [string, () => HourRange[]][]).map(([label, make]) => (
+              <Pressable
+                key={label}
+                onPress={() => setVisibleHours(make())}
+                accessibilityRole="button"
+                style={{
+                  paddingHorizontal: space.md, paddingVertical: 6,
+                  borderRadius: 999,
+                  borderWidth: 1, borderColor: p.line,
+                }}
+              >
+                <Text variant="caption" tone="soft">{label}</Text>
+              </Pressable>
+            ))}
+          </Row>
 
           <Spacer size={space.lg} />
           <Divider />
@@ -472,40 +484,65 @@ export function Settings({
  * must never be one: a native dependency would end over-the-air updates for this
  * app, and a preview strip is not worth that.
  */
-function DayWindowPreview({ window: win, clock }: { window: DayWindow; clock: ClockFormat }) {
+/**
+ * The day as twenty four cells, one per hour, tapped on and off.
+ *
+ * A START AND AN END COULD NOT SAY WHAT PEOPLE MEAN. "Everything except the
+ * middle of the night" needs two stretches, and no pair of numbers expresses
+ * two stretches. Twenty four switches express every possible answer, take one
+ * tap each, and show the shape of the day at a glance rather than describing it.
+ *
+ * Laid out as two rows of twelve. One row of twenty four cells on a phone gives
+ * each about fourteen points, which is under any reasonable touch target.
+ */
+function HourStrip({ ranges, clock, onToggle }: {
+  ranges: HourRange[];
+  clock: ClockFormat;
+  onToggle: (hour: number) => void;
+}) {
   const p = useTheme();
-  const hours = Array.from({ length: DAY_HOUR_MAX }, (_, h) => h);
+  const off = new Set(hiddenHours(ranges));
+
+  const row = (from: number) => (
+    <Row gap={2}>
+      {Array.from({ length: 12 }, (_, i) => {
+        const hour = from + i;
+        const shown = !off.has(hour);
+        return (
+          <Pressable
+            key={hour}
+            onPress={() => onToggle(hour)}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: shown }}
+            accessibilityLabel={`${formatHour(hour, clock)}, ${shown ? 'shown' : 'hidden'}`}
+            style={{
+              flex: 1,
+              height: 34,
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: radius.sm,
+              borderWidth: 1,
+              borderColor: shown ? p.accent : p.line,
+              backgroundColor: shown ? p.accentSoft : 'transparent',
+            }}
+          >
+            <Text
+              variant="caption"
+              tone={shown ? 'accent' : 'faint'}
+              style={{ fontSize: 10, fontWeight: shown ? '700' : '400' }}
+            >
+              {hour === 0 ? '12a' : hour === 12 ? '12p' : hour < 12 ? `${hour}a` : `${hour - 12}p`}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </Row>
+  );
 
   return (
-    <View accessible accessibilityLabel={describeDayWindow(win, clock)}>
-      <Row gap={2} style={{ alignItems: 'flex-end' }}>
-        {hours.map(h => {
-          const inside = h >= win.start && h < win.end;
-          // Midnight, 6am, noon and 6pm stand a little taller. They are the only
-          // reference points a bar this small can carry without becoming noise.
-          const marker = h % 6 === 0;
-          return (
-            <View
-              key={h}
-              style={{
-                flex: 1,
-                height: inside ? (marker ? 30 : 24) : marker ? 16 : 12,
-                borderRadius: 2,
-                backgroundColor: inside ? p.accent : p.surfaceAlt,
-                borderWidth: inside ? 0 : 1,
-                borderColor: p.line,
-                opacity: inside ? (marker ? 1 : 0.85) : 1,
-              }}
-            />
-          );
-        })}
-      </Row>
-      <Spacer size={space.xs} />
-      <Row style={{ justifyContent: 'space-between' }}>
-        {[0, 6, 12, 18, 24].map(h => (
-          <Text key={h} variant="caption" tone="faint">{formatHour(h, clock)}</Text>
-        ))}
-      </Row>
+    <View accessible={false} style={{ gap: 3 }}>
+      {row(0)}
+      {row(12)}
     </View>
   );
 }

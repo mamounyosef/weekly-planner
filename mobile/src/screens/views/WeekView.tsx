@@ -58,10 +58,14 @@ import { Animated, PanResponder, Pressable, ScrollView, View } from 'react-nativ
 import { Text, useTheme } from '../../ui/kit';
 import { radius, space } from '../../theme';
 import {
-  layoutDay, hourMarks, yOf, prayerChipMode,
+  layoutDay, blockEnd, prayerChipMode,
   type Placeable, type Placed, type PrayerChipMode,
 } from '../../lib/grid';
 import type { PrayerDrawStyle } from '../../lib/viewPrefs';
+import {
+  FULL_DAY, hourMarksIn, isFullDay, itemsOutsideView, minuteAtY, normaliseRanges,
+  seamsIn, slotsIn, visibleMinutes, yOfMinute, type HourRange,
+} from '../../lib/dayWindows';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
 } from '../../lib/dragGrid';
@@ -109,7 +113,7 @@ type Drag =
 
 export function WeekView({
   dates, dayOf, today, nowMin, clock, interval = 30, detailed,
-  prayersOn, dayStartH = 9, dayEndH = 18, onMenuItem,
+  prayersOn, visibleHours, onMenuItem,
   prayerColour, prayerLabels = true, prayerStyle = 'marker',
   isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
 }: {
@@ -133,8 +137,11 @@ export function WeekView({
    * nothing on screen to say it was ever there. So the setting decides how much
    * empty day you are willing to look at, and the content decides the rest.
    */
-  dayStartH?: number;
-  dayEndH?: number;
+  /**
+   * Which hours this device draws. A LIST of stretches, so "everything except
+   * the middle of the night" is expressible, which a start and an end was not.
+   */
+  visibleHours?: HourRange[];
   /** This device's own prayer colour, and whether to name each line. */
   prayerColour?: string;
   prayerLabels?: boolean;
@@ -162,6 +169,14 @@ export function WeekView({
 }) {
   const p = useTheme();
   const scroller = useRef<ScrollView>(null);
+  /**
+   * Set when the user asks to see the hours they normally hide.
+   *
+   * Hiding hours is a display choice, and a display choice that loses a meeting
+   * is a bug however it was configured. So the grid always says how many things
+   * are in the hours it is not drawing, and this is the way back to them.
+   */
+  const [showingAll, setShowingAll] = useState(false);
 
   const days = useMemo(() => dates.map(date => {
     const agenda = dayOf(date);
@@ -175,71 +190,79 @@ export function WeekView({
 
   // The window of hours worth drawing: from an hour before the earliest thing to
   // an hour after the latest, never less than a working day.
-  const { fromHour, toHour } = useMemo(() => {
-    // The setting is exact: ask for 7am to 11pm and that is what the grid opens
-    // on, with no courtesy hour either side. The padding below belongs to
-    // CONTENT only, so an event at the very edge of the window is not flush
-    // against it.
-    const wantFrom = Math.max(0, Math.min(23, Math.floor(dayStartH)));
-    const wantTo = Math.max(wantFrom + 1, Math.min(24, Math.ceil(dayEndH)));
-
-    let min = Infinity;
-    let max = -Infinity;
-    for (const d of days) {
-      for (const i of d.timed) {
-        min = Math.min(min, i.startMin!);
-        max = Math.max(max, i.endMin ?? i.startMin! + 60);
-      }
-      // Prayers stretch the window too. Fajr is often hours before the first
-      // event, and a marker drawn above the top of the grid is not a subtle
-      // problem: it is simply missing, with nothing to say it was ever there.
-      for (const pr of d.prayers) {
-        min = Math.min(min, pr.minutes);
-        max = Math.max(max, pr.minutes + 30);
-      }
-    }
-
-    const fromHour = Number.isFinite(min)
-      ? Math.min(wantFrom, Math.max(0, Math.floor(min / 60) - 1))
-      : wantFrom;
-    const toHour = Number.isFinite(max)
-      ? Math.max(wantTo, Math.min(24, Math.ceil(max / 60) + 1))
-      : wantTo;
-    return { fromHour, toHour: Math.max(fromHour + 1, toHour) };
-  }, [days, dayStartH, dayEndH]);
+  /**
+   * The hours actually drawn, and everything measured from them.
+   *
+   * THE SETTING IS OBEYED NOW. It used to be a floor that content could
+   * override: the grid stretched itself open to include the earliest thing on
+   * screen, and since dawn prayer in Amman is around 04:19 that meant the day
+   * reopened at 3am every morning however the setting was left. It looked like
+   * the setting did nothing, because in practice it did nothing.
+   *
+   * Anything falling in an hour that is not drawn is not lost. It is counted
+   * and offered below, and a tap shows the whole day.
+   */
+  const ranges = useMemo(() => normaliseRanges(visibleHours), [visibleHours]);
+  const shown = showingAll ? FULL_DAY : ranges;
 
   const slot = slotHeight(interval);
   const pxPerHour = slot * (60 / interval);
-  const marks = hourMarks(fromHour, toHour);
-  const gridHeight = (toHour - fromHour) * pxPerHour;
+  const marks = useMemo(() => hourMarksIn(shown), [shown]);
+  const gridHeight = visibleMinutes(shown) * (pxPerHour / 60);
+  /** The one measurement everything on this grid agrees to use. */
+  const yAt = useCallback(
+    (minute: number) => yOfMinute(minute, shown, pxPerHour),
+    [shown, pxPerHour],
+  );
+  const seams = useMemo(() => seamsIn(shown), [shown]);
+
+  /**
+   * How many timed things fall in hours the grid is not drawing.
+   *
+   * The safety net for the whole feature. A meeting at 3am with 3am switched off
+   * would otherwise be gone with nothing on screen to say so, which is the worst
+   * way for a planner to fail: silently, and only discovered afterwards.
+   */
+  const hiddenCount = useMemo(() => {
+    if (showingAll || isFullDay(ranges)) return 0;
+    let n = 0;
+    for (const d of days) {
+      n += itemsOutsideView(d.timed, i => i.startMin, ranges).length;
+      n += itemsOutsideView(d.prayers, pr => pr.minutes, ranges).length;
+    }
+    return n;
+  }, [days, ranges, showingAll]);
   const anyAllDay = days.some(d => d.allDay.length > 0);
 
-  /** Every slot line in the visible window, in minutes from midnight. */
-  const slots = useMemo(() => {
-    const out: number[] = [];
-    for (let m = fromHour * 60; m <= toHour * 60; m += interval) out.push(m);
-    return out;
-  }, [fromHour, toHour, interval]);
+  /** Every slot line in the drawn hours, in minutes from midnight. */
+  const slots = useMemo(() => slotsIn(shown, interval), [shown, interval]);
 
   // Laid out HERE rather than inside each column, because the gesture hit-tests
   // blocks by arithmetic and needs to see every day's placement at once. The
   // columns are handed the result so nothing is computed twice.
   const placedByDate = useMemo(() => days.map(d => layoutDay<GridItem>(
     d.timed.map(i => ({ id: i.id, startMin: i.startMin!, endMin: i.endMin, item: i })),
-    { pxPerHour, dayStartHour: fromHour },
-  )), [days, pxPerHour, fromHour]);
+    { pxPerHour, dayStartHour: 0 },
+  // `layoutDay` still decides the COLUMNS, which is the part that is a real
+  // algorithm. Its vertical maths assumes hours run without gaps, so the top and
+  // the height are re-derived here through the piecewise mapping.
+  ).map(pl => ({
+    ...pl,
+    top: yAt(pl.item.startMin),
+    height: Math.max(2, yAt(blockEnd(pl.item)) - yAt(pl.item.startMin)),
+  }))), [days, pxPerHour, yAt]);
 
   useEffect(() => {
     // Start where the day does, not at the top of an empty grid.
     const target = nowMin !== null
-      ? yOf(nowMin, pxPerHour, fromHour) - 120
+      ? yAt(nowMin) - 120
       : 0;
     const id = setTimeout(
       () => scroller.current?.scrollTo({ y: Math.max(0, target), animated: false }),
       0,
     );
     return () => clearTimeout(id);
-  }, [fromHour, nowMin, pxPerHour]);
+  }, [yAt, nowMin, pxPerHour]);
 
   // ─── Gesture state ─────────────────────────────────────────────────────────
   // Three things the render needs, and a pile of bookkeeping it does not. The
@@ -267,11 +290,11 @@ export function WeekView({
 
   /** Everything the responder needs from the current render. */
   const geom = useRef({
-    dates, days, placedByDate, pxPerHour, fromHour, toHour, interval, gridW,
+    dates, days, placedByDate, pxPerHour, shown, interval, gridW,
     lifted, canCreate, canMove,
   });
   geom.current = {
-    dates, days, placedByDate, pxPerHour, fromHour, toHour, interval, gridW,
+    dates, days, placedByDate, pxPerHour, shown, interval, gridW,
     lifted, canCreate, canMove,
   };
 
@@ -321,7 +344,7 @@ export function WeekView({
       if (inCol < left || inCol > left + w) continue;
       hit = { item: pl.item.item, placed: pl, onGrip: y > pl.top + pl.height - GRIP_ZONE };
     }
-    return { col, date, hit, minutes: minutesAtY(y, g.pxPerHour, g.fromHour) };
+    return { col, date, hit, minutes: minuteAtY(y, g.shown, g.pxPerHour) };
   }, []);
 
   const stopDrag = useCallback(() => {
@@ -352,7 +375,8 @@ export function WeekView({
       // gesture confirms itself before the finger has moved anywhere.
       const r = createRange({
         anchorMin: minutes, currentMin: minutes,
-        interval: g.interval, fromHour: g.fromHour, toHour: g.toHour,
+        interval: g.interval,
+        fromHour: g.shown[0].from, toHour: g.shown[g.shown.length - 1].to,
       });
       t.armed = { mode: 'create', anchorMin: minutes };
       setDrag({ mode: 'create', date, startMin: r.startMin, endMin: r.endMin });
@@ -398,8 +422,11 @@ export function WeekView({
     const cur = dragRef.current;
     if (!t.armed || !cur) return;
     const pt = toGrid(pageX, pageY);
-    const minutes = minutesAtY(pt.y, g.pxPerHour, g.fromHour);
-    const win = { interval: g.interval, fromHour: g.fromHour, toHour: g.toHour };
+    const minutes = minuteAtY(pt.y, g.shown, g.pxPerHour);
+    const win = {
+      interval: g.interval,
+      fromHour: g.shown[0].from, toHour: g.shown[g.shown.length - 1].to,
+    };
 
     let next: Drag;
     if (cur.mode === 'create') {
@@ -688,6 +715,30 @@ export function WeekView({
         </View>
       ) : null}
 
+      {/* What is not being drawn, and the way to it. Never a warning: hiding
+          hours is a choice the user made, and this is only the receipt. */}
+      {hiddenCount > 0 || showingAll ? (
+        <Pressable
+          onPress={() => setShowingAll(v => !v)}
+          accessibilityRole="button"
+          style={{
+            flexDirection: 'row', alignItems: 'center', gap: space.sm,
+            paddingHorizontal: space.md, paddingVertical: 5,
+            borderBottomWidth: 1, borderBottomColor: p.line,
+            backgroundColor: p.surface,
+          }}
+        >
+          <Text variant="caption" tone="faint" style={{ flex: 1, fontSize: 11 }}>
+            {showingAll
+              ? 'Showing every hour, including the ones you hide.'
+              : `${hiddenCount} ${hiddenCount === 1 ? 'thing is' : 'things are'} in hours you hide.`}
+          </Text>
+          <Text variant="caption" tone="accent" style={{ fontSize: 11, fontWeight: '700' }}>
+            {showingAll ? 'Done' : 'Show all'}
+          </Text>
+        </Pressable>
+      ) : null}
+
       <ScrollView
         ref={scroller}
         scrollEnabled={!dragging}
@@ -724,7 +775,7 @@ export function WeekView({
                   tone={onHour ? 'soft' : 'faint'}
                   style={{
                     position: 'absolute',
-                    top: yOf(m, pxPerHour, fromHour) - (onHour ? 7 : 6),
+                    top: yAt(m) - (onHour ? 7 : 6),
                     right: 4,
                     fontSize: onHour ? 10 : 8.5,
                     fontWeight: onHour ? '700' : '400',
@@ -748,7 +799,7 @@ export function WeekView({
                 pointerEvents="none"
                 style={{
                   position: 'absolute',
-                  top: yOf(m, pxPerHour, fromHour) - 8,
+                  top: yAt(m) - 8,
                   right: 2,
                   backgroundColor: p.accent,
                   borderRadius: radius.sm,
@@ -768,7 +819,8 @@ export function WeekView({
             <DayColumn
               key={d.date}
               placed={placedByDate[i]}
-              fromHour={fromHour}
+              yAt={yAt}
+              seams={seams}
               height={gridHeight}
               pxPerHour={pxPerHour}
               marks={marks}
@@ -803,11 +855,10 @@ export function WeekView({
               clock={clock}
               left={RAIL + colW * dragCol}
               width={colW}
-              top={yOf(drag.startMin, pxPerHour, fromHour)}
+              top={yAt(drag.startMin)}
               height={Math.max(
                 14,
-                yOf(drag.endMin ?? drag.startMin, pxPerHour, fromHour)
-                  - yOf(drag.startMin, pxPerHour, fromHour),
+                yAt(drag.endMin ?? drag.startMin) - yAt(drag.startMin),
               )}
               fade={ghostIn}
             />
@@ -885,11 +936,11 @@ function Ghost({
 }
 
 function DayColumn({
-  placed, fromHour, height, pxPerHour, marks, slots, detailed, clock, prayers,
+  placed, yAt, height, pxPerHour, marks, slots, detailed, clock, prayers, seams,
   prayerColour, prayerLabels, chipMode, prayerStyle, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
 }: {
   placed: Placed<GridItem>[];
-  fromHour: number;
+  yAt: (minute: number) => number;
   height: number;
   pxPerHour: number;
   marks: number[];
@@ -897,6 +948,7 @@ function DayColumn({
   detailed?: boolean;
   clock?: string;
   prayers: { key: string; label: string; minutes: number }[];
+  seams: number[];
   prayerColour?: string;
   prayerLabels?: boolean;
   chipMode: PrayerChipMode;
@@ -939,7 +991,7 @@ function DayColumn({
           key={`s${m}`}
           style={{
             position: 'absolute',
-            top: yOf(m, pxPerHour, fromHour),
+            top: yAt(m),
             left: 0, right: 0,
             height: 1,
             backgroundColor: isDragTarget ? p.accent : p.line,
@@ -952,7 +1004,7 @@ function DayColumn({
           key={h}
           style={{
             position: 'absolute',
-            top: yOf(h * 60, pxPerHour, fromHour),
+            top: yAt(h * 60),
             left: 0, right: 0,
             height: 1,
             backgroundColor: p.line,
@@ -1055,6 +1107,26 @@ function DayColumn({
         );
       })}
 
+      {/* Where hours have been cut out. Without a break, 1am sits directly above
+          6am with nothing to say four hours are missing, and the day quietly
+          misreads as continuous. */}
+      {seams.map(at => {
+        const y = at * (pxPerHour / 60);
+        return (
+          <View
+            key={`seam${at}`}
+            pointerEvents="none"
+            style={{
+              position: 'absolute', top: y - 2, left: 0, right: 0, height: 4,
+              backgroundColor: p.bg,
+              borderTopWidth: 1, borderBottomWidth: 1,
+              borderTopColor: p.line, borderBottomColor: p.line,
+              opacity: 0.9,
+            }}
+          />
+        );
+      })}
+
       {/* Prayers, in whichever shape this device asked for.
           MARKER is a hairline with a pill sitting in it, which is what the desk
           draws. PILL is a short bar at the minute, which reads as "a thing at a
@@ -1064,7 +1136,7 @@ function DayColumn({
       {prayers.map(pr => {
         const colour = prayerColour ?? p.ok;
         const done = isPrayerDone?.(pr.key) ?? false;
-        const top = yOf(pr.minutes, pxPerHour, fromHour);
+        const top = yAt(pr.minutes);
         const named = chipMode !== 'dot' && prayerLabels !== false;
 
         const glyph = (
@@ -1169,7 +1241,7 @@ function DayColumn({
       {nowMin !== null ? (
         <View style={{
           position: 'absolute',
-          top: yOf(nowMin, pxPerHour, fromHour),
+          top: yAt(nowMin),
           left: 0, right: 0, height: 1.5,
           backgroundColor: p.danger,
         }} />

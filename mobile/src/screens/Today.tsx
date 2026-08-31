@@ -100,7 +100,7 @@ export function Today({
   const {
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
     prayersOn, isPrayerDone, togglePrayer, customWindow, events, categories,
-    dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
+    visibleHours, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
     unreadNotifications, prayerAppearance,
   } = usePlanner();
 
@@ -558,8 +558,7 @@ export function Today({
           prayerStyle={prayerAppearance.style}
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
-          dayStartH={dayWindow.start}
-          dayEndH={dayWindow.end}
+          visibleHours={visibleHours}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -584,8 +583,7 @@ export function Today({
           prayerStyle={prayerAppearance.style}
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
-          dayStartH={dayWindow.start}
-          dayEndH={dayWindow.end}
+          visibleHours={visibleHours}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -607,8 +605,7 @@ export function Today({
           prayerStyle={prayerAppearance.style}
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
-          dayStartH={dayWindow.start}
-          dayEndH={dayWindow.end}
+          visibleHours={visibleHours}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}

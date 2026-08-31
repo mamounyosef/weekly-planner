@@ -1,0 +1,309 @@
+// Tests which hours the grid draws, and where a minute lands once some of them
+// are missing.
+//
+// THE ONE THAT MATTERS: `minuteAtY` must be the exact inverse of `yOfMinute`
+// for every visible minute. They are used by different things (one draws, the
+// other reads a thumb), so a disagreement between them does not throw: a block
+// dragged to 10:00 simply lands at 09:45, or at 06:00 when a hidden stretch sits
+// between. The round trip is asserted rather than the arithmetic being trusted.
+//
+// THE OTHER ONE: hiding hours must never hide an ITEM. `itemsOutsideView` is the
+// net, and a meeting at 3am with 3am switched off has to come back from it.
+//
+// Run with: npx tsx src/lib/dayWindows.test.ts
+
+import assert from 'node:assert/strict';
+import {
+  FULL_DAY,
+  describeRanges,
+  drawnMinuteOf,
+  hiddenHours,
+  hourMarksIn,
+  isFullDay,
+  isMinuteVisible,
+  itemsOutsideView,
+  minuteAtY,
+  normaliseRanges,
+  rangesFromHidden,
+  seamsIn,
+  slotsIn,
+  visibleMinutes,
+  yOfMinute,
+  type HourRange,
+} from './dayWindows';
+
+const r = (from: number, to: number): HourRange => ({ from, to });
+
+/** The example that started this: everything except the middle of the night. */
+const NIGHT_OFF = normaliseRanges([r(0, 2), r(6, 24)]);
+
+function main() {
+  console.log('--- 1. NORMALISING PUTS ANY INPUT INTO ONE CANONICAL SHAPE ---');
+  {
+    assert.deepEqual(normaliseRanges([r(0, 24)]), [r(0, 24)]);
+    assert.deepEqual(normaliseRanges([r(9, 17)]), [r(9, 17)]);
+
+    // Out of order, overlapping, and touching all come back as one stretch.
+    assert.deepEqual(normaliseRanges([r(12, 18), r(9, 13)]), [r(9, 18)], 'overlap merges');
+    assert.deepEqual(normaliseRanges([r(9, 12), r(12, 15)]), [r(9, 15)], 'touching merges');
+    assert.deepEqual(normaliseRanges([r(18, 24), r(0, 6)]), [r(0, 6), r(18, 24)], 'sorted');
+    assert.deepEqual(normaliseRanges([r(0, 24), r(9, 10)]), [r(0, 24)], 'contained is absorbed');
+
+    // Anything that is not a range is dropped, not guessed at.
+    assert.deepEqual(normaliseRanges([r(9, 9)]), FULL_DAY, 'an empty range is no range');
+    assert.deepEqual(normaliseRanges([r(17, 9)]), FULL_DAY, 'backwards is no range');
+    assert.deepEqual(normaliseRanges([]), FULL_DAY, 'nothing means the whole day');
+
+    // A GRID WITH NO HOURS IS NOT A PREFERENCE, it is a blank screen with no way
+    // back, so every degenerate input gives the whole day instead.
+    const rubbish: unknown[] = [
+      null, undefined, 0, 1, '', 'x', true, {}, [null], [undefined], [0], ['x'],
+      [{}], [[]], [{ from: 'a', to: 'b' }], [{ from: NaN, to: 9 }],
+      [{ from: 9, to: Infinity }], [{ from: -5, to: -1 }], [{ from: 25, to: 30 }],
+      [{ from: 9 }], [{ to: 17 }], [{ from: null, to: null }],
+    ];
+    for (const raw of rubbish) {
+      const out = normaliseRanges(raw);
+      assert.ok(out.length > 0, `${JSON.stringify(raw)} still leaves a grid`);
+      assert.ok(visibleMinutes(out) > 0, `${JSON.stringify(raw)} draws something`);
+      for (const range of out) {
+        assert.ok(range.from >= 0 && range.to <= 24 && range.from < range.to,
+          `${JSON.stringify(raw)} gives a sane range`);
+      }
+    }
+
+    // Idempotent, which is what stops the device rewriting storage forever.
+    for (const raw of [[r(0, 2), r(6, 24)], [r(9, 17)], [r(1, 3), r(2, 5)], rubbish]) {
+      const once = normaliseRanges(raw);
+      assert.deepEqual(normaliseRanges(once), once, 'stable under a second pass');
+    }
+
+    // Fractions of an hour are floored rather than kept, since the strip the
+    // user actually taps is a whole hour.
+    assert.deepEqual(normaliseRanges([{ from: 9.7, to: 17.2 }]), [r(9, 17)]);
+  }
+
+  console.log('--- 2. HIDDEN HOURS AND RANGES ARE TWO VIEWS OF ONE THING ---');
+  {
+    assert.deepEqual(hiddenHours(FULL_DAY), [], 'nothing is hidden in a full day');
+    assert.deepEqual(hiddenHours(NIGHT_OFF), [2, 3, 4, 5], 'the small hours');
+    assert.deepEqual(rangesFromHidden([2, 3, 4, 5]), NIGHT_OFF, 'and back again');
+
+    // The round trip holds for EVERY possible set of hidden hours that leaves
+    // something behind. This is the property that lets the settings screen think
+    // in hours while the grid thinks in ranges.
+    for (let mask = 0; mask < (1 << 12); mask += 1) {
+      const hidden: number[] = [];
+      for (let h = 0; h < 12; h += 1) if (mask & (1 << h)) hidden.push(h * 2);
+      const ranges = rangesFromHidden(hidden);
+      assert.deepEqual(normaliseRanges(ranges), ranges, `mask ${mask} is canonical`);
+      if (hidden.length < 24) {
+        assert.deepEqual(hiddenHours(ranges), hidden, `mask ${mask} round trips`);
+      }
+    }
+
+    // Every hour hidden is the one input that cannot be honoured.
+    const all = Array.from({ length: 24 }, (_, h) => h);
+    assert.deepEqual(rangesFromHidden(all), FULL_DAY, 'a blank day is refused');
+    assert.deepEqual(rangesFromHidden([]), FULL_DAY);
+    // Rubbish among the hours is ignored, not fatal.
+    assert.deepEqual(rangesFromHidden([2, 3, 4, 5, -1, 99, NaN as number]), NIGHT_OFF);
+  }
+
+  console.log('--- 3. A MINUTE KNOWS WHETHER IT IS DRAWN ---');
+  {
+    for (let m = 0; m < 24 * 60; m += 7) {
+      assert.equal(isMinuteVisible(m, FULL_DAY), true, `${m} is in a full day`);
+    }
+    assert.equal(isMinuteVisible(0, NIGHT_OFF), true, 'midnight is shown');
+    assert.equal(isMinuteVisible(119, NIGHT_OFF), true, 'one minute to two');
+    assert.equal(isMinuteVisible(120, NIGHT_OFF), false, 'two exactly is hidden');
+    assert.equal(isMinuteVisible(359, NIGHT_OFF), false, 'one minute to six');
+    assert.equal(isMinuteVisible(360, NIGHT_OFF), true, 'six exactly is back');
+    assert.equal(isMinuteVisible(24 * 60 - 1, NIGHT_OFF), true, 'the last minute');
+  }
+
+  console.log('--- 4. HOW TALL THE GRID IS ---');
+  {
+    assert.equal(visibleMinutes(FULL_DAY), 1440);
+    assert.equal(visibleMinutes(NIGHT_OFF), 1200, 'four hours fewer');
+    assert.equal(visibleMinutes([r(9, 17)]), 480);
+    assert.equal(visibleMinutes([r(0, 1), r(23, 24)]), 120, 'two thin ends');
+  }
+
+  console.log('--- 5. THE ROUND TRIP, WHICH IS THE WHOLE THING ---');
+  {
+    // Every visible minute, at several slot heights, must survive being turned
+    // into a pixel and read back. A disagreement here is a block that lands
+    // somewhere other than where it was dropped.
+    const shapes: HourRange[][] = [
+      FULL_DAY,
+      [r(9, 17)],
+      NIGHT_OFF,
+      normaliseRanges([r(0, 3), r(8, 12), r(14, 18), r(22, 24)]),
+      [r(23, 24)],
+    ];
+    for (const ranges of shapes) {
+      for (const pxPerHour of [45, 48, 60, 96, 130.5]) {
+        for (const range of ranges) {
+          for (let m = range.from * 60; m < range.to * 60; m += 1) {
+            const y = yOfMinute(m, ranges, pxPerHour);
+            const back = minuteAtY(y, ranges, pxPerHour);
+            assert.ok(Math.abs(back - m) < 1e-6,
+              `${m} came back as ${back} at ${pxPerHour}px`);
+          }
+        }
+      }
+    }
+  }
+
+  console.log('--- 6. POSITIONS SKIP THE HOURS THAT ARE NOT THERE ---');
+  {
+    // Nine in the morning is nine hours down a full day, but only five once the
+    // small hours are gone. This is the arithmetic the old code could not do.
+    assert.equal(drawnMinuteOf(9 * 60, FULL_DAY), 9 * 60);
+    assert.equal(drawnMinuteOf(9 * 60, NIGHT_OFF), 5 * 60,
+      'two hours drawn, four skipped, then three more: five drawn hours');
+    assert.equal(drawnMinuteOf(0, NIGHT_OFF), 0);
+    assert.equal(drawnMinuteOf(6 * 60, NIGHT_OFF), 2 * 60, 'six sits right under two');
+
+    // A minute inside a hidden stretch is pinned to the seam above it rather
+    // than being given a position it does not have.
+    assert.equal(drawnMinuteOf(3 * 60, NIGHT_OFF), 2 * 60);
+    assert.equal(drawnMinuteOf(5 * 60 + 59, NIGHT_OFF), 2 * 60);
+
+    // Before the first drawn hour and after the last, clamped rather than off grid.
+    const office = [r(9, 17)];
+    assert.equal(drawnMinuteOf(0, office), 0, 'midnight clamps to the top');
+    assert.equal(drawnMinuteOf(23 * 60, office), 8 * 60, 'and 11pm to the bottom');
+    for (let m = 0; m <= 24 * 60; m += 13) {
+      const y = yOfMinute(m, office, 60);
+      assert.ok(y >= 0 && y <= visibleMinutes(office), `${m} stays on the grid`);
+    }
+  }
+
+  console.log('--- 7. A PIXEL OFF THE END STILL NAMES A VISIBLE MINUTE ---');
+  {
+    for (const ranges of [FULL_DAY, NIGHT_OFF, [r(9, 17)]]) {
+      for (const y of [-500, -1, 0, 1e6, NaN, Infinity, -Infinity]) {
+        const m = minuteAtY(y, ranges, 60);
+        assert.ok(Number.isFinite(m), `${y} gives a real minute`);
+        assert.ok(m >= 0 && m <= 24 * 60, `${y} stays inside the day`);
+      }
+      // A rate that makes no sense must not produce a NaN minute either.
+      for (const rate of [0, -60, NaN, Infinity]) {
+        const m = minuteAtY(100, ranges, rate);
+        assert.ok(Number.isFinite(m), `rate ${rate} gives a real minute`);
+      }
+    }
+  }
+
+  console.log('--- 8. THE LINES DRAWN DOWN THE GRID ---');
+  {
+    assert.equal(hourMarksIn(FULL_DAY).length, 25, 'every hour plus the closing one');
+    assert.deepEqual(hourMarksIn([r(9, 12)]), [540, 600, 660, 720]);
+
+    // A seam must not produce the same line twice, which would read as a
+    // thicker line for no reason.
+    const touching = [r(0, 2), r(2, 4)];
+    assert.equal(new Set(hourMarksIn(touching)).size, hourMarksIn(touching).length);
+    for (const ranges of [FULL_DAY, NIGHT_OFF, [r(9, 17)], touching]) {
+      const marks = hourMarksIn(ranges);
+      assert.deepEqual([...marks].sort((a, b) => a - b), marks, 'in order');
+      assert.equal(new Set(marks).size, marks.length, 'no duplicates');
+    }
+
+    // Slots divide the drawn hours and nothing else.
+    for (const interval of [5, 10, 15, 30, 60]) {
+      const slots = slotsIn(NIGHT_OFF, interval);
+      assert.equal(new Set(slots).size, slots.length, `${interval} has no duplicates`);
+      for (const m of slots) {
+        const atEdge = NIGHT_OFF.some(x => m === x.from * 60 || m === x.to * 60);
+        assert.ok(isMinuteVisible(m, NIGHT_OFF) || atEdge,
+          `${interval}: ${m} is drawn or is an edge`);
+      }
+    }
+    // A nonsense interval falls back rather than looping forever.
+    for (const bad of [0, -5, NaN, Infinity]) {
+      const slots = slotsIn([r(9, 10)], bad as number);
+      assert.ok(slots.length > 0 && slots.length < 200, `${bad} terminates`);
+    }
+  }
+
+  console.log('--- 9. THE SEAMS, SO A CUT IS VISIBLE ---');
+  {
+    assert.deepEqual(seamsIn(FULL_DAY), [], 'an uncut day has no seams');
+    assert.deepEqual(seamsIn(NIGHT_OFF), [120], 'one cut, two hours down');
+    assert.deepEqual(seamsIn(normaliseRanges([r(0, 2), r(6, 8), r(20, 24)])), [120, 240]);
+    for (const ranges of [FULL_DAY, NIGHT_OFF, [r(9, 17)]]) {
+      assert.equal(seamsIn(ranges).length, ranges.length - 1, 'one seam between each pair');
+    }
+  }
+
+  console.log('--- 10. NOTHING IS EVER SILENTLY LOST ---');
+  {
+    // THE SAFETY NET. A meeting at 3am with 3am switched off must come back
+    // from here, or it is gone with nothing on screen to say so.
+    const items = [
+      { id: 'night', min: 3 * 60 },
+      { id: 'morning', min: 9 * 60 },
+      { id: 'edge', min: 2 * 60 },
+      { id: 'back', min: 6 * 60 },
+      { id: 'undated', min: null as number | null },
+    ];
+    const out = itemsOutsideView(items, i => i.min, NIGHT_OFF);
+    assert.deepEqual(out.map(i => i.id), ['night', 'edge'],
+      'the two in hidden hours, and only those');
+
+    assert.deepEqual(itemsOutsideView(items, i => i.min, FULL_DAY), [],
+      'a full day hides nothing');
+    assert.deepEqual(itemsOutsideView([], i => (i as any).min, NIGHT_OFF), []);
+
+    // Every item is either drawn or reported. Never neither.
+    for (const ranges of [FULL_DAY, NIGHT_OFF, [r(9, 17)]]) {
+      const hiddenSet = new Set(itemsOutsideView(items, i => i.min, ranges).map(i => i.id));
+      for (const item of items) {
+        if (item.min === null) continue;
+        const drawn = isMinuteVisible(item.min, ranges);
+        assert.notEqual(drawn, hiddenSet.has(item.id),
+          `${item.id} is drawn or reported, never both or neither`);
+      }
+    }
+  }
+
+  console.log('--- 11. WHAT A PERSON READS ---');
+  {
+    assert.equal(describeRanges(FULL_DAY), 'The whole day is shown.');
+    assert.ok(isFullDay(FULL_DAY));
+    assert.ok(!isFullDay(NIGHT_OFF));
+
+    assert.ok(describeRanges([r(9, 17)]).includes('9am to 5pm'));
+    assert.ok(describeRanges([r(9, 17)], '24h').includes('09:00 to 17:00'));
+    assert.ok(describeRanges(NIGHT_OFF).includes('4 hours are hidden'));
+    assert.ok(describeRanges(normaliseRanges([r(0, 1), r(2, 24)])).includes('1 hour is hidden'),
+      'one hour is singular');
+
+    // Midnight and noon are named, not numbered, and 24 reads as midnight.
+    const ends = describeRanges([r(0, 24)], undefined);
+    assert.ok(ends.length > 0);
+    assert.ok(describeRanges([r(0, 12)]).includes('midnight'));
+    assert.ok(describeRanges([r(0, 12)]).includes('noon'));
+
+    // NO DASHES ANYWHERE, in any shape, in either clock.
+    const shapes = [
+      FULL_DAY, NIGHT_OFF, [r(9, 17)], [r(23, 24)],
+      normaliseRanges([r(0, 3), r(8, 12), r(14, 18), r(22, 24)]),
+    ];
+    for (const ranges of shapes) {
+      for (const clock of [undefined, '12h', '24h']) {
+        const line = describeRanges(ranges, clock);
+        assert.ok(line.length > 0, 'there is something to read');
+        assert.ok(!line.includes('—') && !line.includes('–'), `no dash in "${line}"`);
+      }
+    }
+  }
+
+  console.log('\nALL PASS (dayWindows: canonical ranges, the round trip, seams, nothing lost)');
+}
+
+main();
