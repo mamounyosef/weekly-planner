@@ -550,6 +550,7 @@ export function Today({
           prayersOn={prayerAppearance.showOnCalendar ? prayersOn : undefined}
           prayerColour={prayerAppearance.colour}
           prayerLabels={prayerAppearance.showLabels}
+          prayerStyle={prayerAppearance.style}
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           dayStartH={dayWindow.start}
@@ -575,6 +576,7 @@ export function Today({
           prayersOn={prayerAppearance.showOnCalendar ? prayersOn : undefined}
           prayerColour={prayerAppearance.colour}
           prayerLabels={prayerAppearance.showLabels}
+          prayerStyle={prayerAppearance.style}
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           dayStartH={dayWindow.start}
@@ -597,6 +599,7 @@ export function Today({
           prayersOn={prayerAppearance.showOnCalendar ? prayersOn : undefined}
           prayerColour={prayerAppearance.colour}
           prayerLabels={prayerAppearance.showLabels}
+          prayerStyle={prayerAppearance.style}
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           dayStartH={dayWindow.start}

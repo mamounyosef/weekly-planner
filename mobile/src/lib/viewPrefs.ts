@@ -285,9 +285,33 @@ export const DEFAULT_SWIPE_VIEW_SWITCH = true;
 // different piece of glass. Kept here beside the theme and the snap interval,
 // which are per device for exactly the same reason.
 
+/**
+ * The three shapes a prayer can take on a grid.
+ *
+ *  marker  a hairline across the day with a pill sitting in it
+ *  pill    a full width bar at that minute, like a very short event
+ *  row     out of the grid entirely, into a band above it
+ *
+ * The same three the desk offers, chosen separately here: the right answer on a
+ * 27 inch monitor is not automatically the right one on a phone.
+ */
+export type PrayerDrawStyle = 'marker' | 'pill' | 'row';
+
+export const PRAYER_DRAW_STYLES: { id: PrayerDrawStyle; label: string; hint: string }[] = [
+  { id: 'marker', label: 'Marker line', hint: 'A line across the day with the name sitting in it.' },
+  { id: 'pill', label: 'Small pill', hint: 'A short bar at the time, like a very brief event.' },
+  { id: 'row', label: 'Its own row', hint: 'Out of the grid, into a band above it.' },
+];
+
+export function isPrayerDrawStyle(raw: unknown): raw is PrayerDrawStyle {
+  return raw === 'marker' || raw === 'pill' || raw === 'row';
+}
+
 export interface PrayerAppearance {
   /** Whether prayers are drawn across the time grids at all. */
   showOnCalendar: boolean;
+  /** Which of the three shapes this device draws them in. */
+  style: PrayerDrawStyle;
   /** The line and marker colour. */
   colour: string;
   /** Whether the prayer's name is drawn beside its line. */
@@ -296,6 +320,7 @@ export interface PrayerAppearance {
 
 export const DEFAULT_PRAYER_APPEARANCE: PrayerAppearance = {
   showOnCalendar: true,
+  style: 'marker',
   colour: '#34d399',
   showLabels: true,
 };
@@ -318,6 +343,7 @@ export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
   const r = raw as Record<string, unknown>;
   if (typeof r.showOnCalendar === 'boolean') out.showOnCalendar = r.showOnCalendar;
   if (typeof r.showLabels === 'boolean') out.showLabels = r.showLabels;
+  if (isPrayerDrawStyle(r.style)) out.style = r.style;
   // Normalised to lower case so two spellings of one colour are one value and
   // cannot ping-pong a stored setting between them.
   if (isHexColour(r.colour)) out.colour = r.colour.toLowerCase();
@@ -327,7 +353,9 @@ export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
 /** What a person reads back on the settings screen. No dashes, ever. */
 export function describePrayerAppearance(a: PrayerAppearance): string {
   if (!a.showOnCalendar) return 'Not drawn on this phone. The times are still shared.';
-  return a.showLabels
-    ? 'Drawn with the name beside each line.'
-    : 'Drawn as a line, with no name.';
+  const shape = PRAYER_DRAW_STYLES.find(s => s.id === a.style)?.label ?? 'Marker line';
+  // The row style has no line to label, so promising a name either way would be
+  // describing a setting that does nothing.
+  if (a.style === 'row') return `${shape}, above the grid.`;
+  return a.showLabels ? `${shape}, with the name.` : `${shape}, with no name.`;
 }

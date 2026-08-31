@@ -46,6 +46,8 @@ import {
   coercePrayerAppearance,
   describePrayerAppearance,
   isHexColour,
+  isPrayerDrawStyle,
+  PRAYER_DRAW_STYLES,
 } from './viewPrefs';
 
 /** Every value a key-value store has ever been caught handing back. */
@@ -372,7 +374,32 @@ function main() {
       assert.equal(typeof got.showOnCalendar, 'boolean', `${String(raw)} gives a boolean`);
       assert.equal(typeof got.showLabels, 'boolean');
       assert.ok(isHexColour(got.colour), `${String(raw)} gives a real colour`);
+      assert.ok(isPrayerDrawStyle(got.style), `${String(raw)} gives a real style`);
     }
+
+    // ── The three shapes ──
+    for (const { id } of PRAYER_DRAW_STYLES) {
+      assert.equal(coercePrayerAppearance({ style: id }).style, id, `${id} survives`);
+      assert.ok(isPrayerDrawStyle(id));
+    }
+    // Every style has a label and a hint, and no two share an id.
+    assert.equal(new Set(PRAYER_DRAW_STYLES.map(s2 => s2.id)).size, PRAYER_DRAW_STYLES.length);
+    for (const s2 of PRAYER_DRAW_STYLES) {
+      assert.ok(s2.label.length > 0 && s2.hint.length > 0, `${s2.id} is described`);
+      for (const text of [s2.label, s2.hint]) {
+        assert.ok(!text.includes('—') && !text.includes('–'), `no dash in "${text}"`);
+      }
+    }
+    // Anything that is not one of the three falls back rather than being kept.
+    for (const bad of ['Marker', 'MARKER', 'line', '', 0, 1, null, [], {}, 'row ']) {
+      assert.equal(coercePrayerAppearance({ style: bad }).style,
+        DEFAULT_PRAYER_APPEARANCE.style, `${String(bad)} is not a style`);
+      assert.ok(!isPrayerDrawStyle(bad as unknown));
+    }
+    // A bad style does not cost the colour beside it.
+    const mixed = coercePrayerAppearance({ style: 'nope', colour: '#123456' });
+    assert.equal(mixed.style, DEFAULT_PRAYER_APPEARANCE.style);
+    assert.equal(mixed.colour, '#123456', 'the good field survived a bad neighbour');
 
     // ONE BAD FIELD DOES NOT COST THE OTHERS. That is the whole reason to coerce
     // per field rather than reject the object: a corrupt colour must not also
@@ -402,14 +429,16 @@ function main() {
       assert.ok(!isHexColour(bad as unknown), `${String(bad)} is not a colour`);
     }
 
-    // Every reachable combination has a sentence, and none of them uses a dash.
+    // EVERY reachable combination has a sentence, and none of them uses a dash.
     for (const showOnCalendar of [true, false]) {
       for (const showLabels of [true, false]) {
+        for (const style of PRAYER_DRAW_STYLES.map(s2 => s2.id)) {
         const line = describePrayerAppearance({
-          ...DEFAULT_PRAYER_APPEARANCE, showOnCalendar, showLabels,
+          ...DEFAULT_PRAYER_APPEARANCE, showOnCalendar, showLabels, style,
         });
         assert.ok(line.length > 0, 'there is something to read');
         assert.ok(!line.includes('—') && !line.includes('–'), `no dash in "${line}"`);
+        }
       }
     }
   }

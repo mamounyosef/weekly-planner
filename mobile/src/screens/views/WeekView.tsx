@@ -61,6 +61,7 @@ import {
   layoutDay, hourMarks, yOf, prayerChipMode,
   type Placeable, type Placed, type PrayerChipMode,
 } from '../../lib/grid';
+import type { PrayerDrawStyle } from '../../lib/viewPrefs';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
 } from '../../lib/dragGrid';
@@ -109,7 +110,8 @@ type Drag =
 export function WeekView({
   dates, dayOf, today, nowMin, clock, interval = 30, detailed,
   prayersOn, dayStartH = 9, dayEndH = 18, onMenuItem,
-  prayerColour, prayerLabels = true, isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
+  prayerColour, prayerLabels = true, prayerStyle = 'marker',
+  isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
 }: {
   dates: string[];
   dayOf: (date: string) => AgendaDay;
@@ -136,6 +138,8 @@ export function WeekView({
   /** This device's own prayer colour, and whether to name each line. */
   prayerColour?: string;
   prayerLabels?: boolean;
+  /** Which of the three shapes this device draws prayers in. */
+  prayerStyle?: PrayerDrawStyle;
   /** Whether a prayer has been marked as prayed, and how to flip it. */
   isPrayerDone?: (date: string, key: string) => boolean;
   onTogglePrayer?: (date: string, key: string) => void;
@@ -572,6 +576,77 @@ export function WeekView({
         })}
       </View>
 
+      {/* ── Prayers in a row of their own ──
+          Out of the grid entirely, which is the point of this style: a day with
+          six prayers drawn through it is six lines across everything else, and
+          on a phone that is most of the screen. Here they sit in one band above
+          the grid, in time order, and the grid below is left to the things that
+          actually occupy time. */}
+      {prayerStyle === 'row' && days.some(d => d.prayers.length > 0) ? (
+        <View style={{
+          flexDirection: 'row',
+          borderBottomWidth: 1,
+          borderBottomColor: p.line,
+          backgroundColor: p.surface,
+          paddingVertical: 4,
+        }}>
+          <View style={{
+            width: RAIL, justifyContent: 'center', alignItems: 'flex-end', paddingRight: 4,
+          }}>
+            <Text variant="caption" tone="faint" style={{ fontSize: 9 }}>pray</Text>
+          </View>
+          {days.map(d => (
+            <View key={d.date} style={{ flex: 1, paddingHorizontal: 1, gap: 2 }}>
+              {d.prayers.map(pr => {
+                const colour = prayerColour ?? p.ok;
+                const done = isPrayerDone?.(d.date, pr.key) ?? false;
+                return (
+                  <Pressable
+                    key={pr.key}
+                    onPress={() => onTogglePrayer?.(d.date, pr.key)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 3,
+                      borderRadius: 3,
+                      borderWidth: 1,
+                      borderColor: colour,
+                      backgroundColor: `${colour}1f`,
+                      paddingHorizontal: 3,
+                      paddingVertical: 1,
+                      opacity: done ? 0.5 : 1,
+                    }}
+                  >
+                    <Text style={{ color: colour, fontSize: 8, lineHeight: 10 }}>
+                      {done ? '◉' : '○'}
+                    </Text>
+                    <Text
+                      numberOfLines={1}
+                      style={{
+                        color: colour, fontSize: 9, lineHeight: 12, flexShrink: 1,
+                        textDecorationLine: done ? 'line-through' : 'none',
+                      }}
+                    >
+                      {/* The width decides how much is worth saying, exactly as
+                          it does for the in-grid marker. */}
+                      {chipMode === 'dot' ? formatClock(pr.minutes, clock) : pr.label}
+                    </Text>
+                    {chipMode === 'full' ? (
+                      <Text style={{
+                        color: colour, fontSize: 8.5, lineHeight: 12, opacity: 0.8,
+                        marginLeft: 'auto',
+                      }}>
+                        {formatClock(pr.minutes, clock)}
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))}
+        </View>
+      ) : null}
+
       {/* All-day band, only when there is one */}
       {anyAllDay ? (
         <View style={{
@@ -700,10 +775,11 @@ export function WeekView({
               slots={slots}
               detailed={detailed}
               clock={clock}
-              prayers={d.prayers}
+              prayers={prayerStyle === 'row' ? [] : d.prayers}
               prayerColour={prayerColour}
               prayerLabels={prayerLabels}
               chipMode={chipMode}
+              prayerStyle={prayerStyle}
               isPrayerDone={isPrayerDone ? (key: string) => isPrayerDone(d.date, key) : undefined}
               onTogglePrayer={onTogglePrayer ? (key: string) => onTogglePrayer(d.date, key) : undefined}
               isToday={d.date === today}
@@ -810,7 +886,7 @@ function Ghost({
 
 function DayColumn({
   placed, fromHour, height, pxPerHour, marks, slots, detailed, clock, prayers,
-  prayerColour, prayerLabels, chipMode, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
+  prayerColour, prayerLabels, chipMode, prayerStyle, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
 }: {
   placed: Placed<GridItem>[];
   fromHour: number;
@@ -824,6 +900,7 @@ function DayColumn({
   prayerColour?: string;
   prayerLabels?: boolean;
   chipMode: PrayerChipMode;
+  prayerStyle: PrayerDrawStyle;
   isPrayerDone?: (key: string) => boolean;
   onTogglePrayer?: (key: string) => void;
   isToday: boolean;
@@ -978,14 +1055,70 @@ function DayColumn({
         );
       })}
 
-      {/* Prayers: a hairline with a pill sitting in it, exactly as the desk
-          draws them. A prayer has a time and no length, so a block would be a
-          lie about its shape and would steal a column from the events beside it.
-          The pill carries the tap, the line does not, so nothing here can eat a
+      {/* Prayers, in whichever shape this device asked for.
+          MARKER is a hairline with a pill sitting in it, which is what the desk
+          draws. PILL is a short bar at the minute, which reads as "a thing at a
+          time" rather than "a line through the day". Either way the tap target
+          is the shape itself and never the line, so nothing here can swallow a
           drag meant for the grid. */}
       {prayers.map(pr => {
         const colour = prayerColour ?? p.ok;
         const done = isPrayerDone?.(pr.key) ?? false;
+        const top = yOf(pr.minutes, pxPerHour, fromHour);
+        const named = chipMode !== 'dot' && prayerLabels !== false;
+
+        const glyph = (
+          <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
+            {done ? '◉' : '○'}
+          </Text>
+        );
+        const name = named ? (
+          <Text
+            numberOfLines={1}
+            style={{
+              color: colour, fontSize: 9, lineHeight: 11, fontWeight: '700',
+              textDecorationLine: done ? 'line-through' : 'none',
+            }}
+          >
+            {pr.label}
+          </Text>
+        ) : null;
+        const time = chipMode === 'full' && prayerLabels !== false ? (
+          <Text style={{ color: colour, fontSize: 8.5, lineHeight: 11, opacity: 0.8 }}>
+            {formatClock(pr.minutes, clock)}
+          </Text>
+        ) : null;
+
+        if (prayerStyle === 'pill') {
+          return (
+            <Pressable
+              key={pr.key}
+              onPress={() => onTogglePrayer?.(pr.key)}
+              accessibilityRole="button"
+              accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
+              style={{
+                position: 'absolute',
+                top, left: 2, right: 2, height: 16,
+                flexDirection: 'row', alignItems: 'center', gap: 3,
+                paddingHorizontal: 4,
+                borderRadius: radius.sm,
+                borderWidth: 1,
+                borderColor: colour,
+                // A wash of the colour rather than the colour itself: a solid
+                // bar at this size competes with the events around it, which
+                // are the things with actual duration.
+                backgroundColor: `${colour}26`,
+                opacity: done ? 0.5 : 1,
+                zIndex: 3,
+              }}
+            >
+              {glyph}
+              {name}
+              {time ? <View style={{ marginLeft: 'auto' }}>{time}</View> : null}
+            </Pressable>
+          );
+        }
+
         const line = (
           <View style={{
             flex: 1, height: 1, backgroundColor: colour, opacity: done ? 0.4 : 0.85,
@@ -997,10 +1130,9 @@ function DayColumn({
             pointerEvents="box-none"
             style={{
               position: 'absolute',
-              top: yOf(pr.minutes, pxPerHour, fromHour) - 8,
+              top: top - 8,
               left: 0, right: 0, height: 16,
-              flexDirection: 'row',
-              alignItems: 'center',
+              flexDirection: 'row', alignItems: 'center',
               zIndex: 3,
               opacity: done ? 0.55 : 1,
             }}
@@ -1012,9 +1144,7 @@ function DayColumn({
               accessibilityRole="button"
               accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
               style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 3,
+                flexDirection: 'row', alignItems: 'center', gap: 3,
                 height: 15,
                 marginHorizontal: 3,
                 paddingLeft: chipMode === 'dot' ? 3 : 5,
@@ -1022,30 +1152,14 @@ function DayColumn({
                 borderRadius: 999,
                 borderWidth: 1,
                 borderColor: colour,
-                // The card colour, not the grid's: the pill has to read as
-                // sitting ON the line rather than being a gap in it.
+                // The card colour, not the grid's, so the pill reads as sitting
+                // ON the line rather than as a gap in it.
                 backgroundColor: p.surface,
               }}
             >
-              <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
-                {done ? '◉' : '○'}
-              </Text>
-              {chipMode !== 'dot' && prayerLabels !== false ? (
-                <Text style={{
-                  color: colour,
-                  fontSize: 9,
-                  lineHeight: 11,
-                  fontWeight: '700',
-                  textDecorationLine: done ? 'line-through' : 'none',
-                }}>
-                  {pr.label}
-                </Text>
-              ) : null}
-              {chipMode === 'full' && prayerLabels !== false ? (
-                <Text style={{ color: colour, fontSize: 8.5, lineHeight: 11, opacity: 0.8 }}>
-                  {formatClock(pr.minutes, clock)}
-                </Text>
-              ) : null}
+              {glyph}
+              {name}
+              {time}
             </Pressable>
             {line}
           </View>

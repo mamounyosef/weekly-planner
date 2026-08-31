@@ -47,7 +47,9 @@ import { Button, Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Segment, Stepper, TextField, Toggle } from '../ui/Fields';
 import { radius, space, HIT } from '../theme';
 import { usePlanner } from '../state/planner';
-import { DEFAULT_PRAYER_APPEARANCE } from '../lib/viewPrefs';
+import {
+  DEFAULT_PRAYER_APPEARANCE, PRAYER_DRAW_STYLES, describePrayerAppearance,
+} from '../lib/viewPrefs';
 import { readClientStore } from '../lib/syncClient';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { formatClock, ymd } from '../lib/agenda';
@@ -405,6 +407,17 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
                   onChange={v => setAppearance({ ...appearance, showOnCalendar: v })}
                 />
 
+                <Field
+                  label="How they are drawn"
+                  hint={PRAYER_DRAW_STYLES.find(x => x.id === appearance.style)?.hint}
+                >
+                  <Segment
+                    options={PRAYER_DRAW_STYLES.map(x => ({ key: x.id, label: x.label }))}
+                    value={appearance.style}
+                    onChange={k => setAppearance({ ...appearance, style: k as any })}
+                  />
+                </Field>
+
                 <Field label="Colour">
                   <ColourPicker
                     value={appearance.colour}
@@ -418,16 +431,25 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
                   />
                 </Field>
 
-                <Field
-                  label="Labels on the grid"
-                  hint="Off keeps the line and drops the name, which is easier to read on a busy week."
-                >
-                  <Toggle
-                    label="Show the name"
-                    value={appearance.showLabels}
-                    onChange={v => setAppearance({ ...appearance, showLabels: v })}
-                  />
-                </Field>
+                {/* A row has no line to label, so the switch would be a
+                    control that does nothing. It is hidden rather than
+                    disabled: there is nothing to explain. */}
+                {appearance.style === 'row' ? null : (
+                  <Field
+                    label="Labels on the grid"
+                    hint="Off keeps the mark and drops the name, which is easier to read on a busy week."
+                  >
+                    <Toggle
+                      label="Show the name"
+                      value={appearance.showLabels}
+                      onChange={v => setAppearance({ ...appearance, showLabels: v })}
+                    />
+                  </Field>
+                )}
+
+                <Text variant="caption" tone="faint">
+                  {describePrayerAppearance(appearance)}
+                </Text>
               </Card>
             </View>
 
