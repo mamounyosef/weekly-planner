@@ -84,11 +84,13 @@ const VIEW_LABELS: Record<ViewMode, string> = {
 const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
 
 export function Today({
-  onOpenConflicts, onOpenSearch, onOpenNotifications, goToDate, onWentToDate,
+  onOpenConflicts, onOpenSearch, onOpenNotifications, onOpenQuickAdd,
+  goToDate, onWentToDate,
 }: {
   onOpenConflicts: () => void;
   onOpenSearch?: () => void;
   onOpenNotifications?: () => void;
+  onOpenQuickAdd?: () => void;
   /** A day handed over from search or the bell. Shown, then acknowledged. */
   goToDate?: string;
   onWentToDate?: () => void;
@@ -466,6 +468,9 @@ export function Today({
           {/* Search and the bell live in the header rather than on the tab bar:
               both are ways of reaching the calendar, not places beside it, and
               the bar is deliberately four wide so the tabs stay legible. */}
+          {onOpenQuickAdd ? (
+            <HeaderButton glyph="✎" onPress={onOpenQuickAdd} a11y="Quick add" />
+          ) : null}
           {onOpenSearch ? (
             <HeaderButton glyph="⌕" onPress={onOpenSearch} a11y="Search" />
           ) : null}

@@ -33,6 +33,7 @@ import { Reminders } from './src/screens/Reminders';
 import { Prayers } from './src/screens/Prayers';
 import { Search } from './src/screens/Search';
 import { Notifications } from './src/screens/Notifications';
+import { QuickAdd } from './src/screens/QuickAdd';
 import { space } from './src/theme';
 
 export default function App() {
@@ -98,6 +99,7 @@ function Shell() {
   const [showPrayers, setShowPrayers] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
   /** A result tapped in search, handed to the calendar to open. */
   const [pendingOpen, setPendingOpen] = useState<{ date: string } | null>(null);
 
@@ -161,6 +163,7 @@ function Shell() {
                 onOpenConflicts={() => setShowConflicts(true)}
                 onOpenSearch={() => setShowSearch(true)}
                 onOpenNotifications={() => setShowNotifications(true)}
+                onOpenQuickAdd={() => setShowQuickAdd(true)}
                 goToDate={pendingOpen?.date}
                 onWentToDate={() => setPendingOpen(null)}
               />
@@ -177,6 +180,11 @@ function Shell() {
               />
             )}
           </View>
+
+          {/* Over whatever is on screen, not instead of it: typing one line
+              is a thing you do in passing, and losing your place to do it is
+              the reason people stop bothering. */}
+          {showQuickAdd ? <QuickAdd onClose={() => setShowQuickAdd(false)} /> : null}
 
           <TabBar
             active={tab}
