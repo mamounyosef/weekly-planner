@@ -63,8 +63,8 @@ import {
 } from '../../lib/grid';
 import type { PrayerDrawStyle } from '../../lib/viewPrefs';
 import {
-  FULL_DAY, hourMarksIn, isFullDay, itemsOutsideView, minuteAtY, normaliseRanges,
-  seamsIn, slotsIn, visibleMinutes, yOfMinute, type HourRange,
+  hourMarksIn, minuteAtY, normaliseRanges, seamsIn, slotsIn, visibleMinutes,
+  yOfMinute, type HourRange,
 } from '../../lib/dayWindows';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
@@ -169,14 +169,6 @@ export function WeekView({
 }) {
   const p = useTheme();
   const scroller = useRef<ScrollView>(null);
-  /**
-   * Set when the user asks to see the hours they normally hide.
-   *
-   * Hiding hours is a display choice, and a display choice that loses a meeting
-   * is a bug however it was configured. So the grid always says how many things
-   * are in the hours it is not drawing, and this is the way back to them.
-   */
-  const [showingAll, setShowingAll] = useState(false);
 
   const days = useMemo(() => dates.map(date => {
     const agenda = dayOf(date);
@@ -203,7 +195,9 @@ export function WeekView({
    * and offered below, and a tap shows the whole day.
    */
   const ranges = useMemo(() => normaliseRanges(visibleHours), [visibleHours]);
-  const shown = showingAll ? FULL_DAY : ranges;
+  // Nothing overrides the choice any more, not content and not a banner. The
+  // hours that are hidden are simply not drawn, and the seam says where.
+  const shown = ranges;
 
   const slot = slotHeight(interval);
   const pxPerHour = slot * (60 / interval);
@@ -216,22 +210,6 @@ export function WeekView({
   );
   const seams = useMemo(() => seamsIn(shown), [shown]);
 
-  /**
-   * How many timed things fall in hours the grid is not drawing.
-   *
-   * The safety net for the whole feature. A meeting at 3am with 3am switched off
-   * would otherwise be gone with nothing on screen to say so, which is the worst
-   * way for a planner to fail: silently, and only discovered afterwards.
-   */
-  const hiddenCount = useMemo(() => {
-    if (showingAll || isFullDay(ranges)) return 0;
-    let n = 0;
-    for (const d of days) {
-      n += itemsOutsideView(d.timed, i => i.startMin, ranges).length;
-      n += itemsOutsideView(d.prayers, pr => pr.minutes, ranges).length;
-    }
-    return n;
-  }, [days, ranges, showingAll]);
   const anyAllDay = days.some(d => d.allDay.length > 0);
 
   /** Every slot line in the drawn hours, in minutes from midnight. */
@@ -715,36 +693,14 @@ export function WeekView({
         </View>
       ) : null}
 
-      {/* What is not being drawn, and the way to it. Never a warning: hiding
-          hours is a choice the user made, and this is only the receipt. */}
-      {hiddenCount > 0 || showingAll ? (
-        <Pressable
-          onPress={() => setShowingAll(v => !v)}
-          accessibilityRole="button"
-          style={{
-            flexDirection: 'row', alignItems: 'center', gap: space.sm,
-            paddingHorizontal: space.md, paddingVertical: 5,
-            borderBottomWidth: 1, borderBottomColor: p.line,
-            backgroundColor: p.surface,
-          }}
-        >
-          <Text variant="caption" tone="faint" style={{ flex: 1, fontSize: 11 }}>
-            {showingAll
-              ? 'Showing every hour, including the ones you hide.'
-              : `${hiddenCount} ${hiddenCount === 1 ? 'thing is' : 'things are'} in hours you hide.`}
-          </Text>
-          <Text variant="caption" tone="accent" style={{ fontSize: 11, fontWeight: '700' }}>
-            {showingAll ? 'Done' : 'Show all'}
-          </Text>
-        </Pressable>
-      ) : null}
-
       <ScrollView
         ref={scroller}
         scrollEnabled={!dragging}
         scrollEventThrottle={16}
         onScroll={e => { scrollY.current = e.nativeEvent.contentOffset.y; }}
-        contentContainerStyle={{ paddingBottom: space.xxl }}
+        // A little air at the top, so the first hour is not flush against
+        // whatever sits above the grid.
+        contentContainerStyle={{ paddingTop: space.sm, paddingBottom: space.xxl }}
       >
         <View
           ref={gridRef}
@@ -775,7 +731,10 @@ export function WeekView({
                   tone={onHour ? 'soft' : 'faint'}
                   style={{
                     position: 'absolute',
-                    top: yAt(m) - (onHour ? 7 : 6),
+                    // Never above the grid. A label centred on the very first
+                    // line sits at a negative offset, where Android clips it,
+                    // which is why midnight looked tangled with the row above.
+                    top: Math.max(0, yAt(m) - (onHour ? 7 : 6)),
                     right: 4,
                     fontSize: onHour ? 10 : 8.5,
                     fontWeight: onHour ? '700' : '400',
@@ -812,6 +771,25 @@ export function WeekView({
                 </Text>
               </View>
             )) : null}
+
+            {/* The same break the columns draw. Without it the rail reads as
+                a continuous list of times, and 1:55am sitting directly above
+                8:00am looks like a rendering fault rather than four hours
+                deliberately left out. */}
+            {seams.map(at => (
+              <View
+                key={`railseam${at}`}
+                pointerEvents="none"
+                style={{
+                  position: 'absolute',
+                  top: at * (pxPerHour / 60) - 2,
+                  left: 0, right: 0, height: 4,
+                  backgroundColor: p.bg,
+                  borderTopWidth: 1, borderBottomWidth: 1,
+                  borderTopColor: p.line, borderBottomColor: p.line,
+                }}
+              />
+            ))}
           </View>
 
           {/* Columns */}
