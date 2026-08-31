@@ -273,3 +273,61 @@ export function coerceBool(raw: unknown, fallback: boolean): boolean {
  * is how you scroll a wide grid, and on a narrow phone the two can fight.
  */
 export const DEFAULT_SWIPE_VIEW_SWITCH = true;
+
+// ─── How this device draws prayers ───────────────────────────────────────────
+// Per device, deliberately, and separate from the prayer settings themselves.
+//
+// The times are a fact about Amman: the city, the method and the madhab decide
+// them, they are the same on every screen, and they are shared. How a prayer is
+// DRAWN is not a fact about anything. A green line across a phone's grid and a
+// pill on a wide desk monitor are both right, on their own screens, and a phone
+// that adopted the desk's answer would be adopting a decision made about a
+// different piece of glass. Kept here beside the theme and the snap interval,
+// which are per device for exactly the same reason.
+
+export interface PrayerAppearance {
+  /** Whether prayers are drawn across the time grids at all. */
+  showOnCalendar: boolean;
+  /** The line and marker colour. */
+  colour: string;
+  /** Whether the prayer's name is drawn beside its line. */
+  showLabels: boolean;
+}
+
+export const DEFAULT_PRAYER_APPEARANCE: PrayerAppearance = {
+  showOnCalendar: true,
+  colour: '#34d399',
+  showLabels: true,
+};
+
+/** A six-digit hex colour, or nothing. Anything else is not a colour. */
+export function isHexColour(raw: unknown): raw is string {
+  return typeof raw === 'string' && /^#[0-9a-fA-F]{6}$/.test(raw);
+}
+
+/**
+ * Read stored appearance, tolerating anything.
+ *
+ * Each field falls back on its own. A corrupt colour must not also cost you the
+ * choice to show prayers at all, which is the kind of collateral loss that makes
+ * a settings screen feel unreliable.
+ */
+export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
+  const out = { ...DEFAULT_PRAYER_APPEARANCE };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.showOnCalendar === 'boolean') out.showOnCalendar = r.showOnCalendar;
+  if (typeof r.showLabels === 'boolean') out.showLabels = r.showLabels;
+  // Normalised to lower case so two spellings of one colour are one value and
+  // cannot ping-pong a stored setting between them.
+  if (isHexColour(r.colour)) out.colour = r.colour.toLowerCase();
+  return out;
+}
+
+/** What a person reads back on the settings screen. No dashes, ever. */
+export function describePrayerAppearance(a: PrayerAppearance): string {
+  if (!a.showOnCalendar) return 'Not drawn on this phone. The times are still shared.';
+  return a.showLabels
+    ? 'Drawn with the name beside each line.'
+    : 'Drawn as a line, with no name.';
+}

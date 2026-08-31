@@ -105,7 +105,8 @@ type Drag =
 
 export function WeekView({
   dates, dayOf, today, nowMin, clock, interval = 30, detailed,
-  prayersOn, dayStartH = 9, dayEndH = 18, onMenuItem, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
+  prayersOn, dayStartH = 9, dayEndH = 18, onMenuItem,
+  prayerColour, prayerLabels = true, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
 }: {
   dates: string[];
   dayOf: (date: string) => AgendaDay;
@@ -129,6 +130,9 @@ export function WeekView({
    */
   dayStartH?: number;
   dayEndH?: number;
+  /** This device's own prayer colour, and whether to name each line. */
+  prayerColour?: string;
+  prayerLabels?: boolean;
   /**
    * Everything you can do to a block without opening it.
    *
@@ -681,6 +685,8 @@ export function WeekView({
               detailed={detailed}
               clock={clock}
               prayers={d.prayers}
+              prayerColour={prayerColour}
+              prayerLabels={prayerLabels}
               isToday={d.date === today}
               nowMin={d.date === today ? nowMin : null}
               liftedId={lifted?.date === d.date ? lifted.id : null}
@@ -785,7 +791,7 @@ function Ghost({
 
 function DayColumn({
   placed, fromHour, height, pxPerHour, marks, slots, detailed, clock, prayers,
-  isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
+  prayerColour, prayerLabels, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
 }: {
   placed: Placed<GridItem>[];
   fromHour: number;
@@ -796,6 +802,8 @@ function DayColumn({
   detailed?: boolean;
   clock?: string;
   prayers: { key: string; label: string; minutes: number }[];
+  prayerColour?: string;
+  prayerLabels?: boolean;
   isToday: boolean;
   nowMin: number | null;
   /** The block the user has picked up, if it is in this column. */
@@ -963,10 +971,13 @@ function DayColumn({
             alignItems: 'center',
           }}
         >
-          <View style={{ flex: 1, height: 1, backgroundColor: p.ok, opacity: 0.45 }} />
-          {detailed ? (
+          <View style={{
+            flex: 1, height: 1, backgroundColor: prayerColour ?? p.ok, opacity: 0.45,
+          }} />
+          {detailed && prayerLabels !== false ? (
             <Text style={{
-              color: p.ok, fontSize: 9, lineHeight: 11, marginLeft: 4, opacity: 0.9,
+              color: prayerColour ?? p.ok,
+              fontSize: 9, lineHeight: 11, marginLeft: 4, opacity: 0.9,
             }}>
               {pr.label}
             </Text>

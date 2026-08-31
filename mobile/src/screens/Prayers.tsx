@@ -47,6 +47,7 @@ import { Button, Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Segment, Stepper, TextField, Toggle } from '../ui/Fields';
 import { radius, space, HIT } from '../theme';
 import { usePlanner } from '../state/planner';
+import { DEFAULT_PRAYER_APPEARANCE } from '../lib/viewPrefs';
 import { readClientStore } from '../lib/syncClient';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { formatClock, ymd } from '../lib/agenda';
@@ -100,7 +101,11 @@ const FETCH_TIMEOUT_MS = 12_000;
 export function Prayers({ onClose }: { onClose?: () => void }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { shared, edit, data, isPrayerDone, togglePrayer, timeFormat } = usePlanner();
+  const {
+    shared, edit, data, isPrayerDone, togglePrayer, timeFormat,
+    prayerAppearance: appearance, setPrayerAppearance: setAppearance,
+    prayerCacheSummary,
+  } = usePlanner();
 
   const raw = (shared as { prayer?: unknown }).prayer;
   const s = useMemo(() => normalisePrayerSettings(raw), [raw]);
@@ -234,15 +239,9 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
   }, [rows, s, Math.floor(nowMinutes / 5)]);
 
   const [openRow, setOpenRow] = useState<PrayerKey | null>(null);
-  const [methodsOpen, setMethodsOpen] = useState(false);
 
   // The location is committed on a button rather than on every keystroke: each
   // commit changes the cache key, and a key change is a network fetch.
-  const [cityDraft, setCityDraft] = useState(s.city);
-  const [countryDraft, setCountryDraft] = useState(s.country);
-  useEffect(() => { setCityDraft(s.city); setCountryDraft(s.country); }, [s.city, s.country]);
-  const locationChanged = cityDraft.trim() !== s.city || countryDraft.trim() !== s.country;
-  const locationUsable = cityDraft.trim().length > 0 && countryDraft.trim().length > 0;
 
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
@@ -347,167 +346,88 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
               ) : null}
             </View>
 
-            {/* ── Location ── */}
+            {/* ── What this phone actually holds ──
+                The one question worth answering when prayers do not appear on
+                the calendar, and the one nobody can answer from outside the
+                device: does the phone HAVE the times. Guessing at this from the
+                server's own files has been wrong before, so the phone says it
+                itself. */}
             <View style={{ gap: space.sm }}>
-              <Text variant="label" tone="faint">LOCATION</Text>
-              <Card style={{ gap: space.lg }}>
-                <Field label="City" hint="Spelling matters">
-                  <TextField
-                    value={cityDraft}
-                    onChange={setCityDraft}
-                    placeholder="Amman"
-                    invalid={cityDraft.trim().length === 0}
-                  />
-                </Field>
-                <Field label="Country">
-                  <TextField
-                    value={countryDraft}
-                    onChange={setCountryDraft}
-                    placeholder="Jordan"
-                    invalid={countryDraft.trim().length === 0}
-                  />
-                </Field>
-                <Text variant="caption" tone="faint">
-                  The name is geocoded by the times service, so write it the way a map would.
-                  Changing it fetches a fresh month for the new place.
+              <Text variant="label" tone="faint">ON THIS DEVICE</Text>
+              <Card style={{ gap: space.xs }}>
+                <Text variant="body">
+                  {prayerCacheSummary.hasToday
+                    ? "Today's times are saved on this phone."
+                    : prayerCacheSummary.months > 0
+                      ? 'This phone has some months saved, but not today.'
+                      : 'No times are saved on this phone yet.'}
                 </Text>
-                {locationChanged ? (
-                  <Row gap={space.sm}>
-                    <Button
-                      label="Cancel"
-                      variant="quiet"
-                      onPress={() => { setCityDraft(s.city); setCountryDraft(s.country); }}
-                    />
-                    <Button
-                      label="Use this location"
-                      style={{ flex: 1 }}
-                      disabled={!locationUsable}
-                      onPress={() => patch({ city: cityDraft.trim(), country: countryDraft.trim() })}
-                    />
-                  </Row>
-                ) : null}
+                <Text variant="caption" tone="faint">
+                  {prayerCacheSummary.months} {prayerCacheSummary.months === 1 ? 'month' : 'months'} cached.
+                  Looking for {prayerCacheSummary.key}.
+                </Text>
               </Card>
             </View>
 
-            {/* ── How they are calculated ── */}
+            {/* ── Where the times come from ──
+                A calculation method is chosen once and then never again, so the
+                controls for it are not worth the room on a phone. The city, the
+                country, the method and the madhab all live on the PC and arrive
+                here through the shared settings. This says so plainly, because a
+                screen showing a value with no way to change it and no
+                explanation reads as broken rather than as deliberate. */}
             <View style={{ gap: space.sm }}>
-              <Text variant="label" tone="faint">CALCULATION</Text>
-              <Card style={{ gap: space.lg }}>
-                <View style={{ gap: space.sm }}>
-                  <Pressable
-                    onPress={() => setMethodsOpen(v => !v)}
-                    accessibilityRole="button"
-                    accessibilityState={{ expanded: methodsOpen }}
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: HIT }}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text variant="body">Method</Text>
-                      <Text variant="caption" tone="accent" numberOfLines={2} style={{ marginTop: 2 }}>
-                        {PRAYER_METHODS.find(m => m.id === s.method)?.label ?? `Method ${s.method}`}
-                      </Text>
-                    </View>
-                    <Text variant="title" tone="faint">{methodsOpen ? '⌃' : '⌄'}</Text>
-                  </Pressable>
-                  <Text variant="caption" tone="faint">
-                    The authority whose angles are used. This is the single biggest reason two apps
-                    disagree: the same city can differ by twenty minutes between methods.
-                  </Text>
-
-                  {methodsOpen ? (
-                    <View style={{
-                      borderWidth: 1, borderColor: p.line, borderRadius: radius.md,
-                      backgroundColor: p.surfaceAlt, overflow: 'hidden',
-                    }}>
-                      {PRAYER_METHODS.map((m, i) => {
-                        const on = m.id === s.method;
-                        return (
-                          <Pressable
-                            key={m.id}
-                            onPress={() => { patch({ method: m.id }); setMethodsOpen(false); }}
-                            android_ripple={{ color: p.accentSoft }}
-                            accessibilityRole="button"
-                            accessibilityState={{ selected: on }}
-                            style={{
-                              flexDirection: 'row', alignItems: 'center', gap: space.sm,
-                              paddingHorizontal: space.md, minHeight: HIT,
-                              borderTopWidth: i === 0 ? 0 : 1, borderTopColor: p.line,
-                              backgroundColor: on ? p.accentSoft : 'transparent',
-                            }}
-                          >
-                            <Text variant={on ? 'bodyStrong' : 'body'} tone={on ? 'accent' : 'soft'} style={{ flex: 1 }}>
-                              {m.label}
-                            </Text>
-                            {on ? <Text variant="body" tone="accent">✓</Text> : null}
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  ) : null}
-                </View>
-
-                <Divider />
-
-                <Field label="Asr madhab" hint={PRAYER_SCHOOLS.find(x => x.id === s.school)?.hint}>
-                  <Segment
-                    options={PRAYER_SCHOOLS.map(x => ({ key: String(x.id), label: x.label }))}
-                    value={String(s.school)}
-                    onChange={k => patch({ school: k === '1' ? 1 : 0 })}
-                  />
-                </Field>
+              <Text variant="label" tone="faint">HOW THESE ARE WORKED OUT</Text>
+              <Card style={{ gap: space.xs }}>
+                <Text variant="body">{describePrayerConfig(s)}</Text>
+                <Text variant="caption" tone="faint">
+                  Set on your PC, in Settings then Prayer. Changes there reach this phone on
+                  the next sync.
+                </Text>
               </Card>
             </View>
 
-            {/* ── The PC's own drawing settings ── */}
+            {/* ── How THIS phone draws them ──
+                Appearance is a property of the screen in your hand, not of the
+                planner. A prayer drawn as a green line across a phone grid and
+                the same prayer drawn as a pill on a wide desk monitor are the
+                right answer in both places, so these are kept per device
+                alongside the theme and the snap interval, and the PC can never
+                push its choice here. The TIMES are shared; only the drawing is
+                not. */}
             <View style={{ gap: space.sm }}>
-              <Text variant="label" tone="faint">ON YOUR PC</Text>
+              <Text variant="label" tone="faint">ON THIS PHONE</Text>
               <Card style={{ gap: space.lg }}>
-                <Text variant="caption" tone="faint">
-                  These describe how the desk window draws a prayer. They are here because the
-                  setting is shared, not because this phone uses them.
-                </Text>
-
-                <Field label="Drawn as" hint={PRAYER_STYLES.find(x => x.id === s.style)?.hint}>
-                  <Segment
-                    options={PRAYER_STYLES.map(x => ({ key: x.id, label: x.label }))}
-                    value={s.style}
-                    onChange={k => patch({ style: k })}
-                  />
-                </Field>
+                <Toggle
+                  label="Show on the calendar"
+                  hint="Draws each prayer across the day, week and custom grids."
+                  value={appearance.showOnCalendar}
+                  onChange={v => setAppearance({ ...appearance, showOnCalendar: v })}
+                />
 
                 <Field label="Colour">
                   <ColourPicker
-                    value={s.color}
+                    value={appearance.colour}
+                    // Clearing a swatch means "back to the default", not "no
+                    // colour": a line has to be drawn in something.
+                    onChange={hex => setAppearance({
+                      ...appearance,
+                      colour: hex ?? DEFAULT_PRAYER_APPEARANCE.colour,
+                    })}
                     swatches={PRAYER_COLOURS.map(hex => ({ key: hex, hex }))}
-                    // Tapping the chosen swatch again clears it in the shared
-                    // picker. A prayer with no colour has nothing to draw, so
-                    // that press keeps the current one instead.
-                    onChange={next => patch({ color: next ?? s.color })}
                   />
                 </Field>
 
-                <Toggle
-                  label="Show in the side window"
-                  hint="Prayers appear on the widget's timeline and in its day list"
-                  value={s.showInWidget}
-                  onChange={v => patch({ showInWidget: v })}
-                />
-
-                <Row style={{ alignItems: 'center', gap: space.md }}>
-                  <View style={{ flex: 1 }}>
-                    <Text variant="body">Draw up to</Text>
-                    <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-                      How far ahead they are drawn. Past days always keep theirs.
-                    </Text>
-                  </View>
-                  <Stepper
-                    value={s.horizonDays}
-                    min={PRAYER_HORIZON_MIN}
-                    max={PRAYER_HORIZON_MAX}
-                    step={s.horizonDays >= 30 ? 5 : 1}
-                    onChange={n => patch({ horizonDays: n })}
-                    format={n => (n === 1 ? '1 day' : `${n} days`)}
+                <Field
+                  label="Labels on the grid"
+                  hint="Off keeps the line and drops the name, which is easier to read on a busy week."
+                >
+                  <Toggle
+                    label="Show the name"
+                    value={appearance.showLabels}
+                    onChange={v => setAppearance({ ...appearance, showLabels: v })}
                   />
-                </Row>
+                </Field>
               </Card>
             </View>
 

@@ -99,7 +99,7 @@ export function Today({
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
     prayersOn, isPrayerDone, togglePrayer, customWindow, events, categories,
     dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
-    unreadNotifications,
+    unreadNotifications, prayerAppearance,
   } = usePlanner();
 
   const today = ymd(new Date());
@@ -547,7 +547,9 @@ export function Today({
           nowMin={weekDates.includes(today) ? nowMin : null}
           clock={timeFormat}
           interval={interval}
-          prayersOn={prayersOn}
+          prayersOn={prayerAppearance.showOnCalendar ? prayersOn : undefined}
+          prayerColour={prayerAppearance.colour}
+          prayerLabels={prayerAppearance.showLabels}
           dayStartH={dayWindow.start}
           dayEndH={dayWindow.end}
           onCreateRange={createFromDrag}
@@ -568,7 +570,9 @@ export function Today({
           clock={timeFormat}
           interval={interval}
           detailed
-          prayersOn={prayersOn}
+          prayersOn={prayerAppearance.showOnCalendar ? prayersOn : undefined}
+          prayerColour={prayerAppearance.colour}
+          prayerLabels={prayerAppearance.showLabels}
           dayStartH={dayWindow.start}
           dayEndH={dayWindow.end}
           onCreateRange={createFromDrag}
@@ -586,7 +590,9 @@ export function Today({
           clock={timeFormat}
           interval={interval}
           detailed={customDates.length <= 2}
-          prayersOn={prayersOn}
+          prayersOn={prayerAppearance.showOnCalendar ? prayersOn : undefined}
+          prayerColour={prayerAppearance.colour}
+          prayerLabels={prayerAppearance.showLabels}
           dayStartH={dayWindow.start}
           dayEndH={dayWindow.end}
           onCreateRange={createFromDrag}

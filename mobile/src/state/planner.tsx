@@ -44,8 +44,9 @@ import { createExpoRunner, openPlannerDatabase } from '../lib/sqlite';
 import { createTransport, isAuthError, type PlannerTransport } from '../lib/syncTransport';
 import { prefs } from '../lib/prefs';
 import {
-  DEFAULT_DAY_WINDOW, DEFAULT_SWIPE_VIEW_SWITCH, withDayEnd, withDayStart,
-  type DayWindow,
+  DEFAULT_DAY_WINDOW, DEFAULT_PRAYER_APPEARANCE, DEFAULT_SWIPE_VIEW_SWITCH,
+  withDayEnd, withDayStart,
+  type DayWindow, type PrayerAppearance,
 } from '../lib/viewPrefs';
 import {
   planOccurrenceDelete, planOccurrenceEdit, type OccurrenceScope,
@@ -282,6 +283,17 @@ interface PlannerContextValue {
   /** Whether a sideways swipe changes the view as well as the date. */
   swipeViewSwitch: boolean;
   setSwipeViewSwitch(on: boolean): void;
+  /** How this phone draws prayers. Its own, never the desk's. */
+  prayerAppearance: PrayerAppearance;
+  setPrayerAppearance(look: PrayerAppearance): void;
+  /**
+   * How many months of prayer times this phone actually holds.
+   *
+   * Shown on the prayer screen. When the times do not appear on the calendar the
+   * question is always the same, and unanswerable from the outside: does the
+   * phone HAVE them. This answers it on the device rather than by inference.
+   */
+  prayerCacheSummary: { months: number; key: string; hasToday: boolean };
   /** The prayers of one day, already offset, filtered and sorted. */
   prayersOn(date: string): PrayerOccurrence[];
   /** Whether a given prayer has been marked as prayed. */
@@ -340,6 +352,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   /** A tick purely so "in 20 minutes" stops being a lie a minute later. */
   const [notifyClock, setNotifyClock] = useState(() => Date.now());
   const [swipeViewSwitch, setSwipeState] = useState(DEFAULT_SWIPE_VIEW_SWITCH);
+  const [prayerAppearance, setPrayerLook] = useState<PrayerAppearance>(DEFAULT_PRAYER_APPEARANCE);
 
   const storageRef = useRef<SyncStorage | null>(null);
   const transportRef = useRef<PlannerTransport | null>(null);
@@ -386,6 +399,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
           prefs.getInterval(), prefs.getCustomWindow(),
           prefs.getDayWindow(), prefs.getSwipeViewSwitch(),
         ]);
+        setPrayerLook(await prefs.getPrayerAppearance());
         setIntervalState(savedInterval);
         setCustomWindowState(savedWindow);
         setDayWindowState(savedDayWindow);
@@ -790,6 +804,17 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     () => readClientStore(data, 'prayerTimes') as Record<string, any>,
     [data],
   );
+
+  /** What this phone holds, so the prayer screen can say so plainly. */
+  const prayerCacheSummary = useMemo(() => {
+    const today = ymd(new Date());
+    const key = `${prayerQueryKey(prayerSettings)}|${today.slice(0, 4)}-${Number(today.slice(5, 7))}`;
+    return {
+      months: Object.keys(prayerMonths ?? {}).length,
+      key,
+      hasToday: Boolean((prayerMonths?.[key] as any)?.days?.[today]),
+    };
+  }, [prayerMonths, prayerSettings]);
 
   const prayersOn = useCallback((date: string): PrayerOccurrence[] => {
     if (!prayerSettings.enabled) return [];
@@ -1242,6 +1267,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       setSwipeState(on);
       void prefs.setSwipeViewSwitch(on);
     },
+    prayerAppearance,
+    setPrayerAppearance: (look: PrayerAppearance) => {
+      setPrayerLook(look);
+      void prefs.setPrayerAppearance(look);
+    },
+    prayerCacheSummary,
     answerConflict,
     resetLocal,
     lastError,

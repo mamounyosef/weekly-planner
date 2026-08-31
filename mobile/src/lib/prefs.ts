@@ -31,6 +31,9 @@ import {
   type DayWindow,
   type SnapInterval,
   type SpanWindow,
+  DEFAULT_PRAYER_APPEARANCE,
+  coercePrayerAppearance,
+  type PrayerAppearance,
 } from './viewPrefs';
 
 const KEY_SERVER = 'planner.serverUrl';
@@ -42,6 +45,7 @@ const KEY_INTERVAL = 'planner.interval';
 const KEY_THEME = 'planner.themeMode';
 const KEY_FOCUS_TIMER = 'planner.focusTimer';
 const KEY_NOTIFY_CENTRE = 'planner.notifyCentre';
+const KEY_PRAYER_LOOK = 'planner.prayerAppearance';
 const KEY_CUSTOM_BEFORE = 'planner.customDaysBefore';
 const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
 const KEY_DAY_START = 'planner.dayStartH';
@@ -250,6 +254,25 @@ export const prefs = {
     }
   },
   setNotifyCentre: (state: unknown) => write(KEY_NOTIFY_CENTRE, JSON.stringify(state)),
+
+  /**
+   * How THIS phone draws prayers.
+   *
+   * Per device, like the theme and the snap interval. The times themselves are
+   * shared, because they are a fact about a city; how they are drawn is a fact
+   * about a screen, and the desk must never be able to push its answer here.
+   */
+  async getPrayerAppearance(): Promise<PrayerAppearance> {
+    const raw = await read(KEY_PRAYER_LOOK);
+    if (!raw) return DEFAULT_PRAYER_APPEARANCE;
+    try {
+      return coercePrayerAppearance(JSON.parse(raw));
+    } catch {
+      return DEFAULT_PRAYER_APPEARANCE;
+    }
+  },
+  setPrayerAppearance: (look: PrayerAppearance) =>
+    write(KEY_PRAYER_LOOK, JSON.stringify(coercePrayerAppearance(look))),
 
   async signOut(): Promise<void> {
     await write(KEY_SESSION, null);

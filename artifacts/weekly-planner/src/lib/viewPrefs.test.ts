@@ -42,6 +42,10 @@ import {
   withDayEnd,
   withDayStart,
   type DayWindow,
+  DEFAULT_PRAYER_APPEARANCE,
+  coercePrayerAppearance,
+  describePrayerAppearance,
+  isHexColour,
 } from './viewPrefs';
 
 /** Every value a key-value store has ever been caught handing back. */
@@ -346,6 +350,70 @@ function main() {
     assert.equal(DAY_HOUR_MIN, 0);
     assert.equal(DAY_HOUR_MAX, 24);
   }
+
+  console.log('--- 11. HOW THIS DEVICE DRAWS PRAYERS ---');
+  {
+    // The defaults are themselves legal, and survive a round trip.
+    assert.deepEqual(coercePrayerAppearance(DEFAULT_PRAYER_APPEARANCE), DEFAULT_PRAYER_APPEARANCE);
+    assert.deepEqual(
+      coercePrayerAppearance(JSON.parse(JSON.stringify(DEFAULT_PRAYER_APPEARANCE))),
+      DEFAULT_PRAYER_APPEARANCE);
+
+    // Anything at all can be in storage, and none of it may throw.
+    const rubbish: unknown[] = [
+      null, undefined, 0, 1, -1, NaN, Infinity, '', 'x', '{}', '[]', true, false,
+      [], [1, 2], {}, { colour: 1 }, { colour: '#12345' }, { colour: '#1234567' },
+      { colour: 'red' }, { colour: '#GGGGGG' }, { colour: null }, { showLabels: 'yes' },
+      { showOnCalendar: 'no' }, { showOnCalendar: 1 }, () => {},
+      new Date(),
+    ];
+    for (const raw of rubbish) {
+      const got = coercePrayerAppearance(raw as unknown);
+      assert.equal(typeof got.showOnCalendar, 'boolean', `${String(raw)} gives a boolean`);
+      assert.equal(typeof got.showLabels, 'boolean');
+      assert.ok(isHexColour(got.colour), `${String(raw)} gives a real colour`);
+    }
+
+    // ONE BAD FIELD DOES NOT COST THE OTHERS. That is the whole reason to coerce
+    // per field rather than reject the object: a corrupt colour must not also
+    // take away the choice of whether prayers are drawn at all.
+    const partial = coercePrayerAppearance({ colour: 'not a colour', showOnCalendar: false });
+    assert.equal(partial.showOnCalendar, false, 'the good field survived');
+    assert.equal(partial.colour, DEFAULT_PRAYER_APPEARANCE.colour, 'the bad one fell back');
+
+    // Case is normalised, so one colour is one value and cannot ping-pong.
+    assert.equal(coercePrayerAppearance({ colour: '#AABBCC' }).colour, '#aabbcc');
+    assert.equal(
+      coercePrayerAppearance({ colour: '#aabbcc' }).colour,
+      coercePrayerAppearance({ colour: '#AaBbCc' }).colour,
+      'the same colour written two ways is one value');
+
+    // Idempotent: coercing what was already coerced changes nothing.
+    for (const raw of rubbish) {
+      const once = coercePrayerAppearance(raw as unknown);
+      assert.deepEqual(coercePrayerAppearance(once), once, 'stable under a second pass');
+    }
+
+    // isHexColour is exactly as strict as it claims to be.
+    for (const good of ['#000000', '#ffffff', '#34d399', '#ABCDEF']) {
+      assert.ok(isHexColour(good), `${good} is a colour`);
+    }
+    for (const bad of ['#fff', '#1234567', 'ffffff', '#12345g', '', ' #ffffff', '#ffffff ', null, 3]) {
+      assert.ok(!isHexColour(bad as unknown), `${String(bad)} is not a colour`);
+    }
+
+    // Every reachable combination has a sentence, and none of them uses a dash.
+    for (const showOnCalendar of [true, false]) {
+      for (const showLabels of [true, false]) {
+        const line = describePrayerAppearance({
+          ...DEFAULT_PRAYER_APPEARANCE, showOnCalendar, showLabels,
+        });
+        assert.ok(line.length > 0, 'there is something to read');
+        assert.ok(!line.includes('—') && !line.includes('–'), `no dash in "${line}"`);
+      }
+    }
+  }
+
 
   console.log('\nALL PASS (viewPrefs: day window invariant, storage round trip, rubbish tolerance)');
 }
