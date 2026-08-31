@@ -371,7 +371,11 @@ export function createTransport(opts: TransportOptions) {
     // speaks the same endpoint and reconciles with `mergeFocusTimers`.
     async getFocusTimer(): Promise<Record<string, unknown>> {
       const res = await request<Record<string, unknown>>('api/focus-timer', 'GET');
-      return (res && typeof res === 'object') ? res : {};
+      // An ARRAY is not a timer. `typeof [] === 'object'` is true, so the
+      // obvious guard lets one through and the caller then reads fields off it
+      // that are all undefined, which coerces to "no session" and looks exactly
+      // like the desk having stopped one.
+      return (res && typeof res === 'object' && !Array.isArray(res)) ? res : {};
     },
 
     async putFocusTimer(state: Record<string, unknown>): Promise<void> {
@@ -384,7 +388,7 @@ export function createTransport(opts: TransportOptions) {
     // server can do. These are the same three endpoints the PC's own bell uses.
     async notifyStore(): Promise<Record<string, unknown>> {
       const res = await request<Record<string, unknown>>('api/notifications', 'GET');
-      return (res && typeof res === 'object') ? res : {};
+      return (res && typeof res === 'object' && !Array.isArray(res)) ? res : {};
     },
 
     /**

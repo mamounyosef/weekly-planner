@@ -536,6 +536,126 @@ async function main() {
       'Sending "Cookie: planner_session=null" would be worse than sending nothing');
   }
 
+  console.log('--- 19. THE FOCUS TIMER GOES OVER ITS OWN ENDPOINT ---');
+  {
+    // NOT the op log, deliberately. A running timer is one fact rather than a
+    // record of independently editable fields, and per-field merging would fight
+    // the checkpoint a session writes every few seconds.
+    let seen: { url: string; init: any } | null = null;
+    const t = createTransport({
+      baseUrl: 'http://pc.local:5173',
+      fetchImpl: respond({
+        body: JSON.stringify({ running: true, anchor: 123, plannedSeconds: 1500 }),
+        onCall: (url, init) => { seen = { url, init }; },
+      }),
+    });
+
+    const got = await t.getFocusTimer();
+    assert.ok(seen, 'a request was made');
+    assert.equal(seen!.url, 'http://pc.local:5173/api/focus-timer');
+    assert.equal(seen!.init.method, 'GET');
+    assert.equal((got as any).plannedSeconds, 1500, 'the timer came back');
+
+    await t.putFocusTimer({ running: false } as any);
+    assert.equal(seen!.init.method, 'POST');
+    assert.deepEqual(JSON.parse(seen!.init.body), { running: false },
+      'the state is the whole body, not wrapped');
+
+    // Valid JSON that is not a record becomes an empty one. An ARRAY is the
+    // case worth naming: `typeof [] === 'object'`, so the obvious guard lets one
+    // through, and the caller then reads fields off it that are all undefined,
+    // which coerces to "no session" and looks exactly like the desk having
+    // stopped one.
+    // An EMPTY body belongs here too: a 200 with nothing in it is the server
+    // saying there is no timer, which is a fact rather than a fault.
+    for (const body of ['', 'null', '[]', '[1,2]', '"text"', '42', 'true']) {
+      const bad = createTransport({
+        baseUrl: 'http://pc.local:5173', fetchImpl: respond({ body }),
+      });
+      const out = await bad.getFocusTimer();
+      assert.ok(out !== null && typeof out === 'object' && !Array.isArray(out),
+        `${body} gives a record`);
+      assert.deepEqual(out, {}, `${body} gives an EMPTY record`);
+    }
+
+    // A body that is not JSON at all is a broken server, not an empty timer, so
+    // it throws and the caller keeps the timer it already has.
+    for (const body of ['not json', '<html>hi</html>']) {
+      const bad = createTransport({
+        baseUrl: 'http://pc.local:5173', fetchImpl: respond({ body }),
+      });
+      await assert.rejects(() => bad.getFocusTimer(), `${JSON.stringify(body)} is refused`);
+    }
+  }
+
+  console.log('--- 20. THE NOTIFICATION CENTRE SPEAKS THE ENGINE\'S OWN VERBS ---');
+  {
+    const calls: { url: string; init: any }[] = [];
+    const t = createTransport({
+      baseUrl: 'http://pc.local:5173',
+      fetchImpl: respond({
+        body: JSON.stringify({ items: {}, updatedAt: 5 }),
+        onCall: (url, init) => calls.push({ url, init }),
+      }),
+    });
+
+    const store = await t.notifyStore();
+    assert.equal(calls[0].url, 'http://pc.local:5173/api/notifications');
+    assert.equal(calls[0].init.method, 'GET');
+    assert.equal((store as any).updatedAt, 5);
+
+    // LOCAL-FIRED CARRIES THE KEYS AND THE DEVICE. The engine skips any key it
+    // has no record of, which is exactly why this call has to happen before the
+    // actions below: the other order drops the dismissal silently.
+    await t.notifyLocalFired(['event:a:2026-08-31:-15'], PH);
+    const fired = calls[calls.length - 1];
+    assert.equal(fired.url, 'http://pc.local:5173/api/notifications/local-fired');
+    assert.equal(fired.init.method, 'POST');
+    assert.deepEqual(JSON.parse(fired.init.body),
+      { keys: ['event:a:2026-08-31:-15'], deviceId: PH });
+
+    // EVERY VERB THE ENGINE ACTUALLY IMPLEMENTS. A name it does not know is
+    // accepted by the endpoint and then quietly does nothing, so the set the
+    // phone sends is pinned here against `notification-engine.ts`.
+    for (const action of ['read', 'unread', 'done', 'clear', 'snooze']) {
+      await t.notifyAction(action, ['k1', 'k2'], PH);
+      const last = calls[calls.length - 1];
+      assert.equal(last.url, 'http://pc.local:5173/api/notifications/action');
+      assert.equal(last.init.method, 'POST');
+      const body = JSON.parse(last.init.body);
+      assert.equal(body.action, action);
+      assert.deepEqual(body.keys, ['k1', 'k2']);
+      assert.equal(body.deviceId, PH);
+      assert.ok(!('minutes' in body), `${action} sends no minutes it does not have`);
+    }
+
+    // A snooze carries its length, and only when there is one.
+    await t.notifyAction('snooze', ['k1'], PH, 20);
+    assert.equal(JSON.parse(calls[calls.length - 1].init.body).minutes, 20);
+    await t.notifyAction('snooze', ['k1'], PH, 0);
+    assert.equal(JSON.parse(calls[calls.length - 1].init.body).minutes, 0,
+      'a zero is a real value, not an absent one');
+
+    // An unreachable PC throws rather than reporting success, so the caller
+    // leaves the decision unstamped and sends it again next time.
+    const dead = createTransport({
+      baseUrl: 'http://pc.local:5173',
+      fetchImpl: respond({ throws: new Error('network down') }),
+    });
+    await assert.rejects(() => dead.notifyAction('read', ['k'], PH), 'a failure is a failure');
+    await assert.rejects(() => dead.notifyLocalFired(['k'], PH));
+    await assert.rejects(() => dead.getFocusTimer());
+
+    // And a store that is valid JSON but not a record is an empty one.
+    for (const body of ['null', '[]', '42']) {
+      const bad = createTransport({
+        baseUrl: 'http://pc.local:5173', fetchImpl: respond({ body }),
+      });
+      assert.deepEqual(await bad.notifyStore(), {}, `${body} gives an empty store`);
+    }
+  }
+
+
   console.log('\nALL PASS (HTTP transport: URLs, cookies, portals, timeouts, coercion)');
 }
 
