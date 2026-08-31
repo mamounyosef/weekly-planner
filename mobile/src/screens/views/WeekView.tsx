@@ -57,7 +57,10 @@ import { Animated, PanResponder, Pressable, ScrollView, View } from 'react-nativ
 
 import { Text, useTheme } from '../../ui/kit';
 import { radius, space } from '../../theme';
-import { layoutDay, hourMarks, yOf, type Placeable, type Placed } from '../../lib/grid';
+import {
+  layoutDay, hourMarks, yOf, prayerChipMode,
+  type Placeable, type Placed, type PrayerChipMode,
+} from '../../lib/grid';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
 } from '../../lib/dragGrid';
@@ -106,7 +109,7 @@ type Drag =
 export function WeekView({
   dates, dayOf, today, nowMin, clock, interval = 30, detailed,
   prayersOn, dayStartH = 9, dayEndH = 18, onMenuItem,
-  prayerColour, prayerLabels = true, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
+  prayerColour, prayerLabels = true, isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
 }: {
   dates: string[];
   dayOf: (date: string) => AgendaDay;
@@ -133,6 +136,9 @@ export function WeekView({
   /** This device's own prayer colour, and whether to name each line. */
   prayerColour?: string;
   prayerLabels?: boolean;
+  /** Whether a prayer has been marked as prayed, and how to flip it. */
+  isPrayerDone?: (date: string, key: string) => boolean;
+  onTogglePrayer?: (date: string, key: string) => void;
   /**
    * Everything you can do to a block without opening it.
    *
@@ -516,6 +522,16 @@ export function WeekView({
 
   const columnCount = days.length;
   const colW = gridW > 0 && columnCount > 0 ? (gridW - RAIL) / columnCount : 0;
+
+  /**
+   * How much of a prayer marker fits, from the MEASURED column width.
+   *
+   * The marker drops its time, then its name, as the column narrows. Deriving
+   * that from the number of days instead would be wrong on a landscape phone or
+   * a tablet, where seven columns are wide enough for the whole pill. The width
+   * is already measured here for the drag layer, so this costs nothing.
+   */
+  const chipMode: PrayerChipMode = prayerChipMode(colW);
   const dragCol = drag ? Math.max(0, dates.indexOf(drag.date)) : -1;
 
   return (
@@ -687,6 +703,9 @@ export function WeekView({
               prayers={d.prayers}
               prayerColour={prayerColour}
               prayerLabels={prayerLabels}
+              chipMode={chipMode}
+              isPrayerDone={isPrayerDone ? (key: string) => isPrayerDone(d.date, key) : undefined}
+              onTogglePrayer={onTogglePrayer ? (key: string) => onTogglePrayer(d.date, key) : undefined}
               isToday={d.date === today}
               nowMin={d.date === today ? nowMin : null}
               liftedId={lifted?.date === d.date ? lifted.id : null}
@@ -791,7 +810,7 @@ function Ghost({
 
 function DayColumn({
   placed, fromHour, height, pxPerHour, marks, slots, detailed, clock, prayers,
-  prayerColour, prayerLabels, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
+  prayerColour, prayerLabels, chipMode, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
 }: {
   placed: Placed<GridItem>[];
   fromHour: number;
@@ -804,6 +823,9 @@ function DayColumn({
   prayers: { key: string; label: string; minutes: number }[];
   prayerColour?: string;
   prayerLabels?: boolean;
+  chipMode: PrayerChipMode;
+  isPrayerDone?: (key: string) => boolean;
+  onTogglePrayer?: (key: string) => void;
   isToday: boolean;
   nowMin: number | null;
   /** The block the user has picked up, if it is in this column. */
@@ -956,34 +978,79 @@ function DayColumn({
         );
       })}
 
-      {/* Prayers, as lines across the grid rather than blocks in it. A prayer
-          has a time and no length, so a block would be a lie about its shape,
-          and it would take a column from the events it sits beside. */}
-      {prayers.map(pr => (
-        <View
-          key={pr.key}
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            top: yOf(pr.minutes, pxPerHour, fromHour),
-            left: 0, right: 0,
-            flexDirection: 'row',
-            alignItems: 'center',
-          }}
-        >
+      {/* Prayers: a hairline with a pill sitting in it, exactly as the desk
+          draws them. A prayer has a time and no length, so a block would be a
+          lie about its shape and would steal a column from the events beside it.
+          The pill carries the tap, the line does not, so nothing here can eat a
+          drag meant for the grid. */}
+      {prayers.map(pr => {
+        const colour = prayerColour ?? p.ok;
+        const done = isPrayerDone?.(pr.key) ?? false;
+        const line = (
           <View style={{
-            flex: 1, height: 1, backgroundColor: prayerColour ?? p.ok, opacity: 0.45,
+            flex: 1, height: 1, backgroundColor: colour, opacity: done ? 0.4 : 0.85,
           }} />
-          {detailed && prayerLabels !== false ? (
-            <Text style={{
-              color: prayerColour ?? p.ok,
-              fontSize: 9, lineHeight: 11, marginLeft: 4, opacity: 0.9,
-            }}>
-              {pr.label}
-            </Text>
-          ) : null}
-        </View>
-      ))}
+        );
+        return (
+          <View
+            key={pr.key}
+            pointerEvents="box-none"
+            style={{
+              position: 'absolute',
+              top: yOf(pr.minutes, pxPerHour, fromHour) - 8,
+              left: 0, right: 0, height: 16,
+              flexDirection: 'row',
+              alignItems: 'center',
+              zIndex: 3,
+              opacity: done ? 0.55 : 1,
+            }}
+          >
+            {line}
+            <Pressable
+              onPress={() => onTogglePrayer?.(pr.key)}
+              hitSlop={6}
+              accessibilityRole="button"
+              accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 3,
+                height: 15,
+                marginHorizontal: 3,
+                paddingLeft: chipMode === 'dot' ? 3 : 5,
+                paddingRight: chipMode === 'dot' ? 3 : 6,
+                borderRadius: 999,
+                borderWidth: 1,
+                borderColor: colour,
+                // The card colour, not the grid's: the pill has to read as
+                // sitting ON the line rather than being a gap in it.
+                backgroundColor: p.surface,
+              }}
+            >
+              <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
+                {done ? '◉' : '○'}
+              </Text>
+              {chipMode !== 'dot' && prayerLabels !== false ? (
+                <Text style={{
+                  color: colour,
+                  fontSize: 9,
+                  lineHeight: 11,
+                  fontWeight: '700',
+                  textDecorationLine: done ? 'line-through' : 'none',
+                }}>
+                  {pr.label}
+                </Text>
+              ) : null}
+              {chipMode === 'full' && prayerLabels !== false ? (
+                <Text style={{ color: colour, fontSize: 8.5, lineHeight: 11, opacity: 0.8 }}>
+                  {formatClock(pr.minutes, clock)}
+                </Text>
+              ) : null}
+            </Pressable>
+            {line}
+          </View>
+        );
+      })}
 
       {nowMin !== null ? (
         <View style={{

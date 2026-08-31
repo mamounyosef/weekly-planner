@@ -14,6 +14,7 @@ import {
   layoutDay,
   monthGrid,
   yOf,
+  prayerChipMode,
   MIN_BLOCK_MINUTES,
   type Placeable,
 } from './grid';
@@ -187,6 +188,42 @@ function main() {
     assert.ok(weeks.flat().includes('2026-08-01'), 'and the 1st is on the grid');
     assert.ok(weeks.flat().includes('2026-08-31'), 'along with the last day');
   }
+
+  console.log('--- 10. HOW MUCH OF A PRAYER MARKER FITS ---');
+  {
+    // The thresholds themselves, so a change to them fails here rather than in a
+    // week view where the label is quietly clipped.
+    assert.equal(prayerChipMode(400), 'full', 'a day column fits everything');
+    assert.equal(prayerChipMode(132), 'full', 'exactly at the full threshold');
+    assert.equal(prayerChipMode(131.9), 'name', 'just under it drops the time');
+    assert.equal(prayerChipMode(78), 'name', 'exactly at the name threshold');
+    assert.equal(prayerChipMode(77.9), 'dot', 'just under it drops the name');
+    assert.equal(prayerChipMode(45), 'dot', 'a seven column week gets a ring');
+
+    // It never throws and never returns anything else, whatever it is handed.
+    for (const w of [0, -1, -1000, NaN, Infinity, -Infinity, 0.0001, 1e9]) {
+      assert.ok(['full', 'name', 'dot'].includes(prayerChipMode(w)),
+        `${w} gives a real mode`);
+    }
+    // An unmeasured column falls to the SMALLEST marker, not the largest.
+    // Infinity is not a measurement any more than NaN is, and guessing "full"
+    // for it would draw a label that does not fit the moment a real width
+    // arrives, which is a flicker on every first paint.
+    assert.equal(prayerChipMode(NaN), 'dot', 'an unmeasured column is not full');
+    assert.equal(prayerChipMode(Infinity), 'dot', 'and neither is a nonsense one');
+
+    // MONOTONIC. A wider column may never show LESS than a narrower one, which
+    // is the property that stops a marker flickering between two modes while a
+    // layout settles.
+    const rank: Record<string, number> = { dot: 0, name: 1, full: 2 };
+    let last = -1;
+    for (let w = 0; w <= 400; w += 0.5) {
+      const here = rank[prayerChipMode(w)];
+      assert.ok(here >= last, `width ${w} does not go backwards`);
+      last = here;
+    }
+  }
+
 
   console.log('\nALL PASS (grid: overlap columns, positions, month shape)');
 }

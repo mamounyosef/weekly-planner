@@ -151,3 +151,29 @@ export function monthGrid(
   }
   return { weeks, month };
 }
+
+// ─── Prayer markers ──────────────────────────────────────────────────────────
+
+/**
+ * How much of a prayer marker fits in one column.
+ *
+ * The desk draws a hairline with a pill sitting in it: a ring, the name, the
+ * time. A phone showing seven days gives each column about forty-five points,
+ * which is not enough for the word "Maghrib", let alone a time beside it. The
+ * honest answer is to drop content rather than to squash it, because a truncated
+ * label reads as a rendering fault while a bare ring on a coloured line reads as
+ * a deliberate mark that the day view will explain.
+ *
+ * Driven by measured width rather than column count, so a wide phone in
+ * landscape gets the fuller marker it can actually fit.
+ */
+export type PrayerChipMode = 'full' | 'name' | 'dot';
+
+export function prayerChipMode(columnWidth: number): PrayerChipMode {
+  if (!Number.isFinite(columnWidth) || columnWidth <= 0) return 'dot';
+  // Roughly: a ring is 9pt, a name runs to about 52pt, a time about 34pt, plus
+  // the padding and the hairline either side. Anything tighter loses a word.
+  if (columnWidth >= 132) return 'full';
+  if (columnWidth >= 78) return 'name';
+  return 'dot';
+}
