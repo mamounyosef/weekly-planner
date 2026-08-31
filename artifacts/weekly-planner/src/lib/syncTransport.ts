@@ -362,6 +362,48 @@ export function createTransport(opts: TransportOptions) {
     async resolve(deviceId: string, conflictId: string, choice: ResolveChoice): Promise<unknown> {
       return request('api/sync/resolve', 'POST', { deviceId, conflictId, choice });
     },
+
+    // ── The focus timer ──
+    // Deliberately NOT the op log. A running timer is one fact, not a record of
+    // independently editable fields, and per-field merging would fight the
+    // periodic checkpoint the phone writes while a session runs. The PC has
+    // always kept it as a whole object behind `/api/focus-timer`, so the phone
+    // speaks the same endpoint and reconciles with `mergeFocusTimers`.
+    async getFocusTimer(): Promise<Record<string, unknown>> {
+      const res = await request<Record<string, unknown>>('api/focus-timer', 'GET');
+      return (res && typeof res === 'object') ? res : {};
+    },
+
+    async putFocusTimer(state: Record<string, unknown>): Promise<void> {
+      await request('api/focus-timer', 'POST', state);
+    },
+
+    // ── The notification centre ──
+    // Read state is server-owned and shared: dealing with something here has to
+    // close the Windows toast and reach every other device, which only the
+    // server can do. These are the same three endpoints the PC's own bell uses.
+    async notifyStore(): Promise<Record<string, unknown>> {
+      const res = await request<Record<string, unknown>>('api/notifications', 'GET');
+      return (res && typeof res === 'object') ? res : {};
+    },
+
+    /**
+     * Tell the server this phone rang, BEFORE reporting what was done about it.
+     * The engine ignores an action on a key it has no record of, so the other
+     * order silently drops the dismissal and the reminder is sent again.
+     */
+    async notifyLocalFired(keys: readonly string[], deviceId: string): Promise<void> {
+      await request('api/notifications/local-fired', 'POST', { keys, deviceId });
+    },
+
+    async notifyAction(
+      action: string, keys: readonly string[], deviceId: string, minutes?: number,
+    ): Promise<void> {
+      await request('api/notifications/action', 'POST',
+        minutes === undefined
+          ? { action, keys, deviceId }
+          : { action, keys, deviceId, minutes });
+    },
   } satisfies SyncTransport & Record<string, unknown>;
 }
 

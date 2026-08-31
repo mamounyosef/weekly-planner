@@ -60,6 +60,10 @@ const testFiles = [
   'src/lib/monthDrag.test.ts',
   'src/lib/occurrence.test.ts',
   'src/lib/viewPrefs.test.ts',
+  'src/lib/prayerSettings.test.ts',
+  'src/lib/focusTimer.test.ts',
+  'src/lib/notifyCentre.test.ts',
+  'src/lib/search.test.ts',
 ];
 
 console.log(`\n======================================================`);

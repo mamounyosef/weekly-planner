@@ -50,6 +50,17 @@ import {
 import {
   planOccurrenceDelete, planOccurrenceEdit, type OccurrenceScope,
 } from '../lib/occurrence';
+import {
+  IDLE_FOCUS_TIMER, coerceFocusTimer, mergeFocusTimers, reduceFocusTimer,
+  type FocusTimerAction, type FocusTimerState,
+} from '../lib/focusTimer';
+import {
+  EMPTY_CENTRE_STATE, buildCentre, centreStateFromServer, clearEntries,
+  coerceCentreState, desiredAlarms, dismiss as dismissKeys, handledKeys,
+  markAllRead, markCompleted, markRead, markSynced, markUnread, mergeCentreState,
+  pendingSync, pruneCentreState, recordFired, snooze as snoozeKeys,
+  type CentreView, type NotifyCentreState,
+} from '../lib/notifyCentre';
 import { buildDay, ymd, type AgendaDay } from '../lib/agenda';
 import {
   buildEventRecord,
@@ -235,6 +246,23 @@ interface PlannerContextValue {
   taskLists: any[];
   /** Focus history from the PC, newest last. Empty until it syncs. */
   focusSessions: any[];
+  /** What has fired and what is coming, joined with what you did about it. */
+  notifyCentre: CentreView;
+  /** For the badge. Only things that have actually fired can be unread. */
+  unreadNotifications: number;
+  /** The snooze durations the user configured on the PC. */
+  snoozeOptions: number[];
+  notifyRead(keys: readonly string[]): void;
+  notifyUnread(keys: readonly string[]): void;
+  notifyDismiss(keys: readonly string[]): void;
+  notifySnooze(keys: readonly string[], minutes: number): void;
+  notifyComplete(keys: readonly string[]): void;
+  notifyClear(keys: readonly string[]): void;
+  notifyMarkAllRead(): void;
+  /** The live focus timer. Always a real state, never undefined. */
+  focusTimer: FocusTimerState;
+  /** Apply one action to the timer: persist it, log any session, then push. */
+  runFocusTimer(action: FocusTimerAction): Promise<void>;
   /** Minutes each time step moves. This device's own: 5, 10, 15, 30 or 60. */
   interval: number;
   setInterval(minutes: number): void;
@@ -283,6 +311,34 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const [interval, setIntervalState] = useState(30);
   const [customWindow, setCustomWindowState] = useState({ before: 1, after: 3 });
   const [dayWindow, setDayWindowState] = useState<DayWindow>(DEFAULT_DAY_WINDOW);
+  const [focusTimer, setFocusTimerState] = useState<FocusTimerState>(IDLE_FOCUS_TIMER);
+  // Read through a ref for the same reason `saveDraft` does: an action can be
+  // dispatched while a sync is landing, and reducing against a stale state would
+  // lose whichever of the two happened first.
+  const focusTimerRef = useRef<FocusTimerState>(IDLE_FOCUS_TIMER);
+  /**
+   * A session that finished while the app was closed, waiting for the store.
+   *
+   * Settling happens before the database is open, because the timer must be
+   * right on the first frame. The record it produces is written as soon as
+   * there is somewhere to write it.
+   */
+  const pendingFocusSessionRef = useRef<any>(null);
+
+  /**
+   * What this phone has done about each reminder, and the schedule it was done
+   * against.
+   *
+   * The centre is DERIVED, never accumulated: `computeSchedule` is the authority
+   * on what exists and when, these marks are the authority on what the user did
+   * about it, and the two are joined on every render. That is why an offline
+   * fortnight is harmless rather than a backlog.
+   */
+  const [notifyState, setNotifyStateRaw] = useState<NotifyCentreState>(EMPTY_CENTRE_STATE);
+  const notifyStateRef = useRef<NotifyCentreState>(EMPTY_CENTRE_STATE);
+  const scheduleRef = useRef<any[]>([]);
+  /** A tick purely so "in 20 minutes" stops being a lie a minute later. */
+  const [notifyClock, setNotifyClock] = useState(() => Date.now());
   const [swipeViewSwitch, setSwipeState] = useState(DEFAULT_SWIPE_VIEW_SWITCH);
 
   const storageRef = useRef<SyncStorage | null>(null);
@@ -334,6 +390,25 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         setCustomWindowState(savedWindow);
         setDayWindowState(savedDayWindow);
         setSwipeState(savedSwipe);
+
+        // SETTLE FIRST, before anything is drawn. A session that ran out while
+        // the app was closed is completed at the instant it actually ran out,
+        // not at the moment you reopened the app, so six hours in a pocket
+        // credits the right hour to the right day.
+        const storedTimer = coerceFocusTimer(await prefs.getFocusTimer());
+        const settled = reduceFocusTimer(storedTimer, { kind: 'settle' }, Date.now());
+        focusTimerRef.current = settled.state;
+        setFocusTimerState(settled.state);
+        if (settled.changed) void prefs.setFocusTimer(settled.state);
+        pendingFocusSessionRef.current = settled.session ?? null;
+
+        // Pruned on the way in. The marks are a cache of decisions, and one for
+        // a reminder three months gone can never be needed again.
+        const centre = pruneCentreState(
+          coerceCentreState(await prefs.getNotifyCentre()), { now: Date.now() },
+        );
+        notifyStateRef.current = centre;
+        setNotifyStateRaw(centre);
         const loaded = await storage.load(deviceId);
         if (cancelled) return;
 
@@ -397,7 +472,19 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         to: now + 48 * 60 * 60 * 1000,
       });
 
-      const plan = await syncAlarms(schedule, { now });
+      scheduleRef.current = schedule as any[];
+
+      // The alarms and the list must agree about when something will actually
+      // arrive, so both go through `desiredAlarms`, which applies quiet hours,
+      // and both skip anything already dealt with on any device.
+      const marks = notifyStateRef.current;
+      const plan = await syncAlarms(
+        desiredAlarms(schedule as any, marks, {
+          now,
+          settings: (currentShared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
+        }),
+        { now, handledKeys: handledKeys(marks, now) },
+      );
       setAlarmSummary(
         plan.keep.length + plan.schedule.length === 0
           ? 'Nothing to remind you about yet'
@@ -405,11 +492,20 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       );
     } catch {
       // Alarm planning must never take the app down; the next sync retries it.
-      setAlarmSummary('Reminders could not be scheduled — check permissions');
+      setAlarmSummary('Reminders could not be scheduled. Check permissions.');
     }
   }, []);
 
   // ── Sync ──
+  /**
+   * Set once the reconciler exists.
+   *
+   * `syncNow` is declared before `saveRecord`, which the reconciler needs, so
+   * the two cannot simply reference each other. A ref closes the loop without
+   * reordering half the provider around one call.
+   */
+  const reconcileFocusTimerRef = useRef<() => Promise<void>>(async () => {});
+
   const syncNow = useCallback(async () => {
     const storage = storageRef.current;
     const transport = transportRef.current;
@@ -469,6 +565,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         failuresRef.current = 0;
         setLastError(null);
         await replanAlarms(merged);
+        // Only on a healthy cycle: reconciling a timer against a server we
+        // could not reach would compare it with nothing and look like a stop.
+        await reconcileFocusTimerRef.current();
+        // A read taken on the PC lands here; a dismissal taken here goes out.
+        await pullNotifyRef.current();
+        await flushNotifyRef.current();
       }
     } catch (err) {
       failuresRef.current += 1;
@@ -539,8 +641,22 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       void applyUpdateIfAny();
       void syncNow();
       void (async () => {
-        const missed = await collectMissed(Date.now());
-        if (missed.length > 0) void replanAlarms(dataRef.current);
+        const now = Date.now();
+        const missed = await collectMissed(now);
+        if (missed.length === 0) return;
+        // Anything that rang while the app was shut is RECORDED as delivered
+        // before anything else happens. Without that the centre would show it as
+        // still upcoming, and the PC would send it a second time.
+        const next = recordFired(notifyStateRef.current, missed as any, {
+          now, by: dataRef.current.deviceId,
+        });
+        if (next !== notifyStateRef.current) {
+          notifyStateRef.current = next;
+          setNotifyStateRaw(next);
+          void prefs.setNotifyCentre(next);
+          void flushNotifyRef.current();
+        }
+        void replanAlarms(dataRef.current);
       })();
     };
     const sub = AppState.addEventListener('change', handler);
@@ -762,6 +878,182 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     return plan.targetId;
   }, [removeItem, saveRecord, weekStartsOn]);
 
+  /**
+   * The whole timer, in one place: reduce, persist, log, push.
+   *
+   * The reducer decides everything; this only carries out what it decided. That
+   * split is what lets the timer be tested against a closed app, a clock that
+   * jumps and two devices at once, none of which can be reproduced here.
+   */
+  const runFocusTimer = useCallback(async (action: FocusTimerAction) => {
+    const out = reduceFocusTimer(
+      focusTimerRef.current, action, Date.now(), dataRef.current.deviceId,
+    );
+    // An unchanged state must not be written. A redundant write is a POST that
+    // can lose a race against a real one made on the PC a moment later.
+    if (!out.changed) return;
+
+    focusTimerRef.current = out.state;
+    setFocusTimerState(out.state);
+    void prefs.setFocusTimer(out.state);
+
+    // The finished session, if this action ended one. Its id is derived, not
+    // random, so the same session completed on both machines collapses to one
+    // record rather than counting the hour twice.
+    if (out.session) {
+      await saveRecord('focusSessions', out.session.id, out.session as any);
+    }
+
+    void transportRef.current?.putFocusTimer(out.state as any).catch(() => {
+      // Offline is the normal case, not an error: the phone holds the timer and
+      // the next successful sync reconciles it.
+    });
+  }, [saveRecord]);
+
+  /**
+   * Reconcile the phone's timer with the PC's.
+   *
+   * Both machines can start one, and neither is wrong. `mergeFocusTimers` picks
+   * the newest START, because that is the one the user is sitting in front of,
+   * and hands back the loser as a finished record so no worked time is ever
+   * thrown away, only a countdown.
+   */
+  const reconcileFocusTimer = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport) return;
+    let remote: unknown;
+    try {
+      remote = await transport.getFocusTimer();
+    } catch {
+      return;
+    }
+    const mine = focusTimerRef.current;
+    const merged = mergeFocusTimers(mine, coerceFocusTimer(remote), Date.now());
+    if (merged.salvaged) {
+      await saveRecord('focusSessions', merged.salvaged.id, merged.salvaged as any);
+    }
+    if (merged.state !== mine) {
+      focusTimerRef.current = merged.state;
+      setFocusTimerState(merged.state);
+      void prefs.setFocusTimer(merged.state);
+    } else {
+      // We won. Tell the other machine rather than letting it keep a timer the
+      // user has already moved on from.
+      void transport.putFocusTimer(merged.state as any).catch(() => {});
+    }
+  }, [saveRecord]);
+
+  reconcileFocusTimerRef.current = reconcileFocusTimer;
+
+  // ── The notification centre ──
+  /**
+   * One action, applied everywhere it has to land.
+   *
+   * The order matters. The marks are written first because they are what the
+   * user just decided; the alarms are replanned next so a dismissal actually
+   * cancels the buzz; the server is told last, and failing to tell it is not an
+   * error. Nothing is queued: `pendingSync` recomputes the whole payload from
+   * the marks next time, so an unreachable PC costs a delay, never a decision.
+   */
+  const applyNotify = useCallback((
+    fn: (state: NotifyCentreState, opts: { now: number; by: string; items?: any }) => NotifyCentreState,
+  ) => {
+    const now = Date.now();
+    const next = fn(notifyStateRef.current, {
+      now,
+      by: dataRef.current.deviceId,
+      items: scheduleRef.current,
+    });
+    if (next === notifyStateRef.current) return;
+    notifyStateRef.current = next;
+    setNotifyStateRaw(next);
+    void prefs.setNotifyCentre(next);
+    void replanAlarms(dataRef.current);
+    void flushNotifyRef.current();
+  }, [replanAlarms]);
+
+  /**
+   * Report this phone's decisions to the PC.
+   *
+   * `local-fired` goes FIRST, deliberately: the engine ignores an action on a
+   * key it has never heard of, so telling it "this was dismissed" before
+   * telling it "this fired here" would silently drop the dismissal and the PC
+   * would send the reminder again.
+   */
+  const flushNotifyCentre = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport) return;
+    const sentAt = Date.now();
+    const payload = pendingSync(notifyStateRef.current, sentAt);
+    if (payload.keys.length === 0) return;
+
+    const deviceId = dataRef.current.deviceId;
+    try {
+      if (payload.fired.length) {
+        await transport.notifyLocalFired(payload.fired, deviceId);
+      }
+      const buckets: [string, string[]][] = [
+        ['read', payload.read],
+        ['unread', payload.unread],
+        ['done', payload.completed],
+        ['clear', payload.cleared],
+      ];
+      for (const [action, keys] of buckets) {
+        if (keys.length) await transport.notifyAction(action, keys, deviceId);
+      }
+      for (const s of payload.snoozed) {
+        await transport.notifyAction('snooze', [s.key], deviceId, s.minutes);
+      }
+    } catch {
+      // Left unstamped, so the next flush sends it again with a fresh snooze
+      // duration. Nothing is lost by failing here.
+      return;
+    }
+
+    const acked = markSynced(notifyStateRef.current, payload.keys, { now: Date.now(), sentAt });
+    if (acked !== notifyStateRef.current) {
+      notifyStateRef.current = acked;
+      setNotifyStateRaw(acked);
+      void prefs.setNotifyCentre(acked);
+    }
+  }, []);
+
+  const flushNotifyRef = useRef<() => Promise<void>>(async () => {});
+  flushNotifyRef.current = flushNotifyCentre;
+
+  /** A read taken on the PC, folded in without undoing one taken here. */
+  const pullNotifyCentre = useCallback(async () => {
+    const transport = transportRef.current;
+    if (!transport) return;
+    let store: unknown;
+    try {
+      store = await transport.notifyStore();
+    } catch {
+      return;
+    }
+    const merged = mergeCentreState(
+      notifyStateRef.current, centreStateFromServer(store as any),
+    );
+    if (merged === notifyStateRef.current) return;
+    notifyStateRef.current = merged;
+    setNotifyStateRaw(merged);
+    void prefs.setNotifyCentre(merged);
+  }, []);
+
+  const pullNotifyRef = useRef<() => Promise<void>>(async () => {});
+  pullNotifyRef.current = pullNotifyCentre;
+
+
+  // The session that finished while the app was shut, written as soon as there
+  // is a database. Kept out of the launch path so nothing delays the first paint.
+  useEffect(() => {
+    if (!ready) return;
+    const pending = pendingFocusSessionRef.current;
+    if (!pending) return;
+    pendingFocusSessionRef.current = null;
+    void saveRecord('focusSessions', pending.id, pending);
+  }, [ready, saveRecord]);
+
   const answerConflict = useCallback(async (conflict: SyncConflict, choice: ResolveChoice) => {
     const previous = dataRef.current;
     const next = applyLocalResolution(previous, conflict, choice, Date.now());
@@ -838,6 +1130,27 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
 
   const status = useMemo(() => describeStatus(data, phase, Date.now()), [data, phase]);
 
+  // Relative wording ("in 20 minutes") is a claim about now, so it is rebuilt on
+  // a slow tick rather than left to whatever last caused a render.
+  useEffect(() => {
+    const id = setInterval(() => setNotifyClock(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const notifyCentre = useMemo(() => buildCentre({
+    schedule: scheduleRef.current as any,
+    state: notifyState,
+    now: notifyClock,
+    settings: (shared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
+  }), [notifyState, notifyClock, shared.notifications, alarmSummary]);
+
+  const snoozeOptions = useMemo(() => {
+    const raw = (shared.notifications as any)?.snoozeOptions;
+    return Array.isArray(raw) && raw.length
+      ? raw.filter((n: unknown) => typeof n === 'number' && n > 0)
+      : [5, 10, 30, 60];
+  }, [shared.notifications]);
+
   const value: PlannerContextValue = {
     ready,
     signedIn: Boolean(username && transportRef.current),
@@ -865,6 +1178,38 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     timeFormat: shared.timeFormat,
     taskLists: (shared.taskLists as any[]) ?? [],
     focusSessions,
+    focusTimer,
+    runFocusTimer,
+    notifyCentre,
+    unreadNotifications: notifyCentre.unread,
+    snoozeOptions,
+    notifyRead: keys => applyNotify((st, o) => markRead(st, keys, o)),
+    notifyUnread: keys => applyNotify((st, o) => markUnread(st, keys, o)),
+    notifyDismiss: keys => applyNotify((st, o) => dismissKeys(st, keys, o)),
+    notifySnooze: (keys, minutes) => applyNotify((st, o) => snoozeKeys(st, keys, minutes, o)),
+    notifyClear: keys => applyNotify((st, o) => clearEntries(st, keys, o)),
+    notifyMarkAllRead: () => applyNotify((st, o) => markAllRead(st, notifyCentre, o)),
+    /**
+     * Completing from the list also ticks the thing itself.
+     *
+     * `markCompleted` only records that the reminder was dealt with; the item
+     * is a separate fact, and leaving it unticked would mean dismissing a
+     * reminder for a task that then stays open forever.
+     */
+    notifyComplete: keys => {
+      applyNotify((st, o) => markCompleted(st, keys, o));
+      for (const key of keys) {
+        const entry = notifyCentre.entries.find(e => e.key === key);
+        if (!entry || !entry.refId) continue;
+        if (entry.kind !== 'task' && entry.kind !== 'event') continue;
+        void toggleDone(entry.kind === 'task' ? 'tasks' : 'events', {
+          masterId: entry.refId,
+          date: entry.occDate ?? ymd(new Date()),
+          repeating: Boolean(entry.occDate),
+          completed: false,
+        });
+      }
+    },
     prayersOn,
     isPrayerDone,
     togglePrayer,

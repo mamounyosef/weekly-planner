@@ -30,6 +30,9 @@ import { Conflicts } from './src/screens/Conflicts';
 import { Settings } from './src/screens/Settings';
 import { Categories } from './src/screens/Categories';
 import { Reminders } from './src/screens/Reminders';
+import { Prayers } from './src/screens/Prayers';
+import { Search } from './src/screens/Search';
+import { Notifications } from './src/screens/Notifications';
 import { space } from './src/theme';
 
 export default function App() {
@@ -44,6 +47,47 @@ export default function App() {
   );
 }
 
+/**
+ * The bell, joined to the planner.
+ *
+ * The screen itself takes only props on purpose: it asks a question about a
+ * list and reports what was decided, and knows nothing about stores or sync.
+ * This is the ten lines that connect the two, kept here rather than inside the
+ * screen so the screen stays testable as a pure view.
+ */
+function NotificationsScreen({ onClose, onOpenSettings, onOpenDate }: {
+  onClose: () => void;
+  onOpenSettings: () => void;
+  onOpenDate: (date: string) => void;
+}) {
+  const {
+    notifyCentre, snoozeOptions, alarmSummary, timeFormat, data,
+    notifyRead, notifyUnread, notifyDismiss, notifySnooze,
+    notifyComplete, notifyClear, notifyMarkAllRead,
+  } = usePlanner();
+
+  return (
+    <Notifications
+      view={notifyCentre}
+      now={Date.now()}
+      snoozeOptions={snoozeOptions}
+      alarmSummary={alarmSummary}
+      timeFormat={timeFormat}
+      deviceId={data.deviceId}
+      onClose={onClose}
+      onRead={notifyRead}
+      onUnread={notifyUnread}
+      onDismiss={notifyDismiss}
+      onSnooze={notifySnooze}
+      onComplete={notifyComplete}
+      onClear={notifyClear}
+      onMarkAllRead={notifyMarkAllRead}
+      onOpen={entry => { if (entry.occDate) onOpenDate(entry.occDate); }}
+      onOpenSettings={onOpenSettings}
+    />
+  );
+}
+
 function Shell() {
   const p = useTheme();
   const { ready, signedIn, conflicts } = usePlanner();
@@ -51,6 +95,11 @@ function Shell() {
   const [showConflicts, setShowConflicts] = useState(false);
   const [showCategories, setShowCategories] = useState(false);
   const [showReminders, setShowReminders] = useState(false);
+  const [showPrayers, setShowPrayers] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  /** A result tapped in search, handed to the calendar to open. */
+  const [pendingOpen, setPendingOpen] = useState<{ date: string } | null>(null);
 
   // The splash lasts only as long as opening SQLite; there is no network in this
   // path, so it is over before it registers even on a slow phone.
@@ -81,11 +130,40 @@ function Shell() {
         <Categories onClose={() => setShowCategories(false)} />
       ) : showReminders ? (
         <Reminders onClose={() => setShowReminders(false)} />
+      ) : showPrayers ? (
+        <Prayers onClose={() => setShowPrayers(false)} />
+      ) : showSearch ? (
+        <Search
+          onClose={() => setShowSearch(false)}
+          onOpenItem={target => {
+            setShowSearch(false);
+            setPendingOpen({ date: target.date });
+          }}
+          onOpenDate={date => {
+            setShowSearch(false);
+            setPendingOpen({ date });
+          }}
+        />
+      ) : showNotifications ? (
+        <NotificationsScreen
+          onClose={() => setShowNotifications(false)}
+          onOpenSettings={() => { setShowNotifications(false); setShowReminders(true); }}
+          onOpenDate={date => {
+            setShowNotifications(false);
+            setPendingOpen({ date });
+          }}
+        />
       ) : (
         <>
           <View style={{ flex: 1 }}>
             {tab === 'calendar' ? (
-              <Today onOpenConflicts={() => setShowConflicts(true)} />
+              <Today
+                onOpenConflicts={() => setShowConflicts(true)}
+                onOpenSearch={() => setShowSearch(true)}
+                onOpenNotifications={() => setShowNotifications(true)}
+                goToDate={pendingOpen?.date}
+                onWentToDate={() => setPendingOpen(null)}
+              />
             ) : tab === 'tasks' ? (
               <Tasks />
             ) : tab === 'focus' ? (
@@ -95,6 +173,7 @@ function Shell() {
                 onClose={() => setTab('calendar')}
                 onOpenCategories={() => setShowCategories(true)}
                 onOpenReminders={() => setShowReminders(true)}
+                onOpenPrayers={() => setShowPrayers(true)}
               />
             )}
           </View>

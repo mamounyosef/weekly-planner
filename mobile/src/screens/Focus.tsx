@@ -1,35 +1,68 @@
 // ─── Focus ───────────────────────────────────────────────────────────────────
-// How the time actually went, which is a different question from what was
-// planned — and the only screen here that looks backwards.
+// Where the time goes, and where it went. Two halves of one screen, in that
+// order, because a place you only ever look back from is a report and a place
+// you can start from is a tool.
 //
-// WHAT IT SHOWS AND WHY
+// THE LIVE HALF
+// The clock at the top is the hero: big enough to read across a desk, and laid
+// out one character per fixed-width cell so the digits never shuffle sideways as
+// the seconds change. There is no monospace font to lean on here, and a hero
+// clock that fidgets twice a second is the difference between calm and nervous.
+//
+// NOTHING ON THIS SCREEN COUNTS. Every number is derived from the stored start
+// instant against the current clock, in `focusTimer.ts`, which is the only way a
+// timer survives Android suspending the app: an interval that stops for twenty
+// minutes leaves a counter twenty minutes short and nothing to notice it by. The
+// one-second tick below exists purely to repaint. Delete it and the numbers are
+// still right, they just stop moving.
+//
+// THE RING is plain Views. Two half-width clipping masks, each holding a circle
+// with two of its four borders coloured (which draws exactly a 180 degree arc)
+// rotated to where the arc should start. A charting or SVG library here would
+// have to be a native one, and a native module would end over-the-air updates
+// for this whole app: from then on every change reaches the phone only as a new
+// APK. A ring is not worth that.
+//
+// THE BACKWARD HALF
 // A total is not an answer on its own; the useful thing is the shape. So the
-// screen leads with one number for the range, then the days as bars, because a
-// week of ragged bars and a week of even ones mean completely different things
-// and no total distinguishes them. Empty days are drawn as empty rather than
-// skipped: a chart with the gaps closed up reads as unbroken work.
+// range leads with one number, then the days as bars, because a week of ragged
+// bars and a week of even ones mean completely different things and no total
+// distinguishes them. Empty days are drawn as empty rather than skipped: a chart
+// with the gaps closed up reads as unbroken work.
 //
-// The chart is plain Views, not a charting library. Seven to thirty-one bars in
-// a column need layout, not a rendering engine, and a dependency here would have
-// to be a native one — which would mean this screen could only ever reach the
-// phone as a whole new APK instead of over the air.
-//
-// The maths lives in `focusStats.ts`, shared with the PC, so the two can never
-// disagree about yesterday.
+// The maths lives in `focusStats.ts` and the state machine in `focusTimer.ts`,
+// both shared with the PC, so the two can never disagree about yesterday or
+// about how long a session ran.
 
-import React, { useMemo, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState, Pressable, RefreshControl, ScrollView, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
-import { radius, space } from '../theme';
+import { HIT, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   dateKey,
   describeDuration,
+  focusDayKey,
   summariseFocus,
   type FocusSessionRecord,
 } from '../lib/focusStats';
+import {
+  IDLE_FOCUS_TIMER,
+  coerceFocusTimer,
+  focusElapsedSeconds,
+  focusIsOverdue,
+  focusPhase,
+  focusProgress,
+  focusRemainingSeconds,
+  focusUncreditedSeconds,
+  formatFocusClock,
+  formatFocusLength,
+  reduceFocusTimer,
+  type FocusTimerAction,
+  type FocusTimerState,
+} from '../lib/focusTimer';
 
 type Range = 'week' | 'month' | 'year';
 
@@ -39,13 +72,97 @@ const RANGES: { id: Range; label: string; days: number }[] = [
   { id: 'year', label: 'Year', days: 365 },
 ];
 
+/** The lengths worth one tap. Anything else is a rare enough case to live on the PC. */
+const PRESETS = [15, 25, 45, 60, 90];
+
+/**
+ * What the planner context is expected to provide once the timer is wired in.
+ *
+ * Read through a cast rather than as required context fields, and with a local
+ * fallback below, so this screen works the moment it lands and gains its memory
+ * across restarts when the context grows to match. The alternative is a screen
+ * that cannot even be opened until an unrelated file has changed.
+ */
+interface FocusTimerBridge {
+  focusTimer?: unknown;
+  runFocusTimer?: (action: FocusTimerAction) => void | Promise<void>;
+}
+
+/** Which confirmation, if any, is being asked for. */
+type Pending = null | 'finish' | 'discard';
+
 export function Focus() {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { focusSessions, shared, syncNow } = usePlanner();
+  const { width } = useWindowDimensions();
+  const planner = usePlanner();
+  const { focusSessions, shared, syncNow, saveRecord } = planner;
+
+  const bridge = planner as unknown as FocusTimerBridge;
+  const wired = typeof bridge.runFocusTimer === 'function';
 
   const [range, setRange] = useState<Range>('week');
   const [refreshing, setRefreshing] = useState(false);
+  const [pending, setPending] = useState<Pending>(null);
+
+  // Only ever used until the context owns the timer. Kept in a ref as well as in
+  // state because an action has to read the CURRENT state, and a callback that
+  // closed over an older render would silently re-anchor a running session.
+  const [localTimer, setLocalTimer] = useState<FocusTimerState>(IDLE_FOCUS_TIMER);
+  const localRef = useRef(localTimer);
+  localRef.current = localTimer;
+
+  const timer = useMemo(
+    () => coerceFocusTimer(wired ? bridge.focusTimer : localTimer),
+    [wired, bridge.focusTimer, localTimer],
+  );
+
+  // The repaint tick. It carries no information: every number below is computed
+  // from `now` against the stored anchor, so a missed tick costs a frame and
+  // never a second.
+  const [now, setNow] = useState(() => Date.now());
+  const phase = focusPhase(timer);
+
+  useEffect(() => {
+    if (phase !== 'running') return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
+
+  // Coming back from the background is the case that matters: the clock may have
+  // moved by hours, and the session may have finished long ago.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active') setNow(Date.now());
+    });
+    return () => sub.remove();
+  }, []);
+
+  const run = useCallback((action: FocusTimerAction) => {
+    setPending(null);
+    if (wired) {
+      void bridge.runFocusTimer!(action);
+      setNow(Date.now());
+      return;
+    }
+    const out = reduceFocusTimer(localRef.current, action, Date.now(), 'phone');
+    if (!out.changed) return;
+    localRef.current = out.state;
+    setLocalTimer(out.state);
+    setNow(Date.now());
+    // A finished session is history the moment it ends, so it goes to the same
+    // store the PC's sessions arrive in and merges by id.
+    if (out.session) {
+      void saveRecord('focusSessions', out.session.id, { ...out.session });
+    }
+  }, [wired, bridge, saveRecord]);
+
+  // A session that ran past its planned length while the app was closed is
+  // finished, and finished at the moment it ran out. Settling on every tick is
+  // what puts it on the right day instead of on the day you next looked.
+  useEffect(() => {
+    if (focusIsOverdue(timer, now)) run({ kind: 'settle' });
+  }, [timer, now, run]);
 
   const dayStartHour = typeof (shared as any).focusDayStartHour === 'number'
     ? (shared as any).focusDayStartHour
@@ -62,6 +179,22 @@ export function Focus() {
     });
   }, [focusSessions, range, dayStartHour]);
 
+  /**
+   * Today's total, including the session still running.
+   *
+   * The live part is the UNCREDITED elapsed time, never the raw elapsed: editing
+   * a day's figure on the PC while a session runs banks what has been run so far
+   * into the day directly, and counting it here as well would show the same
+   * minutes twice and then log them twice when the session ends.
+   */
+  const todaySeconds = useMemo(() => {
+    const key = focusDayKey(new Date(now), dayStartHour);
+    const logged = summariseFocus(focusSessions as FocusSessionRecord[], {
+      from: key, to: key, dayStartHour,
+    }).totalSeconds;
+    return logged + (phase === 'running' ? focusUncreditedSeconds(timer, now) : 0);
+  }, [focusSessions, dayStartHour, now, phase, timer]);
+
   const refresh = async () => {
     setRefreshing(true);
     try { await syncNow(); } finally { setRefreshing(false); }
@@ -72,6 +205,11 @@ export function Focus() {
   // last stretch in detail rather than a smear of hairlines.
   const bars = range === 'year' ? summary.days.slice(-52) : summary.days;
 
+  const elapsed = focusElapsedSeconds(timer, now);
+  const remaining = focusRemainingSeconds(timer, now);
+  const progress = focusProgress(timer, now);
+  const ring = Math.min(268, Math.max(200, width - space.xl * 2 - space.lg * 2));
+
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
       <View style={{
@@ -81,8 +219,20 @@ export function Focus() {
         borderBottomWidth: 1,
         borderBottomColor: p.line,
       }}>
-        <Text variant="caption" tone="faint">HOW THE TIME WENT</Text>
-        <Text variant="display">Focus</Text>
+        <Row style={{ justifyContent: 'space-between' }}>
+          <View>
+            <Text variant="caption" tone="faint">
+              {phase === 'idle' ? 'HOW THE TIME GOES' : 'SESSION IN PROGRESS'}
+            </Text>
+            <Text variant="display">Focus</Text>
+          </View>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text variant="caption" tone="faint">TODAY</Text>
+            <Text variant="title" tone={todaySeconds > 0 ? 'accent' : 'faint'}>
+              {describeDuration(todaySeconds)}
+            </Text>
+          </View>
+        </Row>
       </View>
 
       <ScrollView
@@ -95,7 +245,88 @@ export function Focus() {
           <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={p.accent} />
         }
       >
-        {/* Range picker */}
+        {/* ── The live timer ─────────────────────────────────────────────── */}
+        <View style={{
+          borderRadius: radius.lg,
+          borderWidth: 1,
+          borderColor: phase === 'running' ? p.accent : p.line,
+          backgroundColor: p.surface,
+          padding: space.lg,
+          alignItems: 'center',
+          marginBottom: space.xl,
+        }}>
+          <Ring size={ring} progress={progress} phase={phase}>
+            <Clock
+              text={formatFocusClock(phase === 'idle' ? timer.plannedSeconds : remaining)}
+              size={Math.round(ring * 0.21)}
+            />
+            <Text variant="label" tone="faint" style={{ marginTop: space.xs }}>
+              {phase === 'idle' ? 'READY' : phase === 'paused' ? 'PAUSED' : 'LEFT'}
+            </Text>
+            {phase !== 'idle' ? (
+              <Text variant="caption" tone="soft" style={{ marginTop: 2 }}>
+                {formatFocusLength(elapsed)} of {formatFocusLength(timer.plannedSeconds)}
+              </Text>
+            ) : null}
+          </Ring>
+
+          <View style={{ height: space.lg }} />
+
+          {pending ? (
+            <Confirm
+              kind={pending}
+              elapsed={elapsed}
+              onCancel={() => setPending(null)}
+              onConfirm={() => run({ kind: pending === 'finish' ? 'stop' : 'discard' })}
+            />
+          ) : phase === 'idle' ? (
+            <>
+              <Row gap={space.xs} style={{ marginBottom: space.lg }}>
+                {PRESETS.map(mins => {
+                  const on = timer.plannedSeconds === mins * 60;
+                  return (
+                    <Pressable
+                      key={mins}
+                      onPress={() => run({ kind: 'setPlanned', seconds: mins * 60 })}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: on }}
+                      accessibilityLabel={`${mins} minute session`}
+                      style={{
+                        flex: 1,
+                        height: 40,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderRadius: radius.sm,
+                        borderWidth: 1,
+                        borderColor: on ? p.accent : p.line,
+                        backgroundColor: on ? p.accentSoft : 'transparent',
+                      }}
+                    >
+                      <Text variant="bodyStrong" style={{ color: on ? p.accent : p.inkSoft }}>
+                        {mins}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </Row>
+              <BigButton label="Start focus" tone="go" onPress={() => run({ kind: 'start' })} />
+            </>
+          ) : (
+            <>
+              <BigButton
+                label={phase === 'running' ? 'Pause' : 'Resume'}
+                tone={phase === 'running' ? 'hold' : 'go'}
+                onPress={() => run({ kind: phase === 'running' ? 'pause' : 'resume' })}
+              />
+              <Row gap={space.sm} style={{ marginTop: space.md, alignSelf: 'stretch' }}>
+                <SmallButton label="Finish" onPress={() => setPending('finish')} />
+                <SmallButton label="Discard" tone="danger" onPress={() => setPending('discard')} />
+              </Row>
+            </>
+          )}
+        </View>
+
+        {/* ── The history ────────────────────────────────────────────────── */}
         <Row
           gap={0}
           style={{
@@ -130,10 +361,10 @@ export function Focus() {
         </Row>
 
         {summary.sessions === 0 ? (
-          <View style={{ paddingTop: space.xxl, alignItems: 'center', gap: space.sm }}>
+          <View style={{ paddingTop: space.lg, alignItems: 'center', gap: space.sm }}>
             <Text variant="heading" tone="soft">No focus time yet</Text>
             <Text variant="caption" tone="faint" style={{ textAlign: 'center', maxWidth: 280 }}>
-              Sessions you run on your PC turn up here once they sync.
+              Start a session above, or run one on your PC. Both land here together.
             </Text>
           </View>
         ) : (
@@ -178,6 +409,230 @@ export function Focus() {
           </>
         )}
       </ScrollView>
+    </View>
+  );
+}
+
+/**
+ * The progress ring, drawn with four Views and no dependency.
+ *
+ * A circle with only its top and right borders coloured is exactly a 180 degree
+ * arc, spanning [r - 45, r + 135] once rotated by r. Clip the box to its right
+ * half and rotate that arc so it ENDS at the current angle, and the visible part
+ * is the fill from twelve o'clock round to wherever the session has got to; the
+ * left half picks up the same arc for anything past halfway. Two masks, one
+ * formula, no library.
+ */
+function Ring({ size, progress, phase, children }: {
+  size: number;
+  progress: number;
+  phase: 'idle' | 'running' | 'paused';
+  children: React.ReactNode;
+}) {
+  const p = useTheme();
+  const stroke = Math.max(8, Math.round(size * 0.045));
+  const angle = Math.min(360, Math.max(0, progress * 360));
+  const colour = phase === 'paused' ? p.inkFaint : p.accent;
+
+  // The arc is placed by where it ENDS, so both halves share one rotation.
+  const rightRotation = Math.min(angle, 180) - 135;
+  const leftRotation = Math.max(angle, 180) - 135;
+
+  const arc = (rotation: number) => ({
+    position: 'absolute' as const,
+    top: 0,
+    width: size,
+    height: size,
+    borderRadius: size / 2,
+    borderWidth: stroke,
+    borderColor: 'transparent',
+    borderTopColor: colour,
+    borderRightColor: colour,
+    transform: [{ rotate: `${rotation}deg` }],
+  });
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      {/* The track. Always a full circle, so the ring reads as a ring even at zero. */}
+      <View style={{
+        position: 'absolute',
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        borderWidth: stroke,
+        borderColor: p.line,
+      }} />
+
+      {/* Right half: the first 180 degrees. */}
+      <View style={{
+        position: 'absolute', right: 0, top: 0, width: size / 2, height: size, overflow: 'hidden',
+      }}>
+        <View style={[arc(rightRotation), { right: 0 }]} />
+      </View>
+
+      {/* Left half: anything past halfway. */}
+      {angle > 180 ? (
+        <View style={{
+          position: 'absolute', left: 0, top: 0, width: size / 2, height: size, overflow: 'hidden',
+        }}>
+          <View style={[arc(leftRotation), { left: 0 }]} />
+        </View>
+      ) : null}
+
+      <View style={{ alignItems: 'center', paddingHorizontal: stroke * 2 }}>{children}</View>
+    </View>
+  );
+}
+
+/**
+ * The clock, one character per fixed-width cell.
+ *
+ * Proportional digits are different widths, so a plain string re-centres itself
+ * on almost every tick and the whole line jitters. Giving each character a cell
+ * of its own holds every digit exactly where it was; only the leading hour can
+ * change the overall width, and that happens once an hour.
+ */
+function Clock({ text, size }: { text: string; size: number }) {
+  const digit = Math.round(size * 0.6);
+  const colon = Math.round(size * 0.3);
+  return (
+    <Row gap={0} align="baseline">
+      {text.split('').map((ch, i) => (
+        <View key={`${i}-${ch}`} style={{ width: ch === ':' ? colon : digit, alignItems: 'center' }}>
+          <Text
+            variant="display"
+            style={{ fontSize: size, lineHeight: Math.round(size * 1.1), fontWeight: '800', letterSpacing: 0 }}
+          >
+            {ch}
+          </Text>
+        </View>
+      ))}
+    </Row>
+  );
+}
+
+/** The one action that matters, sized so it cannot be missed or mistaken. */
+function BigButton({ label, tone, onPress }: {
+  label: string;
+  tone: 'go' | 'hold';
+  onPress: () => void;
+}) {
+  const p = useTheme();
+  const go = tone === 'go';
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      android_ripple={{ color: go ? 'rgba(0,0,0,0.15)' : p.accentSoft }}
+      style={({ pressed }) => ({
+        alignSelf: 'stretch',
+        height: HIT + 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: radius.pill,
+        backgroundColor: go ? p.accent : p.surfaceAlt,
+        borderWidth: go ? 0 : 1,
+        borderColor: p.line,
+        opacity: pressed ? 0.9 : 1,
+      })}
+    >
+      <Text variant="title" style={{ color: go ? p.accentInk : p.ink }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/** Deliberately quieter and smaller than the primary action. */
+function SmallButton({ label, tone, onPress }: {
+  label: string;
+  tone?: 'danger';
+  onPress: () => void;
+}) {
+  const p = useTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      android_ripple={{ color: p.accentSoft }}
+      style={({ pressed }) => ({
+        flex: 1,
+        height: HIT,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: radius.pill,
+        borderWidth: 1,
+        borderColor: tone === 'danger' ? p.danger : p.line,
+        opacity: pressed ? 0.85 : 1,
+      })}
+    >
+      <Text variant="bodyStrong" tone={tone === 'danger' ? 'danger' : 'soft'}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * The second tap.
+ *
+ * Ending a session is not undoable: finishing logs it and clears the clock,
+ * discarding throws the time away entirely. Both replace the controls with a
+ * plain question rather than firing on the first touch, and the way out of the
+ * question is the wide, obvious half.
+ */
+function Confirm({ kind, elapsed, onCancel, onConfirm }: {
+  kind: 'finish' | 'discard';
+  elapsed: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const p = useTheme();
+  const finishing = kind === 'finish';
+  return (
+    <View style={{ alignSelf: 'stretch', gap: space.md }}>
+      <Text variant="body" tone="soft" style={{ textAlign: 'center' }}>
+        {finishing
+          ? `Finish now and log ${formatFocusLength(elapsed)}?`
+          : `Throw away ${formatFocusLength(elapsed)} and log nothing?`}
+      </Text>
+      <Row gap={space.sm}>
+        <Pressable
+          onPress={onCancel}
+          accessibilityRole="button"
+          android_ripple={{ color: p.accentSoft }}
+          style={({ pressed }) => ({
+            flex: 2,
+            height: HIT,
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: radius.pill,
+            backgroundColor: p.surfaceAlt,
+            borderWidth: 1,
+            borderColor: p.line,
+            opacity: pressed ? 0.85 : 1,
+          })}
+        >
+          <Text variant="bodyStrong">Keep going</Text>
+        </Pressable>
+        <Pressable
+          onPress={onConfirm}
+          accessibilityRole="button"
+          android_ripple={{ color: p.accentSoft }}
+          style={({ pressed }) => ({
+            flex: 1,
+            height: HIT,
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: radius.pill,
+            borderWidth: 1,
+            borderColor: finishing ? p.accent : p.danger,
+            opacity: pressed ? 0.85 : 1,
+          })}
+        >
+          <Text variant="bodyStrong" tone={finishing ? 'accent' : 'danger'}>
+            {finishing ? 'Finish' : 'Discard'}
+          </Text>
+        </Pressable>
+      </Row>
     </View>
   );
 }

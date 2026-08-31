@@ -40,6 +40,8 @@ const KEY_USER = 'planner.username';
 const KEY_VIEW = 'planner.calendarView';
 const KEY_INTERVAL = 'planner.interval';
 const KEY_THEME = 'planner.themeMode';
+const KEY_FOCUS_TIMER = 'planner.focusTimer';
+const KEY_NOTIFY_CENTRE = 'planner.notifyCentre';
 const KEY_CUSTOM_BEFORE = 'planner.customDaysBefore';
 const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
 const KEY_DAY_START = 'planner.dayStartH';
@@ -207,6 +209,47 @@ export const prefs = {
     return isThemeMode(raw) ? raw : 'system';
   },
   setThemeMode: (mode: ThemeMode) => write(KEY_THEME, mode),
+
+  /**
+   * The focus timer, as one JSON blob.
+   *
+   * Per device, and stored WHOLE rather than as synced fields. A running timer
+   * is a single fact, and the periodic checkpoint a session writes would fight
+   * a per-field merge every few seconds. It reaches the PC over
+   * `/api/focus-timer`, which is the same endpoint the PC has always used.
+   *
+   * A blob that will not parse is treated as no timer at all: the alternative is
+   * a screen that cannot be used until the app is reinstalled, for the sake of a
+   * session nobody can see anyway.
+   */
+  async getFocusTimer(): Promise<unknown> {
+    const raw = await read(KEY_FOCUS_TIMER);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  },
+  setFocusTimer: (state: unknown) => write(KEY_FOCUS_TIMER, JSON.stringify(state)),
+
+  /**
+   * What this phone has done about each reminder.
+   *
+   * DEVICE-LOCAL, and deliberately not a sync store. It is a cache of a truth
+   * the server owns plus the decisions this phone has not managed to report
+   * yet, so a corrupt blob costs at most a repeated dismissal, never data.
+   */
+  async getNotifyCentre(): Promise<unknown> {
+    const raw = await read(KEY_NOTIFY_CENTRE);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  },
+  setNotifyCentre: (state: unknown) => write(KEY_NOTIFY_CENTRE, JSON.stringify(state)),
 
   async signOut(): Promise<void> {
     await write(KEY_SESSION, null);

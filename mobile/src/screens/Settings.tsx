@@ -30,10 +30,13 @@ import {
   type DayWindow,
 } from '../lib/viewPrefs';
 
-export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
+export function Settings({
+  onClose, onOpenCategories, onOpenReminders, onOpenPrayers,
+}: {
   onClose: () => void;
   onOpenCategories?: () => void;
   onOpenReminders?: () => void;
+  onOpenPrayers?: () => void;
 }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
@@ -388,6 +391,25 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
               <Text variant="body">Notifications</Text>
               <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
                 How early things alert, quiet hours and snoozing. Shared with your PC.
+              </Text>
+            </View>
+            <Text variant="title" tone="faint">›</Text>
+          </Pressable>
+
+          <Divider />
+
+          <Pressable
+            onPress={onOpenPrayers}
+            accessibilityRole="button"
+            style={{
+              flexDirection: 'row', alignItems: 'center',
+              minHeight: HIT, gap: space.md,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="body">Prayer times</Text>
+              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+                City, method, corrections and which ones show. Shared with your PC.
               </Text>
             </View>
             <Text variant="title" tone="faint">›</Text>

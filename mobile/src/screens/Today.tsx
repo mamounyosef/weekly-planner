@@ -83,8 +83,15 @@ const VIEW_LABELS: Record<ViewMode, string> = {
 /** The palette the menu offers, the same one the editor shows. */
 const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
 
-export function Today({ onOpenConflicts }: {
+export function Today({
+  onOpenConflicts, onOpenSearch, onOpenNotifications, goToDate, onWentToDate,
+}: {
   onOpenConflicts: () => void;
+  onOpenSearch?: () => void;
+  onOpenNotifications?: () => void;
+  /** A day handed over from search or the bell. Shown, then acknowledged. */
+  goToDate?: string;
+  onWentToDate?: () => void;
 }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
@@ -92,6 +99,7 @@ export function Today({ onOpenConflicts }: {
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
     prayersOn, isPrayerDone, togglePrayer, customWindow, events, categories,
     dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
+    unreadNotifications,
   } = usePlanner();
 
   const today = ymd(new Date());
@@ -117,6 +125,18 @@ export function Today({ onOpenConflicts }: {
    * desktop on the week is the correct state of affairs, not a disagreement.
    */
   const [view, setView] = useState<ViewMode>('day');
+
+  /**
+   * A day handed over from search or the bell.
+   *
+   * Acknowledged immediately so it fires once. Leaving it set would pin the
+   * calendar to that day and quietly undo every swipe afterwards.
+   */
+  useEffect(() => {
+    if (!goToDate) return;
+    setSelected(goToDate);
+    onWentToDate?.();
+  }, [goToDate, onWentToDate]);
   useEffect(() => {
     void prefs.getCalendarView().then(saved => {
       const known: string[] = ['agenda', 'day', 'custom', 'week', 'month', 'year'];
@@ -441,6 +461,21 @@ export function Today({ onOpenConflicts }: {
           {conflicts.length > 0 ? (
             <HeaderButton glyph="◎" onPress={onOpenConflicts} a11y="Conflicts"
               badge={conflicts.length} />
+          ) : null}
+
+          {/* Search and the bell live in the header rather than on the tab bar:
+              both are ways of reaching the calendar, not places beside it, and
+              the bar is deliberately four wide so the tabs stay legible. */}
+          {onOpenSearch ? (
+            <HeaderButton glyph="⌕" onPress={onOpenSearch} a11y="Search" />
+          ) : null}
+          {onOpenNotifications ? (
+            <HeaderButton
+              glyph="◔"
+              onPress={onOpenNotifications}
+              a11y="Notifications"
+              badge={unreadNotifications > 0 ? unreadNotifications : undefined}
+            />
           ) : null}
         </Row>
 
