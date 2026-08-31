@@ -161,9 +161,10 @@ function main() {
 
     const adj1 = adjustDayTotal([s1, s2], { dateKeyVal: '2026-08-29', newTotalSeconds: 1800 });
     const adj2 = adjustDayTotal([s2, s1], { dateKeyVal: '2026-08-29', newTotalSeconds: 1800 });
-    // Duration should be 1800.
-    const tot1 = adj1.filter(s => s.id.includes('2')).reduce((a, b) => a + b.durationSeconds, 0);
-    const tot2 = adj2.filter(s => s.id.includes('2')).reduce((a, b) => a + b.durationSeconds, 0);
+    
+    // Duration should be 1800 in mutated
+    const tot1 = adj1.mutated.filter(s => s.id.includes('2')).reduce((a, b) => a + b.durationSeconds, 0);
+    const tot2 = adj2.mutated.filter(s => s.id.includes('2')).reduce((a, b) => a + b.durationSeconds, 0);
     assert.equal(tot1, tot2);
   }
 

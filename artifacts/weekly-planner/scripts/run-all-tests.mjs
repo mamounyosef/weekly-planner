@@ -68,6 +68,8 @@ const testFiles = [
   'src/lib/quickAdd.test.ts',
   'src/lib/dayWindows.test.ts',
   'src/lib/displaySettings.test.ts',
+  'src/lib/conflictText.test.ts',
+  'src/lib/focusGoals.test.ts',
 ];
 
 console.log(`\n======================================================`);

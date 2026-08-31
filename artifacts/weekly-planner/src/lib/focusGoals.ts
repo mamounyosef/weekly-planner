@@ -68,19 +68,22 @@ export function computeGoalStats(
   };
 }
 
+export interface FocusDayDelta {
+  mutated: FocusSessionRecord[];
+  deletedIds: string[];
+}
+
 /**
  * Adjusts a single day's total focus time.
- * If increasing, it appends a synthetic session to make up the difference.
- * If decreasing, it shrinks or drops sessions from that day (chronologically).
+ * Returns only the changes to make.
  */
 export function adjustDayTotal(
   sessions: readonly FocusSessionRecord[],
   opts: { dateKeyVal: string; newTotalSeconds: number; dayStartHour?: number }
-): FocusSessionRecord[] {
+): FocusDayDelta {
   const { dateKeyVal, newTotalSeconds, dayStartHour = 0 } = opts;
   const want = Math.max(0, Math.floor(newTotalSeconds) || 0);
 
-  const out: FocusSessionRecord[] = [];
   const daySessions: FocusSessionRecord[] = [];
   let currentTotal = 0;
 
@@ -90,14 +93,15 @@ export function adjustDayTotal(
     if (key === dateKeyVal) {
       daySessions.push(s);
       currentTotal += s.durationSeconds;
-    } else {
-      out.push(s);
     }
   }
 
-  if (want === 0) return out;
+  if (want === currentTotal) return { mutated: [], deletedIds: [] };
 
-  // Sort chronological so shrinking affects the most recent first, etc.
+  if (want === 0) {
+    return { mutated: [], deletedIds: daySessions.map(s => s.id) };
+  }
+
   daySessions.sort((a, b) => {
     const ta = Date.parse(a.startedAt);
     const tb = Date.parse(b.startedAt);
@@ -105,12 +109,14 @@ export function adjustDayTotal(
     return ta - tb;
   });
 
+  const mutated: FocusSessionRecord[] = [];
+  const deletedIds: string[] = [];
+
   if (want > currentTotal) {
-    out.push(...daySessions);
     const diff = want - currentTotal;
     const last = daySessions.length > 0 ? daySessions[daySessions.length - 1] : null;
     const anchor = last ? (last.endedAt ?? last.startedAt) : `${dateKeyVal}T12:00:00.000Z`;
-    out.push({
+    mutated.push({
       id: `adj-${dateKeyVal}-${want}-${diff}`,
       startedAt: anchor,
       endedAt: anchor,
@@ -118,46 +124,43 @@ export function adjustDayTotal(
       plannedSeconds: diff
     });
   } else {
-    // Shrink sessions
     let accumulated = 0;
     for (const s of daySessions) {
-      if (accumulated >= want) break;
+      if (accumulated >= want) {
+        deletedIds.push(s.id);
+        continue;
+      }
       const space = want - accumulated;
       if (s.durationSeconds <= space) {
-        out.push(s);
         accumulated += s.durationSeconds;
       } else {
-        out.push({
+        mutated.push({
           ...s,
           durationSeconds: space,
           plannedSeconds: Math.min(s.plannedSeconds ?? space, space),
-          id: `${s.id}-shrunk`
+          id: s.id
         });
         accumulated += space;
       }
     }
   }
 
-  return out;
+  return { mutated, deletedIds };
 }
 
 /**
  * Updates or removes a single focus session.
- * If newDurationSeconds is 0, it removes it.
  */
 export function editSingleSession(
-  sessions: readonly FocusSessionRecord[],
-  id: string,
+  session: FocusSessionRecord,
   newDurationSeconds: number
-): FocusSessionRecord[] {
+): FocusDayDelta {
   const want = Math.max(0, Math.floor(newDurationSeconds) || 0);
   if (want === 0) {
-    return sessions.filter(s => s.id !== id);
+    return { mutated: [], deletedIds: [session.id] };
   }
-  return sessions.map(s => {
-    if (s.id === id) {
-      return { ...s, durationSeconds: want };
-    }
-    return s;
-  });
+  if (want === session.durationSeconds) {
+    return { mutated: [], deletedIds: [] };
+  }
+  return { mutated: [{ ...session, durationSeconds: want }], deletedIds: [] };
 }
