@@ -56,6 +56,10 @@ const testFiles = [
   'src/lib/focusStats.test.ts',
   'src/lib/grid.test.ts',
   'src/lib/prayerSync.test.ts',
+  'src/lib/dragGrid.test.ts',
+  'src/lib/monthDrag.test.ts',
+  'src/lib/occurrence.test.ts',
+  'src/lib/viewPrefs.test.ts',
 ];
 
 console.log(`\n======================================================`);

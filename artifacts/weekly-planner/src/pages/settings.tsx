@@ -1787,9 +1787,13 @@ export default function SettingsPage() {
   // Coalesced on a short trailing timer: a broadcast re-serialises every setting,
   // writes localStorage synchronously and POSTs, so a control that changes rapidly
   // (or several that change together) used to pay that cost once per change.
+  const pendingBroadcastRef = useRef<number | undefined>(undefined);
+  const pendingSnapshotRef = useRef<AppSettings | undefined>(undefined);
+
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    const broadcastId = window.setTimeout(() => broadcastSettingsChange({
+    
+    const snapshot = {
       // Device-scoped keys (view, interval, theme, panel, day window) are echoed
       // back exactly as the shared file had them. They belong to THIS screen and
       // travel to the planner through the device channel below — putting them in
@@ -1825,11 +1829,30 @@ export default function SettingsPage() {
       notifications,
       hardware,
       categories,
-    taskLists,
-    }), 150);
-    return () => window.clearTimeout(broadcastId);
+      taskLists,
+    } as AppSettings;
+    
+    pendingSnapshotRef.current = snapshot;
+
+    if (pendingBroadcastRef.current !== undefined) {
+      window.clearTimeout(pendingBroadcastRef.current);
+    }
+    
+    pendingBroadcastRef.current = window.setTimeout(() => {
+      pendingBroadcastRef.current = undefined;
+      broadcastSettingsChange(snapshot);
+    }, 150);
   }, [hardware, prayer, notifications, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingBroadcastRef.current !== undefined && pendingSnapshotRef.current) {
+        window.clearTimeout(pendingBroadcastRef.current);
+        broadcastSettingsChange(pendingSnapshotRef.current);
+      }
+    };
+  }, []);
 
   // Global keydown for Shortcut Recorder and Esc Navigation
   useEffect(() => {

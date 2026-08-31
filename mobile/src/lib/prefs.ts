@@ -2,10 +2,36 @@
 // The server address and the session cookie. The cookie goes in SecureStore
 // (hardware-backed keystore on Android) because it is a bearer credential for
 // the whole planner; the address is ordinary settings.
+//
+// Everything below the credentials is a VIEW preference, and every one of them
+// is deliberately per device. The PC keeps its own copies in
+// `DEVICE_SCOPED_KEYS` (see `artifacts/weekly-planner/src/lib/deviceSettings.ts`)
+// and the sync layer refuses to carry them, so a phone showing a two column
+// Span view from 6am and a desktop showing a full week from 8am is the correct
+// state of affairs rather than a disagreement to resolve.
+//
+// WHAT COUNTS AS A VALID VALUE IS NOT DECIDED HERE. It lives in `viewPrefs.ts`,
+// which is the same file the PC uses, copied across the way the sync engine is.
+// A store hands back strings and nulls, never numbers, and the phone and the PC
+// disagreeing about whether '25' is an hour would be a layout bug on one device
+// that is invisible on the other.
 
 import * as SecureStore from 'expo-secure-store';
 import { makeDeviceId } from './syncStorage';
 import { isThemeMode, type ThemeMode } from '../theme';
+import {
+  DEFAULT_SWIPE_VIEW_SWITCH,
+  coerceBool,
+  coerceDayWindow,
+  coerceSnapInterval,
+  coerceSpanWindow,
+  encodeBool,
+  withDayEnd,
+  withDayStart,
+  type DayWindow,
+  type SnapInterval,
+  type SpanWindow,
+} from './viewPrefs';
 
 const KEY_SERVER = 'planner.serverUrl';
 const KEY_SESSION = 'planner.session';
@@ -16,6 +42,9 @@ const KEY_INTERVAL = 'planner.interval';
 const KEY_THEME = 'planner.themeMode';
 const KEY_CUSTOM_BEFORE = 'planner.customDaysBefore';
 const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
+const KEY_DAY_START = 'planner.dayStartH';
+const KEY_DAY_END = 'planner.dayEndH';
+const KEY_SWIPE_VIEWS = 'planner.swipeViewSwitch';
 
 async function read(key: string): Promise<string | null> {
   try {
@@ -69,6 +98,9 @@ export const prefs = {
    * `DEVICE_SCOPED_KEYS`, so a phone showing the day and a desktop showing the
    * week is the correct state of affairs rather than a disagreement to resolve.
    * Kept here rather than in the synced settings for exactly that reason.
+   *
+   * Returned raw because the phone has one view the PC does not (`agenda`), so
+   * the caller owns the list of names and validates it there.
    */
   getCalendarView: () => read(KEY_VIEW),
   setCalendarView: (view: string) => write(KEY_VIEW, view),
@@ -81,10 +113,8 @@ export const prefs = {
    * a wide grid; a thumb on a phone wants bigger steps, and the PC's own
    * `seedDeviceSettings` already drops a new phone to thirty.
    */
-  async getInterval(): Promise<number> {
-    const raw = await read(KEY_INTERVAL);
-    const n = Number(raw);
-    return n === 5 || n === 10 || n === 15 || n === 30 || n === 60 ? n : 30;
+  async getInterval(): Promise<SnapInterval> {
+    return coerceSnapInterval(await read(KEY_INTERVAL));
   },
   setInterval: (minutes: number) => write(KEY_INTERVAL, String(minutes)),
 
@@ -95,18 +125,75 @@ export const prefs = {
    * 27-inch monitor, and the PC keeps `customDaysBefore` and `customDaysAfter`
    * in its own device-scoped settings for exactly that reason.
    */
-  async getCustomWindow(): Promise<{ before: number; after: number }> {
+  async getCustomWindow(): Promise<SpanWindow> {
     const [b, a] = await Promise.all([read(KEY_CUSTOM_BEFORE), read(KEY_CUSTOM_AFTER)]);
-    const clamp = (raw: string | null, fallback: number) => {
-      const n = Number(raw);
-      return Number.isFinite(n) && n >= 0 && n <= 14 ? Math.floor(n) : fallback;
-    };
-    return { before: clamp(b, 1), after: clamp(a, 3) };
+    return coerceSpanWindow(b, a);
   },
   async setCustomWindow(before: number, after: number): Promise<void> {
-    await write(KEY_CUSTOM_BEFORE, String(before));
-    await write(KEY_CUSTOM_AFTER, String(after));
+    // Clamped on the way IN as well as on the way out. A value that is illegal
+    // on read is illegal on write, and storing it anyway leaves a number in the
+    // keystore that silently becomes something else next launch.
+    const win = coerceSpanWindow(before, after);
+    await write(KEY_CUSTOM_BEFORE, String(win.before));
+    await write(KEY_CUSTOM_AFTER, String(win.after));
   },
+
+  /**
+   * The visible window of the time grid: the first hour drawn and the hour it
+   * stops at, matching the PC's `dayStartH` and `dayEndH`.
+   *
+   * Per device for the plainest reason of all: a phone shows perhaps a tenth of
+   * the pixels a desktop does, so a window that reads comfortably on the desk is
+   * a wall of unreadable slivers in your hand. Somebody who wants 7am to 11pm at
+   * work and 6am to midnight on the phone is not in an inconsistent state.
+   *
+   * The two hours are stored SEPARATELY, which is why they are always read back
+   * as a pair through `coerceDayWindow`: two independent writes can be
+   * interrupted between them, and a start of 20 with a stale end of 6 would draw
+   * a grid of negative height. `viewPrefs` repairs the pair rather than trusting
+   * that they were written together, because they were not.
+   */
+  async getDayWindow(): Promise<DayWindow> {
+    const [start, end] = await Promise.all([read(KEY_DAY_START), read(KEY_DAY_END)]);
+    return coerceDayWindow(start, end);
+  },
+  async setDayWindow(win: DayWindow): Promise<void> {
+    const safe = coerceDayWindow(win.start, win.end);
+    await write(KEY_DAY_START, String(safe.start));
+    await write(KEY_DAY_END, String(safe.end));
+  },
+  /**
+   * Move one end of the window and persist the pair.
+   *
+   * These take the CURRENT window rather than reading it back, so the settings
+   * screen stays the single source of what is on screen and a tap never waits on
+   * the keystore before the number moves. `withDayStart` carries the span along,
+   * `withDayEnd` pushes the start out of the way, and both guarantee start < end
+   * whichever control the user reaches for first.
+   */
+  async setDayStart(current: DayWindow, hour: number): Promise<DayWindow> {
+    const next = withDayStart(current, hour);
+    await prefs.setDayWindow(next);
+    return next;
+  },
+  async setDayEnd(current: DayWindow, hour: number): Promise<DayWindow> {
+    const next = withDayEnd(current, hour);
+    await prefs.setDayWindow(next);
+    return next;
+  },
+
+  /**
+   * Whether a sideways swipe moves between views.
+   *
+   * The PC calls this `mobileSwipeViewSwitch` and keeps it per device, which is
+   * the only sensible place for it: the same gesture is how you drag a wide grid
+   * sideways, so on a narrow screen the two can fight, and whether they do
+   * depends entirely on the size of the screen doing the swiping.
+   */
+  async getSwipeViewSwitch(): Promise<boolean> {
+    return coerceBool(await read(KEY_SWIPE_VIEWS), DEFAULT_SWIPE_VIEW_SWITCH);
+  },
+  setSwipeViewSwitch: (on: boolean) => write(KEY_SWIPE_VIEWS, encodeBool(on)),
 
   /**
    * Light, dark, or whatever the phone is set to.
@@ -126,5 +213,6 @@ export const prefs = {
     await write(KEY_USER, null);
     // The server URL and device id deliberately survive signing out: the user is
     // almost always signing back into the same planner on the same phone.
+    // So do the view preferences: they describe this screen, not this account.
   },
 };

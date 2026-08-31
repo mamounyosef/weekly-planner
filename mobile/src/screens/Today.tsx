@@ -35,7 +35,7 @@
 //    every interface uses for removed text. It is now a filled check and a
 //    quieter card, which is what finishing something looks like.
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   PanResponder,
   Pressable,
@@ -53,6 +53,11 @@ import { WeekView } from './views/WeekView';
 import { MonthView } from './views/MonthView';
 import { YearView } from './views/YearView';
 import { prefs } from '../lib/prefs';
+import { daysBetween } from '../lib/monthDrag';
+import { ItemMenu, type ItemMenuTarget } from '../ui/ItemMenu';
+import { SWATCH_BASE_HEX } from '../lib/gcalColor';
+import { anchorFor, describeRecur, draftFromRecord, toTimeString } from '../lib/draft';
+import type { OccurrenceScope } from '../lib/occurrence';
 import {
   addDays,
   currentItem,
@@ -75,6 +80,9 @@ const VIEW_LABELS: Record<ViewMode, string> = {
   year: 'Year',
 };
 
+/** The palette the menu offers, the same one the editor shows. */
+const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
+
 export function Today({ onOpenConflicts }: {
   onOpenConflicts: () => void;
 }) {
@@ -82,13 +90,24 @@ export function Today({ onOpenConflicts }: {
   const insets = useSafeAreaInsets();
   const {
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
-    prayersOn, isPrayerDone, togglePrayer, customWindow, events,
+    prayersOn, isPrayerDone, togglePrayer, customWindow, events, categories,
+    dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
   } = usePlanner();
 
   const today = ymd(new Date());
   const [selected, setSelected] = useState(today);
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
+  const [menu, setMenu] = useState<ItemMenuTarget | null>(null);
+  /**
+   * Which occurrence the menu is acting on.
+   *
+   * Kept beside the menu rather than inside its target, because `ItemMenuTarget`
+   * is deliberately a DESCRIPTION: the menu asks a question and knows nothing
+   * about stores, masters or dates. The answer comes back as an id, and this is
+   * what turns that id back into "which item, on which day, in which store".
+   */
+  const menuItemRef = useRef<AgendaItem | null>(null);
 
   /**
    * Which view this phone is on.
@@ -223,6 +242,153 @@ export function Today({ onOpenConflicts }: {
   const open = (item: AgendaItem) =>
     setEditing({ store: item.store, id: item.masterId, date: item.date });
 
+  /**
+   * Long-press anything: open the menu on it.
+   *
+   * The description is built here, not in the menu, so the menu stays a thing
+   * that asks a question. Everything it shows (the colour, the repeat sentence,
+   * whether the series is locked) comes from the record the occurrence resolves
+   * to, which is the same record the actions will be planned against.
+   */
+  const hold = (item: AgendaItem) => {
+    menuItemRef.current = item;
+    const store = item.store === 'events' ? events() : tasks();
+    const master = (store as any)[item.masterId] ?? {};
+    setMenu({
+      id: item.id,
+      title: item.title,
+      subtitle: item.startMin === null
+        ? dayLabel(item.date, new Date())
+        : `${dayLabel(item.date, new Date())}, ${formatClock(item.startMin, timeFormat)}`,
+      repeats: item.repeating,
+      repeatLabel: item.repeating ? describeRecur(master.recur) : undefined,
+      locked: master.locked === true,
+      done: item.completed,
+      colour: typeof master.colour === 'string' ? master.colour : undefined,
+      categoryId: item.categoryId,
+      accent: item.colour,
+      kind: item.store === 'events' ? 'event' : 'task',
+    });
+  };
+
+  /** The occurrence the menu is on, or nothing if it closed underneath us. */
+  const heldItem = (): AgendaItem | null => menuItemRef.current;
+
+  const closeMenu = () => { setMenu(null); menuItemRef.current = null; };
+
+  const menuEdit = async (_id: string, scope: OccurrenceScope) => {
+    const item = heldItem();
+    closeMenu();
+    if (!item) return;
+    if (scope === 'all' || !item.repeating) {
+      setEditing({ store: item.store, id: item.masterId, date: item.date });
+      return;
+    }
+    // "Only this one" and "this and everything after" both have to SPLIT the
+    // series before the editor can be trusted to write to one id. Doing the
+    // split first, with an empty patch, means the sheet then edits a plain
+    // standalone record and every field in it behaves normally.
+    const target = await applyScoped(item.store, item.masterId, item.date, scope, 'edit', {});
+    if (target) setEditing({ store: item.store, id: target, date: item.date });
+  };
+
+  const menuDelete = async (_id: string, scope: OccurrenceScope) => {
+    const item = heldItem();
+    closeMenu();
+    if (!item) return;
+    await applyScoped(item.store, item.masterId, item.date, scope, 'delete');
+  };
+
+  /**
+   * Duplicate lands on the SAME day, not the next free slot.
+   *
+   * Copying something is nearly always the first half of "and now change one
+   * thing about it", so the copy opens in the editor straight away rather than
+   * appearing silently underneath the original where two identical blocks
+   * overlap and neither can be told apart.
+   */
+  const menuDuplicate = async (_id: string) => {
+    const item = heldItem();
+    closeMenu();
+    if (!item) return;
+    const store = item.store === 'events' ? events() : tasks();
+    const master = (store as any)[item.masterId];
+    if (!master) return;
+    // Through `draftFromRecord` and back out, which is the same round trip the
+    // editor makes. A shallow copy of the record would carry the Google id and
+    // the sync stamps with it, and two records claiming one remote event means
+    // one of them quietly stops being drawn.
+    const draft = draftFromRecord(master, item.store, item.date);
+    const id = await saveDraft(item.store, {
+      ...draft,
+      title: `${draft.title} copy`,
+      // A copy of one occurrence is a single item, never a second series. The
+      // alternative is one long-press silently creating a year of events.
+      recur: undefined,
+    });
+    setEditing({ store: item.store, id, date: item.date });
+  };
+
+  const menuColour = async (_id: string, colour: string | undefined) => {
+    const item = heldItem();
+    closeMenu();
+    if (item) await edit(item.store, item.masterId, { colour });
+  };
+
+  const menuCategory = async (_id: string, categoryId: string | undefined) => {
+    const item = heldItem();
+    closeMenu();
+    if (item) await edit(item.store, item.masterId, { categoryId });
+  };
+
+  const menuToggleDone = (_id: string, _next: boolean) => {
+    const item = heldItem();
+    closeMenu();
+    if (item) void tick(item);
+  };
+
+  /**
+   * A stretch drawn on an empty grid IS the answer to "when", so the sheet opens
+   * already holding it rather than on the next round half hour.
+   */
+  const createFromDrag = ({ date, startMin, endMin }: {
+    date: string; startMin: number; endMin: number;
+  }) => setEditing({
+    store: 'events',
+    date,
+    prefill: { allDay: false, startMin, endMin },
+  });
+
+  /**
+   * Dropping a block writes it straight through, with no sheet in between.
+   *
+   * A confirmation step here would make the gesture pointless: the whole value
+   * of dragging an event is that it is faster than opening it. It is also
+   * reversible by dragging it back, which a delete is not, so it does not need
+   * the guard a destructive action does.
+   *
+   * A repeating occurrence is DETACHED first, honouring the same rule the PC
+   * uses: moving one day of a series means that day only, unless the series is
+   * locked, and `applyScoped` reads the lock itself.
+   */
+  const moveFromDrag = async ({ item, date, startMin, endMin }: {
+    item: AgendaItem; date: string; startMin: number; endMin: number | null;
+  }) => {
+    const patch: Record<string, unknown> = {
+      startTime: toTimeString(startMin),
+      endTime: endMin === null ? undefined : toTimeString(endMin),
+    };
+    if (date !== item.date) {
+      const anchor = anchorFor(date, weekStartsOn);
+      patch.weekKey = anchor.weekKey;
+      patch.dayIndex = anchor.dayIndex;
+    }
+    await applyScoped(
+      item.store, item.masterId, item.date,
+      item.repeating ? 'one' : 'all', 'edit', patch,
+    );
+  };
+
   const tick = (item: AgendaItem) => toggleDone(item.store, {
     masterId: item.masterId,
     date: item.date,
@@ -337,7 +503,7 @@ export function Today({ onOpenConflicts }: {
       {/* ── The body ───────────────────────────────────────────────────── */}
       {/* The swipe lives on the body only. Putting it on the whole screen would
           fight the horizontal strips in the header above. */}
-      <View style={{ flex: 1 }} {...(view === 'month' || view === 'year' ? {} : swipe.panHandlers)}>
+      <View style={{ flex: 1 }} {...(view === 'month' || view === 'year' || !swipeViewSwitch ? {} : swipe.panHandlers)}>
       {view === 'week' ? (
         <WeekView
           dates={weekDates}
@@ -347,6 +513,11 @@ export function Today({ onOpenConflicts }: {
           clock={timeFormat}
           interval={interval}
           prayersOn={prayersOn}
+          dayStartH={dayWindow.start}
+          dayEndH={dayWindow.end}
+          onCreateRange={createFromDrag}
+          onMoveItem={moveFromDrag}
+          onMenuItem={hold}
           onOpenItem={open}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
         />
@@ -363,6 +534,11 @@ export function Today({ onOpenConflicts }: {
           interval={interval}
           detailed
           prayersOn={prayersOn}
+          dayStartH={dayWindow.start}
+          dayEndH={dayWindow.end}
+          onCreateRange={createFromDrag}
+          onMoveItem={moveFromDrag}
+          onMenuItem={hold}
           onOpenItem={open}
           onOpenDay={() => chooseView('agenda')}
         />
@@ -376,6 +552,11 @@ export function Today({ onOpenConflicts }: {
           interval={interval}
           detailed={customDates.length <= 2}
           prayersOn={prayersOn}
+          dayStartH={dayWindow.start}
+          dayEndH={dayWindow.end}
+          onCreateRange={createFromDrag}
+          onMoveItem={moveFromDrag}
+          onMenuItem={hold}
           onOpenItem={open}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
         />
@@ -383,9 +564,23 @@ export function Today({ onOpenConflicts }: {
         <MonthView
           anchor={selected}
           events={events()}
+          categories={categories}
           today={today}
           weekStartsOn={weekStartsOn}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
+          onCreateSpan={({ startDate, endDate }) => setEditing({
+            store: 'events',
+            date: startDate,
+            // Sweeping days in the month view is a statement about WHICH DAYS,
+            // so the sheet opens as an all-day item already covering them. The
+            // span is inclusive: one cell is one day, not zero.
+            prefill: {
+              allDay: true,
+              startMin: null,
+              endMin: null,
+              daysSpan: daysBetween(startDate, endDate) + 1,
+            },
+          })}
         />
       ) : view === 'year' ? (
         <YearView
@@ -420,7 +615,7 @@ export function Today({ onOpenConflicts }: {
         {anytime.length > 0 ? (
           <Group title="Anytime" hint="No particular time">
             {anytime.map(item => (
-              <ItemRow key={item.id} item={item} onTick={tick} onOpen={open} clock={timeFormat} />
+              <ItemRow key={item.id} item={item} onTick={tick} onOpen={open} onHold={hold} clock={timeFormat} />
             ))}
           </Group>
         ) : null}
@@ -440,7 +635,7 @@ export function Today({ onOpenConflicts }: {
               return (
                 <View key={item.id}>
                   {crossesNow ? <NowLine minutes={nowMin} clock={timeFormat} /> : null}
-                  <ItemRow item={item} onTick={tick} onOpen={open} rail clock={timeFormat} />
+                  <ItemRow item={item} onTick={tick} onOpen={open} onHold={hold} rail clock={timeFormat} />
                 </View>
               );
             })}
@@ -500,6 +695,19 @@ export function Today({ onOpenConflicts }: {
       </Pressable>
 
       <Editor target={editing} onClose={() => setEditing(null)} />
+
+      <ItemMenu
+        target={menu}
+        onClose={closeMenu}
+        onEdit={menuEdit}
+        onDelete={menuDelete}
+        onToggleDone={menuToggleDone}
+        onDuplicate={menuDuplicate}
+        onColour={menuColour}
+        onCategory={menuCategory}
+        categories={categories as any}
+        swatches={SWATCHES}
+      />
     </View>
   );
 }
@@ -676,10 +884,12 @@ function Pulse() {
  * it is also destructive-ish and easy to do by accident in a pocket, so it gets
  * its own target rather than the whole card.
  */
-function ItemRow({ item, onTick, onOpen, rail, clock }: {
+function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
   item: AgendaItem;
   onTick: (item: AgendaItem) => void;
   onOpen: (item: AgendaItem) => void;
+  /** Long-press: everything you can do to this without opening it. */
+  onHold?: (item: AgendaItem) => void;
   rail?: boolean;
   clock?: string;
 }) {
@@ -703,6 +913,8 @@ function ItemRow({ item, onTick, onOpen, rail, clock }: {
 
       <Pressable
         onPress={() => onOpen(item)}
+        onLongPress={onHold ? () => onHold(item) : undefined}
+        delayLongPress={280}
         android_ripple={{ color: p.accentSoft }}
         style={({ pressed }) => ({
           flex: 1,

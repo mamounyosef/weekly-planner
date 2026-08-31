@@ -43,6 +43,13 @@ import { createStorage, type SyncStorage } from '../lib/syncStorage';
 import { createExpoRunner, openPlannerDatabase } from '../lib/sqlite';
 import { createTransport, isAuthError, type PlannerTransport } from '../lib/syncTransport';
 import { prefs } from '../lib/prefs';
+import {
+  DEFAULT_DAY_WINDOW, DEFAULT_SWIPE_VIEW_SWITCH, withDayEnd, withDayStart,
+  type DayWindow,
+} from '../lib/viewPrefs';
+import {
+  planOccurrenceDelete, planOccurrenceEdit, type OccurrenceScope,
+} from '../lib/occurrence';
 import { buildDay, ymd, type AgendaDay } from '../lib/agenda';
 import {
   buildEventRecord,
@@ -196,6 +203,26 @@ interface PlannerContextValue {
   saveDraft(store: SyncStore, draft: DraftInput, editingId?: string): Promise<string>;
   /** Remove an item everywhere. A tombstone, never a local hide. */
   removeItem(store: SyncStore, id: string): Promise<void>;
+  /**
+   * Change or delete a repeating item at ONE date, or from it onwards, or
+   * everywhere.
+   *
+   * The decision itself is made in `occurrence.ts`, which is tested against the
+   * PC's own code side by side. A phone and a desktop that disagreed about what
+   * "only this one" meant would not throw an error: they would quietly write two
+   * different shapes of series and both look right until a week later.
+   *
+   * Returns the id worth keeping selected afterwards, or null when the target is
+   * gone.
+   */
+  applyScoped(
+    store: SyncStore,
+    masterId: string,
+    date: string | null,
+    scope: OccurrenceScope,
+    action: 'edit' | 'delete',
+    patch?: Record<string, unknown>,
+  ): Promise<string | null>;
   /** Which weekday this planner's weeks start on. From the PC once synced. */
   weekStartsOn: 0 | 1 | 2 | 3 | 4 | 5 | 6;
   /** The settings the PC shares. Empty until the first sync brings them. */
@@ -214,6 +241,19 @@ interface PlannerContextValue {
   /** The Custom view's window, in days either side of the chosen day. */
   customWindow: { before: number; after: number };
   setCustomWindow(before: number, after: number): void;
+  /**
+   * The hours of the day this phone draws, its own choice.
+   *
+   * Per device, like the view and the interval: a phone held in one hand wants
+   * a tighter window than a wide monitor, and the PC keeps `dayStartH` and
+   * `dayEndH` in its own device-scoped settings for that reason.
+   */
+  dayWindow: DayWindow;
+  setDayStart(hour: number): void;
+  setDayEnd(hour: number): void;
+  /** Whether a sideways swipe changes the view as well as the date. */
+  swipeViewSwitch: boolean;
+  setSwipeViewSwitch(on: boolean): void;
   /** The prayers of one day, already offset, filtered and sorted. */
   prayersOn(date: string): PrayerOccurrence[];
   /** Whether a given prayer has been marked as prayed. */
@@ -242,6 +282,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const [alarmSummary, setAlarmSummary] = useState('No reminders scheduled yet');
   const [interval, setIntervalState] = useState(30);
   const [customWindow, setCustomWindowState] = useState({ before: 1, after: 3 });
+  const [dayWindow, setDayWindowState] = useState<DayWindow>(DEFAULT_DAY_WINDOW);
+  const [swipeViewSwitch, setSwipeState] = useState(DEFAULT_SWIPE_VIEW_SWITCH);
 
   const storageRef = useRef<SyncStorage | null>(null);
   const transportRef = useRef<PlannerTransport | null>(null);
@@ -281,12 +323,17 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         const deviceId = await prefs.getDeviceId();
         await storage.setDeviceId(deviceId);
 
-        const [url, session, user, savedInterval, savedWindow] = await Promise.all([
+        const [
+          url, session, user, savedInterval, savedWindow, savedDayWindow, savedSwipe,
+        ] = await Promise.all([
           prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(),
           prefs.getInterval(), prefs.getCustomWindow(),
+          prefs.getDayWindow(), prefs.getSwipeViewSwitch(),
         ]);
         setIntervalState(savedInterval);
         setCustomWindowState(savedWindow);
+        setDayWindowState(savedDayWindow);
+        setSwipeState(savedSwipe);
         const loaded = await storage.load(deviceId);
         if (cancelled) return;
 
@@ -687,6 +734,34 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     await edit(store, id, { [DELETED_FIELD]: true });
   }, [edit]);
 
+  const applyScoped = useCallback(async (
+    store: SyncStore,
+    masterId: string,
+    date: string | null,
+    scope: OccurrenceScope,
+    action: 'edit' | 'delete',
+    patch: Record<string, unknown> = {},
+  ): Promise<string | null> => {
+    // Through the ref, like `saveDraft`: the menu may have been open while a
+    // sync landed, and planning against a stale master would split the wrong
+    // series.
+    const master = (readClientStore(dataRef.current, store) as any)[masterId];
+    if (!master) return null;
+
+    const opts = { weekStartsOn, newId };
+    const plan = action === 'edit'
+      ? planOccurrenceEdit(master, date, scope, patch as any, opts)
+      : planOccurrenceDelete(master, date, scope, opts);
+
+    // An empty plan is a genuine no-op, so it must not become a write. A
+    // redundant write is a sync op that can lose a race against a real one.
+    for (const w of plan.writes) {
+      if (w.op === 'remove') await removeItem(store, w.id);
+      else await saveRecord(store, w.id, w.record as Record<string, unknown>);
+    }
+    return plan.targetId;
+  }, [removeItem, saveRecord, weekStartsOn]);
+
   const answerConflict = useCallback(async (conflict: SyncConflict, choice: ResolveChoice) => {
     const previous = dataRef.current;
     const next = applyLocalResolution(previous, conflict, choice, Date.now());
@@ -783,6 +858,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     toggleDone,
     saveDraft,
     removeItem,
+    applyScoped,
     weekStartsOn,
     shared,
     categories,
@@ -801,6 +877,25 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     setCustomWindow: (before: number, after: number) => {
       setCustomWindowState({ before, after });
       void prefs.setCustomWindow(before, after);
+    },
+    dayWindow,
+    // The repaired window is computed here and stored, rather than being read
+    // back from disk: moving one end can move the other, and the screen has to
+    // show the corrected pair immediately rather than a frame of the illegal one.
+    setDayStart: (hour: number) => {
+      const next = withDayStart(dayWindow, hour);
+      setDayWindowState(next);
+      void prefs.setDayWindow(next);
+    },
+    setDayEnd: (hour: number) => {
+      const next = withDayEnd(dayWindow, hour);
+      setDayWindowState(next);
+      void prefs.setDayWindow(next);
+    },
+    swipeViewSwitch,
+    setSwipeViewSwitch: (on: boolean) => {
+      setSwipeState(on);
+      void prefs.setSwipeViewSwitch(on);
     },
     answerConflict,
     resetLocal,

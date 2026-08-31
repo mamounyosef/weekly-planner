@@ -2525,8 +2525,6 @@ export default function DailyPlanner() {
   }), [slots, sh, timeFormat]);
   const dayEndMin   = dayEndH * 60;
   const dayStartMin = dayStartH * 60;
-  const darkPalette = (eventColorStyle as string) === 'classic' ? CLASSIC_DARK_EVENT_COLORS : VIVID_DARK_EVENT_COLORS;
-  const colorPalette = darkMode ? darkPalette : EVENT_COLORS;
   // Universal event card styles (tinted, solid, minimal, glowing) for ALL planner items & Google Calendar.
   const pageBg = themePalette(darkMode, darkPreset, lightPreset).rootBg;
   const chipColors = useCallback((ev: PlannerEvent) =>
@@ -4852,11 +4850,33 @@ export default function DailyPlanner() {
   // one meant a full re-serialise + a synchronous localStorage write + a POST per
   // frame — the single biggest stall while resizing. 150ms is below the threshold
   // where the other window looks out of date, and the final value always lands.
+  const pendingBroadcastRef = useRef<number | undefined>(undefined);
+  const pendingSnapshotRef = useRef<AppSettings | undefined>(undefined);
+
   useEffect(() => {
     if (!settingsLoaded.current) return;
-    const id = window.setTimeout(() => broadcastSettingsChange(currentSettingsSnapshot()), 150);
-    return () => window.clearTimeout(id);
+    
+    const snapshot = currentSettingsSnapshot();
+    pendingSnapshotRef.current = snapshot;
+
+    if (pendingBroadcastRef.current !== undefined) {
+      window.clearTimeout(pendingBroadcastRef.current);
+    }
+    
+    pendingBroadcastRef.current = window.setTimeout(() => {
+      pendingBroadcastRef.current = undefined;
+      broadcastSettingsChange(snapshot);
+    }, 150);
   }, [currentSettingsSnapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingBroadcastRef.current !== undefined && pendingSnapshotRef.current) {
+        window.clearTimeout(pendingBroadcastRef.current);
+        broadcastSettingsChange(pendingSnapshotRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => { localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts)); }, [shortcuts]);
 
@@ -7855,7 +7875,7 @@ export default function DailyPlanner() {
                               style={{ color: day.isExcluded ? '#f59e0b' : menuText }}
                             >
                               <div className="flex items-center gap-1.5 min-w-0 truncate">
-                                <CalendarX size={12} className={day.isExcluded ? 'text-amber-400' : 'text-slate-400'} />
+                                <CalendarX size={12} className={day.isExcluded ? 'text-amber-500' : 'text-muted-foreground'} />
                                 <span className="truncate">Exclude date</span>
                               </div>
                               <input
@@ -7901,7 +7921,7 @@ export default function DailyPlanner() {
                               e.stopPropagation();
                               startEditingFocusDay('bar', day.key, day.day, day.seconds);
                             }}
-                            className={`cursor-pointer hover:underline ${day.isExcluded ? 'line-through text-amber-400 opacity-75' : ''}`}
+                            className={`cursor-pointer hover:underline ${day.isExcluded ? 'line-through text-amber-500 opacity-75' : ''}`}
                             title="Double-click to edit focus time"
                           >
                             {day.seconds > 0 ? formatFocusDuration(day.seconds) : '—'}
@@ -8122,7 +8142,7 @@ export default function DailyPlanner() {
                         style={{ color: focusExcludedSet.has(todayFocusKey) ? '#f59e0b' : menuText }}
                       >
                         <div className="flex items-center gap-2 min-w-0 truncate">
-                          <CalendarX size={13} className={focusExcludedSet.has(todayFocusKey) ? 'text-amber-400' : 'text-slate-400'} />
+                          <CalendarX size={13} className={focusExcludedSet.has(todayFocusKey) ? 'text-amber-500' : 'text-muted-foreground'} />
                           <span className="truncate">Exclude today</span>
                         </div>
                         <input
@@ -9281,7 +9301,7 @@ export default function DailyPlanner() {
                                         {!tooShort && (
                                           <div className="flex items-center gap-1 pt-1 flex-shrink-0" onMouseDown={e => e.preventDefault()}>
                                             {SWATCHES.map(c => {
-                                              const sc = colorPalette[c];
+                                              const sc = gcalChipColors(SWATCH_BASE_HEX[c] || c, { dark: darkMode, style: eventColorStyle as EventCardStyle, pageBg }) || { bg: 'transparent', border: 'transparent', text: 'transparent' };
                                               return (
                                                 <button key={c} type="button"
                                                   onClick={e => { e.stopPropagation(); applyEdit(ev.id, { color: c }); }}
@@ -10557,7 +10577,7 @@ export default function DailyPlanner() {
                                     style={{ color: d.isExcluded ? '#f59e0b' : menuText }}
                                   >
                                     <div className="flex items-center gap-2 min-w-0 truncate">
-                                      <CalendarX size={13} className={d.isExcluded ? 'text-amber-400' : 'text-slate-400'} />
+                                      <CalendarX size={13} className={d.isExcluded ? 'text-amber-500' : 'text-muted-foreground'} />
                                       <span className="truncate">Exclude date</span>
                                     </div>
                                     <input
@@ -10689,7 +10709,7 @@ export default function DailyPlanner() {
                                     style={{ color: isExcluded ? '#f59e0b' : menuText }}
                                   >
                                     <div className="flex items-center gap-1.5 min-w-0 truncate">
-                                      <CalendarX size={12} className={isExcluded ? 'text-amber-400' : 'text-slate-400'} />
+                                      <CalendarX size={12} className={isExcluded ? 'text-amber-500' : 'text-muted-foreground'} />
                                       <span className="truncate">Exclude date</span>
                                     </div>
                                     <input
@@ -10712,7 +10732,7 @@ export default function DailyPlanner() {
                                 e.stopPropagation();
                                 startEditingFocusDay('month', key, d, secs);
                               }}
-                              className={`${isPhone ? 'text-[10px]' : 'text-[15px]'} font-bold tabular-nums leading-none cursor-pointer ${isExcluded ? 'line-through opacity-75 text-amber-400' : ''}`}
+                              className={`${isPhone ? 'text-[10px]' : 'text-[15px]'} font-bold tabular-nums leading-none cursor-pointer ${isExcluded ? 'line-through opacity-75 text-amber-500' : ''}`}
                               style={{ color: isExcluded ? '#f59e0b' : (secs > 0 ? (hot ? '#fff' : '#60a5fa') : menuSub), opacity: secs > 0 || isExcluded ? 1 : 0.45 }}
                             >
                               {editingFocusDayKey === focusEditKey('month', key) ? (
@@ -10741,7 +10761,7 @@ export default function DailyPlanner() {
                               )}
                             </span>
                             {isExcluded ? (
-                              <span className="text-[9px] font-bold uppercase tracking-wider text-amber-400 leading-none">Excl</span>
+                              <span className="text-[9px] font-bold uppercase tracking-wider text-amber-500 leading-none">Excl</span>
                             ) : (
                               sessions > 0 && (
                                 <span className={`${isPhone ? 'text-[9px]' : 'text-[11px]'} font-bold tabular-nums leading-none`} style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
@@ -10962,8 +10982,8 @@ export default function DailyPlanner() {
               </div>
             )}
 
-            <div className="rounded-xl p-3 mb-5 border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs flex items-start gap-2.5">
-              <AlertTriangle size={16} className="flex-shrink-0 mt-0.5 text-amber-400" />
+            <div className="rounded-xl p-3 mb-5 border border-amber-500/30 bg-amber-500/10 text-amber-500 text-xs flex items-start gap-2.5">
+              <AlertTriangle size={16} className="flex-shrink-0 mt-0.5 text-amber-500" />
               <div>
                 <span className="font-semibold block mb-0.5">Permanent Database Action</span>
                 This action directly updates your focus-sessions.json database for this specific day. This change cannot be undone.

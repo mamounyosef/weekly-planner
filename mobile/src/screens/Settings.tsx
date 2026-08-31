@@ -12,9 +12,23 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Updates from 'expo-updates';
 
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
+import { Stepper, Toggle } from '../ui/Fields';
 import { space, HIT, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import { checkPermissions, requestPermissions, type PermissionState } from '../lib/notify';
+import { prefs } from '../lib/prefs';
+import {
+  DAY_HOUR_MAX,
+  DAY_HOUR_MIN,
+  DEFAULT_DAY_WINDOW,
+  DEFAULT_SWIPE_VIEW_SWITCH,
+  describeDayWindow,
+  formatHour,
+  withDayEnd,
+  withDayStart,
+  type ClockFormat,
+  type DayWindow,
+} from '../lib/viewPrefs';
 
 export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
   onClose: () => void;
@@ -26,7 +40,8 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
   const {
     username, serverUrl, status, data, alarmSummary, lastError,
     signOut, syncNow, resetLocal, interval, setInterval,
-    customWindow, setCustomWindow,
+    customWindow, setCustomWindow, timeFormat,
+    dayWindow, setDayStart, setDayEnd, swipeViewSwitch, setSwipeViewSwitch,
   } = usePlanner();
 
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
@@ -36,6 +51,15 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
   const [updateState, setUpdateState] = useState<string | null>(null);
 
   useEffect(() => { void checkPermissions().then(setPerm); }, []);
+
+  /** The clock the planner is set to, which the preview and the sentence follow. */
+  const clock: ClockFormat = timeFormat === '24h' ? '24h' : '12h';
+
+  // The grid's own window and the swipe live on the planner context, not here:
+  // Today.tsx draws the grid from them, so a stepper on this screen and the grid
+  // behind it must be reading the same value rather than two copies of it. The
+  // repair (moving one end can drag the other) happens in viewPrefs, so the
+  // number on screen is always the one that was actually stored.
 
   const askForPermissions = async () => {
     setChecking(true);
@@ -145,7 +169,7 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
         </Section>
 
         {/* ── Reminders ── */}
-        <Section title="Reminders">
+        <Section title="Notifications">
           <Text variant="body" tone="soft">
             Reminders are scheduled on this phone, so they fire with your PC switched off
             and with no internet connection.
@@ -211,6 +235,59 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
               );
             })}
           </Row>
+        </Section>
+
+        {/* ── View ── */}
+        {/* Everything here describes the piece of glass in your hand, not the
+            plan. It is a section of its own rather than more rows under "This
+            device" because these are the settings someone actually comes here
+            to change, and burying the visible day under a snap interval made
+            the screen look like it had nothing in it. */}
+        <Section title="View">
+          <Text variant="body">Visible hours</Text>
+          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+            The slice of the day the time grid draws. Kept on this phone only, because a
+            window that reads well on a monitor is a wall of slivers on a phone.
+          </Text>
+
+          <Spacer size={space.md} />
+          <Row gap={space.md} style={{ alignItems: 'center' }}>
+            <Text variant="caption" tone="soft" style={{ width: 44 }}>Start</Text>
+            <Stepper
+              value={dayWindow.start}
+              min={DAY_HOUR_MIN}
+              max={DAY_HOUR_MAX - 1}
+              onChange={setDayStart}
+              format={h => formatHour(h, clock)}
+            />
+          </Row>
+          <Spacer size={space.sm} />
+          <Row gap={space.md} style={{ alignItems: 'center' }}>
+            <Text variant="caption" tone="soft" style={{ width: 44 }}>End</Text>
+            <Stepper
+              value={dayWindow.end}
+              min={DAY_HOUR_MIN + 1}
+              max={DAY_HOUR_MAX}
+              onChange={setDayEnd}
+              format={h => formatHour(h, clock)}
+            />
+          </Row>
+
+          <Spacer size={space.md} />
+          <DayWindowPreview window={dayWindow} clock={clock} />
+          <Spacer size={space.sm} />
+          <Text variant="caption" tone="soft">{describeDayWindow(dayWindow, clock)}</Text>
+
+          <Spacer size={space.lg} />
+          <Divider />
+          <Spacer size={space.xs} />
+
+          <Toggle
+            label="Swipe between views"
+            hint="Drag left or right across the grid to move to the next view. Turn off if it fights scrolling."
+            value={swipeViewSwitch}
+            onChange={setSwipeViewSwitch}
+          />
         </Section>
 
         {/* ── This device ── */}
@@ -308,7 +385,7 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
             }}
           >
             <View style={{ flex: 1 }}>
-              <Text variant="body">Reminders</Text>
+              <Text variant="body">Notifications</Text>
               <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
                 How early things alert, quiet hours and snoozing. Shared with your PC.
               </Text>
@@ -356,6 +433,57 @@ export function Settings({ onClose, onOpenCategories, onOpenReminders }: {
           <Button label="Reset local data" variant="danger" onPress={confirmReset} />
         </Section>
       </ScrollView>
+    </View>
+  );
+}
+
+/**
+ * The whole day as a bar, with the chosen window lit up inside it.
+ *
+ * Two numbers and a sentence still ask you to picture the result. This does not:
+ * the twenty-four hours are always drawn, the visible ones are filled, and the
+ * hidden ones stay as faint outlines, so how much of the day you have cut away
+ * is obvious at a glance and before leaving the screen. Ticks at midnight, 6,
+ * noon and 6 give the eye something to measure against.
+ *
+ * Built from plain Views on purpose. There is no chart library here and there
+ * must never be one: a native dependency would end over-the-air updates for this
+ * app, and a preview strip is not worth that.
+ */
+function DayWindowPreview({ window: win, clock }: { window: DayWindow; clock: ClockFormat }) {
+  const p = useTheme();
+  const hours = Array.from({ length: DAY_HOUR_MAX }, (_, h) => h);
+
+  return (
+    <View accessible accessibilityLabel={describeDayWindow(win, clock)}>
+      <Row gap={2} style={{ alignItems: 'flex-end' }}>
+        {hours.map(h => {
+          const inside = h >= win.start && h < win.end;
+          // Midnight, 6am, noon and 6pm stand a little taller. They are the only
+          // reference points a bar this small can carry without becoming noise.
+          const marker = h % 6 === 0;
+          return (
+            <View
+              key={h}
+              style={{
+                flex: 1,
+                height: inside ? (marker ? 30 : 24) : marker ? 16 : 12,
+                borderRadius: 2,
+                backgroundColor: inside ? p.accent : p.surfaceAlt,
+                borderWidth: inside ? 0 : 1,
+                borderColor: p.line,
+                opacity: inside ? (marker ? 1 : 0.85) : 1,
+              }}
+            />
+          );
+        })}
+      </Row>
+      <Spacer size={space.xs} />
+      <Row style={{ justifyContent: 'space-between' }}>
+        {[0, 6, 12, 18, 24].map(h => (
+          <Text key={h} variant="caption" tone="faint">{formatHour(h, clock)}</Text>
+        ))}
+      </Row>
     </View>
   );
 }

@@ -67,6 +67,17 @@ export interface EditorTarget {
    * it land somewhere else is the surprise that makes lists feel unreliable.
    */
   listId?: string;
+  /**
+   * Fields a gesture already decided, applied over the blank draft.
+   *
+   * Dragging a stretch of the grid, or sweeping days in the month view, IS the
+   * answer to "when": the sheet must open already holding it. Opening on the
+   * next round half hour after the user has just drawn 9:15 to 10:00 with their
+   * thumb would throw the gesture away and make it look decorative.
+   *
+   * Only applied when creating. An existing item's own record always wins.
+   */
+  prefill?: Partial<DraftInput>;
 }
 
 const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
@@ -105,10 +116,15 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
   const [draft, setDraft] = useState<DraftInput>(() => (
     existing
       ? draftFromRecord(existing, target.store, target.date)
-      : withDefaultCategory(
-        blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()),
-        categories,
-      )
+      : {
+        // Category defaults first, then the gesture, so a drag's own times are
+        // never overwritten by the category's default duration.
+        ...withDefaultCategory(
+          blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()),
+          categories,
+        ),
+        ...(target.prefill ?? {}),
+      }
   ));
   const [problems, setProblems] = useState<DraftProblem[]>([]);
   const [busy, setBusy] = useState(false);

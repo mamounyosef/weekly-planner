@@ -139,21 +139,6 @@ const POSITION_SNAP  = 5;
 
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
-const EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#d9e8d2', border: '#7fae72', text: '#2c4726' },
-  peach: { bg: '#fbe0cf', border: '#e8a274', text: '#7a3d1c' },
-  blue:  { bg: '#d6e4f5', border: '#7ba6dd', text: '#1f3f66' },
-  sand:  { bg: '#f2e2bd', border: '#cba25a', text: '#5c421a' },
-  lilac: { bg: '#e8dcf2', border: '#b48cdb', text: '#4a2a68' },
-};
-
-const DARK_EVENT_COLORS: Record<EventColor, { bg: string; border: string; text: string }> = {
-  sage:  { bg: '#182818', border: '#365e30', text: '#8ec88e' },
-  peach: { bg: '#2e1810', border: '#6e3820', text: '#d48060' },
-  blue:  { bg: '#101c30', border: '#284878', text: '#78aadd' },
-  sand:  { bg: '#261e0e', border: '#6a4e28', text: '#c8a860' },
-  lilac: { bg: '#1e1228', border: '#523070', text: '#b07ecc' },
-};
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function timeToMin(t: string): number {
@@ -1327,6 +1312,7 @@ export default function Widget() {
 
     if ((window as any).pywebview?.api?.start_drag) {
       (window as any).pywebview.api.start_drag();
+      return;
     }
 
     let isDragging = true;
