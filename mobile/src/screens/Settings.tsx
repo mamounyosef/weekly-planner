@@ -34,12 +34,13 @@ import {
 } from '../lib/viewPrefs';
 
 export function Settings({
-  onClose, onOpenCategories, onOpenReminders, onOpenPrayers,
+  onClose, onOpenCategories, onOpenReminders, onOpenPrayers, onOpenPlanner,
 }: {
   onClose: () => void;
   onOpenCategories?: () => void;
   onOpenReminders?: () => void;
   onOpenPrayers?: () => void;
+  onOpenPlanner?: () => void;
 }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
@@ -403,6 +404,25 @@ export function Settings({
               <Text variant="body">Notifications</Text>
               <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
                 How early things alert, quiet hours and snoozing. Shared with your PC.
+              </Text>
+            </View>
+            <Text variant="title" tone="faint">›</Text>
+          </Pressable>
+
+          <Divider />
+
+          <Pressable
+            onPress={onOpenPlanner}
+            accessibilityRole="button"
+            style={{
+              flexDirection: 'row', alignItems: 'center',
+              minHeight: HIT, gap: space.md,
+            }}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="body">The planner</Text>
+              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+                Clock, week start, task colour and the focus day. Shared with your PC.
               </Text>
             </View>
             <Text variant="title" tone="faint">›</Text>

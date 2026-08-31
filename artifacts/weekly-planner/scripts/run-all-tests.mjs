@@ -67,6 +67,7 @@ const testFiles = [
   'src/lib/taskBoard.test.ts',
   'src/lib/quickAdd.test.ts',
   'src/lib/dayWindows.test.ts',
+  'src/lib/displaySettings.test.ts',
 ];
 
 console.log(`\n======================================================`);

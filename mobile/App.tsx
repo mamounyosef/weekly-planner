@@ -31,6 +31,7 @@ import { Settings } from './src/screens/Settings';
 import { Categories } from './src/screens/Categories';
 import { Reminders } from './src/screens/Reminders';
 import { Prayers } from './src/screens/Prayers';
+import { Planner } from './src/screens/Planner';
 import { Search } from './src/screens/Search';
 import { Notifications } from './src/screens/Notifications';
 import { QuickAdd } from './src/screens/QuickAdd';
@@ -97,6 +98,7 @@ function Shell() {
   const [showCategories, setShowCategories] = useState(false);
   const [showReminders, setShowReminders] = useState(false);
   const [showPrayers, setShowPrayers] = useState(false);
+  const [showPlanner, setShowPlanner] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
@@ -134,6 +136,8 @@ function Shell() {
         <Reminders onClose={() => setShowReminders(false)} />
       ) : showPrayers ? (
         <Prayers onClose={() => setShowPrayers(false)} />
+      ) : showPlanner ? (
+        <Planner onClose={() => setShowPlanner(false)} />
       ) : showSearch ? (
         <Search
           onClose={() => setShowSearch(false)}
@@ -177,6 +181,7 @@ function Shell() {
                 onOpenCategories={() => setShowCategories(true)}
                 onOpenReminders={() => setShowReminders(true)}
                 onOpenPrayers={() => setShowPrayers(true)}
+                onOpenPlanner={() => setShowPlanner(true)}
               />
             )}
           </View>
