@@ -28,7 +28,7 @@ export interface Placed<T> {
 }
 
 /** Below this a block is unreadable, so it is drawn taller than it is long. */
-export const MIN_BLOCK_MINUTES = 20;
+export const MIN_BLOCK_MINUTES = 15;
 
 export function blockEnd(item: Placeable): number {
   const start = item.startMin;

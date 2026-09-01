@@ -35,10 +35,7 @@ import {
   TIME_FORMATS,
   WEEK_START_LABELS,
   coerceDisplaySettings,
-  describeFocusDay,
-  describeFocusGoal,
   displayPatch,
-  FOCUS_GOAL_CHOICES,
   type DisplaySettings,
 } from '../lib/displaySettings';
 
@@ -204,73 +201,6 @@ export function Planner({ onClose }: { onClose?: () => void }) {
               value={s.autoRollRecurringTasks}
               onChange={v => set({ autoRollRecurringTasks: v })}
             />
-          </Card>
-        </View>
-
-        {/* ── Focus ──
-            The day boundary belongs here rather than on the focus screen: it
-            decides which DAY a session is counted against, and the history on
-            both machines has to bucket it the same way or the two disagree
-            about yesterday. */}
-        <View style={{ gap: space.sm }}>
-          <Text variant="label" tone="faint">FOCUS</Text>
-          <Card style={{ gap: space.md }}>
-            <Field
-              label="A focus day starts at"
-              hint="Late work belongs to the day that has not ended yet, not the one just started."
-            >
-              <Stepper
-                value={s.focusDayStartHour}
-                min={0}
-                max={11}
-                onChange={h => set({ focusDayStartHour: h })}
-                format={h => (h === 0 ? 'midnight' : h < 12 ? `${h}am` : `${h - 12}pm`)}
-              />
-            </Field>
-            <Text variant="caption" tone="soft">
-              {describeFocusDay(s.focusDayStartHour, s.timeFormat)}
-            </Text>
-
-            <Divider />
-
-            {/* The goal the streak is measured against. Zero is a real answer
-                rather than a missing one: with no goal, any day you focused at
-                all counts, which is what someone who has not set one expects. */}
-            <Field
-              label="Daily goal"
-              hint="What the progress bar and the streak on the Focus screen are measured against."
-            >
-              <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
-                {FOCUS_GOAL_CHOICES.map(goal => {
-                  const on = goal === s.focusDailyGoalSeconds;
-                  return (
-                    <Pressable
-                      key={goal}
-                      onPress={() => set({ focusDailyGoalSeconds: goal })}
-                      accessibilityRole="radio"
-                      accessibilityState={{ selected: on }}
-                      accessibilityLabel={describeFocusGoal(goal)}
-                      style={{
-                        paddingHorizontal: space.md, paddingVertical: 7,
-                        borderRadius: radius.sm,
-                        borderWidth: 1,
-                        borderColor: on ? p.accent : p.line,
-                        backgroundColor: on ? p.accentSoft : 'transparent',
-                      }}
-                    >
-                      <Text
-                        variant="caption"
-                        tone={on ? 'accent' : 'soft'}
-                        style={{ fontWeight: on ? '700' : '400' }}
-                      >
-                        {goal === 0 ? 'None' : goal < 3600 ? `${goal / 60}m` : `${goal / 3600}h`}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </Row>
-            </Field>
-            <Text variant="caption" tone="soft">{describeFocusGoal(s.focusDailyGoalSeconds)}</Text>
           </Card>
         </View>
 

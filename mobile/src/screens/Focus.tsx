@@ -46,6 +46,7 @@ import {
   describeDuration,
   focusDayKey,
   summariseFocus,
+  computeAllTimeStreaks,
   type FocusSessionRecord,
 } from '../lib/focusStats';
 import {
@@ -68,6 +69,8 @@ import {
   adjustDayTotal,
   editSingleSession,
 } from '../lib/focusGoals';
+import { summariseFocusYear } from '../lib/yearStats';
+import { YearChart } from '../components/YearChart';
 import { Stepper } from '../ui/Fields';
 
 type Range = 'week' | 'month' | 'year';
@@ -190,6 +193,14 @@ export function Focus() {
     });
   }, [focusSessions, range, dayStartHour]);
 
+  const yearSummary = useMemo(() => {
+    return summariseFocusYear(focusSessions as FocusSessionRecord[], {
+      year: new Date().getFullYear(),
+      dayStartHour,
+      excludedDates: (shared as any).focusExcludedDates || [],
+    });
+  }, [focusSessions, dayStartHour, shared]);
+
   /**
    * Today's total, including the session still running.
    *
@@ -211,13 +222,22 @@ export function Focus() {
       now: new Date(now).toISOString(),
       goalSeconds: focusDailyGoalSeconds,
       dayStartHour,
+      excludedDates: (shared as any).focusExcludedDates || [],
       // The running session, so the bar and the streak move with the clock
       // rather than sitting frozen until it is stopped. Uncredited, for the
       // same reason `todaySeconds` above uses it: time already banked into the
       // day by an edit must not be counted twice.
       liveSeconds: phase === 'running' ? focusUncreditedSeconds(timer, now) : 0,
     });
-  }, [focusSessions, now, focusDailyGoalSeconds, dayStartHour, phase, timer]);
+  }, [focusSessions, now, focusDailyGoalSeconds, dayStartHour, phase, timer, shared]);
+
+  const allTimeStreaks = useMemo(() => {
+    return computeAllTimeStreaks(focusSessions as FocusSessionRecord[], {
+      anchorDate: new Date(now),
+      dayStartHour,
+      excludedDates: (shared as any).focusExcludedDates || [],
+    });
+  }, [focusSessions, now, dayStartHour, shared]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -406,37 +426,45 @@ export function Focus() {
             {/* The headline. One number, big, with the rest as support. */}
             <View style={{ marginBottom: space.xl }}>
               <Text variant="label" tone="faint" style={{ letterSpacing: 1 }}>
-                {range === 'week' ? 'THIS WEEK' : range === 'month' ? 'LAST 30 DAYS' : 'LAST YEAR'}
+                {range === 'week' ? 'THIS WEEK' : range === 'month' ? 'LAST 30 DAYS' : 'THIS YEAR'}
               </Text>
               <Text
                 variant="display"
                 style={{ fontSize: 44, lineHeight: 50, marginTop: 2, color: p.accent }}
               >
-                {describeDuration(summary.totalSeconds)}
+                {describeDuration(range === 'year' ? yearSummary.yearSeconds : summary.totalSeconds)}
               </Text>
               <Text variant="caption" tone="soft" style={{ marginTop: 2 }}>
-                {summary.sessions} session{summary.sessions === 1 ? '' : 's'}
+                {range === 'year' ? yearSummary.yearSessions : summary.sessions} session{
+                  (range === 'year' ? yearSummary.yearSessions : summary.sessions) === 1 ? '' : 's'
+                }
               </Text>
             </View>
 
-            <Chart days={bars} peak={peak} compact={range !== 'week'} selectedDay={selectedDay} onSelect={setSelectedDay} />
+            {range === 'year' ? (
+              <YearChart months={yearSummary.months} yearMaxSeconds={yearSummary.yearMaxSeconds} />
+            ) : (
+              <Chart days={bars} peak={peak} compact={range !== 'week'} selectedDay={selectedDay} onSelect={setSelectedDay} />
+            )}
 
             <Row gap={space.sm} style={{ marginTop: space.xl }}>
-              <Stat label="Average day" value={describeDuration(summary.averageSeconds)}
-                hint="over days you worked" />
-              <Stat label="Best day" value={describeDuration(summary.bestDay?.seconds ?? 0)}
-                hint={summary.bestDay ? niceDate(summary.bestDay.date) : undefined} />
+              <Stat label={range === 'year' ? 'Active days' : 'Average day'} 
+                value={range === 'year' ? `${yearSummary.yearActiveDays}` : describeDuration(summary.averageSeconds)}
+                hint={range === 'year' ? 'this year' : 'over days you worked'} />
+              <Stat label={range === 'year' ? 'Best month' : 'Best day'} 
+                value={range === 'year' ? (yearSummary.yearBestMonth ? describeDuration(yearSummary.yearBestMonth.seconds) : '0m') : describeDuration(summary.bestDay?.seconds ?? 0)}
+                hint={range === 'year' ? (yearSummary.yearBestMonth ? yearSummary.yearBestMonth.month.toLocaleString('default', { month: 'long' }) : 'none') : (summary.bestDay ? niceDate(summary.bestDay.date) : undefined)} />
             </Row>
 
             <Row gap={space.sm} style={{ marginTop: space.sm }}>
               <Stat
                 label="Current streak"
-                value={goalStats.currentStreak === 0 ? 'None' : `${goalStats.currentStreak} day${goalStats.currentStreak === 1 ? '' : 's'}`}
-                hint={goalStats.currentStreak === 0 ? 'nothing today yet' : 'in a row'}
+                value={allTimeStreaks.currentStreak === 0 ? 'None' : `${allTimeStreaks.currentStreak} day${allTimeStreaks.currentStreak === 1 ? '' : 's'}`}
+                hint={allTimeStreaks.currentStreak === 0 ? 'nothing today yet' : 'in a row'}
               />
               <Stat
                 label="Best streak"
-                value={`${goalStats.bestStreak} day${goalStats.bestStreak === 1 ? '' : 's'}`}
+                value={`${allTimeStreaks.longestStreak} day${allTimeStreaks.longestStreak === 1 ? '' : 's'}`}
                 hint="all time"
               />
             </Row>

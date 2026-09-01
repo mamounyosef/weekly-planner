@@ -43,6 +43,7 @@ export const SHARED_SETTING_KEYS = [
   'focusDailyGoalSeconds',
   'focusChime',
   'focusCues',
+  'focusExcludedDates',
 ] as const satisfies ReadonlyArray<keyof AppSettings>;
 
 export type SharedSettingKey = (typeof SHARED_SETTING_KEYS)[number];

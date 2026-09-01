@@ -54,6 +54,7 @@ const testFiles = [
   'src/lib/settingsScope.test.ts',
   'src/lib/settingsRoundTrip.test.ts',
   'src/lib/focusStats.test.ts',
+  'src/lib/yearStats.test.ts',
   'src/lib/grid.test.ts',
   'src/lib/prayerSync.test.ts',
   'src/lib/dragGrid.test.ts',

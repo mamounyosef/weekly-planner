@@ -13,18 +13,19 @@
 // in this app that will not resolve itself and needs a person.
 
 import React from 'react';
-import { Pressable, View } from 'react-native';
+import { Pressable, View, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Text, useTheme } from './kit';
 import { space } from '../theme';
+import { ICONS } from './icons';
 
 export type TabId = 'calendar' | 'tasks' | 'focus' | 'settings';
 
 export interface TabDef {
   id: TabId;
   label: string;
-  glyph: string;
+  iconName: string;
   badge?: number;
 }
 
@@ -33,10 +34,10 @@ export interface TabDef {
  * do, how the time went, and how it all behaves.
  */
 export const TABS: readonly TabDef[] = [
-  { id: 'calendar', label: 'Calendar', glyph: '▦' },
-  { id: 'tasks', label: 'Tasks', glyph: '✓' },
-  { id: 'focus', label: 'Focus', glyph: '◐' },
-  { id: 'settings', label: 'Settings', glyph: '⚙' },
+  { id: 'calendar', label: 'Calendar', iconName: 'calendar' },
+  { id: 'tasks', label: 'Tasks', iconName: 'check-square' },
+  { id: 'focus', label: 'Focus', iconName: 'target' },
+  { id: 'settings', label: 'Settings', iconName: 'settings' },
 ];
 
 export function TabBar({ active, onChange, badges }: {
@@ -80,15 +81,15 @@ export function TabBar({ active, onChange, badges }: {
             }}
           >
             <View>
-              <Text
+              <Image
+                source={{ uri: ICONS[tab.iconName] }}
                 style={{
-                  fontSize: 17,
-                  lineHeight: 20,
-                  color: on ? p.accent : p.inkFaint,
+                  width: 22,
+                  height: 22,
+                  tintColor: on ? p.accent : p.inkFaint,
+                  marginBottom: 2,
                 }}
-              >
-                {tab.glyph}
-              </Text>
+              />
               {badge ? (
                 <View style={{
                   position: 'absolute',

@@ -21,7 +21,11 @@ import {
  * tick-off state. Both windows use this — the server owns the Aladhan cache, so
  * a second window costs no extra API calls.
  */
-export function usePrayerTimes(settings: PrayerSettings, visibleDates: Date[]) {
+export function usePrayerTimes(
+  settings: PrayerSettings,
+  visibleDates: Date[],
+  language: 'english' | 'arabic' = 'english'
+) {
   const [months, setMonths] = useState<Record<string, PrayerMonth>>({});
   const [done, setDone] = useState<PrayerDoneMap>({});
   const [stale, setStale] = useState(false);
@@ -130,8 +134,8 @@ export function usePrayerTimes(settings: PrayerSettings, visibleDates: Date[]) {
     const dateStr = prayerDateKey(date);
     if (!withinPrayerHorizon(dateStr, settings)) return [];
     const ym = `${date.getFullYear()}-${date.getMonth() + 1}`;
-    return buildPrayerDay(dateStr, months[ym]?.[dateStr], settings);
-  }, [months, settings]);
+    return buildPrayerDay(dateStr, months[ym]?.[dateStr], settings, language);
+  }, [months, settings, language]);
 
   /**
    * The day's raw times, before any of the "which ones to show" settings are

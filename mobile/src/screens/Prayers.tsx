@@ -447,6 +447,17 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
                   </Field>
                 )}
 
+                <Field label="Language" hint="The language used to display the prayer names on the calendar.">
+                  <Segment
+                    options={[
+                      { key: 'english', label: 'English' },
+                      { key: 'arabic', label: 'Arabic' },
+                    ]}
+                    value={appearance.language ?? 'english'}
+                    onChange={k => setAppearance({ ...appearance, language: k as 'english' | 'arabic' })}
+                  />
+                </Field>
+
                 <Text variant="caption" tone="faint">
                   {describePrayerAppearance(appearance)}
                 </Text>

@@ -219,6 +219,7 @@ export function buildPrayerDay(
   dateStr: string,
   times: PrayerDayTimes | undefined,
   settings: PrayerSettings,
+  language: 'english' | 'arabic' = 'english',
 ): PrayerOccurrence[] {
   if (!times) return [];
   const out: PrayerOccurrence[] = [];
@@ -232,7 +233,7 @@ export function buildPrayerDay(
     const time = minutesToPrayerTime(clampedMinutes);
     out.push({
       key,
-      label: PRAYER_LABELS[key],
+      label: language === 'arabic' ? PRAYER_ARABIC[key] : PRAYER_LABELS[key],
       arabic: PRAYER_ARABIC[key],
       time,
       minutes: clampedMinutes,

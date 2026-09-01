@@ -15,8 +15,8 @@
 // that has happened, so they surface as a badge on the calendar and open over
 // it. On a good day the screen does not exist.
 
-import React, { useState } from 'react';
-import { ActivityIndicator, StatusBar, View } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { ActivityIndicator, StatusBar, View, BackHandler } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { PlannerProvider, usePlanner } from './src/state/planner';
@@ -35,6 +35,7 @@ import { Planner } from './src/screens/Planner';
 import { Search } from './src/screens/Search';
 import { Notifications } from './src/screens/Notifications';
 import { QuickAdd } from './src/screens/QuickAdd';
+import { Diagnostics } from './src/screens/Diagnostics';
 import { space } from './src/theme';
 
 export default function App() {
@@ -102,8 +103,37 @@ function Shell() {
   const [showSearch, setShowSearch] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   /** A result tapped in search, handed to the calendar to open. */
   const [pendingOpen, setPendingOpen] = useState<{ date: string } | null>(null);
+
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (showDiagnostics) { setShowDiagnostics(false); return true; }
+      if (showQuickAdd) { setShowQuickAdd(false); return true; }
+      if (showNotifications) { setShowNotifications(false); return true; }
+      if (showSearch) { setShowSearch(false); return true; }
+      if (showPlanner) { setShowPlanner(false); return true; }
+      if (showPrayers) { setShowPrayers(false); return true; }
+      if (showReminders) { setShowReminders(false); return true; }
+      if (showCategories) { setShowCategories(false); return true; }
+      if (showConflicts) { setShowConflicts(false); return true; }
+      
+      if (tab !== 'calendar') { 
+        setTab('calendar'); 
+        return true; 
+      }
+      
+      // If we are at the calendar tab and no modals are open, exit the app
+      return false;
+    });
+    return () => sub.remove();
+  }, [
+    showDiagnostics, showQuickAdd, showNotifications, showSearch,
+    showPlanner, showPrayers, showReminders, showCategories,
+    showConflicts, tab
+  ]);
 
   // The splash lasts only as long as opening SQLite; there is no network in this
   // path, so it is over before it registers even on a slow phone.

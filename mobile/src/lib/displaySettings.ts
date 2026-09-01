@@ -55,6 +55,7 @@ export interface DisplaySettings {
    * who has not set one would expect.
    */
   focusDailyGoalSeconds: number;
+  focusExcludedDates: string[];
 }
 
 /** The desk's own defaults, so a phone with nothing synced yet agrees with it. */
@@ -66,6 +67,7 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   autoRollRecurringTasks: true,
   focusDayStartHour: 4,
   focusDailyGoalSeconds: 0,
+  focusExcludedDates: [],
 };
 
 export const WEEK_START_LABELS: { id: WeekStart; label: string; short: string }[] = [
@@ -160,6 +162,9 @@ export function coerceDisplaySettings(raw: unknown): DisplaySettings {
   if (isFocusDayStartHour(r.focusDayStartHour)) out.focusDayStartHour = r.focusDayStartHour;
   if (isFocusGoalSeconds(r.focusDailyGoalSeconds)) {
     out.focusDailyGoalSeconds = r.focusDailyGoalSeconds;
+  }
+  if (Array.isArray(r.focusExcludedDates)) {
+    out.focusExcludedDates = r.focusExcludedDates.filter(d => typeof d === 'string');
   }
   return out;
 }

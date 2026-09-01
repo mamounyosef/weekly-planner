@@ -741,7 +741,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'categories' | 'notifications' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
+type TabCategory = 'appearance' | 'calendar' | 'categories' | 'tasks' | 'notifications' | 'prayer' | 'audio' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
 
 interface Toast {
   id: number;
@@ -1162,7 +1162,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'categories', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
@@ -1182,7 +1182,7 @@ export default function SettingsPage() {
     try {
       const search = window.location.search || (location.includes('?') ? location.slice(location.indexOf('?')) : '');
       const requested = new URLSearchParams(search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'categories', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
       if (requested && known.includes(requested)) {
         setActiveTab(requested as TabCategory);
       }
@@ -1193,7 +1193,7 @@ export default function SettingsPage() {
     const handlePopState = () => {
       try {
         const requested = new URLSearchParams(window.location.search).get('tab');
-        const known: string[] = ['appearance', 'calendar', 'categories', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+        const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
         if (requested && known.includes(requested)) {
           setActiveTab(requested as TabCategory);
         }
@@ -1239,12 +1239,21 @@ export default function SettingsPage() {
   const [dayEndH, setDayEndH] = useState<number>(initialSettings.dayEndH);
   const [mobileContentZoom, setMobileContentZoom] = useState<number>(1);
   const [mobileUiZoom, setMobileUiZoom] = useState<number>(1);
+  // Per device, like the prayer colour: the stored device snapshot fills it in
+  // below. It is deliberately NOT read from the shared settings, which do not
+  // and must not carry it.
+  const [prayerLanguage, setPrayerLanguage] = useState<'english' | 'arabic'>('english');
   const [focusDayStartHour, setFocusDayStartHour] = useState<number>(initialSettings.focusDayStartHour);
   // Read only on the desk: the control for it lives on the phone's Focus
   // screen. Held in state so a save from here carries it through untouched
   // rather than dropping it back to zero.
   const [focusDailyGoalSeconds, setFocusDailyGoalSeconds] = useState<number>(
     initialSettings.focusDailyGoalSeconds,
+  );
+  // Same again: the days you excused yourself are chosen on the Focus screen,
+  // never here, but they must survive a save made from this page.
+  const [focusExcludedDates, setFocusExcludedDates] = useState<string[]>(
+    initialSettings.focusExcludedDates,
   );
   const [focusChime, setFocusChime] = useState<FocusChimeId>(initialSettings.focusChime);
   const [chimeCategory, setChimeCategory] = useState<'all' | FocusChimeCategory>('all');
@@ -1608,6 +1617,7 @@ export default function SettingsPage() {
     setDayEndH(d.dayEndH);
     setMobileContentZoom(d.mobileContentZoom ?? 1);
     setMobileUiZoom(d.mobileUiZoom ?? 1);
+    setPrayerLanguage(d.prayerLanguage ?? 'english');
     setTasksPanelOpen(d.tasksPanelOpen);
     setTasksPanelWidth(d.tasksPanelWidth);
     setShowTaskRow(d.showTaskRow);
@@ -1665,12 +1675,13 @@ export default function SettingsPage() {
       dayStartH, dayEndH,
       mobileContentZoom,
       mobileUiZoom,
+      prayerLanguage,
       ...deviceExtrasRef.current,
     });
   }, [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, mobileSwipeViewSwitch, tasksPanelOpen,
       tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
       darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
-      mobileContentZoom, mobileUiZoom]);
+      mobileContentZoom, mobileUiZoom, prayerLanguage]);
 
   // Apply dark mode CSS class whenever darkMode changes
   useEffect(() => {
@@ -1693,6 +1704,7 @@ export default function SettingsPage() {
       setWeekStartsOn(s.weekStartsOn);
       setFocusDayStartHour(s.focusDayStartHour);
       setFocusDailyGoalSeconds(s.focusDailyGoalSeconds);
+      setFocusExcludedDates(s.focusExcludedDates);
       setFocusChime(s.focusChime);
       setFocusCues(s.focusCues);
       setShortcuts(s.shortcuts);
@@ -1742,6 +1754,7 @@ export default function SettingsPage() {
           setWeekStartsOn(coerced.weekStartsOn);
           setFocusDayStartHour(coerced.focusDayStartHour);
           setFocusDailyGoalSeconds(coerced.focusDailyGoalSeconds);
+          setFocusExcludedDates(coerced.focusExcludedDates);
           setFocusChime(coerced.focusChime);
           setFocusCues(coerced.focusCues);
           setShortcuts(coerced.shortcuts);
@@ -1935,6 +1948,7 @@ export default function SettingsPage() {
     // Set on the phone's Focus screen; carried through here untouched so a
     // desk save cannot wipe it.
     focusDailyGoalSeconds,
+    focusExcludedDates,
     focusChime,
     focusCues,
     shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,
@@ -2209,7 +2223,8 @@ export default function SettingsPage() {
   const tabs: { id: TabCategory; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: 'appearance', label: 'Appearance', icon: <Sun size={17} /> },
     { id: 'calendar', label: 'Calendar Grid', icon: <Calendar size={17} /> },
-    { id: 'categories', label: 'Tasks & Categories', icon: <Tag size={17} />, badge: `${categories.length + taskLists.length}` },
+    { id: 'categories', label: 'Categories', icon: <Tag size={17} />, badge: `${categories.length}` },
+    { id: 'tasks', label: 'Tasks', icon: <CheckSquare size={17} />, badge: `${taskLists.length}` },
     { id: 'notifications', label: 'Notifications', icon: <Bell size={17} />,
       badge: notifications.enabled ? undefined : 'Off' },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
@@ -2845,6 +2860,103 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Tasks */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Tasks</h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      How tasks appear on the weekly grid. Tasks that live only in the side panel have no colour unless you give them one.
+                    </p>
+                  </div>
+
+                  <label className="flex items-center justify-between gap-4 cursor-pointer">
+                    <span className="flex flex-col">
+                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Show the task row</span>
+                      <span className="text-[11px]" style={{ color: textSecondary }}>
+                        A band directly under All Day holding tasks that have a date but no time.
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowTaskRow(v => !v)}
+                      className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
+                      style={{ background: showTaskRow ? taskColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={showTaskRow}
+                    >
+                      <span
+                        className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
+                        style={{ left: showTaskRow ? 22 : 2 }}
+                      />
+                    </button>
+                  </label>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex flex-col">
+                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task Checkbox Shape</span>
+                      <span className="text-[11px]" style={{ color: textSecondary }}>
+                        Choose whether completed task checkboxes are circles or squares in the side panel.
+                      </span>
+                    </span>
+                    <div className="flex items-center gap-1.5 p-1 rounded-xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
+                      <button
+                        type="button"
+                        onClick={() => setTaskCheckboxShape('circle')}
+                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
+                        style={{
+                          background: taskCheckboxShape === 'circle' ? taskColor : 'transparent',
+                          color: taskCheckboxShape === 'circle' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                        }}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-full border border-current" /> Circle
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTaskCheckboxShape('square')}
+                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
+                        style={{
+                          background: taskCheckboxShape === 'square' ? taskColor : 'transparent',
+                          color: taskCheckboxShape === 'square' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                        }}
+                      >
+                        <span className="w-2.5 h-2.5 rounded-sm border border-current" /> Square
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-3">
+                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task colour on the calendar</span>
+                    <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                      Every task drawn on the grid uses this one colour — that uniformity is what makes a task read as a task at a glance.
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {['#7dd3fc', '#67e8f9', '#a5b4fc', '#c4b5fd', '#86efac', '#fcd34d', '#fda4af', '#94a3b8'].map(hex => (
+                        <button
+                          key={hex}
+                          onClick={() => setTaskColor(hex)}
+                          className={`${isTouch ? 'w-11 h-11' : 'w-8 h-8'} rounded-lg transition-transform hover:scale-110`}
+                          style={{
+                            background: hex,
+                            border: `2px solid ${taskColor.toLowerCase() === hex ? textPrimary : 'transparent'}`,
+                          }}
+                          title={hex}
+                        />
+                      ))}
+                      <label
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border cursor-pointer"
+                        style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }}
+                      >
+                        <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>Custom</span>
+                        <input
+                          type="color"
+                          value={taskColor}
+                          onChange={e => setTaskColor(e.target.value)}
+                          className="touch-target w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
               </TabPanel>
             )}
 
@@ -3154,103 +3266,6 @@ export default function SettingsPage() {
                     </label>
                   </div>
                 </div>
-
-                {/* Tasks */}
-                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-6" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div>
-                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Tasks</h2>
-                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                      How tasks appear on the weekly grid. Tasks that live only in the side panel have no colour unless you give them one.
-                    </p>
-                  </div>
-
-                  <label className="flex items-center justify-between gap-4 cursor-pointer">
-                    <span className="flex flex-col">
-                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Show the task row</span>
-                      <span className="text-[11px]" style={{ color: textSecondary }}>
-                        A band directly under All Day holding tasks that have a date but no time.
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowTaskRow(v => !v)}
-                      className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0"
-                      style={{ background: showTaskRow ? taskColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
-                      aria-pressed={showTaskRow}
-                    >
-                      <span
-                        className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth"
-                        style={{ left: showTaskRow ? 22 : 2 }}
-                      />
-                    </button>
-                  </label>
-
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="flex flex-col">
-                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task Checkbox Shape</span>
-                      <span className="text-[11px]" style={{ color: textSecondary }}>
-                        Choose whether completed task checkboxes are circles or squares in the side panel.
-                      </span>
-                    </span>
-                    <div className="flex items-center gap-1.5 p-1 rounded-xl border" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
-                      <button
-                        type="button"
-                        onClick={() => setTaskCheckboxShape('circle')}
-                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
-                        style={{
-                          background: taskCheckboxShape === 'circle' ? taskColor : 'transparent',
-                          color: taskCheckboxShape === 'circle' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
-                        }}
-                      >
-                        <span className="w-2.5 h-2.5 rounded-full border border-current" /> Circle
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTaskCheckboxShape('square')}
-                        className="flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-semibold transition-smooth"
-                        style={{
-                          background: taskCheckboxShape === 'square' ? taskColor : 'transparent',
-                          color: taskCheckboxShape === 'square' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
-                        }}
-                      >
-                        <span className="w-2.5 h-2.5 rounded-sm border border-current" /> Square
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-3">
-                    <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task colour on the calendar</span>
-                    <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                      Every task drawn on the grid uses this one colour — that uniformity is what makes a task read as a task at a glance.
-                    </p>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {['#7dd3fc', '#67e8f9', '#a5b4fc', '#c4b5fd', '#86efac', '#fcd34d', '#fda4af', '#94a3b8'].map(hex => (
-                        <button
-                          key={hex}
-                          onClick={() => setTaskColor(hex)}
-                          className={`${isTouch ? 'w-11 h-11' : 'w-8 h-8'} rounded-lg transition-transform hover:scale-110`}
-                          style={{
-                            background: hex,
-                            border: `2px solid ${taskColor.toLowerCase() === hex ? textPrimary : 'transparent'}`,
-                          }}
-                          title={hex}
-                        />
-                      ))}
-                      <label
-                        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border cursor-pointer"
-                        style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }}
-                      >
-                        <span className="text-[11px] font-semibold" style={{ color: textSecondary }}>Custom</span>
-                        <input
-                          type="color"
-                          value={taskColor}
-                          onChange={e => setTaskColor(e.target.value)}
-                          className="touch-target w-6 h-6 bg-transparent border-0 cursor-pointer p-0"
-                        />
-                      </label>
-                    </div>
-                  </div>
-                </div>
               </TabPanel>
             )}
 
@@ -3317,108 +3332,6 @@ export default function SettingsPage() {
                       />
                     ))}
                   </Reorder.Group>
-                </div>
-
-                {/* ── Task Lists ──────────────────────────────────────────── */}
-                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <FolderKanban size={18} style={{ color: accentColor }} />
-                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Task Lists</h2>
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                          {taskLists.length} list{taskLists.length === 1 ? '' : 's'}
-                        </span>
-                      </div>
-                      <p className="text-xs mt-1" style={{ color: textSecondary }}>
-                        Separate boards inside the tasks panel — Work, Study, Errands. Not the same thing as
-                        categories: a category colours a calendar item, a list decides which board a task sits on.
-                        You can also manage these straight from the tasks panel on the main window.
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleAddTaskList}
-                      className="touch-target px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
-                      style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
-                    >
-                      <Plus size={15} />
-                      Add List
-                    </button>
-                  </div>
-
-                  {/* Task Lists — smooth Framer Motion drag to reorder */}
-                  <Reorder.Group
-                    axis="y"
-                    values={taskLists}
-                    onReorder={setTaskLists}
-                    className="flex flex-col gap-3 select-none"
-                  >
-                    {taskLists.map((list) => (
-                      <TaskListRow
-                        key={list.id}
-                        list={list}
-                        darkMode={darkMode}
-                        accentColor={accentColor}
-                        cardBdr={cardBdr}
-                        textPrimary={textPrimary}
-                        textSecondary={textSecondary}
-                        isGeneral={list.id === GENERAL_LIST_ID}
-                        deleteConfirmListId={deleteConfirmListId}
-                        isTouch={isTouch}
-                        onPatch={(patch) => patchTaskList(list.id, patch)}
-                        onDelete={() => handleDeleteTaskList(list.id)}
-                        onSetDeleteConfirm={(id) => setDeleteConfirmListId(id)}
-                      />
-                    ))}
-                  </Reorder.Group>
-                </div>
-
-                {/* ── Task Recurrence & Overdue Behavior ─────────────────── */}
-                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
-                  <div className="flex items-center gap-2">
-                    <Repeat size={18} style={{ color: accentColor }} />
-                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Task Recurrence & Overdue Behavior</h2>
-                  </div>
-                  <p className="text-xs -mt-2" style={{ color: textSecondary }}>
-                    Control how repeating tasks behave when scheduled occurrences are missed.
-                  </p>
-
-                  <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)', borderColor: cardBdr }}>
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="min-w-0 flex-1">
-                        <span className="text-xs font-semibold block" style={{ color: textPrimary }}>
-                          Roll Overdue Recurring Tasks to Today
-                        </span>
-                        <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
-                          When a recurring task reaches its next scheduled occurrence, remove older missed instances from Overdue and display the task only in Today.
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={autoRollRecurringTasks}
-                        onClick={() => setAutoRollRecurringTasks(v => !v)}
-                        className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
-                        style={{ background: autoRollRecurringTasks ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
-                      >
-                        <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: autoRollRecurringTasks ? 22 : 2 }} />
-                      </button>
-                    </div>
-
-                    <div
-                      className="rounded-xl p-3 text-[11px] leading-relaxed border"
-                      style={{
-                        background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
-                        borderColor: cardBdr,
-                        color: textSecondary,
-                      }}
-                    >
-                      <strong style={{ color: textPrimary }}>How this works: </strong>
-                      If a task repeats daily and was missed yesterday, it stays in the Overdue section until today arrives. Once today arrives, it automatically clears from Overdue and appears as today's task. For tasks repeating every X days, missed tasks stay overdue until the next occurrence day arrives.
-                    </div>
-                  </div>
                 </div>
 
                 {/* Create / Edit Category Modal.
@@ -3802,6 +3715,121 @@ export default function SettingsPage() {
                     </div>
                   )}
                 </AnimatePresence>
+              </TabPanel>
+            )}
+
+            {/* ✅ TASKS TAB */}
+            {activeTab === 'tasks' && (
+              <TabPanel
+                isPhone={isPhone}
+                key="tasks"
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6"
+              >
+                {/* ── Task Lists ──────────────────────────────────────────── */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <FolderKanban size={18} style={{ color: accentColor }} />
+                        <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Task Lists</h2>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          {taskLists.length} list{taskLists.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <p className="text-xs mt-1" style={{ color: textSecondary }}>
+                        Separate boards inside the tasks panel — Work, Study, Errands. Not the same thing as
+                        categories: a category colours a calendar item, a list decides which board a task sits on.
+                        You can also manage these straight from the tasks panel on the main window.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleAddTaskList}
+                      className="touch-target px-4 h-9 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 transition-smooth shadow-md active:scale-95 flex-shrink-0"
+                      style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}
+                    >
+                      <Plus size={15} />
+                      Add List
+                    </button>
+                  </div>
+
+                  {/* Task Lists — smooth Framer Motion drag to reorder */}
+                  <Reorder.Group
+                    axis="y"
+                    values={taskLists}
+                    onReorder={setTaskLists}
+                    className="flex flex-col gap-3 select-none"
+                  >
+                    {taskLists.map((list) => (
+                      <TaskListRow
+                        key={list.id}
+                        list={list}
+                        darkMode={darkMode}
+                        accentColor={accentColor}
+                        cardBdr={cardBdr}
+                        textPrimary={textPrimary}
+                        textSecondary={textSecondary}
+                        isGeneral={list.id === GENERAL_LIST_ID}
+                        deleteConfirmListId={deleteConfirmListId}
+                        isTouch={isTouch}
+                        onPatch={(patch) => patchTaskList(list.id, patch)}
+                        onDelete={() => handleDeleteTaskList(list.id)}
+                        onSetDeleteConfirm={(id) => setDeleteConfirmListId(id)}
+                      />
+                    ))}
+                  </Reorder.Group>
+                </div>
+
+                {/* ── Task Recurrence & Overdue Behavior ─────────────────── */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-5" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div className="flex items-center gap-2">
+                    <Repeat size={18} style={{ color: accentColor }} />
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Task Recurrence & Overdue Behavior</h2>
+                  </div>
+                  <p className="text-xs -mt-2" style={{ color: textSecondary }}>
+                    Control how repeating tasks behave when scheduled occurrences are missed.
+                  </p>
+
+                  <div className="p-4 rounded-2xl border flex flex-col gap-3" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.015)', borderColor: cardBdr }}>
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <span className="text-xs font-semibold block" style={{ color: textPrimary }}>
+                          Roll Overdue Recurring Tasks to Today
+                        </span>
+                        <span className="text-[11px] block mt-0.5 leading-snug" style={{ color: textSecondary }}>
+                          When a recurring task reaches its next scheduled occurrence, remove older missed instances from Overdue and display the task only in Today.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={autoRollRecurringTasks}
+                        onClick={() => setAutoRollRecurringTasks(v => !v)}
+                        className="touch-target relative w-10 h-5 rounded-full transition-colors flex-shrink-0 cursor-pointer"
+                        style={{ background: autoRollRecurringTasks ? accentColor : (darkMode ? 'rgba(255,255,255,0.15)' : cardBdr) }}
+                      >
+                        <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-smooth shadow-sm" style={{ left: autoRollRecurringTasks ? 22 : 2 }} />
+                      </button>
+                    </div>
+
+                    <div
+                      className="rounded-xl p-3 text-[11px] leading-relaxed border"
+                      style={{
+                        background: darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+                        borderColor: cardBdr,
+                        color: textSecondary,
+                      }}
+                    >
+                      <strong style={{ color: textPrimary }}>How this works: </strong>
+                      If a task repeats daily and was missed yesterday, it stays in the Overdue section until today arrives. Once today arrives, it automatically clears from Overdue and appears as today's task. For tasks repeating every X days, missed tasks stay overdue until the next occurrence day arrives.
+                    </div>
+                  </div>
+                </div>
               </TabPanel>
             )}
 
@@ -4503,6 +4531,40 @@ export default function SettingsPage() {
                         </div>
                       </div>
 
+                      {/* Language */}
+                      <div className="flex flex-col gap-3">
+                        <span className="text-xs font-semibold" style={{ color: textPrimary }}>Language</span>
+                        <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
+                          The language used to display the prayer names on the calendar.
+                        </p>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setPrayerLanguage('english')}
+                            className="touch-target px-4 py-2 rounded-xl text-xs font-semibold border transition-smooth"
+                            style={{
+                              background: prayerLanguage === 'english' ? prayer.color : 'transparent',
+                              borderColor: prayerLanguage === 'english' ? prayer.color : cardBdr,
+                              color: prayerLanguage === 'english' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                            }}
+                          >
+                            English
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPrayerLanguage('arabic')}
+                            className="touch-target px-4 py-2 rounded-xl text-xs font-semibold border transition-smooth"
+                            style={{
+                              background: prayerLanguage === 'arabic' ? prayer.color : 'transparent',
+                              borderColor: prayerLanguage === 'arabic' ? prayer.color : cardBdr,
+                              color: prayerLanguage === 'arabic' ? (darkMode ? '#0b1220' : '#ffffff') : textSecondary,
+                            }}
+                          >
+                            Arabic
+                          </button>
+                        </div>
+                      </div>
+
                       {/* Horizon */}
                       <div className="flex items-center justify-between gap-4">
                         <span className="flex flex-col">
@@ -4766,6 +4828,53 @@ export default function SettingsPage() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+
+                {/* ── Focus Day Boundary ─────────────────────────────────── */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-4" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Clock size={18} style={{ color: accentColor }} />
+                      <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Focus Day Boundary</h2>
+                    </div>
+                    <p className="text-xs mt-1" style={{ color: textSecondary }}>
+                      The hour a new day begins for focus statistics. Sessions finished before this hour count toward the previous day.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex flex-col">
+                      <span className="text-xs font-semibold" style={{ color: textPrimary }}>Day starts at</span>
+                      <span className="text-[11px]" style={{ color: textSecondary }}>
+                        Late-night sessions before this hour are grouped with the day before.
+                      </span>
+                    </span>
+                    <div className="flex items-center rounded-xl overflow-hidden border" style={{ borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)' }}>
+                      <button
+                        type="button"
+                        onClick={() => setFocusDayStartHour(h => (h + 23) % 24)}
+                        className="touch-target px-3 py-2 flex items-center justify-center transition-colors"
+                        style={{ color: textSecondary }}
+                        title="Decrease day start hour"
+                      >
+                        <Minus size={14} />
+                      </button>
+                      <span className="px-3 py-2 text-xs font-semibold tabular-nums min-w-[60px] text-center" style={{ color: textPrimary }}>
+                        {timeFormat === '24h'
+                          ? `${String(focusDayStartHour).padStart(2, '0')}:00`
+                          : `${focusDayStartHour % 12 === 0 ? 12 : focusDayStartHour % 12} ${focusDayStartHour < 12 ? 'AM' : 'PM'}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setFocusDayStartHour(h => (h + 1) % 24)}
+                        className="touch-target px-3 py-2 flex items-center justify-center transition-colors"
+                        style={{ color: textSecondary }}
+                        title="Increase day start hour"
+                      >
+                        <Plus size={14} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </TabPanel>

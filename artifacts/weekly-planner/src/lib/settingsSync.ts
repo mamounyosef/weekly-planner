@@ -190,6 +190,7 @@ export interface AppSettings {
   focusDailyGoalSeconds: number;
   focusChime: FocusChimeId;
   focusCues: Record<FocusCueSlot, FocusCueId>;
+  focusExcludedDates: string[];
   shortcuts: ShortcutMap;
   autoBackup: AutoBackupCfg;
   // ── Tasks ──────────────────────────────────────────────────────────────────
@@ -251,6 +252,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   focusDailyGoalSeconds: 0,
   focusChime: 'breath',
   focusCues: DEFAULT_FOCUS_CUES,
+  focusExcludedDates: [],
   shortcuts: DEFAULT_SHORTCUTS,
   autoBackup: { enabled: true, intervalHours: 24, keep: 50 },
   tasksPanelOpen: true,
@@ -352,6 +354,9 @@ export function coerceSettings(raw: unknown): AppSettings {
       pause: coerceFocusCue(c.pause, 'pause'),
       resume: coerceFocusCue(c.resume, 'resume'),
     };
+  }
+  if (Array.isArray(r.focusExcludedDates)) {
+    s.focusExcludedDates = r.focusExcludedDates.filter(d => typeof d === 'string');
   }
   if (r.shortcuts) s.shortcuts = coerceShortcuts(r.shortcuts);
   if (r.autoBackup && typeof r.autoBackup === 'object') {

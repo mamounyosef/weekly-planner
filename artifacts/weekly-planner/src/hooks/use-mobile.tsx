@@ -21,12 +21,21 @@ export interface Viewport {
   keyboardInset: number;
 }
 
-function read(): Viewport {
+function read(prev?: Viewport): Viewport {
   if (typeof window === 'undefined') {
     return { width: 1280, height: 800, isPhone: false, isTablet: false, isTouch: false, isLandscape: true, isShort: false, keyboardInset: 0 };
   }
   const width = window.innerWidth;
   const height = window.innerHeight;
+
+  // On Windows, minimizing a window drops its inner dimensions to 0x0.
+  // This is a hidden desktop window, not a 0-pixel wide phone. Falling back
+  // to the previous state prevents the app from inappropriately applying
+  // mobile-only throttling to background processes.
+  if (width === 0 && height === 0 && prev) {
+    return prev;
+  }
+
   const isTouch =
     ((window.matchMedia?.('(pointer: coarse)').matches ?? false) || (navigator.maxTouchPoints ?? 0) > 0);
   // The visual viewport shrinks when the software keyboard opens.
@@ -61,7 +70,7 @@ let isListening = false;
 let rafId = 0;
 
 function notifySubscribers() {
-  const next = read();
+  const next = read(currentViewport);
   const prev = currentViewport;
 
   const flagsSame =

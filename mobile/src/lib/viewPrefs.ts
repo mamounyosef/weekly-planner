@@ -33,7 +33,7 @@
  * worse than not offering it.
  */
 export const DAY_HOUR_MIN = 0;
-export const DAY_HOUR_MAX = 24;
+export const DAY_HOUR_MAX = 48;
 
 /** 7am to 11pm: an ordinary waking day, and what the PC ships with. */
 export const DEFAULT_DAY_START_HOUR = 7;
@@ -167,9 +167,10 @@ export type ClockFormat = '12h' | '24h';
 export function formatHour(hour: number, clock: ClockFormat = '12h'): string {
   const h = Math.min(DAY_HOUR_MAX, Math.max(DAY_HOUR_MIN, Math.round(hour)));
   if (clock === '24h') return `${String(h % 24).padStart(2, '0')}:00`;
-  if (h === 0 || h === 24) return 'midnight';
-  if (h === 12) return 'noon';
-  return h < 12 ? `${h}am` : `${h - 12}pm`;
+  const mod = h % 24;
+  if (mod === 0) return 'midnight';
+  if (mod === 12) return 'noon';
+  return mod < 12 ? `${mod}am` : `${mod - 12}pm`;
 }
 
 /**
@@ -316,6 +317,8 @@ export interface PrayerAppearance {
   colour: string;
   /** Whether the prayer's name is drawn beside its line. */
   showLabels: boolean;
+  /** The language the prayer name is drawn in. */
+  language: 'english' | 'arabic';
 }
 
 export const DEFAULT_PRAYER_APPEARANCE: PrayerAppearance = {
@@ -323,6 +326,7 @@ export const DEFAULT_PRAYER_APPEARANCE: PrayerAppearance = {
   style: 'marker',
   colour: '#34d399',
   showLabels: true,
+  language: 'english',
 };
 
 /** A six-digit hex colour, or nothing. Anything else is not a colour. */
@@ -347,6 +351,7 @@ export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
   // Normalised to lower case so two spellings of one colour are one value and
   // cannot ping-pong a stored setting between them.
   if (isHexColour(r.colour)) out.colour = r.colour.toLowerCase();
+  if (r.language === 'english' || r.language === 'arabic') out.language = r.language;
   return out;
 }
 
@@ -354,8 +359,9 @@ export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
 export function describePrayerAppearance(a: PrayerAppearance): string {
   if (!a.showOnCalendar) return 'Not drawn on this phone. The times are still shared.';
   const shape = PRAYER_DRAW_STYLES.find(s => s.id === a.style)?.label ?? 'Marker line';
+  const lang = a.language === 'arabic' ? 'in Arabic' : 'in English';
   // The row style has no line to label, so promising a name either way would be
   // describing a setting that does nothing.
-  if (a.style === 'row') return `${shape}, above the grid.`;
-  return a.showLabels ? `${shape}, with the name.` : `${shape}, with no name.`;
+  if (a.style === 'row') return `${shape}, above the grid, ${lang}.`;
+  return a.showLabels ? `${shape}, with the name ${lang}.` : `${shape}, with no name.`;
 }

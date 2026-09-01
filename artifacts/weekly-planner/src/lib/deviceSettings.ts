@@ -157,6 +157,8 @@ export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
    * Custom view shares the Week filter.
    */
   hiddenCategoriesByView: Record<FilterViewKey, string[]>;
+  /** The language used to display the prayer names on the calendar. */
+  prayerLanguage: 'english' | 'arabic';
 }
 
 const clampNum = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -198,13 +200,14 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
       analysisTab: 'week',
       mobileTab: 'calendar',
       hiddenCategoryIds: [],
-      hiddenCategoriesByView: { ...emptyFiltersByView },
+      hiddenCategoriesByView: emptyFiltersByView,
+      prayerLanguage: 'english',
     };
   }
   if (kind === 'tablet') {
-    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView } };
+    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
   }
-  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView } };
+  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
 }
 
 /** Validate a stored/served blob, filling anything missing from `base`. */
@@ -278,6 +281,10 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
 
   const activeKey = getFilterViewKey(s.calendarView);
   s.hiddenCategoryIds = s.hiddenCategoriesByView[activeKey] ?? fallbackHidden;
+
+  if (r.prayerLanguage === 'english' || r.prayerLanguage === 'arabic') {
+    s.prayerLanguage = r.prayerLanguage;
+  }
 
   return s;
 }

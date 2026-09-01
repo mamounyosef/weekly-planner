@@ -63,8 +63,8 @@ import {
 } from '../../lib/grid';
 import type { PrayerDrawStyle } from '../../lib/viewPrefs';
 import {
-  hourMarksIn, minuteAtY, normaliseRanges, seamsIn, slotsIn, visibleMinutes,
-  yOfMinute, type HourRange,
+  FULL_DAY, hourMarksIn, isMinuteVisible, minuteAtY, normaliseRanges, seamsIn, slotsIn,
+  splitAcrossWindows, visibleMinutes, yOfMinute, type HourRange,
 } from '../../lib/dayWindows';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
@@ -103,6 +103,9 @@ function slotHeight(interval: number): number {
 
 /** What `layoutDay` is given for each block, with the item carried along. */
 interface GridItem extends Placeable {
+  id: string;
+  isTail?: boolean;
+  isHead?: boolean;
   item: AgendaItem;
 }
 
@@ -113,10 +116,10 @@ type Drag =
 
 export function WeekView({
   dates, dayOf, today, nowMin, clock, interval = 30, detailed,
-  prayersOn, visibleHours, onMenuItem,
+  prayersOn, visibleHours, dayWindow, onMenuItem,
   prayerColour, prayerLabels = true, prayerStyle = 'marker',
   isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
-}: {
+}: { dayWindow?: { start: number; end: number };
   dates: string[];
   dayOf: (date: string) => AgendaDay;
   today: string;
@@ -218,17 +221,51 @@ export function WeekView({
   // Laid out HERE rather than inside each column, because the gesture hit-tests
   // blocks by arithmetic and needs to see every day's placement at once. The
   // columns are handed the result so nothing is computed twice.
-  const placedByDate = useMemo(() => days.map(d => layoutDay<GridItem>(
-    d.timed.map(i => ({ id: i.id, startMin: i.startMin!, endMin: i.endMin, item: i })),
-    { pxPerHour, dayStartHour: 0 },
-  // `layoutDay` still decides the COLUMNS, which is the part that is a real
-  // algorithm. Its vertical maths assumes hours run without gaps, so the top and
-  // the height are re-derived here through the piecewise mapping.
-  ).map(pl => ({
-    ...pl,
-    top: yAt(pl.item.startMin),
-    height: Math.max(2, yAt(blockEnd(pl.item)) - yAt(pl.item.startMin)),
-  }))), [days, pxPerHour, yAt]);
+  const dayStartH = dayWindow?.start ?? 0;
+
+  const placedByDate = useMemo(() => {
+    const logicalCols: GridItem[][] = days.map(() => []);
+    for (let c = 0; c < days.length; c++) {
+      for (const item of days[c].timed) {
+        // Where this actually gets drawn, once a night that runs over the end
+        // of its column is cut in two. Tested in `dayWindows.test.ts`, because
+        // the arithmetic is fiddly and getting it wrong is invisible until a
+        // whole night silently shrinks to a sliver.
+        const pieces = splitAcrossWindows(item, {
+          col: c, columns: days.length, dayStartHour: dayStartH,
+        });
+        for (const piece of pieces) {
+          logicalCols[piece.col].push({
+            id: piece.isTail ? `${item.id}_tail` : piece.isHead ? `${item.id}_head` : item.id,
+            startMin: piece.startMin,
+            endMin: piece.endMin,
+            item,
+            isTail: piece.isTail,
+            isHead: piece.isHead,
+          });
+        }
+      }
+    }
+
+    // Every piece pushed above already carries the coordinates of the SEGMENT
+    // it is, inside this column's own window. So the top and the height are
+    // read straight off it: re-deriving them from the original event is what
+    // put a head half a day above its own column.
+    return logicalCols.map(colItems => {
+      return layoutDay<GridItem>(colItems, { pxPerHour, dayStartHour: dayStartH })
+        .map(pl => {
+          const segStart = pl.item.startMin;
+          const segEnd = blockEnd(pl.item);
+          const isTail = pl.item.isTail === true;
+          const isHead = pl.item.isHead === true;
+          const isHidden = !isMinuteVisible(segStart, shown);
+
+          const top = yAt(segStart);
+          const height = isHidden ? 20 : Math.max(2, yAt(segEnd) - top);
+          return { ...pl, top, height, isHidden, isTail, isHead };
+        });
+    });
+  }, [days, pxPerHour, yAt, dayStartH, shown]);
 
   useEffect(() => {
     // Start where the day does, not at the top of an empty grid.
@@ -795,6 +832,8 @@ export function WeekView({
           {/* Columns */}
           {days.map((d, i) => (
             <DayColumn
+              shown={shown}
+              dayWindow={dayWindow}
               key={d.date}
               placed={placedByDate[i]}
               yAt={yAt}
@@ -914,9 +953,12 @@ function Ghost({
 }
 
 function DayColumn({
-  placed, yAt, height, pxPerHour, marks, slots, detailed, clock, prayers, seams,
+  shown = FULL_DAY, dayWindow, placed, yAt, height, pxPerHour, marks, slots, detailed, clock, prayers, seams,
   prayerColour, prayerLabels, chipMode, prayerStyle, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
 }: {
+  /** The drawn stretches, already normalised by the grid above. */
+  shown?: readonly HourRange[];
+  dayWindow?: { start: number; end: number };
   placed: Placed<GridItem>[];
   yAt: (minute: number) => number;
   height: number;
@@ -996,9 +1038,16 @@ function DayColumn({
         const width = `${100 / pl.columns}%`;
         const isLifted = item.id === liftedId;
         const isBeingDragged = item.id === draggingId;
+        // Squashed away, because the hour it belongs to is one this device does
+        // not draw. It keeps its place and stays tappable, and says what it is
+        // by looking provisional rather than by disappearing.
+        const isSquashed = (pl as { isHidden?: boolean }).isHidden === true;
         return (
           <Pressable
-            key={item.id}
+            // The PIECE's id, not the item's: a night split into a tail and a
+            // head is two blocks, and keying both by the event they came from
+            // would collide.
+            key={pl.item.id}
             onPress={() => {
               // A lifted block is already the subject of the gesture, so a tap
               // on it is asking what else it can do, not asking to open it.
@@ -1026,8 +1075,13 @@ function DayColumn({
               // Three states, in order of how loud they should be: carried
               // (faint, the ghost is doing the talking), lifted (raised and
               // outlined), normal.
-              opacity: isBeingDragged ? 0.2 : item.completed ? 0.45 : 0.92,
+              opacity: isBeingDragged ? 0.2 : isSquashed ? 0.4 : item.completed ? 0.45 : 0.92,
               overflow: 'hidden',
+              ...(isSquashed ? {
+                borderWidth: 1,
+                borderStyle: 'dashed' as const,
+                borderColor: '#fff',
+              } : null),
               ...(isLifted && !isBeingDragged ? {
                 borderWidth: 1.5,
                 borderColor: '#fff',
@@ -1114,11 +1168,15 @@ function DayColumn({
       {prayers.map(pr => {
         const colour = prayerColour ?? p.ok;
         const done = isPrayerDone?.(pr.key) ?? false;
-        const top = yAt(pr.minutes);
+        // A prayer before the window opens belongs to the far end of the same
+        // window, not to the top of it.
+        const normM = pr.minutes < (dayWindow?.start ?? 0) * 60 ? pr.minutes + 1440 : pr.minutes;
+        const isHidden = !isMinuteVisible(normM, shown);
+        const top = yAt(normM);
         const named = chipMode !== 'dot' && prayerLabels !== false;
 
         const glyph = (
-          <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
+          <Text style={{ color: colour, fontSize: 9, lineHeight: 10, opacity: isHidden ? 0.5 : 1 }}>
             {done ? '◉' : '○'}
           </Text>
         );
@@ -1126,7 +1184,7 @@ function DayColumn({
           <Text
             numberOfLines={1}
             style={{
-              color: colour, fontSize: 9, lineHeight: 11, fontWeight: '700',
+              color: colour, fontSize: 9, lineHeight: 11, fontWeight: '700', opacity: isHidden ? 0.5 : 1,
               textDecorationLine: done ? 'line-through' : 'none',
             }}
           >
@@ -1198,6 +1256,7 @@ function DayColumn({
                 height: 15,
                 marginHorizontal: 3,
                 paddingLeft: chipMode === 'dot' ? 3 : 5,
+                opacity: isHidden ? 0.5 : 1,
                 paddingRight: chipMode === 'dot' ? 3 : 6,
                 borderRadius: 999,
                 borderWidth: 1,

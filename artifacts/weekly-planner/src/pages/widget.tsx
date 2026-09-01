@@ -1186,14 +1186,24 @@ export default function Widget() {
       // by hand, so a guess here would mislabel every desk-started session.
       ready: timerHydratedRef.current,
     },
-    display: {
-      mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',
-      remainingSeconds: focusRemainingSeconds,
-      todaySeconds: todayFocusSeconds,
-      sessionsToday: todayFocusSessions,
-      // Until both have arrived from the server this window's totals are a
-      // guess, and a guess on the LCD reads exactly like a fact.
-      ready: timerHydratedRef.current && focusSessionsHydrated,
+    getDisplay: () => {
+      const now = Date.now();
+      const timer = focusTimerRef.current;
+      const todayKey = focusDayKey(new Date(now), focusDayStartHour);
+      const liveSeconds = getFocusTimerUncreditedSeconds(timer, now);
+      // Recompute todaySeconds using the live time + static completed time
+      const baseTodaySeconds = sumFocusSecondsForDay(focusSessions, new Date(now), focusDayStartHour);
+      const todaySeconds = baseTodaySeconds + (timer.sessionStartedAt && focusDayKey(timer.sessionStartedAt, focusDayStartHour) === todayKey ? liveSeconds : 0);
+      
+      return {
+        mode: timer.isRunning ? 'running' : timer.sessionStartedAt ? 'paused' : 'idle',
+        remainingSeconds: Math.max(0, timer.plannedSeconds - getFocusTimerElapsedSeconds(timer, now)),
+        todaySeconds,
+        sessionsToday: todayFocusSessions,
+        // Until both have arrived from the server this window's totals are a
+        // guess, and a guess on the LCD reads exactly like a fact.
+        ready: timerHydratedRef.current && focusSessionsHydrated,
+      };
     },
     onToggle: () => { if (focusTimer.isRunning) pauseFocus(); else startFocus(); },
     onStart: startFocus,

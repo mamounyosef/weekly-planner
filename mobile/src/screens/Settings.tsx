@@ -7,11 +7,12 @@
 // they belong to the machine on the desk.
 
 import React, { useEffect, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, View } from 'react-native';
+import { Alert, BackHandler, Linking, Pressable, ScrollView, View, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Updates from 'expo-updates';
 
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
+import { ICONS } from '../ui/icons';
 import { Stepper, Toggle } from '../ui/Fields';
 import { HIT, radius, space, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
@@ -49,6 +50,7 @@ export function Settings({
     signOut, syncNow, resetLocal, interval, setInterval,
     customWindow, setCustomWindow, timeFormat,
     visibleHours, setVisibleHours, swipeViewSwitch, setSwipeViewSwitch,
+    dayWindow, setDayStart, setDayEnd,
   } = usePlanner();
 
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
@@ -124,370 +126,212 @@ export function Settings({
     );
   };
 
+
+  const [section, setSection] = useState<string | null>(null);
+
+
+  useEffect(() => {
+    if (!section) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setSection(null);
+      return true; // prevent default behavior
+    });
+    return () => sub.remove();
+  }, [section]);
+
+  const renderSectionList = () => (
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.md }}>
+      <Section title="Account & Data">
+        <MenuRow label="User Account" hint="Server, sync, and sign out" iconName="user" onPress={() => setSection('account')} />
+        <MenuRow label="App & Data" hint="Updates and local storage" iconName="hard-drive" onPress={() => setSection('data')} />
+      </Section>
+      <Section title="Preferences">
+        <MenuRow label="Appearance" hint="Theme and colors" iconName="palette" onPress={() => setSection('appearance')} />
+        <MenuRow label="Calendar Grid" hint="Visible hours and gestures" iconName="calendar" onPress={() => setSection('calendar')} />
+      </Section>
+      <Section title="Configuration">
+        <MenuRow label="Core Planner" hint="Clock format, week start" iconName="settings" onPress={onOpenPlanner} />
+        <MenuRow label="Tasks & Categories" hint="Manage your tasks and tags" iconName="tag" onPress={onOpenCategories} />
+        <MenuRow label="Notifications" hint="Alarms and permissions" iconName="bell" onPress={onOpenReminders} />
+        <MenuRow label="Prayer Times" hint="Calculation methods and display" iconName="compass" onPress={onOpenPrayers} />
+      </Section>
+    </ScrollView>
+  );
+
+  const renderAccount = () => (
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+      <Section title="Your planner">
+        <KeyValue label="Signed in as" value={username ?? 'Not signed in'} />
+        <KeyValue label="Server" value={serverUrl ?? 'Not set'} />
+        <KeyValue label="This device" value={data.deviceId} />
+        <Spacer size={space.md} />
+        <Row gap={space.sm}>
+          <Button label="Sync now" onPress={() => void syncNow()} variant="secondary" style={{ flex: 1 }} />
+          <Button label="Sign out" onPress={() => void signOut()} variant="quiet" style={{ flex: 1 }} />
+        </Row>
+      </Section>
+    </ScrollView>
+  );
+
+  const renderData = () => (
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+      <Section title="App">
+        <KeyValue label="Version" value={Updates.runtimeVersion ?? '1.0.0'} />
+        <KeyValue label="Update channel" value={Updates.isEmbeddedLaunch ? 'Built in' : 'Downloaded from your PC'} />
+        {Updates.isEmbeddedLaunch && (
+          <Text variant="caption" tone="soft" style={{ marginTop: space.sm }}>Running the version built into the app, not the latest from your PC. Check for an update below.</Text>
+        )}
+        {updateState && <Text variant="caption" tone="soft" style={{ marginTop: space.sm }}>{updateState}</Text>}
+        <Spacer size={space.md} />
+        <Row gap={space.sm}>
+          <Button label="Check for update" variant="secondary" onPress={checkForUpdate} style={{ flex: 1 }} />
+          {updateState?.startsWith('Ready') && <Button label="Restart" onPress={() => void Updates.reloadAsync()} style={{ flex: 1 }} />}
+        </Row>
+      </Section>
+      <Section title="Local data">
+        <Text variant="caption" tone="soft">Your PC keeps the master copy and its own backups. Resetting only clears the copy on this phone.</Text>
+        <Spacer size={space.md} />
+        <Button label="Reset local data" variant="danger" onPress={confirmReset} />
+      </Section>
+    </ScrollView>
+  );
+
+  const renderAppearance = () => (
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+      <Section title="Appearance">
+        <Text variant="body">Theme</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>The app follows your phone by default.</Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.xs}>
+          {THEME_CHOICES.map(choice => {
+            const on = choice.mode === themeMode;
+            return (
+              <Pressable key={choice.mode} onPress={() => setThemeMode(choice.mode)} accessibilityRole="button" accessibilityState={{ selected: on }} style={{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }}>
+                <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{choice.label}</Text>
+              </Pressable>
+            );
+          })}
+        </Row>
+      </Section>
+    </ScrollView>
+  );
+
+  const renderCalendar = () => (
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+      <Section title="View">
+        <Text variant="body">Visible Schedule Hours</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>{describeDayWindow(dayWindow, clock)}</Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.sm}>
+          <Text variant="caption" tone="soft" style={{ width: 85, textAlign: 'right' }}>Start Hour</Text>
+          <Stepper
+            value={dayWindow.start}
+            min={DAY_HOUR_MIN}
+            max={DAY_HOUR_MAX - 1}
+            onChange={setDayStart}
+            format={v => formatHour(v, clock)}
+          />
+        </Row>
+        <Row gap={space.sm}>
+          <Text variant="caption" tone="soft" style={{ width: 85, textAlign: 'right' }}>Span Duration</Text>
+          <Stepper
+            value={dayWindow.end - dayWindow.start}
+            min={1}
+            max={24}
+            onChange={v => setDayEnd(dayWindow.start + v)}
+            format={v => v === 24 ? '24 Hours (Full Day)' : `${v} Hours`}
+          />
+        </Row>
+        <Spacer size={space.lg} />
+        <Divider />
+        <Spacer size={space.lg} />
+        <Text variant="body">Visible hours within span</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>{describeRanges(visibleHours, clock)}</Text>
+        <Spacer size={space.sm} />
+        <HourStrip ranges={visibleHours} clock={clock} onToggle={h => {
+          const on = !new Set(hiddenHours(visibleHours)).has(h);
+          let hours = Array.from({ length: 24 }, (_, i) => i).filter(x => new Set(hiddenHours(visibleHours)).has(x) ? false : true);
+          if (on) { hours = hours.filter(x => x !== h); } else { hours.push(h); hours.sort((a,b)=>a-b); }
+          const off = Array.from({ length: 24 }, (_, i) => i).filter(x => !hours.includes(x));
+          setVisibleHours(rangesFromHidden(off));
+        }} />
+        <Spacer size={space.xs} />
+        <Text variant="body">Span view</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>How many days the Span view shows either side of the one you are on.</Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.sm}>
+          <Text variant="caption" tone="soft" style={{ width: 40, textAlign: 'right' }}>Before</Text>
+          <DayCount value={customWindow.before} onChange={n => setCustomWindow(n, customWindow.after)} />
+        </Row>
+        <Row gap={space.sm}>
+          <Text variant="caption" tone="soft" style={{ width: 40, textAlign: 'right' }}>After</Text>
+          <DayCount value={customWindow.after} onChange={n => setCustomWindow(customWindow.before, n)} />
+        </Row>
+        <Spacer size={space.xs} />
+        <Toggle label="Swipe between views" hint="Drag left or right across the grid to move to the next view. Turn off if it fights scrolling." value={swipeViewSwitch} onChange={setSwipeViewSwitch} />
+      </Section>
+      <Section title="This device">
+        <Text variant="body">Time slot snap interval</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>How far each tap moves a time. Kept on this phone — your PC has its own.</Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.xs}>
+          {[5, 10, 15, 30, 60].map(mins => {
+            const on = mins === interval;
+            return (
+              <Pressable key={mins} onPress={() => setInterval(mins)} accessibilityRole="button" accessibilityState={{ selected: on }} style={{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }}>
+                <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{mins === 60 ? '1 hr' : `${mins}m`}</Text>
+              </Pressable>
+            );
+          })}
+        </Row>
+      </Section>
+    </ScrollView>
+  );
+
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
-      <View style={{
-        paddingTop: insets.top + space.md,
-        paddingHorizontal: space.xl,
-        paddingBottom: space.md,
-      }}>
+      <View style={{ paddingTop: insets.top + space.md, paddingHorizontal: space.xl, paddingBottom: space.md }}>
         <Row style={{ justifyContent: 'space-between' }}>
-          <Text variant="title">Settings</Text>
-          <Pressable
-            onPress={onClose}
-            accessibilityLabel="Close"
-            style={{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }}
-          >
-            <Text variant="title" tone="soft">✕</Text>
+          <Row gap={space.sm} style={{ alignItems: 'center' }}>
+            {section && (
+              <Pressable onPress={() => setSection(null)} accessibilityLabel="Back" style={{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+                <Text variant="title" tone="soft">‹</Text>
+              </Pressable>
+            )}
+            <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : 'Settings'}</Text>
+          </Row>
+          <Pressable onPress={onClose} accessibilityLabel="Close" style={{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }}>
+            <Text variant="title" tone="soft">×</Text>
           </Pressable>
         </Row>
       </View>
       <Divider />
 
-      <ScrollView contentContainerStyle={{
-        padding: space.xl,
-        paddingBottom: insets.bottom + space.xxl,
-        gap: space.lg,
-      }}>
-        {/* ── Connection ── */}
-        <Section title="Your planner">
-          <KeyValue label="Signed in as" value={username ?? 'Not signed in'} />
-          <KeyValue label="Server" value={serverUrl ?? 'Not set'} />
-          <KeyValue label="This device" value={data.deviceId} />
-          <Spacer size={space.md} />
-          <Row gap={space.sm}>
-            <Button label="Sync now" onPress={() => void syncNow()} variant="secondary" style={{ flex: 1 }} />
-            <Button label="Sign out" onPress={() => void signOut()} variant="quiet" style={{ flex: 1 }} />
-          </Row>
-        </Section>
-
-        {/* ── Sync ── */}
-        <Section title="Sync">
-          <KeyValue label="Status" value={status.label} />
-          <KeyValue label="Waiting to send" value={String(data.outbox.length)} />
-          <KeyValue label="Open conflicts" value={String(data.conflicts.length)} />
-          <KeyValue
-            label="Last synced"
-            value={data.lastSyncedAt === null ? 'Never' : new Date(data.lastSyncedAt).toLocaleString()}
-          />
-          {lastError ? (
-            <Text variant="caption" tone="danger" style={{ marginTop: space.sm }}>{lastError}</Text>
-          ) : null}
-        </Section>
-
-        {/* ── Reminders ── */}
-        <Section title="Notifications">
-          <Text variant="body" tone="soft">
-            Reminders are scheduled on this phone, so they fire with your PC switched off
-            and with no internet connection.
-          </Text>
-          <Spacer size={space.md} />
-          <KeyValue label="On this phone" value={alarmSummary} />
-          <KeyValue
-            label="Permission"
-            value={perm === null ? 'Checking…' : perm.granted ? 'Allowed' : 'Not allowed'}
-          />
-          {perm && !perm.granted ? (
-            <>
-              <Spacer size={space.md} />
-              <Button
-                label="Allow reminders"
-                onPress={askForPermissions}
-                busy={checking}
-              />
-            </>
-          ) : null}
-          {perm && perm.granted && !perm.exactAlarms ? (
-            <>
-              <Spacer size={space.md} />
-              <Text variant="caption" tone="warn">
-                Android is allowed to delay these reminders to save battery. For exact
-                timing, turn on "Alarms & reminders" for this app in system settings.
-              </Text>
-              <Spacer size={space.sm} />
-              <Button label="Open system settings" variant="secondary" onPress={() => void Linking.openSettings()} />
-            </>
-          ) : null}
-        </Section>
-
-        {/* ── Appearance ── */}
-        <Section title="Appearance">
-          <Text variant="body">Theme</Text>
-          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-            Kept on this phone only. Your PC keeps its own.
-          </Text>
-          <Spacer size={space.sm} />
-          <Row gap={space.xs}>
-            {THEME_CHOICES.map(choice => {
-              const on = choice.mode === themeMode;
-              return (
-                <Pressable
-                  key={choice.mode}
-                  onPress={() => setThemeMode(choice.mode)}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: on }}
-                  style={{
-                    flex: 1,
-                    height: 40,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    borderRadius: 10,
-                    backgroundColor: on ? p.accentSoft : p.surfaceAlt,
-                    borderWidth: 1,
-                    borderColor: on ? p.accent : p.line,
-                  }}
-                >
-                  <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{choice.label}</Text>
-                </Pressable>
-              );
-            })}
-          </Row>
-        </Section>
-
-        {/* ── View ── */}
-        {/* Everything here describes the piece of glass in your hand, not the
-            plan. It is a section of its own rather than more rows under "This
-            device" because these are the settings someone actually comes here
-            to change, and burying the visible day under a snap interval made
-            the screen look like it had nothing in it. */}
-        <Section title="View">
-          <Text variant="body">Visible hours</Text>
-          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-            Tap an hour to stop drawing it. They do not have to join up, so you can hide
-            the middle of the night and keep both ends. Kept on this phone only.
-          </Text>
-
-          <Spacer size={space.md} />
-          <HourStrip
-            ranges={visibleHours}
-            clock={clock}
-            onToggle={hour => setVisibleHours(rangesFromHidden(
-              hiddenHours(visibleHours).includes(hour)
-                ? hiddenHours(visibleHours).filter((h: number) => h !== hour)
-                : [...hiddenHours(visibleHours), hour],
-            ))}
-          />
-
-          <Spacer size={space.sm} />
-          <Text variant="caption" tone="soft">{describeRanges(visibleHours, clock)}</Text>
-
-          <Spacer size={space.md} />
-          <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
-            {([
-              ['Whole day', () => [{ from: 0, to: 24 }]],
-              ['Waking hours', () => [{ from: 6, to: 24 }]],
-              ['Working day', () => [{ from: 8, to: 18 }]],
-              ['Hide 2am to 6am', () => rangesFromHidden([2, 3, 4, 5])],
-            ] as [string, () => HourRange[]][]).map(([label, make]) => (
-              <Pressable
-                key={label}
-                onPress={() => setVisibleHours(make())}
-                accessibilityRole="button"
-                style={{
-                  paddingHorizontal: space.md, paddingVertical: 6,
-                  borderRadius: 999,
-                  borderWidth: 1, borderColor: p.line,
-                }}
-              >
-                <Text variant="caption" tone="soft">{label}</Text>
-              </Pressable>
-            ))}
-          </Row>
-
-          <Spacer size={space.lg} />
-          <Divider />
-          <Spacer size={space.xs} />
-
-          <Toggle
-            label="Swipe between views"
-            hint="Drag left or right across the grid to move to the next view. Turn off if it fights scrolling."
-            value={swipeViewSwitch}
-            onChange={setSwipeViewSwitch}
-          />
-        </Section>
-
-        {/* ── This device ── */}
-        <Section title="This device">
-          <Text variant="body">Time slot snap interval</Text>
-          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-            How far each tap moves a time. Kept on this phone — your PC has its own.
-          </Text>
-          <Spacer size={space.sm} />
-          <Row gap={space.xs}>
-            {[5, 10, 15, 30, 60].map(mins => {
-              const on = mins === interval;
-              return (
-                <Pressable
-                  key={mins}
-                  onPress={() => setInterval(mins)}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: on }}
-                  style={{
-                    flex: 1,
-                    height: 40,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    borderRadius: 10,
-                    backgroundColor: on ? p.accentSoft : p.surfaceAlt,
-                    borderWidth: 1,
-                    borderColor: on ? p.accent : p.line,
-                  }}
-                >
-                  <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>
-                    {mins === 60 ? '1 hr' : `${mins}m`}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </Row>
-
-          <Spacer size={space.lg} />
-          <Divider />
-          <Spacer size={space.lg} />
-
-          <Text variant="body">Span view</Text>
-          <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-            How many days the Span view shows either side of the one you are on.
-          </Text>
-          <Spacer size={space.sm} />
-          <Row gap={space.md} style={{ alignItems: 'center' }}>
-            <Text variant="caption" tone="soft" style={{ width: 52 }}>Before</Text>
-            <DayCount
-              value={customWindow.before}
-              onChange={n => setCustomWindow(n, customWindow.after)}
-            />
-          </Row>
-          <Spacer size={space.sm} />
-          <Row gap={space.md} style={{ alignItems: 'center' }}>
-            <Text variant="caption" tone="soft" style={{ width: 52 }}>After</Text>
-            <DayCount
-              value={customWindow.after}
-              onChange={n => setCustomWindow(customWindow.before, n)}
-            />
-          </Row>
-          <Spacer size={space.sm} />
-          <Text variant="caption" tone="faint">
-            {customWindow.before + customWindow.after + 1} columns in total.
-          </Text>
-        </Section>
-
-        {/* ── Your planner's own settings ── */}
-        <Section title="Planner">
-          <Pressable
-            onPress={onOpenCategories}
-            accessibilityRole="button"
-            style={{
-              flexDirection: 'row', alignItems: 'center',
-              minHeight: HIT, gap: space.md,
-            }}
-          >
-            <View style={{ flex: 1 }}>
-              <Text variant="body">Categories</Text>
-              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-                Names, colours and the defaults new items start with. Shared with your PC.
-              </Text>
-            </View>
-            <Text variant="title" tone="faint">›</Text>
-          </Pressable>
-
-          <Divider />
-
-          <Pressable
-            onPress={onOpenReminders}
-            accessibilityRole="button"
-            style={{
-              flexDirection: 'row', alignItems: 'center',
-              minHeight: HIT, gap: space.md,
-            }}
-          >
-            <View style={{ flex: 1 }}>
-              <Text variant="body">Notifications</Text>
-              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-                How early things alert, quiet hours and snoozing. Shared with your PC.
-              </Text>
-            </View>
-            <Text variant="title" tone="faint">›</Text>
-          </Pressable>
-
-          <Divider />
-
-          <Pressable
-            onPress={onOpenPlanner}
-            accessibilityRole="button"
-            style={{
-              flexDirection: 'row', alignItems: 'center',
-              minHeight: HIT, gap: space.md,
-            }}
-          >
-            <View style={{ flex: 1 }}>
-              <Text variant="body">The planner</Text>
-              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-                Clock, week start, task colour and the focus day. Shared with your PC.
-              </Text>
-            </View>
-            <Text variant="title" tone="faint">›</Text>
-          </Pressable>
-
-          <Divider />
-
-          <Pressable
-            onPress={onOpenPrayers}
-            accessibilityRole="button"
-            style={{
-              flexDirection: 'row', alignItems: 'center',
-              minHeight: HIT, gap: space.md,
-            }}
-          >
-            <View style={{ flex: 1 }}>
-              <Text variant="body">Prayer times</Text>
-              <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
-                City, method, corrections and which ones show. Shared with your PC.
-              </Text>
-            </View>
-            <Text variant="title" tone="faint">›</Text>
-          </Pressable>
-        </Section>
-
-        {/* ── App ── */}
-        <Section title="App">
-          <KeyValue label="Version" value={Updates.runtimeVersion ?? '1.0.0'} />
-          <KeyValue
-            label="Update channel"
-            value={Updates.isEmbeddedLaunch ? 'Built in' : 'Downloaded from your PC'}
-          />
-          {Updates.isEmbeddedLaunch ? (
-            // Worth saying out loud. "Built in" means this is the bundle baked
-            // into the APK, which is what you fall back to after clearing the
-            // app data -- and it can be months behind the PC. Anyone hunting a
-            // bug that was already fixed needs to see this before anything else.
-            <Text variant="caption" tone="soft" style={{ marginTop: space.sm }}>
-              Running the version built into the app, not the latest from your PC.
-              Check for an update below.
-            </Text>
-          ) : null}
-          {updateState ? (
-            <Text variant="caption" tone="soft" style={{ marginTop: space.sm }}>{updateState}</Text>
-          ) : null}
-          <Spacer size={space.md} />
-          <Row gap={space.sm}>
-            <Button label="Check for update" variant="secondary" onPress={checkForUpdate} style={{ flex: 1 }} />
-            {updateState?.startsWith('Ready') ? (
-              <Button label="Restart" onPress={() => void Updates.reloadAsync()} style={{ flex: 1 }} />
-            ) : null}
-          </Row>
-        </Section>
-
-        {/* ── Danger ── */}
-        <Section title="Local data">
-          <Text variant="caption" tone="soft">
-            Your PC keeps the master copy and its own backups. Resetting only clears the
-            copy on this phone.
-          </Text>
-          <Spacer size={space.md} />
-          <Button label="Reset local data" variant="danger" onPress={confirmReset} />
-        </Section>
-      </ScrollView>
+      {section === null ? renderSectionList() : section === 'account' ? renderAccount() : section === 'data' ? renderData() : section === 'appearance' ? renderAppearance() : section === 'calendar' ? renderCalendar() : null}
     </View>
+  );
+}
+
+function MenuRow({ label, hint, iconName, onPress }: { label: string; hint: string; iconName?: string; onPress?: () => void }) {
+  const p = useTheme();
+  if (!onPress) return null;
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      style={{ flexDirection: 'row', alignItems: 'center', minHeight: HIT, gap: space.md, paddingVertical: space.xs }}
+    >
+      <View style={{ width: 32, alignItems: 'center' }}>
+        {iconName && ICONS[iconName] ? (
+          <Image source={{ uri: ICONS[iconName] }} style={{ width: 24, height: 24, tintColor: p.accent }} />
+        ) : null}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text variant="body">{label}</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>{hint}</Text>
+      </View>
+      <Text variant="title" tone="faint">›</Text>
+    </Pressable>
   );
 }
 

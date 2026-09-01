@@ -33,6 +33,7 @@ import {
   Animated,
   PanResponder,
   Pressable,
+  SectionList,
   ScrollView,
   StyleSheet,
   View,
@@ -103,7 +104,7 @@ const clockOf = (at: number, timeFormat: string | undefined): string => {
 export function Notifications(props: NotificationsProps) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const [filter, setFilter] = useState<CentreFilter>('all');
+  const [filter, setFilter] = useState<CentreFilter>('unread');
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const shown = useMemo(
@@ -182,17 +183,16 @@ export function Notifications(props: NotificationsProps) {
 
       <Divider />
 
-      <ScrollView
+      <SectionList
+        sections={shown.groups.map(g => ({ ...g, data: g.items }))}
+        keyExtractor={item => item.key}
         contentContainerStyle={{
           paddingHorizontal: space.lg,
           paddingTop: space.md,
           paddingBottom: insets.bottom + space.xxl * 2,
         }}
-      >
-        {shown.groups.length === 0 ? (
+        ListEmptyComponent={
           <View style={{ paddingTop: space.xxl * 1.5, paddingHorizontal: space.lg, alignItems: 'center', gap: space.sm }}>
-            {/* A reassuring empty state, never a shrug: it says what the phone
-                is still holding for you, which is the actual worry. */}
             <View style={{
               width: 64, height: 64, borderRadius: 32,
               alignItems: 'center', justifyContent: 'center',
@@ -205,64 +205,63 @@ export function Notifications(props: NotificationsProps) {
               {empty.hint}
             </Text>
           </View>
-        ) : null}
-
-        {shown.groups.map(group => (
-          <View key={group.id} style={{ marginBottom: space.lg }}>
-            <Row style={{ paddingHorizontal: space.sm, paddingBottom: space.sm }} gap={space.sm}>
-              <Text
-                variant="label"
-                tone={group.relative === 'today' ? 'accent' : 'faint'}
-              >
-                {group.label}
-              </Text>
-              <View style={{ flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: p.line }} />
-              {group.unread > 0 ? (
-                <Text variant="caption" tone="accent">{group.unread} new</Text>
-              ) : null}
-            </Row>
-
-            {group.items.map(entry => (
-              <View key={entry.key}>
-                {entry.key === nowKey ? <NowLine /> : null}
-                <SwipeRow
-                  entry={entry}
-                  now={props.now}
-                  timeFormat={props.timeFormat}
-                  deviceId={props.deviceId}
-                  expanded={expanded === entry.key}
-                  snoozeOptions={props.snoozeOptions}
-                  onToggle={() => setExpanded(expanded === entry.key ? null : entry.key)}
-                  onRead={props.onRead}
-                  onUnread={props.onUnread}
-                  onDismiss={props.onDismiss}
-                  onSnooze={props.onSnooze}
-                  onComplete={props.onComplete}
-                  onClear={props.onClear}
-                  onOpen={props.onOpen}
-                />
-              </View>
-            ))}
+        }
+        renderSectionHeader={({ section: group }) => (
+          <Row style={{ paddingHorizontal: space.sm, paddingBottom: space.sm, marginTop: space.lg }} gap={space.sm}>
+            <Text
+              variant="label"
+              tone={group.relative === 'today' ? 'accent' : 'faint'}
+            >
+              {group.label}
+            </Text>
+            <View style={{ flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: p.line }} />
+            {group.unread > 0 ? (
+              <Text variant="caption" tone="accent">{group.unread} new</Text>
+            ) : null}
+          </Row>
+        )}
+        renderItem={({ item: entry }) => (
+          <View>
+            {entry.key === nowKey ? <NowLine /> : null}
+            <SwipeRow
+              entry={entry}
+              now={props.now}
+              timeFormat={props.timeFormat}
+              deviceId={props.deviceId}
+              expanded={expanded === entry.key}
+              snoozeOptions={props.snoozeOptions}
+              onToggle={() => setExpanded(expanded === entry.key ? null : entry.key)}
+              onRead={props.onRead}
+              onUnread={props.onUnread}
+              onDismiss={props.onDismiss}
+              onSnooze={props.onSnooze}
+              onComplete={props.onComplete}
+              onClear={props.onClear}
+              onOpen={props.onOpen}
+            />
           </View>
-        ))}
+        )}
+        ListFooterComponent={
+          <View>
+            {nowAtEnd ? <NowLine /> : null}
 
-        {nowAtEnd ? <NowLine /> : null}
-
-        {/* ── The footer: what the phone is holding, and where the rules live ── */}
-        <View style={{ paddingHorizontal: space.sm, paddingTop: space.lg, gap: space.xs }}>
-          <Text variant="caption" tone="faint">{props.alarmSummary}</Text>
-          {props.pendingNote ? (
-            <Text variant="caption" tone="faint">{props.pendingNote}</Text>
-          ) : null}
-          {props.onOpenSettings ? (
-            <Pressable onPress={props.onOpenSettings} style={{ minHeight: 40, justifyContent: 'center' }}>
-              <Text variant="caption" tone="accent">
-                Change how early reminders arrive
-              </Text>
-            </Pressable>
-          ) : null}
-        </View>
-      </ScrollView>
+            {/* ── The footer: what the phone is holding, and where the rules live ── */}
+            <View style={{ paddingHorizontal: space.sm, paddingTop: space.lg, gap: space.xs }}>
+              <Text variant="caption" tone="faint">{props.alarmSummary}</Text>
+              {props.pendingNote ? (
+                <Text variant="caption" tone="faint">{props.pendingNote}</Text>
+              ) : null}
+              {props.onOpenSettings ? (
+                <Pressable onPress={props.onOpenSettings} style={{ minHeight: 40, justifyContent: 'center' }}>
+                  <Text variant="caption" tone="accent">
+                    Change how early reminders arrive
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        }
+      />
     </View>
   );
 }

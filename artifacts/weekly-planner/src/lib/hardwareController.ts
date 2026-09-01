@@ -429,8 +429,8 @@ export interface HardwareDisplay {
 export interface HardwareControllerOptions {
   settings: HardwareSettings;
   session: SessionSnapshot;
-  /** Numbers the LCD should mirror -- taken from what the app itself displays. */
-  display: Omit<HardwareDisplay, 'armSeconds'> & {
+  /** Function returning numbers the LCD should mirror, evaluated on each hardware tick. */
+  getDisplay: () => Omit<HardwareDisplay, 'armSeconds'> & {
     /**
      * False until this window has actually loaded the session data. Publishing
      * before that puts a confident "0m, 0 done" on the LCD, which is a lie
@@ -785,21 +785,24 @@ export function useHardwareController(opts: HardwareControllerOptions): {
       // Withheld until the numbers are loaded: the server treats "nobody
       // published recently" as offline, and a display that admits it is waiting
       // beats one that confidently shows a zero total you know is wrong.
-      if (isOwnerRef.current && o.display.ready) {
-        const mode: HardwareDisplay['mode'] = arming > 0 ? 'arming' : o.display.mode;
-        try {
-          await fetch('/api/hardware/state', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mode,
-              remainingSeconds: o.display.remainingSeconds,
-              todaySeconds: o.display.todaySeconds,
-              sessionsToday: o.display.sessionsToday,
-              armSeconds: arming,
-            }),
-          });
-        } catch (_) { /* transient; the next poll republishes */ }
+      if (isOwnerRef.current) {
+        const display = o.getDisplay();
+        if (display.ready) {
+          const mode: HardwareDisplay['mode'] = arming > 0 ? 'arming' : display.mode;
+          try {
+            await fetch('/api/hardware/state', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                mode,
+                remainingSeconds: display.remainingSeconds,
+                todaySeconds: display.todaySeconds,
+                sessionsToday: display.sessionsToday,
+                armSeconds: arming,
+              }),
+            });
+          } catch (_) { /* transient; the next poll republishes */ }
+        }
       }
     };
 

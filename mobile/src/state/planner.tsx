@@ -282,6 +282,8 @@ interface PlannerContextValue {
   dayWindow: DayWindow;
   setDayStart(hour: number): void;
   setDayEnd(hour: number): void;
+  calendarView: 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year';
+  setCalendarView(view: 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year'): void;
   /**
    * Which hours the grid draws, as a list of stretches.
    *
@@ -333,6 +335,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const [interval, setIntervalState] = useState(30);
   const [customWindow, setCustomWindowState] = useState({ before: 1, after: 3 });
   const [dayWindow, setDayWindowState] = useState<DayWindow>(DEFAULT_DAY_WINDOW);
+  const [calendarView, setCalendarViewState] = useState<'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year'>('day');
   const [focusTimer, setFocusTimerState] = useState<FocusTimerState>(IDLE_FOCUS_TIMER);
   // Read through a ref for the same reason `saveDraft` does: an action can be
   // dispatched while a sync is landing, and reducing against a stale state would
@@ -404,11 +407,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         await storage.setDeviceId(deviceId);
 
         const [
-          url, session, user, savedInterval, savedWindow, savedDayWindow, savedSwipe,
+          url, session, user, savedInterval, savedWindow, savedDayWindow, savedSwipe, savedCalendarView,
         ] = await Promise.all([
           prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(),
           prefs.getInterval(), prefs.getCustomWindow(),
           prefs.getDayWindow(), prefs.getSwipeViewSwitch(),
+          prefs.getCalendarView(),
         ]);
         setPrayerLook(await prefs.getPrayerAppearance());
         setVisibleHoursState(await prefs.getVisibleHours());
@@ -416,6 +420,9 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         setCustomWindowState(savedWindow);
         setDayWindowState(savedDayWindow);
         setSwipeState(savedSwipe);
+        if (savedCalendarView && ['agenda', 'day', 'custom', 'week', 'month', 'year'].includes(savedCalendarView)) {
+          setCalendarViewState(savedCalendarView as any);
+        }
 
         // SETTLE FIRST, before anything is drawn. A session that ran out while
         // the app was closed is completed at the instant it actually ran out,
@@ -1254,6 +1261,11 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     setInterval: (minutes: number) => {
       setIntervalState(minutes);
       void prefs.setInterval(minutes);
+    },
+    calendarView,
+    setCalendarView: (v: 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year') => {
+      setCalendarViewState(v);
+      void prefs.setCalendarView(v);
     },
     customWindow,
     setCustomWindow: (before: number, after: number) => {

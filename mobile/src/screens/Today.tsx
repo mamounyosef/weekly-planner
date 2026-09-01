@@ -101,7 +101,7 @@ export function Today({
   const {
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
     prayersOn, isPrayerDone, togglePrayer, customWindow, events, categories,
-    visibleHours, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
+    visibleHours, dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
     unreadNotifications, prayerAppearance,
   } = usePlanner();
 

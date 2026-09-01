@@ -31,13 +31,15 @@ export function computeGoalStats(
      * directly, and counting it here as well would show the same minutes twice.
      */
     liveSeconds?: number;
+    excludedDates?: string[];
   }
 ): FocusGoalStats {
-  const { now, goalSeconds, dayStartHour = 0 } = opts;
+  const { now, goalSeconds, dayStartHour = 0, excludedDates = [] } = opts;
   const live = typeof opts.liveSeconds === 'number' && Number.isFinite(opts.liveSeconds)
     ? Math.max(0, opts.liveSeconds)
     : 0;
   const totals = new Map<string, number>();
+  const excludedSet = new Set(excludedDates);
 
   for (const s of sessions) {
     if (!s || typeof s.durationSeconds !== 'number' || Number.isNaN(s.durationSeconds) || s.durationSeconds < 0) continue;
@@ -67,8 +69,15 @@ export function computeGoalStats(
     if (meetsGoal(secs)) {
       currentRun++;
       if (currentRun > bestStreak) bestStreak = currentRun;
-    } else {
-      currentRun = 0;
+    } else if (!excludedSet.has(day) || day === today) {
+      // Break the streak if the goal isn't met AND it's not an excluded date.
+      // (We don't skip exclusions on 'today' because you either meet it today or you don't.
+      // Actually, if today is an excluded date, maybe we shouldn't break the streak yet?
+      // For consistency with how skipping works: if today is excluded and you don't meet it,
+      // the streak from yesterday is still intact.)
+      if (!excludedSet.has(day)) {
+        currentRun = 0;
+      }
     }
     
     if (i === days.length - 2) {

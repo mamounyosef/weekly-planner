@@ -316,6 +316,8 @@ export interface PrayerAppearance {
   colour: string;
   /** Whether the prayer's name is drawn beside its line. */
   showLabels: boolean;
+  /** The language the prayer name is drawn in. */
+  language: 'english' | 'arabic';
 }
 
 export const DEFAULT_PRAYER_APPEARANCE: PrayerAppearance = {
@@ -323,6 +325,7 @@ export const DEFAULT_PRAYER_APPEARANCE: PrayerAppearance = {
   style: 'marker',
   colour: '#34d399',
   showLabels: true,
+  language: 'english',
 };
 
 /** A six-digit hex colour, or nothing. Anything else is not a colour. */
@@ -347,15 +350,17 @@ export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
   // Normalised to lower case so two spellings of one colour are one value and
   // cannot ping-pong a stored setting between them.
   if (isHexColour(r.colour)) out.colour = r.colour.toLowerCase();
+  if (r.language === 'english' || r.language === 'arabic') out.language = r.language;
   return out;
 }
 
 /** What a person reads back on the settings screen. No dashes, ever. */
 export function describePrayerAppearance(a: PrayerAppearance): string {
-  if (!a.showOnCalendar) return 'Not drawn on this phone. The times are still shared.';
+  if (!a.showOnCalendar) return 'Not drawn on this device. The times are still shared.';
   const shape = PRAYER_DRAW_STYLES.find(s => s.id === a.style)?.label ?? 'Marker line';
+  const lang = a.language === 'arabic' ? 'in Arabic' : 'in English';
   // The row style has no line to label, so promising a name either way would be
   // describing a setting that does nothing.
-  if (a.style === 'row') return `${shape}, above the grid.`;
-  return a.showLabels ? `${shape}, with the name.` : `${shape}, with no name.`;
+  if (a.style === 'row') return `${shape}, above the grid, ${lang}.`;
+  return a.showLabels ? `${shape}, with the name ${lang}.` : `${shape}, with no name.`;
 }

@@ -40,6 +40,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Row, Text, useTheme } from '../ui/kit';
 import { TextField } from '../ui/Fields';
 import { ListChips } from '../ui/ListChips';
+import { SortableList } from '../ui/SortableList';
 import { radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
@@ -91,7 +92,6 @@ export function Tasks() {
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [showDone, setShowDone] = useState(false);
-  const [reordering, setReordering] = useState(false);
   const [listFilter, setListFilter] = useState<string | null>(null);
   /** Which task, if any, has its "add a step" line open. */
   const [composingFor, setComposingFor] = useState<string | null>(null);
@@ -177,12 +177,11 @@ export function Tasks() {
    * cheap after that: only the rows whose number actually changed are written,
    * so a later swap costs two edits, not the group.
    */
-  const move = (group: Task[], index: number, dir: -1 | 1) => {
-    const target = index + dir;
-    if (target < 0 || target >= group.length) return;
+  const moveItem = (group: Task[], fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
     const next = [...group];
-    next[index] = group[target];
-    next[target] = group[index];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
     next.forEach((t, i) => {
       if (t.order !== i) void edit('tasks', t.id, { order: i });
     });
@@ -241,19 +240,6 @@ export function Tasks() {
           </Text>
           <Row style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <Text variant="display">Tasks</Text>
-            {openNodes > 0 || reordering ? (
-              <Pressable
-                onPress={() => { setReordering(v => !v); setComposingFor(null); }}
-                accessibilityRole="button"
-                accessibilityLabel={reordering ? 'Finish moving tasks' : 'Move tasks by hand'}
-                hitSlop={space.md}
-                style={{ paddingHorizontal: space.sm, paddingVertical: space.xs }}
-              >
-                <Text variant="bodyStrong" tone="accent">
-                  {reordering ? 'Done' : 'Reorder'}
-                </Text>
-              </Pressable>
-            ) : null}
           </Row>
         </View>
 
@@ -308,17 +294,7 @@ export function Tasks() {
 
       </View>
 
-      {reordering ? (
-        <View style={{
-          paddingHorizontal: space.xl,
-          paddingVertical: space.sm,
-          backgroundColor: p.accentSoft,
-        }}>
-          <Text variant="caption" tone="accent">
-            Use the arrows to move things within a group. Tap Done when it looks right.
-          </Text>
-        </View>
-      ) : null}
+
 
       <ScrollView
         contentContainerStyle={{
@@ -351,7 +327,6 @@ export function Tasks() {
 
           const collapsible = section.key === 'Done';
           const visible = collapsible && !showDone ? [] : nodes;
-          const movable = reordering && !collapsible;
 
           return (
             <View key={section.key} style={{ marginBottom: space.xl }}>
@@ -422,28 +397,29 @@ export function Tasks() {
               </Pressable>
 
               <View style={{ gap: space.sm, marginTop: space.sm }}>
-                {visible.map((node, index) => (
-                  <TaskCard
-                    key={node.row.occId}
-                    node={{ task: node.row.task, children: node.children.map(c => c.task) }}
-                    today={today}
-                    clock={timeFormat}
-                    list={filter ? null : listOf(node.row.task)}
-                    reordering={movable}
-                    composing={composingFor === node.row.task.id}
-                    onCompose={next => setComposingFor(next ? node.row.task.id : null)}
-                    onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
-                    canMoveUp={index > 0}
-                    canMoveDown={index < visible.length - 1}
-                    onMove={dir => move(visible.map(n => n.row.task), index, dir)}
-                    onMoveChild={(childIndex, dir) => move(node.children.map(c => c.task), childIndex, dir)}
-                    onToggle={t => toggle(t, t.id === node.row.task.id ? node.row.due : undefined)}
-                    onStartReorder={() => setReordering(true)}
-                    onOpen={t => setEditing({
-                      store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
-                    })}
-                  />
-                ))}
+                <SortableList
+                  data={visible}
+                  onReorder={(fromIdx, toIdx) => moveItem(visible.map(n => n.row.task), fromIdx, toIdx)}
+                  renderItem={(node, index, isDragging, onDragStart) => (
+                    <TaskCard
+                      key={node.row.occId}
+                      node={{ task: node.row.task, children: node.children.map(c => c.task) }}
+                      today={today}
+                      clock={timeFormat}
+                      list={filter ? null : listOf(node.row.task)}
+                      isDragging={isDragging}
+                      composing={composingFor === node.row.task.id}
+                      onCompose={next => setComposingFor(next ? node.row.task.id : null)}
+                      onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
+                      onMoveChild={(fromChild, toChild) => moveItem(node.children.map(c => c.task), fromChild, toChild)}
+                      onToggle={t => toggle(t, t.id === node.row.task.id ? node.row.due : undefined)}
+                      onStartDrag={onDragStart}
+                      onOpen={t => setEditing({
+                        store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
+                      })}
+                    />
+                  )}
+                />
               </View>
             </View>
           );
@@ -482,25 +458,21 @@ export function Tasks() {
 // to do" from "one thing in three parts" without reading a word.
 
 function TaskCard({
-  node, today, clock, list, reordering, composing,
-  canMoveUp, canMoveDown,
-  onMove, onMoveChild, onToggle, onOpen, onCompose, onAddSubtask, onStartReorder,
+  node, today, clock, list, isDragging, composing,
+  onMoveChild, onToggle, onOpen, onCompose, onAddSubtask, onStartDrag,
 }: {
   node: Node;
   today: string;
   clock?: string;
   list: TaskList | null;
-  reordering: boolean;
+  isDragging: boolean;
   composing: boolean;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-  onMove: (dir: -1 | 1) => void;
-  onMoveChild: (index: number, dir: -1 | 1) => void;
+  onMoveChild: (fromIndex: number, toIndex: number) => void;
   onToggle: (t: Task) => void;
   onOpen: (t: Task) => void;
   onCompose: (open: boolean) => void;
   onAddSubtask: (title: string) => Promise<void>;
-  onStartReorder: () => void;
+  onStartDrag: () => void;
 }) {
   const p = useTheme();
   const { task, children } = node;
@@ -535,16 +507,16 @@ function TaskCard({
       }} />
 
       <Pressable
-        onPress={() => (reordering ? undefined : onOpen(task))}
-        onLongPress={reordering ? undefined : onStartReorder}
-        delayLongPress={400}
-        android_ripple={reordering ? undefined : { color: p.accentSoft }}
+        onPress={() => onOpen(task)}
+        onLongPress={onStartDrag}
+        delayLongPress={300}
+        android_ripple={{ color: p.accentSoft }}
         style={({ pressed }) => ({
           flexDirection: 'row',
           alignItems: 'center',
           gap: space.md,
           padding: space.md,
-          opacity: pressed && !reordering ? 0.9 : 1,
+          opacity: pressed && !isDragging ? 0.9 : 1,
         })}
       >
         <Check colour={colour} done={done} label={task.title} onPress={() => onToggle(task)} />
@@ -577,55 +549,47 @@ function TaskCard({
           ) : null}
         </View>
 
-        {reordering ? (
-          <Arrows
-            up={canMoveUp}
-            down={canMoveDown}
-            label={task.title || 'this task'}
-            onMove={onMove}
-          />
-        ) : (
-          <Pressable
-            onPress={() => onCompose(!composing)}
-            accessibilityRole="button"
-            accessibilityLabel={`Add a step to ${task.title || 'this task'}`}
-            hitSlop={space.sm}
-            style={({ pressed }) => ({
-              width: 34, height: 34, borderRadius: 17,
-              alignItems: 'center', justifyContent: 'center',
-              borderWidth: 1,
-              borderColor: composing ? p.accent : p.line,
-              backgroundColor: composing || pressed ? p.accentSoft : 'transparent',
-            })}
+        <Pressable
+          onPress={() => onCompose(!composing)}
+          accessibilityRole="button"
+          accessibilityLabel={`Add a step to ${task.title || 'this task'}`}
+          hitSlop={space.sm}
+          style={({ pressed }) => ({
+            width: 34, height: 34, borderRadius: 17,
+            alignItems: 'center', justifyContent: 'center',
+            borderWidth: 1,
+            borderColor: composing ? p.accent : p.line,
+            backgroundColor: composing || pressed ? p.accentSoft : 'transparent',
+          })}
+        >
+          <Text
+            variant="body"
+            tone={composing ? 'accent' : 'faint'}
+            style={{ fontSize: 18, lineHeight: 20 }}
           >
-            <Text
-              variant="body"
-              tone={composing ? 'accent' : 'faint'}
-              style={{ fontSize: 18, lineHeight: 20 }}
-            >
-              +
-            </Text>
-          </Pressable>
-        )}
+            +
+          </Text>
+        </Pressable>
       </Pressable>
 
       {children.length > 0 || composing ? (
         <View style={{ borderTopWidth: 1, borderTopColor: p.line }}>
-          {children.map((child, i) => (
-            <SubtaskRow
-              key={child.id}
-              task={child}
-              today={today}
-              parentDue={due}
-              reordering={reordering}
-              canMoveUp={i > 0}
-              canMoveDown={i < children.length - 1}
-              onMove={dir => onMoveChild(i, dir)}
-              onToggle={() => onToggle(child)}
-              onOpen={() => onOpen(child)}
-              onStartReorder={onStartReorder}
-            />
-          ))}
+          <SortableList
+            data={children}
+            onReorder={onMoveChild}
+            renderItem={(child, i, isChildDragging, onChildDrag) => (
+              <SubtaskRow
+                key={child.id}
+                task={child}
+                today={today}
+                parentDue={due}
+                isDragging={isChildDragging}
+                onToggle={() => onToggle(child)}
+                onOpen={() => onOpen(child)}
+                onStartDrag={onChildDrag}
+              />
+            )}
+          />
 
           {composing ? (
             <Composer
@@ -640,19 +604,16 @@ function TaskCard({
 }
 
 function SubtaskRow({
-  task, today, parentDue, reordering, canMoveUp, canMoveDown,
-  onMove, onToggle, onOpen, onStartReorder,
+  task, today, parentDue, isDragging,
+  onToggle, onOpen, onStartDrag,
 }: {
   task: Task;
   today: string;
   parentDue: string | null;
-  reordering: boolean;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-  onMove: (dir: -1 | 1) => void;
+  isDragging: boolean;
   onToggle: () => void;
   onOpen: () => void;
-  onStartReorder: () => void;
+  onStartDrag: () => void;
 }) {
   const p = useTheme();
   const due = dueDateOf(task);
@@ -666,10 +627,10 @@ function SubtaskRow({
 
   return (
     <Pressable
-      onPress={() => (reordering ? undefined : onOpen())}
-      onLongPress={reordering ? undefined : onStartReorder}
-      delayLongPress={400}
-      android_ripple={reordering ? undefined : { color: p.accentSoft }}
+      onPress={() => onOpen()}
+      onLongPress={onStartDrag}
+      delayLongPress={300}
+      android_ripple={{ color: p.accentSoft }}
       style={({ pressed }) => ({
         flexDirection: 'row',
         alignItems: 'center',
@@ -677,7 +638,7 @@ function SubtaskRow({
         paddingLeft: 40,
         paddingRight: space.md,
         paddingVertical: space.sm,
-        opacity: pressed && !reordering ? 0.9 : done ? 0.55 : 1,
+        opacity: pressed && !isDragging ? 0.9 : done ? 0.55 : 1,
       })}
     >
       <Check
@@ -702,14 +663,6 @@ function SubtaskRow({
         ) : null}
       </View>
 
-      {reordering ? (
-        <Arrows
-          up={canMoveUp}
-          down={canMoveDown}
-          label={task.title || 'this step'}
-          onMove={onMove}
-        />
-      ) : null}
     </Pressable>
   );
 }
@@ -749,49 +702,7 @@ function Check({ colour, done, onPress, label, size = 22 }: {
   );
 }
 
-/**
- * Up and down, as two buttons.
- *
- * Not a drag handle: dragging inside a scrolling list needs a gesture library,
- * and a native module would cost this app its over-the-air updates. Two arrows
- * are also the only control that works with a screen reader, and the one that
- * cannot drop something in the wrong place by accident.
- */
-function Arrows({ up, down, label, onMove }: {
-  up: boolean;
-  down: boolean;
-  label: string;
-  onMove: (dir: -1 | 1) => void;
-}) {
-  const p = useTheme();
 
-  const Arrow = ({ dir, on, glyph }: { dir: -1 | 1; on: boolean; glyph: string }) => (
-    <Pressable
-      onPress={() => onMove(dir)}
-      disabled={!on}
-      accessibilityRole="button"
-      accessibilityLabel={`Move ${label} ${dir === -1 ? 'up' : 'down'}`}
-      style={({ pressed }) => ({
-        width: 38, height: 38,
-        alignItems: 'center', justifyContent: 'center',
-        borderRadius: radius.sm,
-        backgroundColor: pressed ? p.accentSoft : p.surfaceAlt,
-        borderWidth: 1,
-        borderColor: p.line,
-        opacity: on ? 1 : 0.3,
-      })}
-    >
-      <Text variant="bodyStrong" tone="soft">{glyph}</Text>
-    </Pressable>
-  );
-
-  return (
-    <Row gap={space.xs}>
-      <Arrow dir={-1} on={up} glyph="▲" />
-      <Arrow dir={1} on={down} glyph="▼" />
-    </Row>
-  );
-}
 
 /**
  * The line that adds a step.

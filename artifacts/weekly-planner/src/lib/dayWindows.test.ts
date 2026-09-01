@@ -27,6 +27,7 @@ import {
   rangesFromHidden,
   seamsIn,
   slotsIn,
+  splitAcrossWindows,
   visibleMinutes,
   yOfMinute,
   type HourRange,
@@ -299,6 +300,135 @@ function main() {
         const line = describeRanges(ranges, clock);
         assert.ok(line.length > 0, 'there is something to read');
         assert.ok(!line.includes('—') && !line.includes('–'), `no dash in "${line}"`);
+      }
+    }
+  }
+
+
+  // ── 12. NIGHTS THAT RUN PAST THE END OF A COLUMN ───────────────────────────
+  // The bug this exists for: an end read off the clock can never be greater
+  // than 24:00, so sleep from 23:50 to 00:05 arrived with an end EARLIER than
+  // its start. Drawn literally that is a block of no length, which is how a
+  // whole night became a sliver at bedtime.
+  {
+    console.log('--- 12. NIGHTS THAT RUN PAST THE END OF A COLUMN ---');
+    const cut = (startMin: number, endMin: number | null, opts: Partial<{
+      col: number; columns: number; dayStartHour: number; fallbackMinutes: number;
+    }> = {}) => splitAcrossWindows({ startMin, endMin }, {
+      col: opts.col ?? 1,
+      columns: opts.columns ?? 3,
+      dayStartHour: opts.dayStartHour,
+      fallbackMinutes: opts.fallbackMinutes,
+    });
+
+    // An ordinary daytime block is one piece, untouched.
+    assert.deepEqual(cut(9 * 60, 10 * 60), [
+      { col: 1, startMin: 540, endMin: 600, isTail: false, isHead: false },
+    ], 'an ordinary block is left alone');
+
+    // The night that started all of this.
+    assert.deepEqual(cut(23 * 60 + 50, 5), [
+      { col: 1, startMin: 1430, endMin: 1440, isTail: true, isHead: false },
+      { col: 2, startMin: 0, endMin: 5, isTail: false, isHead: true },
+    ], '23:50 to 00:05 is a tail tonight and a head tomorrow');
+
+    // Total drawn length equals the real length, which is the whole point.
+    {
+      const pieces = cut(22 * 60 + 25, 6 * 60 + 40);
+      const drawn = pieces.reduce((n, piece) => n + (piece.endMin - piece.startMin), 0);
+      assert.equal(drawn, (24 * 60 - (22 * 60 + 25)) + (6 * 60 + 40), 'nothing is lost in the cut');
+      assert.equal(pieces.length, 2);
+      assert.equal(pieces[0].isTail, true);
+      assert.equal(pieces[1].isHead, true);
+    }
+
+    // A deadline at six is a MOMENT, not a day. Equal must never wrap, or every
+    // Google deadline in the calendar becomes a wall down the column.
+    assert.deepEqual(cut(18 * 60, 18 * 60), [
+      { col: 1, startMin: 1080, endMin: 1080, isTail: false, isHead: false },
+    ], 'an end equal to the start is zero length, not twenty-four hours');
+
+    // Ending exactly at midnight closes today rather than opening tomorrow.
+    assert.deepEqual(cut(23 * 60, 0), [
+      { col: 1, startMin: 1380, endMin: 1440, isTail: false, isHead: false },
+    ], 'an end at midnight closes the column rather than opening the next');
+
+    // No end at all: the fallback length, and it can cross midnight too.
+    assert.deepEqual(cut(23 * 60 + 45, null), [
+      { col: 1, startMin: 1425, endMin: 1440, isTail: true, isHead: false },
+      { col: 2, startMin: 0, endMin: 15, isTail: false, isHead: true },
+    ], 'an item with no end uses the fallback, and still splits');
+    assert.deepEqual(cut(9 * 60, null, { fallbackMinutes: 45 }), [
+      { col: 1, startMin: 540, endMin: 585, isTail: false, isHead: false },
+    ], 'the fallback length is honoured');
+
+    // The head has nowhere to go: the tail is still drawn, alone.
+    assert.deepEqual(cut(23 * 60, 60, { col: 2, columns: 3 }), [
+      { col: 2, startMin: 1380, endMin: 1440, isTail: true, isHead: false },
+    ], 'the last column keeps its tail and drops the head off the edge');
+
+    // A window that opens at 4am: anything before it belongs to the column
+    // BEFORE, at the far end of that column's own window.
+    assert.deepEqual(cut(60, 3 * 60, { dayStartHour: 4 }), [
+      { col: 0, startMin: 1500, endMin: 1620, isTail: false, isHead: false },
+    ], '1am with a 4am start is late in yesterday, not early today');
+    assert.deepEqual(cut(60, 3 * 60, { col: 0, dayStartHour: 4 }), [],
+      'and it is simply not drawn when that column is off screen');
+
+    // The same window, with an item that runs over ITS end.
+    // 11pm to 5am with a 4am window is cut at 4am, not at midnight: the window
+    // is what a column holds, and midnight is not special to it.
+    assert.deepEqual(cut(23 * 60, 5 * 60, { dayStartHour: 4 }), [
+      { col: 1, startMin: 1380, endMin: 1680, isTail: true, isHead: false },
+      { col: 2, startMin: 240, endMin: 300, isTail: false, isHead: true },
+    ], 'a 4am window cuts 11pm to 5am at its own edge');
+    // Whereas 11pm to 3am fits inside that same window whole, which midnight
+    // would have split.
+    assert.deepEqual(cut(23 * 60, 3 * 60, { dayStartHour: 4 }), [
+      { col: 1, startMin: 1380, endMin: 1620, isTail: false, isHead: false },
+    ], 'and holds 11pm to 3am in one piece');
+    assert.deepEqual(cut(3 * 60, 5 * 60, { dayStartHour: 4 }), [
+      { col: 0, startMin: 1620, endMin: 1680, isTail: true, isHead: false },
+      { col: 1, startMin: 240, endMin: 300, isTail: false, isHead: true },
+    ], '3am to 5am straddles the 4am boundary and is cut at it');
+
+    // Longer than a whole day: the head is clamped so it cannot draw past the
+    // foot of the column it opens.
+    {
+      const pieces = cut(10 * 60, null, { fallbackMinutes: 3 * 1440 });
+      assert.equal(pieces.length, 2);
+      assert.equal(pieces[1].endMin, 1440, 'a head can never run past its own column');
+    }
+
+    // Rubbish in, nothing out. Never a throw, and never a NaN on the grid.
+    assert.deepEqual(splitAcrossWindows({ startMin: null, endMin: 60 }, { col: 1, columns: 3 }), []);
+    assert.deepEqual(splitAcrossWindows({ startMin: undefined, endMin: 60 }, { col: 1, columns: 3 }), []);
+    assert.deepEqual(splitAcrossWindows({ startMin: NaN, endMin: 60 }, { col: 1, columns: 3 }), []);
+    for (const piece of cut(9 * 60, NaN)) {
+      assert.ok(Number.isFinite(piece.startMin) && Number.isFinite(piece.endMin), 'no NaN reaches the grid');
+    }
+
+    // Every piece must sit inside the window of the column it was given to, or
+    // the view's top and height are meaningless.
+    for (const dayStartHour of [0, 4, 7, 12]) {
+      for (let start = 0; start < 1440; start += 17) {
+        for (const end of [null, 0, 5, 300, 725, 1439, start, (start + 600) % 1440]) {
+          const pieces = splitAcrossWindows({ startMin: start, endMin: end }, {
+            col: 2, columns: 5, dayStartHour,
+          });
+          const lo = dayStartHour * 60;
+          for (const piece of pieces) {
+            assert.ok(piece.col >= 0 && piece.col < 5, 'the column is on screen');
+            assert.ok(piece.startMin >= lo && piece.startMin <= lo + 1440, 'start inside the window');
+            assert.ok(piece.endMin >= piece.startMin, 'a piece never ends before it starts');
+            assert.ok(piece.endMin <= lo + 1440, 'end inside the window');
+          }
+          assert.ok(pieces.filter(piece => piece.isTail).length <= 1, 'at most one tail');
+          assert.ok(pieces.filter(piece => piece.isHead).length <= 1, 'at most one head');
+          if (pieces.length === 2) {
+            assert.equal(pieces[0].col + 1, pieces[1].col, 'the head follows its tail');
+          }
+        }
       }
     }
   }

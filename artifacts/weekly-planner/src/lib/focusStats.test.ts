@@ -118,6 +118,12 @@ function main() {
     );
     assert.equal(brokenYesterday.streak, 0, 'A gap at the end ends the streak');
 
+    const skippedHoliday = summariseFocus(
+      days(['2026-08-14', '2026-08-16']),
+      { from: '2026-08-10', to: '2026-08-16', excludedDates: ['2026-08-15'] },
+    );
+    assert.equal(skippedHoliday.streak, 2, 'Skipping a holiday keeps the streak alive');
+
     const allSeven = summariseFocus(
       days(['2026-08-10', '2026-08-11', '2026-08-12', '2026-08-13',
         '2026-08-14', '2026-08-15', '2026-08-16']),

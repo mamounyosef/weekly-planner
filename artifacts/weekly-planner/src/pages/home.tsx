@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { useLocation } from 'wouter';
+import { summariseFocusYear } from '@/lib/yearStats';
+import { computeAllTimeStreaks } from '@/lib/focusStats';
 import { createPortal, flushSync } from 'react-dom';
 import {
   format,
@@ -26,7 +28,6 @@ import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
-  FOCUS_EXCLUDED_DATES_KEY,
   FOCUS_TIMER_KEY,
   DEFAULT_FOCUS_TIMER,
   type FocusSession,
@@ -44,9 +45,6 @@ import {
   checkpointFocusTimer,
   pauseFocusTimer,
   loadLocalFocusSessions,
-  loadLocalFocusExcludedDates,
-  saveLocalFocusExcludedDates,
-  safeFocusExcludedDates,
   loadLocalFocusTimer,
   coerceFocusTimer,
   focusTimerPushKey,
@@ -1108,6 +1106,8 @@ export default function DailyPlanner() {
   const showFocusAnalysisRef = useRef(showFocusAnalysis);
   useEffect(() => { showFocusAnalysisRef.current = showFocusAnalysis; }, [showFocusAnalysis]);
   const [analysisTab, setAnalysisTab]       = useState<'week' | 'month' | 'year'>('week');
+  /** Per device, like the prayer colour and shape: what one screen names them. */
+  const [prayerLanguage, setPrayerLanguage] = useState<'english' | 'arabic'>('english');
   /**
    * Category ids currently hidden from the grid, plus the sentinel
    * UNCATEGORISED for items that belong to no category. Per device, so the
@@ -1148,7 +1148,7 @@ export default function DailyPlanner() {
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
   const [editingFocusDayKey, setEditingFocusDayKey]   = useState<string | null>(null);
   const [editingFocusInput, setEditingFocusInput]     = useState<string>('');
-  const [focusExcludedDates, setFocusExcludedDates]   = useState<string[]>(loadLocalFocusExcludedDates());
+  const [focusExcludedDates, setFocusExcludedDates]   = useState<string[]>(initialSettings.focusExcludedDates);
   const focusExcludedSet = useMemo(() => new Set(focusExcludedDates), [focusExcludedDates]);
   const toggleExcludeFocusDay = useCallback((dateKeyStr: string) => {
     setFocusExcludedDates(prev => {
@@ -1159,7 +1159,6 @@ export default function DailyPlanner() {
         set.add(dateKeyStr);
       }
       const next = Array.from(set);
-      saveLocalFocusExcludedDates(next);
       return next;
     });
   }, []);
@@ -1176,16 +1175,6 @@ export default function DailyPlanner() {
     window.addEventListener('pointerdown', handlePointerDown);
     return () => window.removeEventListener('pointerdown', handlePointerDown);
   }, [openDayMenuKey]);
-
-  useEffect(() => {
-    const handleStorage = (evt: StorageEvent) => {
-      if (evt.key === FOCUS_EXCLUDED_DATES_KEY) {
-        setFocusExcludedDates(loadLocalFocusExcludedDates());
-      }
-    };
-    window.addEventListener('storage', handleStorage);
-    return () => window.removeEventListener('storage', handleStorage);
-  }, []);
 
   const [confirmFocusModal, setConfirmFocusModal]     = useState<{
     date: Date;
@@ -2654,16 +2643,16 @@ export default function DailyPlanner() {
     return days;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleColsSig, dayAt]);
-  const { prayersFor, rawTimesFor, isDone: isPrayerDone, toggleDone: togglePrayerDone } = usePrayerTimes(prayer, prayerDates);
+  const { prayersFor, rawTimesFor, isDone: isPrayerDone, toggleDone: togglePrayerDone } = usePrayerTimes(prayer, prayerDates, prayerLanguage);
   // Today's complete list for the header panel: Sunrise and any individually
   // hidden prayers included, because that panel exists to show the whole day.
   const todayPrayerList = useMemo(() => {
     if (!prayer.enabled) return [] as PrayerOccurrence[];
     const today = new Date(nowTick);
-    return buildPrayerDay(prayerDateKey(today), rawTimesFor(today), { ...prayer, showSunrise: true, hidden: [] });
+    return buildPrayerDay(prayerDateKey(today), rawTimesFor(today), { ...prayer, showSunrise: true, hidden: [] }, prayerLanguage);
     // nowTick only matters here for the date rolling over, so round it to the day.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prayer, rawTimesFor, prayerDateKey(new Date(nowTick))]);
+  }, [prayer, rawTimesFor, prayerDateKey(new Date(nowTick)), prayerLanguage]);
   // Close the prayer panel on an outside click or Escape, like every other popup.
   useEffect(() => {
     if (!prayerPanelOpen) return;
@@ -2931,7 +2920,7 @@ export default function DailyPlanner() {
       sidebarStyle: true, timeFormat: true, weekStartsOn: true, dayStartH: true,
       dayEndH: true, calendarView: true, customDaysBefore: true, customDaysAfter: true,
       customAnchor: true,
-      focusDayStartHour: true, focusDailyGoalSeconds: true, focusChime: true, focusCues: true, shortcutDefaultsVersion: true, shortcuts: true,
+      focusDayStartHour: true, focusDailyGoalSeconds: true, focusExcludedDates: true, focusChime: true, focusCues: true, shortcutDefaultsVersion: true, shortcuts: true,
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
       taskColor: true, taskCheckboxShape: true, taskFilters: true, autoRollRecurringTasks: true, googleSyncEnabled: true, googleTasksSync: true,
       stickyAllDayMain: true, stickyTasksMain: true, stickyAllDayWidget: true, stickyTasksWidget: true,
@@ -2960,6 +2949,7 @@ export default function DailyPlanner() {
     setTaskColor(s.taskColor);
     setTaskCheckboxShape(s.taskCheckboxShape);
     setTaskFilters(canonicalFilters(s.taskFilters));
+    setFocusExcludedDates(s.focusExcludedDates);
     if (typeof s.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(s.autoRollRecurringTasks);
     setGoogleTasksSync(s.googleTasksSync);
     setPrayer(s.prayer);
@@ -3004,6 +2994,7 @@ export default function DailyPlanner() {
       focusDayStartHour,
       focusChime,
       focusCues,
+      focusExcludedDates,
       shortcuts,
       autoBackup,
       stickyAllDayWidget: initialSettings.stickyAllDayWidget,
@@ -3058,10 +3049,12 @@ export default function DailyPlanner() {
     mobileTab,
     hiddenCategoryIds,
     hiddenCategoriesByView,
+    prayerLanguage,
   }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, mobileSwipeViewSwitch, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
-       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds, hiddenCategoriesByView]);
+       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds, hiddenCategoriesByView,
+       prayerLanguage]);
 
   /** Adopt a stored device snapshot into the live state. */
   const applyDeviceSettings = useCallback((d: DeviceSettings) => {
@@ -3087,6 +3080,7 @@ export default function DailyPlanner() {
     if (typeof d.mobileContentZoom === 'number') setMobileContentZoom(clampZoom(d.mobileContentZoom));
     if (typeof d.mobileUiZoom === 'number') setMobileUiZoom(clampZoom(d.mobileUiZoom));
     setAnalysisTab(d.analysisTab);
+    if (d.prayerLanguage === 'english' || d.prayerLanguage === 'arabic') setPrayerLanguage(d.prayerLanguage);
     if (d.hiddenCategoriesByView && typeof d.hiddenCategoriesByView === 'object') {
       setHiddenCategoriesByView(d.hiddenCategoriesByView);
     } else if (Array.isArray(d.hiddenCategoryIds)) {
@@ -3810,67 +3804,25 @@ export default function DailyPlanner() {
       : monthDaysInMonth[0];
 
     // Year view
-    const monthsOfYear = Array.from({ length: 12 }, (_, m) => new Date(analysisYearCursor, m, 1));
-    const monthTotals = monthsOfYear.map(m => {
-      const dayList = eachDayOfInterval({ start: startOfMonth(m), end: endOfMonth(m) });
-      const validDays = dayList.filter(d => !focusExcludedSet.has(dateKey(d)));
-      const seconds = validDays.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
-      const sessions = validDays.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
-      const activeDays = validDays.filter(d => (byDaySeconds.get(dateKey(d)) ?? 0) > 0).length;
-      return { month: m, seconds, sessions, activeDays };
+    const {
+      months: monthTotals,
+      yearSeconds,
+      yearSessions,
+      yearActiveDays,
+      yearMaxSeconds,
+      yearBestMonth,
+    } = summariseFocusYear(completedSessions, {
+      year: analysisYearCursor,
+      dayStartHour: focusDayStartHour,
+      excludedDates: focusExcludedDates,
     });
-    const yearSeconds = monthTotals.reduce((sum, m) => sum + m.seconds, 0);
-    const yearSessions = monthTotals.reduce((sum, m) => sum + m.sessions, 0);
-    const yearActiveDays = monthTotals.reduce((sum, m) => sum + m.activeDays, 0);
-    const yearMaxSeconds = Math.max(1, ...monthTotals.map(m => m.seconds));
-    const yearBestMonth = monthTotals.reduce((best, m) => m.seconds > best.seconds ? m : best, monthTotals[0]);
 
     // Streaks (all-time, based on any non-excluded day with logged focus time)
-    const activeDayKeys = new Set(Array.from(byDaySeconds.entries()).filter(([k, secs]) => secs > 0 && !focusExcludedSet.has(k)).map(([k]) => k));
-    let currentStreak = 0;
-    {
-      let cursorDate = new Date(`${focusDayKey(new Date(), focusDayStartHour)}T00:00:00`);
-      let maxLookback = 1000;
-      while (maxLookback-- > 0) {
-        const k = dateKey(cursorDate);
-        if (focusExcludedSet.has(k)) {
-          // Excluded day (e.g. sick day): pass through without breaking streak
-          cursorDate = new Date(cursorDate.getTime() - 86400000);
-          continue;
-        }
-        if (activeDayKeys.has(k)) {
-          currentStreak++;
-          cursorDate = new Date(cursorDate.getTime() - 86400000);
-        } else {
-          break;
-        }
-      }
-    }
-    let longestStreak = 0, run = 0;
-    let prevDate: Date | null = null;
-    const sortedActiveKeys = Array.from(activeDayKeys).sort();
-    for (const k of sortedActiveKeys) {
-      const d = new Date(`${k}T00:00:00`);
-      if (!prevDate) {
-        run = 1;
-      } else {
-        let gapDate = new Date(prevDate.getTime() + 86400000);
-        let validGapDays = 0;
-        while (gapDate < d) {
-          if (!focusExcludedSet.has(dateKey(gapDate))) {
-            validGapDays++;
-          }
-          gapDate = new Date(gapDate.getTime() + 86400000);
-        }
-        if (validGapDays === 0) {
-          run++;
-        } else {
-          run = 1;
-        }
-      }
-      longestStreak = Math.max(longestStreak, run);
-      prevDate = d;
-    }
+    const { currentStreak, longestStreak } = computeAllTimeStreaks(completedSessions, {
+      anchorDate: new Date(),
+      dayStartHour: focusDayStartHour,
+      excludedDates: focusExcludedDates,
+    });
 
     const allTimeSeconds = Array.from(byDaySeconds.entries())
       .filter(([k]) => !focusExcludedSet.has(k))
@@ -4629,14 +4581,23 @@ export default function DailyPlanner() {
       // by hand, so a guess here would mislabel every desk-started session.
       ready: timerHydratedRef.current,
     },
-    display: {
-      mode: focusTimer.isRunning ? 'running' : focusTimer.sessionStartedAt ? 'paused' : 'idle',
-      remainingSeconds: Math.max(0, focusTimer.plannedSeconds - getFocusTimerElapsedSeconds(focusTimer)),
-      todaySeconds: hwTodaySeconds,
-      sessionsToday: hwSessionsToday,
-      // The timer is the last thing to arrive from the server; until it has,
-      // this window's totals are a guess and must not reach the LCD.
-      ready: timerHydratedRef.current && focusSessionsHydrated,
+    getDisplay: () => {
+      const now = Date.now();
+      const timer = focusTimerRef.current;
+      const todayKey = focusDayKey(new Date(now), focusDayStartHour);
+      const liveSeconds = getFocusTimerUncreditedSeconds(timer, now);
+      const todaySeconds = (focusLoggedByDay.seconds.get(todayKey) ?? 0)
+        + (timer.sessionStartedAt && focusDayKey(timer.sessionStartedAt, focusDayStartHour) === todayKey ? liveSeconds : 0);
+
+      return {
+        mode: timer.isRunning ? 'running' : timer.sessionStartedAt ? 'paused' : 'idle',
+        remainingSeconds: Math.max(0, timer.plannedSeconds - getFocusTimerElapsedSeconds(timer, now)),
+        todaySeconds,
+        sessionsToday: focusLoggedByDay.sessions.get(todayKey) ?? 0,
+        // The timer is the last thing to arrive from the server; until it has,
+        // this window's totals are a guess and must not reach the LCD.
+        ready: timerHydratedRef.current && focusSessionsHydrated,
+      };
     },
     // Button A cycles start/pause/resume; startFocus already resumes an
     // existing session rather than beginning a new one.
@@ -5052,6 +5013,7 @@ export default function DailyPlanner() {
     setTaskColor(restored.taskColor);
     if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
     setTaskFilters(canonicalFilters(restored.taskFilters));
+    setFocusExcludedDates(restored.focusExcludedDates);
     setGoogleTasksSync(restored.googleTasksSync);
     setPrayer(restored.prayer);
     // A restore is the one case that legitimately rewrites the device-scoped
@@ -10800,7 +10762,7 @@ export default function DailyPlanner() {
                         ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
                         ['Sessions', `${focusAnalysis.yearSessions}`],
                         ['Active Days', `${focusAnalysis.yearActiveDays}`],
-                        ['Best Month', focusAnalysis.yearActiveDays > 0 ? format(focusAnalysis.yearBestMonth.month, 'MMM') : '—'],
+                        ['Best Month', focusAnalysis.yearBestMonth ? format(focusAnalysis.yearBestMonth.month, 'MMM') : '—'],
                       ].map(([label, value]) => (
                         <div key={label} className="min-w-0">
                           <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>

@@ -101,9 +101,10 @@ export function dateRange(from: string, to: string): string[] {
  */
 export function summariseFocus(
   sessions: readonly FocusSessionRecord[],
-  opts: { from: string; to: string; dayStartHour?: number },
+  opts: { from: string; to: string; dayStartHour?: number; excludedDates?: string[] },
 ): FocusSummary {
   const dayStartHour = opts.dayStartHour ?? 0;
+  const excluded = new Set(opts.excludedDates ?? []);
   const totals = new Map<string, { seconds: number; sessions: number }>();
 
   for (const s of sessions ?? []) {
@@ -134,7 +135,12 @@ export function summariseFocus(
 
   let streak = 0;
   for (let i = days.length - 1; i >= 0; i -= 1) {
-    if (days[i].seconds <= 0) break;
+    if (days[i].seconds <= 0) {
+      if (excluded.has(days[i].date)) {
+        continue;
+      }
+      break;
+    }
     streak += 1;
   }
 
@@ -146,6 +152,81 @@ export function summariseFocus(
     bestDay,
     streak,
   };
+}
+
+export interface FocusStreaks {
+  currentStreak: number;
+  longestStreak: number;
+}
+
+export function computeAllTimeStreaks(
+  sessions: readonly FocusSessionRecord[],
+  opts: { anchorDate: Date; dayStartHour?: number; excludedDates?: string[] },
+): FocusStreaks {
+  const dayStartHour = opts.dayStartHour ?? 0;
+  const excluded = new Set(opts.excludedDates ?? []);
+  
+  const byDaySeconds = new Map<string, number>();
+  for (const s of sessions ?? []) {
+    if (!isCountable(s)) continue;
+    const key = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
+    if (!key) continue;
+    byDaySeconds.set(key, (byDaySeconds.get(key) ?? 0) + s.durationSeconds);
+  }
+
+  const activeDayKeys = new Set(
+    Array.from(byDaySeconds.entries())
+      .filter(([k, secs]) => secs > 0 && !excluded.has(k))
+      .map(([k]) => k)
+  );
+
+  let currentStreak = 0;
+  {
+    let cursorDate = new Date(`${focusDayKey(opts.anchorDate, dayStartHour)}T00:00:00`);
+    let maxLookback = 1000;
+    while (maxLookback-- > 0) {
+      const k = dateKey(cursorDate);
+      if (excluded.has(k)) {
+        cursorDate = new Date(cursorDate.getTime() - 86400000);
+        continue;
+      }
+      if (activeDayKeys.has(k)) {
+        currentStreak++;
+        cursorDate = new Date(cursorDate.getTime() - 86400000);
+      } else {
+        break;
+      }
+    }
+  }
+
+  let longestStreak = 0;
+  let run = 0;
+  let prevDate: Date | null = null;
+  const sortedActiveKeys = Array.from(activeDayKeys).sort();
+  for (const k of sortedActiveKeys) {
+    const d = new Date(`${k}T00:00:00`);
+    if (!prevDate) {
+      run = 1;
+    } else {
+      let gapDate = new Date(prevDate.getTime() + 86400000);
+      let validGapDays = 0;
+      while (gapDate < d) {
+        if (!excluded.has(dateKey(gapDate))) {
+          validGapDays++;
+        }
+        gapDate = new Date(gapDate.getTime() + 86400000);
+      }
+      if (validGapDays === 0) {
+        run++;
+      } else {
+        run = 1;
+      }
+    }
+    if (run > longestStreak) longestStreak = run;
+    prevDate = d;
+  }
+
+  return { currentStreak, longestStreak };
 }
 
 /** "2h 15m", "45m", "None". Short enough to sit under a bar on a phone. */

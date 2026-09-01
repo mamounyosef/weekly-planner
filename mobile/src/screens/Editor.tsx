@@ -119,9 +119,9 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
       : {
         // Category defaults first, then the gesture, so a drag's own times are
         // never overwritten by the category's default duration.
-        ...withDefaultCategory(
-          blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()),
-          categories,
+        ...(target.store === 'events'
+          ? withDefaultCategory(blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()), categories)
+          : blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes())
         ),
         ...(target.prefill ?? {}),
       }
@@ -315,19 +315,21 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
               ) : null}
             </Field>
 
-            <Field label="Category">
-              <CategoryPicker
-                value={draft.categoryId}
-                onChange={id => setDraft(d => (
-                  // Defaults only when composing. On an edit, choosing a
-                  // category must not snap a 90-minute meeting back to 60.
-                  isNew
-                    ? applyCategoryDefaults(d, categories.find((c: any) => c.id === id))
-                    : { ...d, categoryId: id }
-                ))}
-                categories={categories as any}
-              />
-            </Field>
+            {store === 'events' ? (
+              <Field label="Category">
+                <CategoryPicker
+                  value={draft.categoryId}
+                  onChange={id => setDraft(d => (
+                    // Defaults only when composing. On an edit, choosing a
+                    // category must not snap a 90-minute meeting back to 60.
+                    isNew
+                      ? applyCategoryDefaults(d, categories.find((c: any) => c.id === id))
+                      : { ...d, categoryId: id }
+                  ))}
+                  categories={categories as any}
+                />
+              </Field>
+            ) : null}
 
             {store === 'tasks' && lists.length > 0 ? (
               <Field label="List" hint="Which part of the board it sits on">

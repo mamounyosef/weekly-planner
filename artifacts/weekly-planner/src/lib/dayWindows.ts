@@ -260,3 +260,89 @@ export function describeRanges(
     : `Showing ${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}.`;
   return `${shape} ${hidden} ${hidden === 1 ? 'hour is' : 'hours are'} hidden.`;
 }
+
+// ─── Nights that run past the end of a column ────────────────────────────────
+// A grid column holds one window: the same clock time on one day through to the
+// same clock time on the next. Sleep does not respect it, and neither does a
+// film that finishes at half past midnight. Drawn naively such an item has an
+// end EARLIER than its start, which is not a short block, it is a block whose
+// remainder belongs to the column beside it.
+//
+// So an item is cut into at most two pieces here, and each piece is given
+// coordinates inside the window of the column it is drawn in. The view then
+// reads a top and a height straight off a piece, with no further arithmetic:
+// re-deriving those from the original item is precisely what drew a head half a
+// day above its own column.
+
+/** One drawn piece of an item, in the frame of the column it lands in. */
+export interface DaySpan {
+  /** Which column it belongs to. Always inside the range that was given. */
+  col: number;
+  startMin: number;
+  endMin: number;
+  /** The closing piece of something that ran over the end of its window. */
+  isTail: boolean;
+  /** The opening piece, drawn at the top of the following column. */
+  isHead: boolean;
+}
+
+/**
+ * Where a timed item is actually drawn, once nights that cross the window's
+ * edge are accounted for.
+ *
+ * Returns nothing at all when the item belongs to a column outside the range on
+ * screen, which is the honest answer: it is not that it has no place, it is
+ * that its place is not being drawn.
+ */
+export function splitAcrossWindows(
+  block: { startMin: number | null | undefined; endMin: number | null | undefined },
+  opts: {
+    /** The column the item's calendar day occupies. */
+    col: number;
+    /** How many columns are drawn, so a piece can never land outside them. */
+    columns: number;
+    /** The hour each column's window opens at. Zero means midnight to midnight. */
+    dayStartHour?: number;
+    /** How long an item with no end is treated as being. */
+    fallbackMinutes?: number;
+  },
+): DaySpan[] {
+  const start = block.startMin;
+  if (typeof start !== 'number' || !Number.isFinite(start)) return [];
+
+  const dayStartMin = Math.max(0, Math.round(opts.dayStartHour ?? 0)) * 60;
+  const windowEnd = dayStartMin + 1440;
+  const fallback = opts.fallbackMinutes ?? 30;
+
+  const rawEnd = block.endMin;
+  let end = typeof rawEnd === 'number' && Number.isFinite(rawEnd) ? rawEnd : start + fallback;
+  // STRICTLY earlier, never equal. An end equal to the start is a moment with
+  // no duration — a deadline at six — and reading that as a full day round the
+  // clock would turn every such marker into a wall down the column.
+  if (end < start) end += 1440;
+
+  // Before the window opens is the tail end of the DAY BEFORE's window.
+  const shift = start < dayStartMin ? 1440 : 0;
+  const col = start < dayStartMin ? opts.col - 1 : opts.col;
+  const from = start + shift;
+  const to = end + shift;
+
+  const out: DaySpan[] = [];
+  const inRange = (c: number) => c >= 0 && c < opts.columns;
+
+  if (to <= windowEnd) {
+    if (inRange(col)) out.push({ col, startMin: from, endMin: to, isTail: false, isHead: false });
+    return out;
+  }
+
+  if (inRange(col)) {
+    out.push({ col, startMin: from, endMin: windowEnd, isTail: true, isHead: false });
+  }
+  if (inRange(col + 1)) {
+    // Clamped, so something longer than a whole day cannot draw past the foot
+    // of the column it opens.
+    const headEnd = Math.min(dayStartMin + (to - windowEnd), windowEnd);
+    out.push({ col: col + 1, startMin: dayStartMin, endMin: headEnd, isTail: false, isHead: true });
+  }
+  return out;
+}
