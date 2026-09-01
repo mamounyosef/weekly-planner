@@ -821,6 +821,14 @@ export default function DailyPlanner() {
     openFromUrl();
 
     const onMessage = (event: MessageEvent) => {
+      // The worker found that this page is running against a build the server
+      // no longer has. Nobody was listening for this, which is part of why a
+      // stale build could sit here unnoticed. Reloading is the whole fix: the
+      // shell is fetched from the server now, so one reload lands on current.
+      if (event.data?.type === 'planner-shell-updated') {
+        window.location.reload();
+        return;
+      }
       if (event.data?.type !== 'planner-open-notification') return;
       setNotifyPanelOpen(true);
       setNotifyHighlight(event.data.key ?? null);
@@ -14506,4 +14514,3 @@ function PrayerNextBadge({ minutes, color }: { minutes: number; color: string })
     </span>
   );
 }
-

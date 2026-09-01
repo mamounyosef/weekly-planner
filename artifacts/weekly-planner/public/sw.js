@@ -6,16 +6,16 @@
  *   • /assets/*        — content-hashed by the build. A given URL's bytes can
  *                        never change, so cache-first is correct forever.
  *   • icons, manifest  — artwork that changes about once a year.
- *   • the HTML shell   — served from cache immediately, then refreshed in the
- *                        background. A new build is picked up on the same load
- *                        (see the reload message below), not the next one.
+ *   • the HTML shell   — fetched from the SERVER first, with the cached copy
+ *                        as the fallback when the server cannot be reached in
+ *                        time. See `shellFirst` for why it is that way round.
  *
  * What it never touches: anything under /api/. Every event, task, setting and
  * timer tick still comes live from the server, and the streaming endpoints are
  * passed through untouched — intercepting an SSE stream would break the live
  * sync between the phone, the desktop window and the widget.
  */
-const VERSION = 'planner-v6';
+const VERSION = 'planner-v7';
 const SHELL_CACHE = `${VERSION}-shell`;
 const ASSET_CACHE = `${VERSION}-assets`;
 const SHELL_URL = '/index.html';
@@ -69,12 +69,29 @@ async function cacheFirst(request, cacheName) {
 }
 
 let recovering = false;
+/**
+ * A hashed asset that is gone from the server means the page is running a shell
+ * that no longer matches the build. Since the shell is fetched from the server
+ * first now, this can only happen to a page that was already open when the
+ * build moved, so the shell cache is thrown away and the page is reloaded onto
+ * the current one. The message is sent as well for anything that would rather
+ * handle it itself.
+ */
 async function recoverFromStaleShell() {
   if (recovering) return;
   recovering = true;
   await caches.delete(SHELL_CACHE);
   const clients = await self.clients.matchAll({ type: 'window' });
-  for (const client of clients) client.postMessage({ type: 'planner-shell-updated' });
+  for (const client of clients) {
+    client.postMessage({ type: 'planner-shell-updated' });
+    try {
+      await client.navigate(client.url);
+    } catch (_) {
+      // Some browsers refuse navigate() for a client they did not control from
+      // the start. The message above is the fallback there.
+    }
+  }
+  recovering = false;
 }
 
 async function staleWhileRevalidate(request, cacheName) {
@@ -90,59 +107,64 @@ async function staleWhileRevalidate(request, cacheName) {
 }
 
 /**
- * Windows already reloaded for this shell change. Without it a page could be
- * navigated repeatedly while several requests are in flight, and the user would
- * watch it flicker.
+ * How long the shell may take from the server before the cached copy is used.
+ *
+ * The shell is five kilobytes and the server is usually this same machine or a
+ * device on the same network, so this is never reached in normal use. It exists
+ * for the phone on a dead connection, where waiting is worse than opening a
+ * build that is one version old.
  */
-const reloadedClients = new Set();
+const SHELL_TIMEOUT_MS = 1500;
 
 /**
- * The shell, served from cache first so the app paints without waiting for the
- * network at all. The background copy is compared against what was served; if
- * the build changed, open pages are told to reload themselves once, so a fresh
- * deploy still lands on the very next open rather than the one after it.
+ * The shell, fetched from the SERVER first and falling back to the cache.
+ *
+ * IT USED TO BE THE OTHER WAY ROUND, AND THAT WAS A TRAP. Cache-first painted
+ * instantly and then refreshed in the background, which is the right trade for
+ * a phone and the wrong one for a person who has just pressed reload to look at
+ * a change they made. What it produced was a planner that showed the NEW build
+ * on a hard reload and the OLD one on an ordinary F5, indefinitely: the shell
+ * came from the cache, and every hashed asset it named was still in the asset
+ * cache too, so the previous build went on running perfectly and invisibly.
+ *
+ * The background refresh was supposed to catch that and reload the page. It
+ * could not be relied on: nothing held the worker alive while it ran, so the
+ * browser was free to shut the worker down the moment the cached shell had been
+ * handed over, killing the refresh before it wrote anything. And the message it
+ * sent to say "the build moved" had no listener in the app at all.
+ *
+ * Serving a stale build silently is the worst outcome available here, so the
+ * order is reversed: ask the server, and fall back to the cache only when the
+ * server does not answer in time. The cached copy is still written on every
+ * success, so the app opens offline exactly as it did before.
  */
 async function shellFirst(request) {
   const cache = await caches.open(SHELL_CACHE);
-  const cached = await cache.match(SHELL_URL);
 
-  const refresh = fetch(new Request(SHELL_URL, { cache: 'reload' }))
+  let timer = null;
+  const fromNetwork = fetch(new Request(SHELL_URL, { cache: 'reload' }))
     .then(async (response) => {
-      if (!response.ok) return;
-      const fresh = await response.clone().text();
-      const previous = cached ? await cached.clone().text() : null;
-      await cache.put(SHELL_URL, response);
-      if (previous === null || previous === fresh) return;
-
-      // The build changed under a page that was served the OLD shell. That page
-      // is not merely out of date, it is BROKEN: the script tag in the shell we
-      // just handed it names a hashed bundle that no longer exists, so nothing
-      // on it ever ran -- which also means it cannot receive a message asking it
-      // to reload. It renders as a blank screen that never recovers.
-      //
-      // So the worker navigates it itself. postMessage first, for any page that
-      // IS alive and would rather handle this gracefully; navigate immediately
-      // after, because a page that is already blank has nothing to preserve.
-      const clients = await self.clients.matchAll({ type: 'window' });
-      for (const client of clients) {
-        client.postMessage({ type: 'planner-shell-updated' });
-        if (reloadedClients.has(client.id)) continue;
-        reloadedClients.add(client.id);
-        try {
-          await client.navigate(client.url);
-        } catch (_) {
-          // Some browsers refuse navigate() for clients they did not control
-          // from the start; the postMessage above is the fallback there.
-        }
-      }
+      if (!response || !response.ok) return null;
+      // Written back before it is returned, so the copy kept for offline use is
+      // always the one most recently proven good.
+      await cache.put(SHELL_URL, response.clone());
+      return response;
     })
-    .catch(() => {});
+    .catch(() => null)
+    .finally(() => { if (timer !== null) clearTimeout(timer); });
 
-  // The refresh above is deliberately not awaited here: the page must not wait
-  // on the network when a usable shell is already on the device.
-  if (cached) return cached;
-  await refresh;
-  return (await cache.match(SHELL_URL)) || fetch(request);
+  const cached = await cache.match(SHELL_URL);
+  if (!cached) {
+    // Nothing to fall back to, so there is nothing to wait for either.
+    return (await fromNetwork) || fetch(request);
+  }
+
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), SHELL_TIMEOUT_MS);
+  });
+
+  const winner = await Promise.race([fromNetwork, timeout]);
+  return winner || cached;
 }
 
 /** Pure predicate for fetch routing: never intercept /api/, non-GET, text/event-stream, or third-party origins. */
@@ -194,7 +216,12 @@ if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') 
     if (isServerRoute(url)) return;
 
     if (request.mode === 'navigate') {
-      event.respondWith(shellFirst(request));
+      // waitUntil as well as respondWith: the response can settle on the cached
+      // copy while the write-back of the fresh one is still in flight, and
+      // without this the browser may stop the worker in between.
+      const shell = shellFirst(request);
+      event.respondWith(shell);
+      event.waitUntil(shell.catch(() => {}));
       return;
     }
 
