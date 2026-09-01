@@ -37,6 +37,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Image,
   PanResponder,
   Pressable,
   RefreshControl,
@@ -46,6 +47,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, StatusDot, Text, useTheme } from '../ui/kit';
+import { ICONS } from '../ui/icons';
 import { radius, space, HIT } from '../theme';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
@@ -505,7 +507,7 @@ export function Today({
               because they are an event rather than a place and need to be
               visible from the screen they concern. */}
           {conflicts.length > 0 ? (
-            <HeaderButton glyph="◎" onPress={onOpenConflicts} a11y="Conflicts"
+            <HeaderButton iconName="triangle-alert" onPress={onOpenConflicts} a11y="Conflicts"
               badge={conflicts.length} />
           ) : null}
 
@@ -513,14 +515,14 @@ export function Today({
               both are ways of reaching the calendar, not places beside it, and
               the bar is deliberately four wide so the tabs stay legible. */}
           {onOpenQuickAdd ? (
-            <HeaderButton glyph="✎" onPress={onOpenQuickAdd} a11y="Quick add" />
+            <HeaderButton iconName="plus" onPress={onOpenQuickAdd} a11y="Quick add" />
           ) : null}
           {onOpenSearch ? (
-            <HeaderButton glyph="⌕" onPress={onOpenSearch} a11y="Search" />
+            <HeaderButton iconName="search" onPress={onOpenSearch} a11y="Search" />
           ) : null}
           {onOpenNotifications ? (
             <HeaderButton
-              glyph="◔"
+              iconName="bell"
               onPress={onOpenNotifications}
               a11y="Notifications"
               badge={unreadNotifications > 0 ? unreadNotifications : undefined}
@@ -815,8 +817,16 @@ export function Today({
 
 // ─── Header pieces ───────────────────────────────────────────────────────────
 
-function HeaderButton({ glyph, onPress, a11y, badge }: {
-  glyph: string; onPress: () => void; a11y: string; badge?: number;
+/**
+ * One icon in the header.
+ *
+ * Drawn from `ui/icons`, which holds the set as tinted PNGs rather than as text
+ * glyphs. The glyphs were whatever the system font happened to have: they sat
+ * at different weights and optical sizes beside each other, and the bell was a
+ * quarter-filled circle because no bell existed to use.
+ */
+function HeaderButton({ iconName, onPress, a11y, badge }: {
+  iconName: string; onPress: () => void; a11y: string; badge?: number;
 }) {
   const p = useTheme();
   return (
@@ -827,7 +837,10 @@ function HeaderButton({ glyph, onPress, a11y, badge }: {
       android_ripple={{ color: p.accentSoft, borderless: true }}
       style={{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center' }}
     >
-      <Text variant="heading" tone="soft">{glyph}</Text>
+      <Image
+        source={{ uri: ICONS[iconName] }}
+        style={{ width: 22, height: 22, tintColor: p.inkSoft }}
+      />
       {badge ? (
         <View style={{
           position: 'absolute', top: 6, right: 6,
