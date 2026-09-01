@@ -83,6 +83,39 @@ const LIFTED_SLOP = 6;
 const GRIP_ZONE = 18;
 
 /**
+ * The band a squashed thing sits in.
+ *
+ * An item in an hour this device does not draw still has to be reachable: the
+ * whole point of squashing rather than hiding is that you can still see it is
+ * there and still tap it. Pinned exactly at the seam it was clipped in half by
+ * the edge of the grid, and a prayer landed on top of the block beside it.
+ *
+ * So a squashed thing is given a real height, held clear of the edge, and
+ * prayers sit in a second lane inside the first. Twenty-two points is a thumb
+ * without being a row.
+ */
+const SQUASH_H = 22;
+/** Kept off the very edge, so a chip never reads as cut off. */
+const SQUASH_PAD = 2;
+/** The gap between the block lane and the prayer lane in the same band. */
+const SQUASH_GAP = 2;
+
+/**
+ * Where a squashed thing is drawn, given where it WOULD have been.
+ *
+ * Three cases, and they are the three edges it can be pinned to: above the
+ * first hour drawn, below the last, or at a seam cut out of the middle.
+ */
+function squashedTop(y: number, gridH: number, lane: number): number {
+  const inset = SQUASH_PAD + lane * (SQUASH_H + SQUASH_GAP);
+  const floor = SQUASH_PAD;
+  const ceiling = Math.max(floor, gridH - SQUASH_H - SQUASH_PAD - lane * (SQUASH_H + SQUASH_GAP));
+  if (y <= 0) return Math.min(inset, ceiling);
+  if (y >= gridH) return ceiling;
+  return Math.max(floor, Math.min(ceiling, y - SQUASH_H / 2));
+}
+
+/**
  * How tall one slot is drawn, per snap interval.
  *
  * THE INTERVAL IS THE GRID, not just the editor's step size. Setting it to five
@@ -279,12 +312,13 @@ export function WeekView({
           const isHead = pl.item.isHead === true;
           const isHidden = !isMinuteVisible(segStart, shown);
 
-          const top = yAt(segStart);
-          const height = isHidden ? 20 : Math.max(2, yAt(segEnd) - top);
+          const at = yAt(segStart);
+          const top = isHidden ? squashedTop(at, gridHeight, 0) : at;
+          const height = isHidden ? SQUASH_H : Math.max(2, yAt(segEnd) - at);
           return { ...pl, top, height, isHidden, isTail, isHead };
         });
     });
-  }, [days, pxPerHour, yAt, dayStartH, shown]);
+  }, [days, pxPerHour, yAt, dayStartH, shown, gridHeight]);
 
   useEffect(() => {
     // Start where the day does, not at the top of an empty grid.
@@ -1199,7 +1233,11 @@ function DayColumn({
         // window, not to the top of it.
         const normM = pr.minutes < (dayWindow?.start ?? 0) * 60 ? pr.minutes + 1440 : pr.minutes;
         const isHidden = !isMinuteVisible(normM, shown);
-        const top = yAt(normM);
+        // Lane one, so a squashed prayer sits beside the squashed block rather
+        // than on top of it. Fajr and a night's sleep are pinned to the same
+        // edge by definition, so they collided every time.
+        const at = yAt(normM);
+        const top = isHidden ? squashedTop(at, height, 1) : at;
         const named = chipMode !== 'dot' && prayerLabels !== false;
 
         const glyph = (
@@ -1231,9 +1269,10 @@ function DayColumn({
               onPress={() => onTogglePrayer?.(pr.key)}
               accessibilityRole="button"
               accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
+              hitSlop={6}
               style={{
                 position: 'absolute',
-                top, left: 2, right: 2, height: 16,
+                top, left: 2, right: 2, height: isHidden ? SQUASH_H : 16,
                 flexDirection: 'row', alignItems: 'center', gap: 3,
                 paddingHorizontal: 4,
                 borderRadius: radius.sm,
@@ -1265,8 +1304,8 @@ function DayColumn({
             pointerEvents="box-none"
             style={{
               position: 'absolute',
-              top: top - 8,
-              left: 0, right: 0, height: 16,
+              top: isHidden ? top : top - 8,
+              left: 0, right: 0, height: isHidden ? SQUASH_H : 16,
               flexDirection: 'row', alignItems: 'center',
               zIndex: 3,
               opacity: done ? 0.55 : 1,
@@ -1280,7 +1319,7 @@ function DayColumn({
               accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
               style={{
                 flexDirection: 'row', alignItems: 'center', gap: 3,
-                height: 15,
+                height: isHidden ? SQUASH_H - 2 : 15,
                 marginHorizontal: 3,
                 paddingLeft: chipMode === 'dot' ? 3 : 5,
                 opacity: isHidden ? 0.5 : 1,
