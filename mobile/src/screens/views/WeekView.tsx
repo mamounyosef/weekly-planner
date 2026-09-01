@@ -64,12 +64,12 @@ import {
 import type { PrayerDrawStyle } from '../../lib/viewPrefs';
 import {
   FULL_DAY, hourMarksIn, isMinuteVisible, minuteAtY, normaliseRanges, seamsIn, slotsIn,
-  splitAcrossWindows, visibleMinutes, yOfMinute, type HourRange,
+  splitAcrossWindows, visibleMinutes, windowRanges, yOfMinute, type HourRange,
 } from '../../lib/dayWindows';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
 } from '../../lib/dragGrid';
-import { formatClock, type AgendaDay, type AgendaItem } from '../../lib/agenda';
+import { addDays, formatClock, type AgendaDay, type AgendaItem } from '../../lib/agenda';
 
 const RAIL = 48;
 
@@ -197,7 +197,14 @@ export function WeekView({
    * Anything falling in an hour that is not drawn is not lost. It is counted
    * and offered below, and a tap shows the whole day.
    */
-  const ranges = useMemo(() => normaliseRanges(visibleHours), [visibleHours]);
+  // The two settings meet here. "The day starts at 6am" decides where a column
+  // begins and ends; "visible hours" decides which hours inside it are drawn.
+  // Combining them was the missing step: the window was a number that changed
+  // nothing, and the grid went on running midnight to midnight.
+  const ranges = useMemo(
+    () => windowRanges(dayWindow, visibleHours),
+    [dayWindow, visibleHours],
+  );
   // Nothing overrides the choice any more, not content and not a banner. The
   // hours that are hidden are simply not drawn, and the seam says where.
   const shown = ranges;
@@ -213,6 +220,19 @@ export function WeekView({
   );
   const seams = useMemo(() => seamsIn(shown), [shown]);
 
+  const dayStartH = dayWindow?.start ?? 0;
+  /**
+   * A clock minute placed on THIS grid.
+   *
+   * Two in the morning on a day that opens at six is late in the column, not
+   * early in it, so it is read as 26:00. Everything the grid draws by time goes
+   * through here: the now line, the scroll target, the prayer markers.
+   */
+  const inWindow = useCallback(
+    (minute: number) => (minute < dayStartH * 60 ? minute + 1440 : minute),
+    [dayStartH],
+  );
+
   const anyAllDay = days.some(d => d.allDay.length > 0);
 
   /** Every slot line in the drawn hours, in minutes from midnight. */
@@ -221,7 +241,6 @@ export function WeekView({
   // Laid out HERE rather than inside each column, because the gesture hit-tests
   // blocks by arithmetic and needs to see every day's placement at once. The
   // columns are handed the result so nothing is computed twice.
-  const dayStartH = dayWindow?.start ?? 0;
 
   const placedByDate = useMemo(() => {
     const logicalCols: GridItem[][] = days.map(() => []);
@@ -270,14 +289,14 @@ export function WeekView({
   useEffect(() => {
     // Start where the day does, not at the top of an empty grid.
     const target = nowMin !== null
-      ? yAt(nowMin) - 120
+      ? yAt(inWindow(nowMin)) - 120
       : 0;
     const id = setTimeout(
       () => scroller.current?.scrollTo({ y: Math.max(0, target), animated: false }),
       0,
     );
     return () => clearTimeout(id);
-  }, [yAt, nowMin, pxPerHour]);
+  }, [yAt, nowMin, pxPerHour, inWindow]);
 
   // ─── Gesture state ─────────────────────────────────────────────────────────
   // Three things the render needs, and a pile of bookkeeping it does not. The
@@ -483,16 +502,24 @@ export function WeekView({
     t.active = false;
 
     if (commit && cur) {
+      // The grid counts in its own frame, where a window that opens at 6am runs
+      // to 30:00. A time is written back to the store as a CLOCK time on a
+      // date, so anything past the end of the day rolls over to the next one.
+      const rolled = cur.startMin >= 1440;
+      const date = rolled ? addDays(cur.date, 1) : cur.date;
+      const startMin = rolled ? cur.startMin - 1440 : cur.startMin;
+      const endMin = cur.endMin === null
+        ? null
+        : ((rolled ? cur.endMin - 1440 : cur.endMin) + 1440) % 1440;
+
       if (cur.mode === 'create') {
-        onCreateRange?.({ date: cur.date, startMin: cur.startMin, endMin: cur.endMin });
+        onCreateRange?.({ date, startMin, endMin: endMin ?? startMin + 30 });
         setLifted(null);
       } else {
-        onMoveItem?.({
-          item: cur.item, date: cur.date, startMin: cur.startMin, endMin: cur.endMin,
-        });
+        onMoveItem?.({ item: cur.item, date, startMin, endMin });
         // The block stays lifted so it can be nudged again or resized without
         // holding it a second time.
-        setLifted({ id: cur.item.id, date: cur.date });
+        setLifted({ id: cur.item.id, date });
       }
     }
     stopDrag();
@@ -852,7 +879,7 @@ export function WeekView({
               isPrayerDone={isPrayerDone ? (key: string) => isPrayerDone(d.date, key) : undefined}
               onTogglePrayer={onTogglePrayer ? (key: string) => onTogglePrayer(d.date, key) : undefined}
               isToday={d.date === today}
-              nowMin={d.date === today ? nowMin : null}
+              nowMin={d.date === today && nowMin !== null ? inWindow(nowMin) : null}
               liftedId={lifted?.date === d.date ? lifted.id : null}
               onMenuItem={onMenuItem}
               draggingId={drag && drag.mode !== 'create' ? drag.item.id : null}

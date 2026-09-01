@@ -29,6 +29,7 @@ import {
   slotsIn,
   splitAcrossWindows,
   visibleMinutes,
+  windowRanges,
   yOfMinute,
   type HourRange,
 } from './dayWindows';
@@ -429,6 +430,94 @@ function main() {
             assert.equal(pieces[0].col + 1, pieces[1].col, 'the head follows its tail');
           }
         }
+      }
+    }
+  }
+
+  // ── 13. THE DAY IS ALLOWED TO START WHEN YOU SAY ───────────────────────────
+  // The window and the visible hours are two different questions and were never
+  // combined, so "the day starts at 6am" changed a number in the settings and
+  // nothing on the grid.
+  {
+    console.log('--- 13. THE DAY IS ALLOWED TO START WHEN YOU SAY ---');
+
+    // No window at all is the old behaviour, exactly.
+    assert.deepEqual(windowRanges(null, FULL_DAY), FULL_DAY);
+    assert.deepEqual(windowRanges(undefined, NIGHT_OFF), NIGHT_OFF);
+
+    // A whole day starting at 6 runs 6 to 30, not 6 to 6.
+    assert.deepEqual(windowRanges({ start: 6, end: 30 }, FULL_DAY), [r(6, 30)]);
+    assert.equal(visibleMinutes(windowRanges({ start: 6, end: 30 }, FULL_DAY)), 1440);
+
+    // A shorter window is just shorter.
+    assert.deepEqual(windowRanges({ start: 7, end: 23 }, FULL_DAY), [r(7, 23)]);
+
+    // Hidden hours are cut out of the window, and the cut is expressed in the
+    // window's own frame: 2am to 6am on a day that starts at 6pm is 26 to 30.
+    assert.deepEqual(
+      windowRanges({ start: 18, end: 42 }, normaliseRanges([r(0, 2), r(6, 24)])),
+      [r(18, 26), r(30, 42)],
+    );
+
+    // The same hidden stretch on an ordinary midnight day.
+    assert.deepEqual(windowRanges({ start: 0, end: 24 }, NIGHT_OFF), NIGHT_OFF);
+
+    // Hiding everything the window covers cannot produce a grid of no height.
+    const allHidden = windowRanges({ start: 9, end: 12 }, normaliseRanges([r(13, 20)]));
+    assert.deepEqual(allHidden, [r(9, 12)], 'the window is the floor');
+    assert.ok(visibleMinutes(allHidden) > 0);
+
+    // Rubbish never yields a grid of no height, and never a NaN.
+    for (const win of [
+      { start: NaN, end: 24 }, { start: 6, end: NaN },
+      { start: -5, end: 10 }, { start: 30, end: 40 },
+      { start: 10, end: 10 }, { start: 10, end: 3 },
+      { start: 0, end: 999 }, { start: 6.7, end: 20.2 },
+    ] as { start: number; end: number }[]) {
+      const out = windowRanges(win, FULL_DAY);
+      assert.ok(out.length > 0, 'always something to draw');
+      for (const range of out) {
+        assert.ok(Number.isFinite(range.from) && Number.isFinite(range.to));
+        assert.ok(range.to > range.from, 'a range always moves forwards');
+        assert.ok(range.from >= 0 && range.to <= 48, 'inside the two-day frame');
+      }
+      assert.ok(visibleMinutes(out) > 0);
+      assert.ok(visibleMinutes(out) <= 1440, 'a day is never longer than a day');
+    }
+
+    // The round trip still holds inside a shifted window: this is the property
+    // that keeps a block dropped at 2am from landing at 1:45.
+    for (const win of [{ start: 6, end: 30 }, { start: 18, end: 36 }, { start: 4, end: 20 }]) {
+      const ranges = windowRanges(win, normaliseRanges([r(0, 3), r(7, 24)]));
+      for (let m = win.start * 60; m < win.end * 60; m += 7) {
+        if (!isMinuteVisible(m, ranges)) continue;
+        const y = yOfMinute(m, ranges, 60);
+        const back = minuteAtY(y, ranges, 60);
+        assert.ok(Math.abs(back - m) < 1, 'a drawn minute reads back as itself');
+      }
+    }
+
+    // And a piece cut by `splitAcrossWindows` always lands on a drawn minute or
+    // is honestly reported as hidden, never off the end of the grid.
+    {
+      const win = { start: 6, end: 30 };
+      const ranges = windowRanges(win, FULL_DAY);
+      const pieces = splitAcrossWindows({ startMin: 35, endMin: 9 * 60 + 5 }, {
+        col: 1, columns: 3, dayStartHour: win.start,
+      });
+      assert.equal(pieces.length, 2, '00:35 to 09:05 with a 6am day is two pieces');
+      assert.equal(pieces[0].col, 0, 'the night half belongs to the day before');
+      assert.deepEqual(
+        [pieces[0].startMin, pieces[0].endMin], [35 + 1440, 30 * 60],
+        'and runs to the far edge of that column',
+      );
+      assert.deepEqual(
+        [pieces[1].startMin, pieces[1].endMin], [6 * 60, 9 * 60 + 5],
+        'the morning half opens the next column at 6am',
+      );
+      for (const piece of pieces) {
+        const y = yOfMinute(piece.startMin, ranges, 60);
+        assert.ok(y >= 0 && y <= visibleMinutes(ranges), 'drawn inside the grid');
       }
     }
   }

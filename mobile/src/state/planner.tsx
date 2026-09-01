@@ -842,8 +842,10 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const key = `${prayerQueryKey(prayerSettings)}|${date.slice(0, 4)}-${Number(date.slice(5, 7))}`;
     const entry = prayerMonths?.[key];
     const times = entry?.days?.[date];
-    return buildPrayerDay(date, times, prayerSettings);
-  }, [prayerSettings, prayerMonths]);
+    // The language is this device's choice, like the colour and the shape: the
+    // names are drawn here, so the screen that draws them decides.
+    return buildPrayerDay(date, times, prayerSettings, prayerAppearance.language);
+  }, [prayerSettings, prayerMonths, prayerAppearance.language]);
 
   const prayerDone = useMemo(
     () => readClientStore(data, 'prayerDone') as Record<string, any>,

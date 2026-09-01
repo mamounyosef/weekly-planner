@@ -104,6 +104,7 @@ export function Today({
     day, status, conflicts, syncNow, toggleDone, timeFormat, weekStartsOn, interval,
     prayersOn, isPrayerDone, togglePrayer, customWindow, events, categories,
     visibleHours, dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
+    calendarView: view, setCalendarView,
     unreadNotifications, prayerAppearance,
   } = usePlanner();
 
@@ -129,7 +130,11 @@ export function Today({
    * own per-device settings for the same reason. A phone on the day and a
    * desktop on the week is the correct state of affairs, not a disagreement.
    */
-  const [view, setView] = useState<ViewMode>('day');
+  // Read from the planner, not from a local state seeded with 'day'. The local
+  // copy was loaded asynchronously AFTER the first paint, so every trip back to
+  // the calendar showed the day view for half a second and then jumped to the
+  // one you actually use. The planner reads it while the splash is still up, so
+  // by the time anything is drawn the answer is already known.
 
   /**
    * A day handed over from search or the bell.
@@ -142,16 +147,7 @@ export function Today({
     setSelected(goToDate);
     onWentToDate?.();
   }, [goToDate, onWentToDate]);
-  useEffect(() => {
-    void prefs.getCalendarView().then(saved => {
-      const known: string[] = ['agenda', 'day', 'custom', 'week', 'month', 'year'];
-      if (saved && known.includes(saved)) setView(saved as ViewMode);
-    });
-  }, []);
-  const chooseView = (next: ViewMode) => {
-    setView(next);
-    void prefs.setCalendarView(next);
-  };
+  const chooseView = (next: ViewMode) => setCalendarView(next);
 
   /**
    * The day, EVENTS ONLY.
@@ -568,9 +564,10 @@ export function Today({
           })}
         </ScrollView>
 
-        {/* The strip belongs to the single-day views; the others draw their own
-            dates and a second row of them would only compete. */}
-        {view === 'day' || view === 'agenda' || view === 'custom' ? (
+        {/* Only the agenda gets the strip. Every grid view already writes the
+            day and the date at the head of its own columns, so a second row of
+            them said the same thing twice and cost a band of screen for it. */}
+        {view === 'agenda' ? (
           <Row gap={0} style={{ paddingHorizontal: space.md, marginTop: space.md }}>
             {strip.map(date => (
               <DayCell
@@ -605,6 +602,7 @@ export function Today({
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           visibleHours={visibleHours}
+          dayWindow={dayWindow}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -630,6 +628,7 @@ export function Today({
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           visibleHours={visibleHours}
+          dayWindow={dayWindow}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -652,6 +651,7 @@ export function Today({
           isPrayerDone={isPrayerDone}
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           visibleHours={visibleHours}
+          dayWindow={dayWindow}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}

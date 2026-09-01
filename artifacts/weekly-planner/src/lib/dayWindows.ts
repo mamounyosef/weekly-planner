@@ -346,3 +346,52 @@ export function splitAcrossWindows(
   }
   return out;
 }
+
+/**
+ * The stretches a column actually draws, once the day is allowed to start at an
+ * hour of your choosing.
+ *
+ * TWO SETTINGS, ONE TIMELINE. "The day starts at 6am" says where a column
+ * BEGINS and where it ends, a day later. "Visible hours" says which hours
+ * inside it are worth the space. They were never combined, so the window was a
+ * number in the settings screen that changed nothing: the grid went on drawing
+ * midnight to midnight and a night was cut in half at the wrong place.
+ *
+ * The ranges returned run in the WINDOW's frame, so a day starting at 6am ends
+ * at 30, not at 6. Everything downstream already treats a range as arithmetic
+ * rather than as a clock, and `formatHour` wraps past 24, so a label still
+ * reads 2am.
+ */
+export function windowRanges(
+  win: { start: number; end: number } | null | undefined,
+  visible: readonly HourRange[] | null | undefined,
+): HourRange[] {
+  const vis = normaliseRanges(visible);
+  if (!win) return vis;
+
+  const rawStart = Number(win.start);
+  const start = Number.isFinite(rawStart)
+    ? Math.min(23, Math.max(0, Math.floor(rawStart)))
+    : 0;
+  const rawEnd = Number(win.end);
+  const end = Number.isFinite(rawEnd)
+    ? Math.min(start + 24, Math.max(start + 1, Math.floor(rawEnd)))
+    : start + 24;
+
+  const drawn: HourRange[] = [];
+  for (let h = start; h < end; h += 1) {
+    // Which clock hour this slot of the window is. A window that runs past
+    // midnight asks about the small hours of the NEXT day, and the visible
+    // hours are a statement about the clock, not about the window.
+    const clock = ((h % 24) + 24) % 24;
+    if (!isMinuteVisible(clock * 60, vis)) continue;
+    const last = drawn[drawn.length - 1];
+    if (last && last.to === h) last.to = h + 1;
+    else drawn.push({ from: h, to: h + 1 });
+  }
+
+  // Hiding every hour of the window would leave a grid with no height at all,
+  // which reads as a broken screen rather than as a setting. The window itself
+  // is the floor.
+  return drawn.length > 0 ? drawn : [{ from: start, to: end }];
+}
