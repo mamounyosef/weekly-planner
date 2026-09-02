@@ -320,17 +320,81 @@ export function WeekView({
     });
   }, [days, pxPerHour, yAt, dayStartH, shown, gridHeight]);
 
+  /**
+   * Where the grid should be looking: the current hour, with a little of what
+   * came before it for context.
+   *
+   * Computed during render rather than in an effect, because it is needed
+   * BEFORE the first paint. Read through a ref so the clock ticking over does
+   * not become a reason to move the grid (see the effect below).
+   */
+  const scrollTargetFor = useCallback((minute: number | null) => {
+    if (minute === null) return 0;
+    return Math.max(0, yAt(inWindow(minute)) - 120);
+  }, [yAt, inWindow]);
+
+  const nowMinRef = useRef(nowMin);
+  nowMinRef.current = nowMin;
+
+  /**
+   * The position the grid is BORN at.
+   *
+   * THE FLASH THIS REMOVES. The grid used to mount at the top and then scroll
+   * down to the current hour from an effect, one frame later. For a fraction of
+   * a second you saw midnight -- for anyone with something drawn across the
+   * small hours, a wall of sleep -- and then it jumped. Every return to the
+   * calendar did it: from Tasks, from Focus, from Settings, and on launch.
+   *
+   * A ScrollView handed `contentOffset` starts there instead, so the first
+   * frame drawn is already the right one and there is nothing to jump from.
+   * The effect below stays as the correction for the cases an initial offset
+   * cannot cover: the row heights changing under it, or a different day being
+   * chosen while the view is already mounted.
+   */
+  const initialOffset = useMemo(
+    () => ({ x: 0, y: scrollTargetFor(nowMinRef.current) }),
+    // Deliberately empty: this is the value at MOUNT and must not be
+    // recomputed, or React Native re-applies it and yanks the grid back to now
+    // under the reader's thumb.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  /**
+   * Whether the grid has actually been placed yet.
+   *
+   * `contentOffset` is honoured once the content has a size. The grid's height
+   * is deterministic, so that is the first layout -- but a phone that has not
+   * applied it by then would sit at the top with nothing to correct it, which
+   * is the exact flash this is all here to remove. So the first content-size
+   * report checks, and places the grid itself if it has to.
+   */
+  const placedRef = useRef(false);
+
+  /**
+   * Put the grid back where it belongs when the SHAPE of it changes.
+   *
+   * Keyed on the geometry and the days on screen, never on the clock. It used
+   * to depend on `nowMin`, so every time the minute ticked over the grid
+   * scrolled itself back to the current hour -- whatever you had scrolled to
+   * and whatever you were reading at the time.
+   */
+  const shapeKey = `${dates.join(',')}|${pxPerHour}|${dayStartH}|${gridHeight}`;
+  const lastShapeRef = useRef<string | null>(null);
   useEffect(() => {
-    // Start where the day does, not at the top of an empty grid.
-    const target = nowMin !== null
-      ? yAt(inWindow(nowMin)) - 120
-      : 0;
+    if (lastShapeRef.current === shapeKey) return;
+    const first = lastShapeRef.current === null;
+    lastShapeRef.current = shapeKey;
+    // On the very first pass `contentOffset` has already put us there, so
+    // scrolling again would only risk a visible correction.
+    if (first) return;
+    const target = scrollTargetFor(nowMinRef.current);
     const id = setTimeout(
-      () => scroller.current?.scrollTo({ y: Math.max(0, target), animated: false }),
+      () => scroller.current?.scrollTo({ y: target, animated: false }),
       0,
     );
     return () => clearTimeout(id);
-  }, [yAt, nowMin, pxPerHour, inWindow]);
+  }, [shapeKey, scrollTargetFor]);
 
   // ─── Gesture state ─────────────────────────────────────────────────────────
   // Three things the render needs, and a pile of bookkeeping it does not. The
@@ -795,6 +859,18 @@ export function WeekView({
         ref={scroller}
         scrollEnabled={!dragging}
         scrollEventThrottle={16}
+        // The first frame is drawn here, not at the top and then moved.
+        contentOffset={initialOffset}
+        onContentSizeChange={() => {
+          if (placedRef.current) return;
+          placedRef.current = true;
+          if (initialOffset.y <= 0) return;
+          // Only if the offset was not taken. Scrolling to where we already
+          // are would be a no-op on most phones and a visible correction on
+          // the rest, so it is asked as a question rather than done blindly.
+          if (Math.abs(scrollY.current - initialOffset.y) < 2) return;
+          scroller.current?.scrollTo({ y: initialOffset.y, animated: false });
+        }}
         onScroll={e => { scrollY.current = e.nativeEvent.contentOffset.y; }}
         // A little air at the top, so the first hour is not flush against
         // whatever sits above the grid.
