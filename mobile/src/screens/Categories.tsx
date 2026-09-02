@@ -24,7 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Row, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Stepper, TextField, Toggle } from '../ui/Fields';
-import { PRESSED, radius, space } from '../theme';
+import { PRESSED, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
@@ -399,10 +399,14 @@ function Sheet({ existing, takenNames, onSave, onDelete, onClose }: {
           <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: p.line }} />
         </View>
 
+        {/* Shrinkable: a ScrollView has no height of its own, so inside a
+            capped sheet it would claim the whole form's height and overflow
+            the cap rather than scrolling within it. See `Editor.tsx`. */}
         <ScrollView
+          style={{ flexShrink: 1 }}
           contentContainerStyle={{
             padding: space.lg,
-            paddingBottom: insets.bottom + space.xl,
+            paddingBottom: clearNav(insets.bottom) + space.xl,
             gap: space.lg,
           }}
           keyboardShouldPersistTaps="handled"

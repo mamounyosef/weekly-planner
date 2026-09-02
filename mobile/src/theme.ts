@@ -127,6 +127,20 @@ export const type = {
  */
 export const PRESSED = { opacity: 0.55 } as const;
 
+/**
+ * The least room to leave under anything sitting at the bottom of a sheet.
+ *
+ * `useSafeAreaInsets()` is read inside a Modal, which is its own window, and
+ * what comes back there is not reliably the gesture bar's height -- the Add
+ * button ended up resting on the navigation line. This is a floor, not a
+ * replacement: a device that reports a real inset still gets it.
+ */
+export const NAV_CLEARANCE = 24;
+
+/** The bottom padding a sheet should use, given whatever the insets claim. */
+export const clearNav = (insetBottom: number): number =>
+  Math.max(insetBottom, NAV_CLEARANCE);
+
 export const HIT = 48;
 
 /** The primary actions live in the lower third, within one thumb's reach. */

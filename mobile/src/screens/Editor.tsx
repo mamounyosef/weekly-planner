@@ -21,7 +21,6 @@ import {
   Alert,
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   View,
@@ -33,7 +32,7 @@ import { Button, Row, Text, useTheme } from '../ui/kit';
 import {
   CategoryPicker, ColourPicker, Field, Segment, Stepper, TextField, Toggle,
 } from '../ui/Fields';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   applyCategoryDefaults,
@@ -256,7 +255,20 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
         a layout pass to get wrong.
       */}
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        // 'padding' ON ANDROID TOO, now that the buttons are pinned to the
+        // bottom instead of scrolling with the form. A pinned row is exactly
+        // what a keyboard covers.
+        //
+        // This used to be left undefined on Android because the activity is
+        // `adjustResize` and the window shrank on its own. Under edge-to-edge
+        // it no longer reliably does, and the difference is invisible until
+        // somebody types.
+        //
+        // Safe either way: the padding is computed as
+        // `frame.y + frame.height - keyboardTop`, clamped at zero. If the
+        // window DID resize, the sheet's bottom is already above the keyboard
+        // and that comes out as zero, so nothing is lifted twice.
+        behavior="padding"
         style={{
           position: 'absolute',
           left: 0,
@@ -266,6 +278,9 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
         }}
       >
         <View style={{
+          // Shrinkable, so the column below can be squeezed into the 92% cap
+          // rather than overflowing it.
+          flexShrink: 1,
           backgroundColor: p.surface,
           borderTopLeftRadius: radius.lg,
           borderTopRightRadius: radius.lg,
@@ -276,7 +291,22 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
             <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: p.line }} />
           </View>
 
+          {/*
+            `flexShrink: 1` IS WHAT KEEPS THE BUTTONS ON SCREEN.
+
+            A ScrollView has no height of its own; it takes its content's. Inside
+            a box capped at 92% of the screen that means it claimed the full
+            height of the form and pushed the pinned row below the sheet's own
+            bounds, where it was clipped. The row was not missing -- it was
+            drawn underneath. Scrolling, or any later re-render (the sync tick,
+            about half a minute in), forced a fresh layout pass that happened to
+            resolve it, which is exactly why it looked like it appeared on its
+            own after a while.
+
+            Shrinking lets the scroll area give the row its space first.
+          */}
           <ScrollView
+            style={{ flexShrink: 1 }}
             contentContainerStyle={{
               padding: space.lg,
               // The pinned action row below owns the safe-area inset now; this
@@ -529,7 +559,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
             gap: space.sm,
             paddingHorizontal: space.lg,
             paddingTop: space.md,
-            paddingBottom: insets.bottom + space.md,
+            paddingBottom: clearNav(insets.bottom) + space.md,
             borderTopWidth: 1,
             borderTopColor: p.line,
             backgroundColor: p.surface,

@@ -35,7 +35,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from './kit';
 import { CategoryPicker, ColourPicker, type Swatch } from './Fields';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, clearNav, radius, space } from '../theme';
 import { scopeChoices, type OccurrenceScope } from '../lib/occurrence';
 
 /**
@@ -225,7 +225,7 @@ function Sheet({
           borderTopWidth: 1,
           borderColor: p.line,
           maxHeight: '88%',
-          paddingBottom: insets.bottom,
+          paddingBottom: clearNav(insets.bottom),
         }}
       >
         <View style={{ alignItems: 'center', paddingTop: space.sm }}>
@@ -274,7 +274,11 @@ function Sheet({
             onChoose={scope => choose(step.action, scope)}
           />
         ) : (
+          // Shrinkable: a ScrollView has no height of its own, so inside a
+          // capped sheet it would claim the whole list's height and overflow the
+          // cap rather than scrolling within it. See `Editor.tsx`.
           <ScrollView
+            style={{ flexShrink: 1 }}
             contentContainerStyle={{ paddingVertical: space.sm, paddingBottom: space.lg }}
             keyboardShouldPersistTaps="handled"
           >

@@ -13,7 +13,6 @@ import React, { useState, useMemo } from 'react';
 import {
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   TextInput,
@@ -23,7 +22,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Row, Text, useTheme, Spacer } from '../ui/kit';
-import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, clearNav, radius, space, type as typeScale } from '../theme';
 import { usePlanner } from '../state/planner';
 import { parseQuickAdd } from '../lib/quickAdd';
 import { describeRecur, inferWeekStartsOn } from '../lib/draft';
@@ -233,7 +232,20 @@ function Sheet({ onClose }: { onClose: () => void }) {
         a layout pass to get wrong.
       */}
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        // 'padding' ON ANDROID TOO, now that the buttons are pinned to the
+        // bottom instead of scrolling with the form. A pinned row is exactly
+        // what a keyboard covers.
+        //
+        // This used to be left undefined on Android because the activity is
+        // `adjustResize` and the window shrank on its own. Under edge-to-edge
+        // it no longer reliably does, and the difference is invisible until
+        // somebody types.
+        //
+        // Safe either way: the padding is computed as
+        // `frame.y + frame.height - keyboardTop`, clamped at zero. If the
+        // window DID resize, the sheet's bottom is already above the keyboard
+        // and that comes out as zero, so nothing is lifted twice.
+        behavior="padding"
         style={{
           position: 'absolute',
           left: 0,
@@ -253,10 +265,14 @@ function Sheet({ onClose }: { onClose: () => void }) {
             <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: p.line }} />
           </View>
 
+          {/* Shrinkable: a ScrollView has no height of its own, so inside a
+              capped sheet it would claim the whole form's height and overflow
+              the cap rather than scrolling within it. See `Editor.tsx`. */}
           <ScrollView
+            style={{ flexShrink: 1 }}
             contentContainerStyle={{
               padding: space.lg,
-              paddingBottom: insets.bottom + space.xl,
+              paddingBottom: clearNav(insets.bottom) + space.xl,
               gap: space.lg,
             }}
             keyboardShouldPersistTaps="handled"
