@@ -121,8 +121,22 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
         // never overwritten by the category's default duration.
         ...(target.store === 'events'
           ? withDefaultCategory(blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()), categories)
-          : blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes())
+          // A NEW TASK IS ALL-DAY. Almost nothing on a task list happens at a
+          // clock time -- it is something to get done today, not at 14:15 --
+          // so starting it with a time meant clearing one nearly every time.
+          // `blankDraft` itself is left alone: it is shared with the PC, and
+          // this is a decision about what a task IS, not about a phone.
+          : {
+            // The real clock, not zero: the times are unused while it is
+            // all-day, but they are what the toggle falls back to the moment
+            // somebody turns it off, and 00:00 is not a time anyone meant.
+            ...blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()),
+            allDay: true,
+            // A task has no end. The Ends row is not even drawn for one.
+            endMin: null,
+          }
         ),
+        // Last, so a gesture that DID name a time still wins.
         ...(target.prefill ?? {}),
       }
   ));
@@ -221,7 +235,9 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
           <ScrollView
             contentContainerStyle={{
               padding: space.lg,
-              paddingBottom: insets.bottom + space.xl,
+              // The pinned action row below owns the safe-area inset now; this
+              // is only the gap between the last field and that row.
+              paddingBottom: space.lg,
               gap: space.lg,
             }}
             keyboardShouldPersistTaps="handled"
@@ -240,8 +256,21 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
                 onChange={next => {
                   setStore(next);
                   // A task has no end time; leaving one set would be written and
-                  // then quietly ignored.
-                  if (next === 'tasks') set({ endMin: null, daysSpan: undefined });
+                  // then quietly ignored. And it starts all-day for the same
+                  // reason a new one does, since switching the segment IS how
+                  // most tasks get created.
+                  if (next === 'tasks') set({ allDay: true, endMin: null, daysSpan: undefined });
+                  // Back to an event, and back to having a time: an all-day
+                  // event is a real thing but it is not the common one, and
+                  // inheriting the toggle from a task nobody kept is a
+                  // surprise rather than a default.
+                  else if (draft.allDay) {
+                    const start = Math.ceil(
+                      (new Date().getHours() * 60 + new Date().getMinutes()) / 30,
+                    ) * 30;
+                    const safe = Math.min(23 * 60 + 30, start);
+                    set({ allDay: false, startMin: safe, endMin: Math.min(24 * 60 - 1, safe + 60) });
+                  }
                 }}
               />
             ) : null}
@@ -428,16 +457,6 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
               </View>
             ) : null}
 
-            <Row gap={space.sm}>
-              <Button label="Cancel" variant="secondary" onPress={onClose} style={{ flex: 1 }} />
-              <Button
-                label={isNew ? 'Add' : 'Save'}
-                onPress={() => void save()}
-                busy={busy}
-                style={{ flex: 2 }}
-              />
-            </Row>
-
             {!isNew ? (
               <View style={{ gap: space.sm, paddingTop: space.sm }}>
                 <View style={{ height: 1, backgroundColor: p.line }} />
@@ -445,6 +464,40 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
               </View>
             ) : null}
           </ScrollView>
+
+          {/*
+            SAVE AND CANCEL ARE PINNED, not scrolled.
+
+            They used to be the last rows inside the ScrollView, so on a sheet
+            with enough in it -- an event, which has a day strip, two time rows
+            and a category picker -- they fell past the 92% height cap and were
+            sliced in half by the bottom of the sheet. It read as a rendering
+            fault rather than as "there is more below", because the thing cut
+            off was the button you were reaching for.
+
+            Out here they are always whole and always in the same place, and the
+            content scrolls behind them. The inset padding is on this row now
+            rather than on the scroll content, which is what keeps the buttons
+            clear of the gesture bar.
+          */}
+          <View style={{
+            flexDirection: 'row',
+            gap: space.sm,
+            paddingHorizontal: space.lg,
+            paddingTop: space.md,
+            paddingBottom: insets.bottom + space.md,
+            borderTopWidth: 1,
+            borderTopColor: p.line,
+            backgroundColor: p.surface,
+          }}>
+            <Button label="Cancel" variant="secondary" onPress={onClose} style={{ flex: 1 }} />
+            <Button
+              label={isNew ? 'Add' : 'Save'}
+              onPress={() => void save()}
+              busy={busy}
+              style={{ flex: 2 }}
+            />
+          </View>
         </View>
       </KeyboardAvoidingView>
     </View>
@@ -753,6 +806,34 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
       <Text variant="body" tone="soft" style={{ width: 58 }}>{label}</Text>
 
       <Row gap={space.xs} style={{ alignItems: 'center' }}>
+        {/*
+          THE SLOT IS RESERVED ON BOTH ROWS, empty on the one that cannot be
+          cleared. That is the whole trick: "Ends" carries a Clear and "Starts"
+          does not, and while that button sat on the RIGHT it made the Ends row
+          wider, pushing its minus, its time and its plus left of the ones
+          directly above them. Two controls that do the same thing, a centimetre
+          apart, on consecutive lines.
+
+          Reserving the space on the left instead lines the two steppers up
+          exactly, and puts Clear on the outside where it is furthest from the
+          buttons you actually press.
+        */}
+        <View style={{ width: CLEAR_SLOT, alignItems: 'flex-end' }}>
+          {clearable ? (
+            <Pressable
+              onPress={() => onChange(minutes === null ? 10 * 60 : null)}
+              hitSlop={space.sm}
+              accessibilityRole="button"
+              style={({ pressed }) => [
+                { paddingHorizontal: space.xs, height: HIT, justifyContent: 'center' },
+                pressed ? PRESSED : null,
+              ]}
+            >
+              <Text variant="caption" tone="accent">{minutes === null ? 'Set' : 'Clear'}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
         <Step label="−" onPress={() => nudge(-step)} onLongPress={() => nudge(-60)} />
         <Pressable
           onPress={() => (minutes === null ? onChange(9 * 60) : undefined)}
@@ -770,20 +851,18 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
           </Text>
         </Pressable>
         <Step label="+" onPress={() => nudge(step)} onLongPress={() => nudge(60)} />
-
-        {clearable ? (
-          <Pressable
-            onPress={() => onChange(minutes === null ? 10 * 60 : null)}
-            hitSlop={space.sm}
-            style={({ pressed }) => [{ paddingHorizontal: space.sm, height: HIT, justifyContent: 'center' }, pressed ? PRESSED : null]}
-          >
-            <Text variant="caption" tone="accent">{minutes === null ? 'Set' : 'Clear'}</Text>
-          </Pressable>
-        ) : null}
       </Row>
     </Row>
   );
 }
+
+/**
+ * How much room the Clear/Set button is given.
+ *
+ * Wide enough for "Clear" at caption size with a little air, and identical on
+ * the row that has no button, because being identical is the entire point.
+ */
+const CLEAR_SLOT = 52;
 
 function Step({ label, onPress, onLongPress }: {
   label: string; onPress: () => void; onLongPress: () => void;
