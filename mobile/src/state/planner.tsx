@@ -1264,13 +1264,18 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const resetLocal = useCallback(async () => {
     const storage = storageRef.current;
     if (!storage) return;
+    // Drop anything the coalescer is holding FIRST. A state write scheduled a
+    // moment ago would otherwise land after the wipe and put the whole planner
+    // straight back, which is the one thing "Reset local data" must not do.
+    statePersister.cancel();
+    await statePersister.settled();
     await storage.reset();
     const deviceId = await prefs.getDeviceId();
     const fresh = await storage.load(deviceId);
     commit(fresh);
     failuresRef.current = 0;
     await syncNow();
-  }, [commit, syncNow]);
+  }, [commit, syncNow, statePersister]);
 
   // ── Derived ──
   /**

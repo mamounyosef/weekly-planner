@@ -572,6 +572,139 @@ async function main() {
     console.log('  ok');
   }
 
+  console.log('--- 22. A BUSY DATABASE IS RETRIED, NOT GIVEN UP ON ---');
+  {
+    // The sync engine writes through an EXCLUSIVE transaction on a connection
+    // of its own, so a preference saved at the same instant as an edit can be
+    // refused for a few milliseconds. That is not a failure, it is a wait.
+    const db = new DatabaseSync(':memory:');
+    const base = nodeSql(db);
+    let refusals = 2;
+    const busy: PrefsSql = {
+      ...base,
+      async run(q, params) {
+        if (refusals > 0 && String(q).includes('INSERT INTO prefs')
+            && Array.isArray(params) && params[0] === 'planner.themeMode') {
+          refusals -= 1;
+          throw new Error('database is locked');
+        }
+        return base.run(q, params);
+      },
+    };
+    const secure = secureDouble();
+    const store = createPrefsStore({ sql: busy, secure, keys: KEYS });
+    await store.load();
+
+    store.set('planner.themeMode', 'dark');
+    await store.flush();
+
+    assert.equal(rows(db)['planner.themeMode'], 'dark', 'the third attempt got through');
+    assert.equal(rows(db)[MIGRATED_KEY], '1', 'and a transient refusal did not undo the sweep');
+    assert.equal(
+      secure.writes.length, 0,
+      'nor did it fall back to the keystore for something SQL was going to accept',
+    );
+    console.log('  ok');
+  }
+
+  console.log('--- 23. A WRITE SQL WILL NOT TAKE IS RECOVERED ON THE NEXT LAUNCH ---');
+  {
+    // The hole this closes: if a value only reached the keystore, but the
+    // marker still said "already swept", the next launch would read SQL, find
+    // nothing, and serve the default -- losing a setting the user had chosen.
+    const db = new DatabaseSync(':memory:');
+    const base = nodeSql(db);
+    let refuseWrites = false;
+    const flaky: PrefsSql = {
+      ...base,
+      async run(q, params) {
+        if (refuseWrites && String(q).includes('INSERT INTO prefs')) {
+          throw new Error('disk full');
+        }
+        return base.run(q, params);
+      },
+    };
+    const keystore = secureDouble();
+    const first = createPrefsStore({ sql: flaky, secure: keystore, keys: KEYS });
+    await first.load();
+    assert.equal(rows(db)[MIGRATED_KEY], '1');
+
+    refuseWrites = true;
+    first.set('planner.calendarView', 'month');
+    await first.flush();
+
+    assert.equal(first.get('planner.calendarView'), 'month', 'the screen shows the choice');
+    assert.equal(await keystore.get('planner.calendarView'), 'month', 'and it is somewhere safe');
+    assert.equal(
+      rows(db)[MIGRATED_KEY], undefined,
+      'the marker was cleared, so the next launch knows to look in the keystore',
+    );
+
+    // Relaunch, with the disk working again.
+    refuseWrites = false;
+    const second = createPrefsStore({ sql: flaky, secure: keystore, keys: KEYS });
+    const report = await second.load();
+    assert.equal(report.source, 'migrated', 'it swept again');
+    assert.equal(
+      second.get('planner.calendarView'), 'month',
+      'and the setting came back rather than reverting to a default',
+    );
+    assert.equal(rows(db)['planner.calendarView'], 'month', 'repaired in SQL, too');
+    assert.equal(rows(db)[MIGRATED_KEY], '1', 'and the marker is back');
+
+    // The third launch is the fast path again: no keystore traffic at all.
+    const third = createPrefsStore({ sql: flaky, secure: forbiddenSecure(), keys: KEYS });
+    const back = await third.load();
+    assert.equal(back.source, 'sql');
+    assert.equal(back.secureReads, 0, 'one bad write cost one slow launch, not every launch');
+    assert.equal(third.get('planner.calendarView'), 'month');
+    console.log('  ok');
+  }
+
+  console.log('--- 24. A DELETE SQL WILL NOT TAKE IS ALSO RECOVERED ---');
+  {
+    const db = new DatabaseSync(':memory:');
+    const base = nodeSql(db);
+    let refuseDeletes = false;
+    const flaky: PrefsSql = {
+      ...base,
+      async run(q, params) {
+        const sqlText = String(q);
+        if (refuseDeletes && sqlText.includes('DELETE FROM prefs WHERE key')
+            && Array.isArray(params) && params[0] === 'planner.themeMode') {
+          throw new Error('disk full');
+        }
+        return base.run(q, params);
+      },
+    };
+    const keystore = secureDouble({ 'planner.themeMode': 'dark' });
+    const first = createPrefsStore({ sql: flaky, secure: keystore, keys: KEYS });
+    await first.load();
+    assert.equal(first.get('planner.themeMode'), 'dark');
+
+    refuseDeletes = true;
+    first.set('planner.themeMode', null);
+    await first.flush();
+    assert.equal(await keystore.get('planner.themeMode'), null, 'gone from the keystore');
+    assert.equal(rows(db)[MIGRATED_KEY], undefined, 'and the sweep will run again');
+
+    refuseDeletes = false;
+    const second = createPrefsStore({ sql: flaky, secure: keystore, keys: KEYS });
+    await second.load();
+    assert.equal(
+      second.get('planner.themeMode'), 'dark',
+      'the stale SQL row is still there, because the delete never landed',
+    );
+    // Which is the honest outcome: the value was not removed from SQL, so it is
+    // still set. Clearing it again with a working disk really does remove it.
+    second.set('planner.themeMode', null);
+    await second.flush();
+    const third = createPrefsStore({ sql: flaky, secure: keystore, keys: KEYS });
+    await third.load();
+    assert.equal(third.get('planner.themeMode'), null, 'and now it is gone for good');
+    console.log('  ok');
+  }
+
   console.log('\nAll prefsStore tests passed.');
 }
 

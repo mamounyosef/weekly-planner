@@ -188,6 +188,44 @@ export function createPrefsStore(opts: {
     return found.length;
   }
 
+  /**
+   * How many times to try a write before giving up on SQL.
+   *
+   * Not for a broken disk, which no number of attempts fixes, but for
+   * SQLITE_BUSY. The sync engine writes through `withExclusiveTransactionAsync`,
+   * which takes a connection of its own, so a preference written at the same
+   * instant as an edit is saved can be refused for a few milliseconds and
+   * succeed immediately afterwards.
+   */
+  const WRITE_ATTEMPTS = 3;
+  const RETRY_MS = [20, 60];
+
+  const wait = (ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms); });
+
+  /** True if the value reached SQL. */
+  async function writeToSql(
+    sql: PrefsSql, key: string, value: string | null,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+      try {
+        if (value === null) {
+          await sql.run('DELETE FROM prefs WHERE key = ?', [key]);
+        } else {
+          await sql.run(
+            'INSERT INTO prefs (key, value) VALUES (?, ?) '
+            + 'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+            [key, value],
+          );
+        }
+        return true;
+      } catch (err) {
+        fail(`set:${key}`, err);
+        if (attempt < WRITE_ATTEMPTS - 1) await wait(RETRY_MS[attempt] ?? 60);
+      }
+    }
+    return false;
+  }
+
   async function readAllFromSecure(): Promise<{ map: Map<string, string>; reads: number }> {
     const map = new Map<string, string>();
     let reads = 0;
@@ -284,28 +322,32 @@ export function createPrefsStore(opts: {
 
       const sql = opts.sql;
       queue(async () => {
-        if (sql) {
-          try {
-            if (value === null) {
-              await sql.run('DELETE FROM prefs WHERE key = ?', [key]);
-            } else {
-              await sql.run(
-                'INSERT INTO prefs (key, value) VALUES (?, ?) '
-                + 'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-                [key, value],
-              );
-            }
-            return;
-          } catch (err) {
-            fail(`set:${key}`, err);
-            // Fall through: better in the keystore than nowhere at all.
-          }
-        }
+        if (sql && await writeToSql(sql, key, value)) return;
+
+        // SQL would not take it. Put it in the keystore so the value is not
+        // simply lost, and then CLEAR THE MIGRATION MARKER.
+        //
+        // That second half is the important one. Without it the next launch
+        // would read SQL, find the key absent, trust the marker that says the
+        // keystore has already been swept, and quietly serve the default —
+        // losing a setting the user had just chosen. Clearing the marker makes
+        // the next launch sweep again, find this value sitting in the keystore,
+        // and copy it back into SQL. The app repairs itself, and the cost is one
+        // slow launch rather than a lost preference.
         try {
           if (value === null) await opts.secure.remove(key);
           else await opts.secure.set(key, value);
         } catch (err) {
           fail(`set-secure:${key}`, err);
+        }
+        if (sql) {
+          try {
+            await sql.run('DELETE FROM prefs WHERE key = ?', [MIGRATED_KEY]);
+          } catch (err) {
+            // The marker could not be cleared either, which means SQL is
+            // thoroughly unavailable; `load` falls back wholesale in that case.
+            fail('unmark', err);
+          }
         }
       });
     },
