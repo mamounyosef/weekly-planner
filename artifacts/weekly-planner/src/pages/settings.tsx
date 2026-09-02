@@ -1624,7 +1624,8 @@ export default function SettingsPage() {
     setStickyAllDayMain(d.stickyAllDayMain);
     setStickyTasksMain(d.stickyTasksMain);
     deviceExtrasRef.current = {
-      appZoom: d.appZoom, analysisTab: d.analysisTab, mobileTab: d.mobileTab,
+      appZoom: d.appZoom, analysisTab: d.analysisTab,
+      analysisRangeMode: d.analysisRangeMode ?? 'calendar', mobileTab: d.mobileTab,
       hiddenCategoryIds: d.hiddenCategoryIds ?? [],
       hiddenCategoriesByView: d.hiddenCategoriesByView ?? { day: [], week: [], month: [], year: [] },
     };
@@ -1633,12 +1634,14 @@ export default function SettingsPage() {
   const deviceExtrasRef = useRef<{
     appZoom: number;
     analysisTab: 'week' | 'month' | 'year';
+    analysisRangeMode: 'calendar' | 'rolling';
     mobileTab: 'calendar' | 'tasks' | 'focus';
     hiddenCategoryIds: string[];
     hiddenCategoriesByView: Record<FilterViewKey, string[]>;
   }>({
     appZoom: 1,
     analysisTab: 'week',
+    analysisRangeMode: 'calendar',
     mobileTab: 'calendar',
     hiddenCategoryIds: [],
     hiddenCategoriesByView: { day: [], week: [], month: [], year: [] },

@@ -69,7 +69,12 @@ import {
   adjustDayTotal,
   editSingleSession,
 } from '../lib/focusGoals';
-import { summariseFocusYear } from '../lib/yearStats';
+import { prefs } from '../lib/prefs';
+import { summariseFocusMonths, summariseFocusYear } from '../lib/yearStats';
+import {
+  describeFocusRange, explainFocusMode, focusPeriodRange,
+  type FocusRangeMode,
+} from '../lib/focusPeriod';
 import { YearChart } from '../components/YearChart';
 import { Stepper } from '../ui/Fields';
 
@@ -111,7 +116,22 @@ export function Focus() {
   const wired = typeof bridge.runFocusTimer === 'function';
 
   const [range, setRange] = useState<Range>('week');
+  /**
+   * What "week", "month" and "year" mean here.
+   *
+   * This phone used to answer rolling for week and month and CALENDAR for
+   * year, with the week strip still headed "THIS WEEK", so the same history
+   * read differently on the two screens and neither said why. Now it is a
+   * choice, remembered per device like the PC remembers its own.
+   */
+  const [rangeMode, setRangeMode] = useState<FocusRangeMode>('calendar');
+  useEffect(() => { void prefs.getFocusRangeMode().then(setRangeMode); }, []);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const chooseRangeMode = useCallback((mode: FocusRangeMode) => {
+    setRangeMode(mode);
+    setSelectedDay(null);
+    void prefs.setFocusRangeMode(mode);
+  }, []);
   const [refreshing, setRefreshing] = useState(false);
   const [pending, setPending] = useState<Pending>(null);
 
@@ -135,6 +155,16 @@ export function Focus() {
   // from `now` against the stored anchor, so a missed tick costs a frame and
   // never a second.
   const [now, setNow] = useState(() => Date.now());
+  /**
+   * Today, to the DAY.
+   *
+   * `now` ticks every second while a session runs. Anything that only needs to
+   * know which day it is reads this instead, because it keeps the same string
+   * all day and so does not invalidate the memo it feeds. That is the whole
+   * difference between rebuilding a year of buckets once a day and once a
+   * second, on the screen a running timer keeps you looking at.
+   */
+  const todayKey = useMemo(() => dateKey(new Date(now)), [now]);
   const phase = focusPhase(timer);
 
   useEffect(() => {
@@ -182,24 +212,49 @@ export function Focus() {
     ? (shared as any).focusDayStartHour
     : 0;
 
+  const period = useMemo(
+    () => focusPeriodRange({
+      period: range,
+      mode: rangeMode,
+      today: new Date(`${todayKey}T00:00:00`),
+      weekStartsOn: typeof (shared as any).weekStartsOn === 'number'
+        ? (shared as any).weekStartsOn
+        : 0,
+    }),
+    // Keyed on the DAY, not on `now`. While a session runs `now` ticks once a
+    // second, and depending on it here rebuilt a year of day buckets every
+    // second, on the one screen you are certain to be looking at while it does.
+    // The day still turns over at midnight, because `todayKey` changes then.
+    [range, rangeMode, todayKey, shared],
+  );
+
   const summary = useMemo(() => {
-    const days = RANGES.find(r => r.id === range)!.days;
-    const to = new Date();
-    const from = new Date(to.getTime() - (days - 1) * 86_400_000);
     return summariseFocus(focusSessions as FocusSessionRecord[], {
-      from: dateKey(from),
-      to: dateKey(to),
+      from: period.from,
+      to: period.to,
       dayStartHour,
     });
-  }, [focusSessions, range, dayStartHour]);
+  }, [focusSessions, period, dayStartHour]);
 
   const yearSummary = useMemo(() => {
-    return summariseFocusYear(focusSessions as FocusSessionRecord[], {
-      year: new Date().getFullYear(),
-      dayStartHour,
-      excludedDates: (shared as any).focusExcludedDates || [],
-    });
-  }, [focusSessions, dayStartHour, shared]);
+    const excludedDates = (shared as any).focusExcludedDates || [];
+    const anchor = new Date(`${todayKey}T00:00:00`);
+    // Rolling: the twelve months ending in the one you are standing in.
+    // Calendar: January to December of the year you are in. Both come out of
+    // the same counter, so an excused day is dropped identically either way.
+    return rangeMode === 'rolling'
+      ? summariseFocusMonths(focusSessions as FocusSessionRecord[], {
+          end: new Date(anchor.getFullYear(), anchor.getMonth(), 1),
+          count: 12,
+          dayStartHour,
+          excludedDates,
+        })
+      : summariseFocusYear(focusSessions as FocusSessionRecord[], {
+          year: anchor.getFullYear(),
+          dayStartHour,
+          excludedDates,
+        });
+  }, [focusSessions, dayStartHour, shared, rangeMode, todayKey]);
 
   /**
    * Today's total, including the session still running.
@@ -389,7 +444,7 @@ export function Focus() {
             padding: 3,
             borderWidth: 1,
             borderColor: p.line,
-            marginBottom: space.xl,
+            marginBottom: space.sm,
           }}
         >
           {RANGES.map(r => {
@@ -414,6 +469,52 @@ export function Focus() {
           })}
         </Row>
 
+        {/* What that word means. Two answers, written out, because "calendar"
+            and "rolling" explain nothing until you already know the difference. */}
+        <Row
+          gap={0}
+          style={{
+            backgroundColor: p.surfaceAlt,
+            borderRadius: radius.md,
+            padding: 3,
+            borderWidth: 1,
+            borderColor: p.line,
+            marginBottom: space.sm,
+          }}
+        >
+          {(['calendar', 'rolling'] as const).map(mode => {
+            const on = mode === rangeMode;
+            return (
+              <Pressable
+                key={mode}
+                onPress={() => chooseRangeMode(mode)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: on }}
+                accessibilityLabel={explainFocusMode(mode, range)}
+                style={{
+                  flex: 1, height: 32, alignItems: 'center', justifyContent: 'center',
+                  borderRadius: radius.sm,
+                  backgroundColor: on ? p.accentSoft : 'transparent',
+                }}
+              >
+                <Text variant="caption" tone={on ? 'accent' : 'soft'} style={{ fontWeight: on ? '700' : '400' }}>
+                  {describeFocusRange(focusPeriodRange({
+                    period: range,
+                    mode,
+                    today: new Date(`${todayKey}T00:00:00`),
+                    weekStartsOn: typeof (shared as any).weekStartsOn === 'number'
+                      ? (shared as any).weekStartsOn
+                      : 0,
+                  }))}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </Row>
+        <Text variant="caption" tone="faint" style={{ marginBottom: space.xl }}>
+          {explainFocusMode(rangeMode, range)}
+        </Text>
+
         {summary.sessions === 0 ? (
           <View style={{ paddingTop: space.lg, alignItems: 'center', gap: space.sm }}>
             <Text variant="heading" tone="soft">No focus time yet</Text>
@@ -426,7 +527,7 @@ export function Focus() {
             {/* The headline. One number, big, with the rest as support. */}
             <View style={{ marginBottom: space.xl }}>
               <Text variant="label" tone="faint" style={{ letterSpacing: 1 }}>
-                {range === 'week' ? 'THIS WEEK' : range === 'month' ? 'LAST 30 DAYS' : 'THIS YEAR'}
+                {describeFocusRange(period, true)}
               </Text>
               <Text
                 variant="display"
@@ -450,7 +551,7 @@ export function Focus() {
             <Row gap={space.sm} style={{ marginTop: space.xl }}>
               <Stat label={range === 'year' ? 'Active days' : 'Average day'} 
                 value={range === 'year' ? `${yearSummary.yearActiveDays}` : describeDuration(summary.averageSeconds)}
-                hint={range === 'year' ? 'this year' : 'over days you worked'} />
+                hint={range === 'year' ? describeFocusRange(period).toLowerCase() : 'over days you worked'} />
               <Stat label={range === 'year' ? 'Best month' : 'Best day'} 
                 value={range === 'year' ? (yearSummary.yearBestMonth ? describeDuration(yearSummary.yearBestMonth.seconds) : '0m') : describeDuration(summary.bestDay?.seconds ?? 0)}
                 hint={range === 'year' ? (yearSummary.yearBestMonth ? yearSummary.yearBestMonth.month.toLocaleString('default', { month: 'long' }) : 'none') : (summary.bestDay ? niceDate(summary.bestDay.date) : undefined)} />
@@ -471,6 +572,7 @@ export function Focus() {
 
             {selectedDay ? (
               <DayDetail
+                key={selectedDay}
                 date={selectedDay}
                 sessions={focusSessions as FocusSessionRecord[]}
                 dayStartHour={dayStartHour}
@@ -831,15 +933,35 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
+/**
+ * Dates and times, written for a person, and never a reason to crash.
+ *
+ * Both of these are called during render, on values that come out of the
+ * session history. Hermes throws a RangeError when Intl is handed an invalid
+ * time value, where a browser prints "Invalid Date" and carries on, so a single
+ * unreadable timestamp anywhere in that history would blank the whole screen
+ * rather than one line of it. The guard is the point; the formatting is not.
+ */
 function niceDate(date: string | undefined): string {
   if (!date) return '';
-  return new Date(`${date}T00:00:00`)
-    .toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const d = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return String(date);
+  try {
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  } catch {
+    return String(date);
+  }
 }
 
-function niceTime(iso: string): string {
+function niceTime(iso: string | undefined): string {
   if (!iso) return '';
-  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  try {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
 }
 
 function DayDetail({

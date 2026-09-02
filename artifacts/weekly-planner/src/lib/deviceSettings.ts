@@ -20,6 +20,7 @@
  * nothing about the existing sync contract changes, and an older window that
  * knows nothing about devices keeps working exactly as before.
  */
+import { coerceFocusRangeMode, type FocusRangeMode } from './focusPeriod';
 import {
   type AppSettings, type DarkPreset, type LightPreset, type IntervalMin,
   type EventCardStyle, type SidebarStyle,
@@ -144,6 +145,15 @@ export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
   mobileUiZoom: number;
   /** Range tab on the focus-analysis screen. */
   analysisTab: 'week' | 'month' | 'year';
+  /**
+   * What that tab MEANS: the calendar period you are in, or the last N days.
+   *
+   * Per device rather than shared, like the tab beside it. It answers "how do I
+   * want to read this screen right now", which is a property of the sitting,
+   * not of the planner, and a phone glanced at on the way home is a different
+   * sitting from the desk on a Sunday evening.
+   */
+  analysisRangeMode: FocusRangeMode;
   /** Which mobile tab was last open (phone shell only). */
   mobileTab: 'calendar' | 'tasks' | 'focus';
   /**
@@ -198,6 +208,7 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
       mobileContentZoom: 1,
       mobileUiZoom: 1,
       analysisTab: 'week',
+      analysisRangeMode: 'calendar',
       mobileTab: 'calendar',
       hiddenCategoryIds: [],
       hiddenCategoriesByView: emptyFiltersByView,
@@ -205,9 +216,9 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
     };
   }
   if (kind === 'tablet') {
-    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
+    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', analysisRangeMode: 'calendar', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
   }
-  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
+  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', analysisRangeMode: 'calendar', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
 }
 
 /** Validate a stored/served blob, filling anything missing from `base`. */
@@ -255,6 +266,7 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
     s.mobileUiZoom = clampNum(Math.round(r.mobileUiZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
   }
   if (r.analysisTab === 'week' || r.analysisTab === 'month' || r.analysisTab === 'year') s.analysisTab = r.analysisTab;
+  if (r.analysisRangeMode !== undefined) s.analysisRangeMode = coerceFocusRangeMode(r.analysisRangeMode);
   if (r.mobileTab === 'calendar' || r.mobileTab === 'tasks' || r.mobileTab === 'focus') s.mobileTab = r.mobileTab;
 
   const rawByView = (r.hiddenCategoriesByView && typeof r.hiddenCategoriesByView === 'object')

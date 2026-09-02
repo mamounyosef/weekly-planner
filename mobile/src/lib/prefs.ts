@@ -20,6 +20,7 @@ import * as SecureStore from 'expo-secure-store';
 import { makeDeviceId } from './syncStorage';
 import { FULL_DAY, normaliseRanges, type HourRange } from './dayWindows';
 import { isThemeMode, type ThemeMode } from '../theme';
+import { coerceFocusRangeMode, type FocusRangeMode } from './focusPeriod';
 import {
   DEFAULT_SWIPE_VIEW_SWITCH,
   coerceBool,
@@ -53,6 +54,7 @@ const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
 const KEY_DAY_START = 'planner.dayStartH';
 const KEY_DAY_END = 'planner.dayEndH';
 const KEY_SWIPE_VIEWS = 'planner.swipeViewSwitch';
+const KEY_FOCUS_RANGE_MODE = 'planner.focusRangeMode';
 
 async function read(key: string): Promise<string | null> {
   try {
@@ -110,6 +112,20 @@ export const prefs = {
    * Returned raw because the phone has one view the PC does not (`agenda`), so
    * the caller owns the list of names and validates it there.
    */
+  /**
+   * How the focus screen reads "week", "month" and "year": the calendar period
+   * you are in, or the last N days.
+   *
+   * Per device, matching the PC, which keeps `analysisRangeMode` in its own
+   * device settings beside the tab it qualifies. Reading the same history two
+   * ways on two screens is the point; forcing both machines onto one reading
+   * would be the surprise.
+   */
+  async getFocusRangeMode(): Promise<FocusRangeMode> {
+    return coerceFocusRangeMode(await read(KEY_FOCUS_RANGE_MODE));
+  },
+  setFocusRangeMode: (mode: FocusRangeMode) => write(KEY_FOCUS_RANGE_MODE, mode),
+
   getCalendarView: () => read(KEY_VIEW),
   setCalendarView: (view: string) => write(KEY_VIEW, view),
 

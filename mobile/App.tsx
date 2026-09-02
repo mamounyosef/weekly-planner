@@ -28,7 +28,9 @@ import { Tasks } from './src/screens/Tasks';
 import { Focus } from './src/screens/Focus';
 import { Conflicts } from './src/screens/Conflicts';
 import { Settings } from './src/screens/Settings';
+import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { Categories } from './src/screens/Categories';
+import { TaskSettings } from './src/screens/TaskSettings';
 import { Reminders } from './src/screens/Reminders';
 import { Prayers } from './src/screens/Prayers';
 import { Planner } from './src/screens/Planner';
@@ -97,6 +99,7 @@ function Shell() {
   const [tab, setTab] = useState<TabId>('calendar');
   const [showConflicts, setShowConflicts] = useState(false);
   const [showCategories, setShowCategories] = useState(false);
+  const [showTaskSettings, setShowTaskSettings] = useState(false);
   const [showReminders, setShowReminders] = useState(false);
   const [showPrayers, setShowPrayers] = useState(false);
   const [showPlanner, setShowPlanner] = useState(false);
@@ -118,6 +121,7 @@ function Shell() {
       if (showPrayers) { setShowPrayers(false); return true; }
       if (showReminders) { setShowReminders(false); return true; }
       if (showCategories) { setShowCategories(false); return true; }
+      if (showTaskSettings) { setShowTaskSettings(false); return true; }
       if (showConflicts) { setShowConflicts(false); return true; }
       
       if (tab !== 'calendar') { 
@@ -131,7 +135,7 @@ function Shell() {
     return () => sub.remove();
   }, [
     showDiagnostics, showQuickAdd, showNotifications, showSearch,
-    showPlanner, showPrayers, showReminders, showCategories,
+    showPlanner, showPrayers, showReminders, showCategories, showTaskSettings,
     showConflicts, tab
   ]);
 
@@ -162,6 +166,8 @@ function Shell() {
         // Over the settings tab rather than a tab of its own: categories are
         // configuration you visit occasionally, not a place you live in.
         <Categories onClose={() => setShowCategories(false)} />
+      ) : showTaskSettings ? (
+        <TaskSettings onClose={() => setShowTaskSettings(false)} />
       ) : showReminders ? (
         <Reminders onClose={() => setShowReminders(false)} />
       ) : showPrayers ? (
@@ -191,6 +197,10 @@ function Shell() {
         />
       ) : (
         <>
+          {/* A screen that throws costs you that screen, not the app. Keyed by
+              tab, so walking away and coming back retries it. The tab bar below
+              stays outside the boundary and always works. */}
+          <ErrorBoundary resetKey={tab} where={`the ${tab} screen`}>
           <View style={{ flex: 1 }}>
             {tab === 'calendar' ? (
               <Today
@@ -209,12 +219,14 @@ function Shell() {
               <Settings
                 onClose={() => setTab('calendar')}
                 onOpenCategories={() => setShowCategories(true)}
+                onOpenTasks={() => setShowTaskSettings(true)}
                 onOpenReminders={() => setShowReminders(true)}
                 onOpenPrayers={() => setShowPrayers(true)}
                 onOpenPlanner={() => setShowPlanner(true)}
               />
             )}
           </View>
+          </ErrorBoundary>
 
           {/* Over whatever is on screen, not instead of it: typing one line
               is a thing you do in passing, and losing your place to do it is

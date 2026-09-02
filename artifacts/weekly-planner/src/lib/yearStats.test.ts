@@ -10,7 +10,7 @@
 // Run with: npx tsx src/lib/yearStats.test.ts
 
 import assert from 'node:assert/strict';
-import { summariseFocusYear } from './yearStats';
+import { summariseFocusMonths, summariseFocusYear } from './yearStats';
 import type { FocusSessionRecord } from './focusStats';
 
 const session = (
@@ -169,7 +169,101 @@ function main() {
     assert.equal(res.yearSeconds, 1200);
   }
 
-  console.log('\nALL PASS (yearStats: twelve months, excused days, the best of them)');
+  console.log('--- 9. TWELVE MONTHS ENDING WHEREVER YOU SAY ---');
+  {
+    // The rolling year on the analysis screen is twelve months ending in the
+    // month you are standing in, so the window routinely spans a new year. That
+    // is the case a calendar-year implementation cannot express at all.
+    const sessions: FocusSessionRecord[] = [
+      session('dec', '2025-12-10T10:00:00', 3600),
+      session('jan', '2026-01-10T10:00:00', 1800),
+      session('sep', '2026-09-02T10:00:00', 600),
+      session('too-old', '2025-08-31T10:00:00', 9999),
+    ];
+
+    const res = summariseFocusMonths(sessions, { end: new Date(2026, 8, 1), count: 12 });
+
+    assert.equal(res.months.length, 12);
+    assert.equal(res.months[0].month.getFullYear(), 2025);
+    assert.equal(res.months[0].month.getMonth(), 9, 'the window opens in October 2025');
+    assert.equal(res.months[11].month.getFullYear(), 2026);
+    assert.equal(res.months[11].month.getMonth(), 8, 'and closes in September 2026');
+
+    assert.equal(res.months[2].seconds, 3600, 'December is inside the window');
+    assert.equal(res.months[3].seconds, 1800, 'so is the January after it');
+    assert.equal(res.months[11].seconds, 600);
+    assert.equal(res.yearSeconds, 6000, 'and the August before it is not');
+    assert.equal(res.yearSessions, 3);
+    assert.equal(res.yearActiveDays, 3);
+    assert.equal(res.yearBestMonth?.month.getMonth(), 11, 'December was the best of them');
+
+    // Oldest first, contiguous, no month repeated: the order the bars are drawn.
+    for (let i = 1; i < res.months.length; i += 1) {
+      const prev = res.months[i - 1].month;
+      const here = res.months[i].month;
+      assert.ok(here.getTime() > prev.getTime(), 'months run forwards');
+      const expected = new Date(prev.getFullYear(), prev.getMonth() + 1, 1);
+      assert.equal(here.getTime(), expected.getTime(), 'and step exactly one month');
+      assert.equal(here.getDate(), 1, 'each is the first of its month');
+    }
+  }
+
+  console.log('--- 10. A CALENDAR YEAR IS JUST A WINDOW ENDING IN DECEMBER ---');
+  {
+    // summariseFocusYear is a wrapper now. If the two ever disagree, one of the
+    // two readings on the analysis screen is counting differently from the
+    // other, which is exactly what the setting was added to prevent.
+    const sessions: FocusSessionRecord[] = [
+      session('a', '2026-02-10T10:00:00', 1800),
+      session('b', '2026-02-11T23:30:00', 5400, '2026-02-12T00:30:00'),
+      session('c', '2026-11-30T10:00:00', 700),
+      session('d', '2025-06-06T10:00:00', 700),
+    ];
+    for (const opts of [
+      {},
+      { dayStartHour: 4 },
+      { excludedDates: ['2026-02-10'] },
+      { dayStartHour: 4, excludedDates: ['2026-02-11', '2026-11-30'] },
+    ]) {
+      assert.deepEqual(
+        summariseFocusYear(sessions, { year: 2026, ...opts }),
+        summariseFocusMonths(sessions, { end: new Date(2026, 11, 1), count: 12, ...opts }),
+        `the two agree with ${JSON.stringify(opts)}`,
+      );
+    }
+  }
+
+  console.log('--- 11. A WINDOW OF NO MONTHS IS NOT ALLOWED ---');
+  {
+    // The chart divides by yearMaxSeconds and maps over months. A count of zero
+    // would render as "you have never focused", which is a lie, not an empty
+    // state, so the count is clamped rather than trusted.
+    const sessions: FocusSessionRecord[] = [session('x', '2026-09-02T10:00:00', 600)];
+    for (const count of [0, -5, 0.4, NaN, undefined]) {
+      const res = summariseFocusMonths(sessions, {
+        end: new Date(2026, 8, 1), count: count as number,
+      });
+      assert.ok(res.months.length >= 1, `count ${count} still draws something`);
+      assert.ok(res.yearMaxSeconds >= 1, 'the tallest bar is never zero');
+      assert.ok(Number.isFinite(res.yearSeconds));
+    }
+
+    // A single month is a legitimate window.
+    const one = summariseFocusMonths(sessions, { end: new Date(2026, 8, 1), count: 1 });
+    assert.equal(one.months.length, 1);
+    assert.equal(one.yearSeconds, 600);
+
+    // An absurd count is capped rather than building ten thousand months.
+    const many = summariseFocusMonths(sessions, { end: new Date(2026, 8, 1), count: 100000 });
+    assert.ok(many.months.length <= 120, 'the window is capped');
+
+    // A broken clock still produces twelve real months.
+    const broken = summariseFocusMonths(sessions, { end: new Date(NaN), count: 12 });
+    assert.equal(broken.months.length, 12);
+    for (const m of broken.months) assert.ok(!Number.isNaN(m.month.getTime()));
+  }
+
+  console.log('\nALL PASS (yearStats: twelve months, rolling or calendar, and the best of them)');
 }
 
 main();

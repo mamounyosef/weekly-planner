@@ -41,12 +41,42 @@ function dateKey(d: Date): string {
 
 /**
  * Aggregates focus sessions over a full calendar year.
+ *
+ * A thin wrapper now: a calendar year is twelve months ending in December, and
+ * the rolling year on the analysis screen is twelve months ending in whichever
+ * month you are standing in. Sharing one implementation is what stops the two
+ * readings drifting apart in how they count an excused day or a late session.
  */
 export function summariseFocusYear(
   sessions: readonly FocusSessionRecord[],
   opts: { year: number; dayStartHour?: number; excludedDates?: string[] },
 ): FocusYearSummary {
+  return summariseFocusMonths(sessions, {
+    end: new Date(opts.year, 11, 1),
+    count: 12,
+    dayStartHour: opts.dayStartHour,
+    excludedDates: opts.excludedDates,
+  });
+}
+
+/**
+ * The same twelve bars, but over any run of months ending where you say.
+ *
+ * `end` names the LAST month in the window and `count` how many there are, so
+ * the rolling year is `{ end: this month, count: 12 }`. The months come back
+ * oldest first, which is the order they are drawn in, and a window that spans a
+ * new year is perfectly ordinary rather than a special case.
+ */
+export function summariseFocusMonths(
+  sessions: readonly FocusSessionRecord[],
+  opts: { end: Date; count?: number; dayStartHour?: number; excludedDates?: string[] },
+): FocusYearSummary {
   const dayStartHour = opts.dayStartHour ?? 0;
+  // A window of no months would divide by zero on the chart and read as "you
+  // have never focused", which is a lie rather than an empty state.
+  const rawCount = Math.trunc(opts.count ?? 12);
+  const count = Number.isFinite(rawCount) ? Math.min(120, Math.max(1, rawCount)) : 12;
+  const end = Number.isNaN(opts.end?.getTime?.() ?? NaN) ? new Date() : opts.end;
   const excluded = new Set(opts.excludedDates ?? []);
   
   const byDaySeconds = new Map<string, number>();
@@ -61,7 +91,10 @@ export function summariseFocusYear(
     byDaySessions.set(key, (byDaySessions.get(key) ?? 0) + 1);
   }
 
-  const months = Array.from({ length: 12 }, (_, m) => new Date(opts.year, m, 1));
+  const months = Array.from(
+    { length: count },
+    (_, i) => new Date(end.getFullYear(), end.getMonth() - (count - 1 - i), 1),
+  );
   const monthTotals = months.map(m => {
     const dayList = eachDayOfInterval(startOfMonth(m), endOfMonth(m));
     const validDays = dayList.filter(d => !excluded.has(dateKey(d)));

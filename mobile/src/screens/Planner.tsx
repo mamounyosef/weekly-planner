@@ -25,13 +25,11 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
-import { Field, Segment, Stepper, Toggle } from '../ui/Fields';
+import { Field, Segment } from '../ui/Fields';
 import { radius, space, HIT } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
-  CHECKBOX_SHAPES,
-  TASK_COLOURS,
   TIME_FORMATS,
   WEEK_START_LABELS,
   coerceDisplaySettings,
@@ -156,58 +154,11 @@ export function Planner({ onClose }: { onClose?: () => void }) {
           </Card>
         </View>
 
-        {/* ── Tasks ── */}
-        <View style={{ gap: space.sm }}>
-          <Text variant="label" tone="faint">TASKS</Text>
-          <Card style={{ gap: space.lg }}>
-            <Field
-              label="Colour on the grid"
-              hint="Tasks drawn on the calendar all wear this one colour."
-            >
-              <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
-                {TASK_COLOURS.map(hex => {
-                  const on = hex.toLowerCase() === s.taskColor.toLowerCase();
-                  return (
-                    <Pressable
-                      key={hex}
-                      onPress={() => set({ taskColor: hex })}
-                      accessibilityRole="radio"
-                      accessibilityState={{ selected: on }}
-                      accessibilityLabel={`Task colour ${hex}`}
-                      style={{
-                        width: 30, height: 30,
-                        borderRadius: 15,
-                        backgroundColor: hex,
-                        borderWidth: on ? 3 : 1,
-                        borderColor: on ? p.ink : p.line,
-                      }}
-                    />
-                  );
-                })}
-              </Row>
-            </Field>
-
-            <Field label="Tick box">
-              <Segment
-                options={CHECKBOX_SHAPES.map(c => ({ key: c.id, label: c.label }))}
-                value={s.taskCheckboxShape}
-                onChange={k => set({ taskCheckboxShape: k as DisplaySettings['taskCheckboxShape'] })}
-              />
-            </Field>
-
-            <Toggle
-              label="Roll repeating tasks forward"
-              hint="An overdue repeating task moves itself to today rather than sitting in the past."
-              value={s.autoRollRecurringTasks}
-              onChange={v => set({ autoRollRecurringTasks: v })}
-            />
-          </Card>
-        </View>
-
         <Divider />
         <Text variant="caption" tone="faint">
           Everything on this screen is shared. The view, the snap interval, the visible hours
-          and the theme are kept on this phone alone, and are back in Settings.
+          and the theme are kept on this phone alone, back in Settings, along with task lists,
+          categories and the colour tasks are drawn in.
         </Text>
         <Spacer size={space.md} />
       </ScrollView>

@@ -6,14 +6,14 @@
 // Desk Controller, Backups & Data and Keyboard Shortcuts are absent on purpose —
 // they belong to the machine on the desk.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, BackHandler, Linking, Pressable, ScrollView, View, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Updates from 'expo-updates';
 
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
 import { ICONS } from '../ui/icons';
-import { Stepper, Toggle } from '../ui/Fields';
+import { Segment, Stepper, Toggle } from '../ui/Fields';
 import { HIT, radius, space, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
@@ -21,6 +21,15 @@ import {
 } from '../lib/dayWindows';
 import { checkPermissions, requestPermissions, type PermissionState } from '../lib/notify';
 import { prefs } from '../lib/prefs';
+import { describeUpdate, updateStamp } from '../lib/updateLabel';
+import { SETTINGS_ENTITY } from '../lib/syncBridge';
+import {
+  CHECKBOX_SHAPES,
+  TASK_COLOURS,
+  coerceDisplaySettings,
+  displayPatch,
+  type DisplaySettings,
+} from '../lib/displaySettings';
 import {
   DAY_HOUR_MAX,
   DAY_HOUR_MIN,
@@ -35,10 +44,11 @@ import {
 } from '../lib/viewPrefs';
 
 export function Settings({
-  onClose, onOpenCategories, onOpenReminders, onOpenPrayers, onOpenPlanner,
+  onClose, onOpenCategories, onOpenTasks, onOpenReminders, onOpenPrayers, onOpenPlanner,
 }: {
   onClose: () => void;
   onOpenCategories?: () => void;
+  onOpenTasks?: () => void;
   onOpenReminders?: () => void;
   onOpenPrayers?: () => void;
   onOpenPlanner?: () => void;
@@ -51,15 +61,33 @@ export function Settings({
     customWindow, setCustomWindow, timeFormat,
     visibleHours, setVisibleHours, swipeViewSwitch, setSwipeViewSwitch,
     dayWindow, setDayStart, setDayEnd,
+    shared, edit,
   } = usePlanner();
 
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
+
+  // How a task LOOKS is answered here, beside the theme, because that is the
+  // question being asked. It is still a shared setting rather than a device one,
+  // so it is read straight from the store and written per field, exactly as the
+  // planner screen does: a whole-object write would out-rank whatever the desk
+  // changed a moment ago for the sake of the one field that actually moved.
+  const display: DisplaySettings = useMemo(
+    () => coerceDisplaySettings(shared as unknown),
+    [shared],
+  );
+
+  const setDisplay = (patch: Partial<DisplaySettings>) => {
+    const changed = displayPatch(shared as unknown, patch);
+    if (Object.keys(changed).length === 0) return;
+    void edit('settings', SETTINGS_ENTITY, changed);
+  };
 
   const [perm, setPerm] = useState<PermissionState | null>(null);
   const [checking, setChecking] = useState(false);
   const [updateState, setUpdateState] = useState<string | null>(null);
 
   useEffect(() => { void checkPermissions().then(setPerm); }, []);
+
 
   /** The clock the planner is set to, which the preview and the sentence follow. */
   const clock: ClockFormat = timeFormat === '24h' ? '24h' : '12h';
@@ -139,6 +167,27 @@ export function Settings({
     return () => sub.remove();
   }, [section]);
 
+  // "22 minutes ago" has to keep being true while the screen is open, so the
+  // row is re-rendered on a timer rather than only when it is first drawn.
+  //
+  // `setInterval` is deliberately reached through globalThis: this component
+  // destructures a `setInterval` of its own from the planner (the snap
+  // interval), which shadows the timer function and would otherwise be called
+  // with a callback where a number of minutes belongs.
+  const [tick, setTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (section !== 'data') return;
+    setTick(Date.now());
+    const id = globalThis.setInterval(() => setTick(Date.now()), 30_000);
+    return () => globalThis.clearInterval(id);
+  }, [section]);
+
+  const age = useMemo(
+    () => describeUpdate(Updates.createdAt, new Date(tick), clock),
+    [tick, clock],
+  );
+  const stamp = useMemo(() => updateStamp(Updates.createdAt) ?? '', []);
+
   const renderSectionList = () => (
     <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.md }}>
       <Section title="Account & Data">
@@ -146,12 +195,13 @@ export function Settings({
         <MenuRow label="App & Data" hint="Updates and local storage" iconName="hard-drive" onPress={() => setSection('data')} />
       </Section>
       <Section title="Preferences">
-        <MenuRow label="Appearance" hint="Theme and colors" iconName="palette" onPress={() => setSection('appearance')} />
+        <MenuRow label="Appearance" hint="Theme, and how tasks are drawn" iconName="palette" onPress={() => setSection('appearance')} />
         <MenuRow label="Calendar Grid" hint="Visible hours and gestures" iconName="calendar" onPress={() => setSection('calendar')} />
       </Section>
       <Section title="Configuration">
         <MenuRow label="Core Planner" hint="Clock format, week start" iconName="settings" onPress={onOpenPlanner} />
-        <MenuRow label="Tasks & Categories" hint="Manage your tasks and tags" iconName="tag" onPress={onOpenCategories} />
+        <MenuRow label="Categories" hint="Colours, and what a new item starts as" iconName="tag" onPress={onOpenCategories} />
+        <MenuRow label="Tasks" hint="Lists, and overdue repeats" iconName="check-square" onPress={onOpenTasks} />
         <MenuRow label="Notifications" hint="Alarms and permissions" iconName="bell" onPress={onOpenReminders} />
         <MenuRow label="Prayer Times" hint="Calculation methods and display" iconName="compass" onPress={onOpenPrayers} />
       </Section>
@@ -176,7 +226,12 @@ export function Settings({
   const renderData = () => (
     <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
       <Section title="App">
-        <KeyValue label="Version" value={Updates.runtimeVersion ?? '1.0.0'} />
+        <KeyValue label="Update" value={age ? age.when : 'Built into the app'} />
+        <Text variant="caption" tone="faint" style={{ marginTop: 2, textAlign: 'right' }}>
+          {age ? `${age.ago}  ·  ${stamp}` : 'Running the bundle that shipped with the APK'}
+        </Text>
+        <Spacer size={space.xs} />
+        <KeyValue label="Runtime" value={Updates.runtimeVersion ?? '1.0.0'} />
         <KeyValue label="Update channel" value={Updates.isEmbeddedLaunch ? 'Built in' : 'Downloaded from your PC'} />
         {Updates.isEmbeddedLaunch && (
           <Text variant="caption" tone="soft" style={{ marginTop: space.sm }}>Running the version built into the app, not the latest from your PC. Check for an update below.</Text>
@@ -212,6 +267,46 @@ export function Settings({
             );
           })}
         </Row>
+      </Section>
+      <Section title="Tasks">
+        <Text variant="caption" tone="soft">
+          How tasks are drawn on the grid. Shared with your PC, so changing it here changes it there.
+        </Text>
+        <Spacer size={space.md} />
+        <Text variant="body">Colour on the grid</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+          Tasks drawn on the calendar all wear this one colour.
+        </Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
+          {TASK_COLOURS.map(hex => {
+            const on = hex.toLowerCase() === display.taskColor.toLowerCase();
+            return (
+              <Pressable
+                key={hex}
+                onPress={() => setDisplay({ taskColor: hex })}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: on }}
+                accessibilityLabel={`Task colour ${hex}`}
+                style={{
+                  width: 30, height: 30,
+                  borderRadius: 15,
+                  backgroundColor: hex,
+                  borderWidth: on ? 3 : 1,
+                  borderColor: on ? p.ink : p.line,
+                }}
+              />
+            );
+          })}
+        </Row>
+        <Spacer size={space.lg} />
+        <Text variant="body">Tick box</Text>
+        <Spacer size={space.sm} />
+        <Segment
+          options={CHECKBOX_SHAPES.map(c => ({ key: c.id, label: c.label }))}
+          value={display.taskCheckboxShape}
+          onChange={k => setDisplay({ taskCheckboxShape: k as DisplaySettings['taskCheckboxShape'] })}
+        />
       </Section>
     </ScrollView>
   );

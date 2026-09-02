@@ -4,6 +4,17 @@ import { Text, useTheme } from '../ui/kit';
 import { space } from '../theme';
 import { describeDuration } from '../lib/focusStats';
 
+/** A month's short name, and never a thrown error. */
+function monthName(month: Date): string {
+  if (!(month instanceof Date) || Number.isNaN(month.getTime())) return '';
+  try {
+    return month.toLocaleString(undefined, { month: 'short' });
+  } catch {
+    return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month.getMonth()] ?? '';
+  }
+}
+
 export function YearChart({ 
   months, 
   yearMaxSeconds 
@@ -17,7 +28,11 @@ export function YearChart({
     <View style={{ marginTop: space.md, gap: space.md }}>
       {months.map((m, i) => {
         const h = m.seconds > 0 ? Math.max(5, (m.seconds / yearMaxSeconds) * 100) : 0;
-        const name = m.month.toLocaleString('default', { month: 'short' });
+        // NOT toLocaleString('default'): that is not a language tag, and
+        // Hermes rejects an unusable one with a RangeError rather than
+        // quietly falling back the way a browser does. `undefined` is the
+        // spelled-out way to ask for the device's own locale.
+        const name = monthName(m.month);
         
         return (
           <View key={i} style={{ flexDirection: 'row', alignItems: 'center' }}>

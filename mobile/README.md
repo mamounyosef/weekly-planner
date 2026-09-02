@@ -34,7 +34,7 @@ After changing any of them on the PC side:
 ```bash
 cd artifacts/weekly-planner
 npm test                     # all suites must pass first
-cp src/lib/{sync,syncBridge,syncClient,syncStorage,syncTransport,alarmPlan,agenda,notifications,recurrence,categories,prayerTimes,tasks,taskLists,gcalColor,grid,draft,focusStats,dragGrid,monthDrag,occurrence,viewPrefs,prayerSettings,focusTimer,notifyCentre,search}.ts ../../mobile/src/lib/
+cp src/lib/{sync,syncBridge,syncClient,syncStorage,syncTransport,alarmPlan,agenda,notifications,recurrence,categories,prayerTimes,tasks,taskLists,gcalColor,grid,draft,focusStats,dragGrid,monthDrag,occurrence,viewPrefs,prayerSettings,focusTimer,notifyCentre,search,updateLabel,focusPeriod,yearStats}.ts ../../mobile/src/lib/
 cd ../../mobile && npx tsc --noEmit
 ```
 

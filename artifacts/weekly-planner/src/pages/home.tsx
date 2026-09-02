@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { useLocation } from 'wouter';
-import { summariseFocusYear } from '@/lib/yearStats';
+import { summariseFocusMonths, summariseFocusYear } from '@/lib/yearStats';
+import {
+  ROLLING_DAYS, describeFocusRange, explainFocusMode, focusPeriodRange,
+  type FocusRangeMode,
+} from '@/lib/focusPeriod';
 import { computeAllTimeStreaks } from '@/lib/focusStats';
 import { createPortal, flushSync } from 'react-dom';
 import {
@@ -1151,6 +1155,7 @@ export default function DailyPlanner() {
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [filterMenuPos, setFilterMenuPos] = useState<{ x: number; y: number } | null>(null);
   const filterBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [analysisRangeMode, setAnalysisRangeMode] = useState<FocusRangeMode>('calendar');
   const [analysisWeekCursor, setAnalysisWeekCursor]   = useState(() => new Date());
   const [analysisMonthCursor, setAnalysisMonthCursor] = useState(() => new Date());
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
@@ -3054,6 +3059,7 @@ export default function DailyPlanner() {
     mobileContentZoom,
     mobileUiZoom,
     analysisTab,
+    analysisRangeMode,
     mobileTab,
     hiddenCategoryIds,
     hiddenCategoriesByView,
@@ -3061,7 +3067,7 @@ export default function DailyPlanner() {
   }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, mobileSwipeViewSwitch, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
-       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, mobileTab, hiddenCategoryIds, hiddenCategoriesByView,
+       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, analysisRangeMode, mobileTab, hiddenCategoryIds, hiddenCategoriesByView,
        prayerLanguage]);
 
   /** Adopt a stored device snapshot into the live state. */
@@ -3088,6 +3094,9 @@ export default function DailyPlanner() {
     if (typeof d.mobileContentZoom === 'number') setMobileContentZoom(clampZoom(d.mobileContentZoom));
     if (typeof d.mobileUiZoom === 'number') setMobileUiZoom(clampZoom(d.mobileUiZoom));
     setAnalysisTab(d.analysisTab);
+    if (d.analysisRangeMode === 'calendar' || d.analysisRangeMode === 'rolling') {
+      setAnalysisRangeMode(d.analysisRangeMode);
+    }
     if (d.prayerLanguage === 'english' || d.prayerLanguage === 'arabic') setPrayerLanguage(d.prayerLanguage);
     if (d.hiddenCategoriesByView && typeof d.hiddenCategoriesByView === 'object') {
       setHiddenCategoriesByView(d.hiddenCategoriesByView);
@@ -3770,8 +3779,19 @@ export default function DailyPlanner() {
     const completedSessions = focusSessions.filter(isCompletedFocusSession);
 
     // Week view — every day of the cursored week with its exact logged time.
-    const aWeekStart = startOfWeek(analysisWeekCursor, { weekStartsOn });
-    const aWeekEnd   = endOfWeek(analysisWeekCursor, { weekStartsOn });
+    //
+    // WHICH SEVEN DAYS depends on the reading chosen at the top of the panel.
+    // Calendar: the week the cursor is in, from its first day, future days
+    // drawn but empty. Rolling: the seven days ending on the cursor. The two
+    // agree only on the last day of a week, which is exactly why the screen now
+    // says which one it is showing.
+    const rollingWeek = analysisRangeMode === 'rolling';
+    const aWeekStart = rollingWeek
+      ? subDays(startOfDay(analysisWeekCursor), ROLLING_DAYS.week - 1)
+      : startOfWeek(analysisWeekCursor, { weekStartsOn });
+    const aWeekEnd   = rollingWeek
+      ? startOfDay(analysisWeekCursor)
+      : endOfWeek(analysisWeekCursor, { weekStartsOn });
     const weekDays = eachDayOfInterval({ start: aWeekStart, end: aWeekEnd }).map(d => {
       const k = dateKey(d);
       return {
@@ -3791,14 +3811,26 @@ export default function DailyPlanner() {
     // Average across days that actually had focus (excluding explicitly excluded days)
     const wkAvgActive   = wkActiveDays > 0 ? Math.floor(wkSeconds / wkActiveDays) : 0;
 
-    // Month view
-    const monthStart = startOfMonth(analysisMonthCursor);
-    const monthEnd = endOfMonth(analysisMonthCursor);
+    // Month view. Same choice again: the calendar month, or the last 30 days.
+    //
+    // The heatmap stays a week-aligned grid in both readings, because a grid
+    // whose columns are not weekdays is unreadable. What changes is which cells
+    // are counted: the ones inside the month, or the ones inside the window.
+    // `monthInRange` is the single answer to that, so the totals above the grid
+    // and the dimming inside it can never disagree.
+    const rollingMonth = analysisRangeMode === 'rolling';
+    const monthStart = rollingMonth
+      ? subDays(startOfDay(analysisMonthCursor), ROLLING_DAYS.month - 1)
+      : startOfMonth(analysisMonthCursor);
+    const monthEnd = rollingMonth
+      ? startOfDay(analysisMonthCursor)
+      : endOfMonth(analysisMonthCursor);
     const monthGridDays = eachDayOfInterval({
       start: startOfWeek(monthStart, { weekStartsOn }),
       end: endOfWeek(monthEnd, { weekStartsOn }),
     });
     const monthDaysInMonth = eachDayOfInterval({ start: monthStart, end: monthEnd });
+    const monthInRange = new Set(monthDaysInMonth.map(d => dateKey(d)));
     const validMonthDays = monthDaysInMonth.filter(d => !focusExcludedSet.has(dateKey(d)));
     const monthSeconds = validMonthDays.reduce((sum, d) => sum + (byDaySeconds.get(dateKey(d)) ?? 0), 0);
     const monthSessions = validMonthDays.reduce((sum, d) => sum + (byDaySessions.get(dateKey(d)) ?? 0), 0);
@@ -3819,11 +3851,24 @@ export default function DailyPlanner() {
       yearActiveDays,
       yearMaxSeconds,
       yearBestMonth,
-    } = summariseFocusYear(completedSessions, {
-      year: analysisYearCursor,
-      dayStartHour: focusDayStartHour,
-      excludedDates: focusExcludedDates,
-    });
+    } = analysisRangeMode === 'rolling'
+      // Twelve months ending in the month you are standing in, which is what
+      // "the last year" means to a person. Stepping the cursor a year back
+      // steps the whole window back with it.
+      ? summariseFocusMonths(completedSessions, {
+          end: new Date(
+            nowDate.getFullYear() + (analysisYearCursor - nowDate.getFullYear()),
+            nowDate.getMonth(), 1,
+          ),
+          count: 12,
+          dayStartHour: focusDayStartHour,
+          excludedDates: focusExcludedDates,
+        })
+      : summariseFocusYear(completedSessions, {
+          year: analysisYearCursor,
+          dayStartHour: focusDayStartHour,
+          excludedDates: focusExcludedDates,
+        });
 
     // Streaks (all-time, based on any non-excluded day with logged focus time)
     const { currentStreak, longestStreak } = computeAllTimeStreaks(completedSessions, {
@@ -3844,11 +3889,11 @@ export default function DailyPlanner() {
     return {
       byDaySeconds, byDaySessions,
       aWeekStart, aWeekEnd, weekDays, wkSeconds, wkSessions, wkActiveDays, wkMaxSeconds, wkBestDay, wkAvgActive,
-      monthGridDays, monthStart, monthEnd, monthSeconds, monthSessions, monthActiveDays, monthMaxSeconds, monthBestDay,
+      monthGridDays, monthStart, monthEnd, monthInRange, monthSeconds, monthSessions, monthActiveDays, monthMaxSeconds, monthBestDay,
       monthTotals, yearSeconds, yearSessions, yearActiveDays, yearMaxSeconds, yearBestMonth,
       currentStreak, longestStreak, allTimeSeconds, allTimeSessions, avgSessionLength,
     };
-  }, [focusSessions, analysisWeekCursor, analysisMonthCursor, analysisYearCursor, weekStartsOn, focusDayStartHour, focusExcludedSet]);
+  }, [focusSessions, analysisWeekCursor, analysisMonthCursor, analysisYearCursor, analysisRangeMode, nowDate, weekStartsOn, focusDayStartHour, focusExcludedSet]);
 
   // The memo above only counts *logged* sessions. A session that's still running
   // hasn't been written yet, so fold its elapsed time into the day it belongs to —
@@ -3876,9 +3921,10 @@ export default function DailyPlanner() {
   const monthLiveExtraSeconds = useMemo(() => {
     if (!activeFocusDayKey || !focusDayLiveSeconds) return 0;
     if (focusExcludedSet.has(activeFocusDayKey)) return 0;
-    const d = new Date(`${activeFocusDayKey}T00:00:00`);
-    return isSameMonth(d, analysisMonthCursor) ? focusDayLiveSeconds : 0;
-  }, [activeFocusDayKey, focusDayLiveSeconds, analysisMonthCursor, focusExcludedSet]);
+    // Counted only if the day it belongs to is inside whatever the month tab
+    // is currently showing, which in rolling mode is not a month at all.
+    return focusAnalysis.monthInRange.has(activeFocusDayKey) ? focusDayLiveSeconds : 0;
+  }, [activeFocusDayKey, focusDayLiveSeconds, focusAnalysis.monthInRange, focusExcludedSet]);
 
   // `nowTick` is read from one end of this component to the other, so publishing
   // one every second re-renders the entire planner every second — several
@@ -6418,8 +6464,10 @@ export default function DailyPlanner() {
   // On the analysis screen the same prev/next gesture walks that screen's own
   // cursor — one week, month or year depending on the active tab.
   const analysisStep = (dir: -1 | 1) => {
-    if (analysisTab === 'week')       setAnalysisWeekCursor(d => (dir < 0 ? subWeeks(d, 1) : addWeeks(d, 1)));
-    else if (analysisTab === 'month') setAnalysisMonthCursor(d => (dir < 0 ? subMonths(d, 1) : addMonths(d, 1)));
+    if (analysisTab === 'week')       setAnalysisWeekCursor(d => addDays(d, dir < 0 ? -7 : 7));
+    else if (analysisTab === 'month') setAnalysisMonthCursor(d => (analysisRangeMode === 'rolling'
+      ? addDays(d, dir < 0 ? -ROLLING_DAYS.month : ROLLING_DAYS.month)
+      : (dir < 0 ? subMonths(d, 1) : addMonths(d, 1))));
     else                              setAnalysisYearCursor(y => y + dir);
   };
   const navPrev = () => (showFocusAnalysis ? analysisStep(-1) : navStep(-1));
@@ -10316,10 +10364,14 @@ export default function DailyPlanner() {
                   </div>
                   <span className="text-sm font-semibold truncate" style={{ color: menuText }}>
                     {analysisTab === 'week'
-                      ? `${format(focusAnalysis.aWeekStart, 'MMM d')} – ${format(focusAnalysis.aWeekEnd, isPhone ? 'MMM d' : 'MMM d, yyyy')}`
+                      ? `${format(focusAnalysis.aWeekStart, 'MMM d')} to ${format(focusAnalysis.aWeekEnd, isPhone ? 'MMM d' : 'MMM d, yyyy')}`
                       : analysisTab === 'month'
-                        ? format(analysisMonthCursor, 'MMMM yyyy')
-                        : analysisYearCursor}
+                        ? (analysisRangeMode === 'rolling'
+                            ? `${format(focusAnalysis.monthStart, 'MMM d')} to ${format(focusAnalysis.monthEnd, isPhone ? 'MMM d' : 'MMM d, yyyy')}`
+                            : format(analysisMonthCursor, 'MMMM yyyy'))
+                        : (analysisRangeMode === 'rolling' && focusAnalysis.monthTotals.length > 0
+                            ? `${format(focusAnalysis.monthTotals[0].month, 'MMM yyyy')} to ${format(focusAnalysis.monthTotals[focusAnalysis.monthTotals.length - 1].month, 'MMM yyyy')}`
+                            : analysisYearCursor)}
                   </span>
                 </div>
                 <div className={`flex items-center ${isCompact ? 'gap-2 w-full justify-between' : 'gap-3'}`}>
@@ -10351,6 +10403,32 @@ export default function DailyPlanner() {
                         <Plus size={12} />
                       </button>
                     </div>
+                  </div>
+
+                  {/* What the tab beside this one MEANS. Labelled with the two
+                      answers rather than with the words "calendar" and
+                      "rolling", which explain nothing until you already know
+                      the difference. */}
+                  <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    {(['calendar', 'rolling'] as const).map(mode => {
+                      const active = analysisRangeMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          onClick={() => setAnalysisRangeMode(mode)}
+                          title={explainFocusMode(mode, analysisTab)}
+                          className="px-3 py-1 rounded-md text-[11px] font-semibold transition-colors whitespace-nowrap"
+                          style={{
+                            background: active ? (darkMode ? 'rgba(96,165,250,0.20)' : '#ffffff') : 'transparent',
+                            color: active ? '#60a5fa' : menuSub,
+                          }}
+                        >
+                          {describeFocusRange(focusPeriodRange({
+                            period: analysisTab, mode, today: nowDate, weekStartsOn,
+                          }))}
+                        </button>
+                      );
+                    })}
                   </div>
 
                   <div className="flex items-center rounded-lg p-0.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
@@ -10385,9 +10463,9 @@ export default function DailyPlanner() {
                         style={{ color: menuSub }}
                         onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
                         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                        title="Jump to this week"
+                        title={analysisRangeMode === 'rolling' ? 'Jump back to today' : 'Jump to this week'}
                       >
-                        Weekly overview
+                        {analysisRangeMode === 'rolling' ? `Last ${ROLLING_DAYS.week} days` : 'Weekly overview'}
                       </button>
                       <button onClick={() => setAnalysisWeekCursor(d => addWeeks(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                         <ChevronRight size={16} />
@@ -10577,11 +10655,11 @@ export default function DailyPlanner() {
                   <div>
                     {/* Month nav */}
                     <div className="flex items-center justify-between mb-3">
-                      <button onClick={() => setAnalysisMonthCursor(d => subMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                      <button onClick={() => setAnalysisMonthCursor(d => (analysisRangeMode === 'rolling' ? addDays(d, -ROLLING_DAYS.month) : subMonths(d, 1)))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                         <ChevronLeft size={16} />
                       </button>
-                      <span className="text-xs font-medium" style={{ color: menuSub }}>Monthly overview</span>
-                      <button onClick={() => setAnalysisMonthCursor(d => addMonths(d, 1))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                      <span className="text-xs font-medium" style={{ color: menuSub }}>{analysisRangeMode === 'rolling' ? `Last ${ROLLING_DAYS.month} days` : 'Monthly overview'}</span>
+                      <button onClick={() => setAnalysisMonthCursor(d => (analysisRangeMode === 'rolling' ? addDays(d, ROLLING_DAYS.month) : addMonths(d, 1)))} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                         <ChevronRight size={16} />
                       </button>
                     </div>
@@ -10619,7 +10697,7 @@ export default function DailyPlanner() {
                         const secs = (focusAnalysis.byDaySeconds.get(key) ?? 0)
                           + (activeFocusDayKey === key ? focusDayLiveSeconds : 0);
                         const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
-                        const inMonth = isSameMonth(d, analysisMonthCursor);
+                        const inMonth = focusAnalysis.monthInRange.has(key);
                         const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
                         const todayCell = isSameDay(d, nowDate);
                         const hot = secs > focusAnalysis.monthMaxSeconds * 0.45;
@@ -10746,7 +10824,7 @@ export default function DailyPlanner() {
                     {focusAnalysis.monthSessions === 0 && (
                       <div className="mt-4 rounded-xl px-4 py-6 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px solid ${surfaceBdr}` }}>
                         <Target size={18} style={{ color: menuSub, opacity: 0.6 }} />
-                        <span className="text-xs font-medium" style={{ color: menuText }}>No focus sessions in {format(analysisMonthCursor, 'MMMM')}</span>
+                        <span className="text-xs font-medium" style={{ color: menuText }}>{analysisRangeMode === 'rolling' ? `No focus sessions in the last ${ROLLING_DAYS.month} days` : `No focus sessions in ${format(analysisMonthCursor, 'MMMM')}`}</span>
                         <span className="text-[10px]" style={{ color: menuSub }}>Start the timer on the calendar and your days will light up here.</span>
                       </div>
                     )}
@@ -10758,7 +10836,7 @@ export default function DailyPlanner() {
                       <button onClick={() => setAnalysisYearCursor(y => y - 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                         <ChevronLeft size={16} />
                       </button>
-                      <span className="text-xs font-medium" style={{ color: menuSub }}>Yearly overview</span>
+                      <span className="text-xs font-medium" style={{ color: menuSub }}>{analysisRangeMode === 'rolling' ? 'Last twelve months' : 'Yearly overview'}</span>
                       <button onClick={() => setAnalysisYearCursor(y => y + 1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                         <ChevronRight size={16} />
                       </button>
@@ -10783,7 +10861,8 @@ export default function DailyPlanner() {
                     <div className="flex items-end gap-2.5 h-40">
                       {focusAnalysis.monthTotals.map(m => {
                         const pct = Math.max(3, (m.seconds / focusAnalysis.yearMaxSeconds) * 100);
-                        const active = isSameMonth(m.month, nowDate) && analysisYearCursor === nowDate.getFullYear();
+                        const active = isSameMonth(m.month, nowDate)
+                          && (analysisRangeMode === 'rolling' || analysisYearCursor === nowDate.getFullYear());
                         return (
                           <div key={m.month.toISOString()} className="flex-1 h-full flex flex-col justify-end gap-1.5 min-w-0">
                             <div className="flex-1 flex items-end">
@@ -10808,7 +10887,7 @@ export default function DailyPlanner() {
                     {/* Monthly breakdown table */}
                     <div className="mt-5 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
                       {focusAnalysis.monthTotals.filter(m => m.seconds > 0 || m.sessions > 0).length === 0 ? (
-                        <div className="px-4 py-6 text-center text-xs" style={{ color: menuSub }}>No focus sessions logged in {analysisYearCursor}.</div>
+                        <div className="px-4 py-6 text-center text-xs" style={{ color: menuSub }}>{analysisRangeMode === 'rolling' ? 'No focus sessions logged in these twelve months.' : `No focus sessions logged in ${analysisYearCursor}.`}</div>
                       ) : (
                         focusAnalysis.monthTotals.map((m, i) => (
                           <div

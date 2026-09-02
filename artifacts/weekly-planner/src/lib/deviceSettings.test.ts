@@ -164,4 +164,47 @@ assert.equal(cn('p-4', 'p-2'), 'p-2', 'Tailwind merge resolves conflicting paddi
 assert.equal(cn('text-red-500', false && 'text-blue-500', 'font-bold'), 'text-red-500 font-bold');
 assert.equal(cn('bg-white', undefined, null, 'shadow-md'), 'bg-white shadow-md');
 
+console.log('--- 6. HOW THE FOCUS RANGE IS READ, PER DEVICE ---');
+{
+  // "Week" on the analysis screen means either the week you are in or the last
+  // seven days. The two disagree by up to six days, so which one is meant has
+  // to survive a reload rather than resetting every time the screen opens.
+  for (const kind of ['desktop', 'tablet', 'phone'] as const) {
+    const seed = seedDeviceSettings(mockBase, kind);
+    assert.equal(seed.analysisRangeMode, 'calendar', `${kind} starts on the older reading`);
+  }
+
+  assert.equal(
+    coerceDeviceSettings({ analysisRangeMode: 'rolling' }, mockBase, 'desktop').analysisRangeMode,
+    'rolling',
+    'a stored choice is honoured',
+  );
+
+  // Anything unrecognised, including a value written by a newer build, falls
+  // back rather than leaving the screen with a mode it cannot draw.
+  for (const raw of ['Rolling', 'last7', '', 0, 1, null, {}, []]) {
+    assert.equal(
+      coerceDeviceSettings({ analysisRangeMode: raw } as never, mockBase, 'desktop').analysisRangeMode,
+      'calendar',
+      `${JSON.stringify(raw)} is not a mode`,
+    );
+  }
+
+  // Absent means untouched: an old device blob must not wipe the seeded value.
+  assert.equal(
+    coerceDeviceSettings({ analysisTab: 'year' }, mockBase, 'desktop').analysisRangeMode,
+    'calendar',
+  );
+
+  // It round trips through storage with the rest of the blob.
+  const stored = coerceDeviceSettings(
+    { analysisTab: 'month', analysisRangeMode: 'rolling' }, mockBase, 'desktop',
+  );
+  assert.deepEqual(
+    coerceDeviceSettings(JSON.parse(JSON.stringify(stored)), mockBase, 'desktop'),
+    stored,
+    'settled after one pass',
+  );
+}
+
 console.log('\nALL PASS (deviceSettings & presets)');
