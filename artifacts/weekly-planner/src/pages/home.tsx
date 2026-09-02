@@ -8126,7 +8126,7 @@ export default function DailyPlanner() {
               <div className={`flex items-center gap-1.5 ${isPhone ? 'w-full pt-2 pb-0.5' : 'pt-3 flex-shrink-0'}`}>
                 <button
                   onClick={toggleFocus}
-                  className={`rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
+                  className={`rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-[0.8] h-[34px] text-[12px]' : 'h-7 px-3 text-xs'}`}
                   style={{
                     background: focusTimer.isRunning ? 'rgba(245,158,11,0.18)' : '#2563eb',
                     border: `1px solid ${focusTimer.isRunning ? 'rgba(245,158,11,0.35)' : '#2563eb'}`,
@@ -8135,24 +8135,24 @@ export default function DailyPlanner() {
                 >
                   {/* During the desk countdown this is the way out of a session
                       you did not ask for, so it says so rather than "Start". */}
-                  {hardwareArmSeconds > 0 ? <X size={isPhone ? 15 : 12} /> : focusTimer.isRunning ? <Pause size={isPhone ? 15 : 12} /> : <Play size={isPhone ? 15 : 12} />}
+                  {hardwareArmSeconds > 0 ? <X size={isPhone ? 14 : 12} /> : focusTimer.isRunning ? <Pause size={isPhone ? 14 : 12} /> : <Play size={isPhone ? 14 : 12} />}
                   {hardwareArmSeconds > 0 ? 'Cancel' : focusTimer.isRunning ? 'Pause' : focusElapsedSeconds > 0 ? 'Resume' : 'Start'}
                 </button>
                 <button
                   type="button"
                   onClick={resetFocus}
                   disabled={!focusTimer.isRunning && focusElapsedSeconds <= 0}
-                  className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
+                  className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-9 h-9' : 'w-7 h-7'}`}
                   title="Reset focus timer"
                   style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub, opacity: focusElapsedSeconds <= 0 ? 0.4 : 1 }}
                 >
-                  <RotateCcw size={isPhone ? 15 : 12} />
+                  <RotateCcw size={isPhone ? 14 : 12} />
                 </button>
                 <button
                   type="button"
                   onClick={stopFocusByHand}
                   disabled={!focusTimer.isRunning && focusElapsedSeconds <= 0}
-                  className={`touch-target rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-1 h-10 text-[13px]' : 'h-7 px-3 text-xs'}`}
+                  className={`touch-target rounded-md flex items-center justify-center gap-1.5 font-semibold transition-smooth active:scale-[0.98] ${isPhone ? 'flex-1 h-9 text-[12px]' : 'h-7 px-3 text-xs'}`}
                   title="Stop and log focus time"
                   style={{
                     background: focusElapsedSeconds > 0 ? (darkMode ? 'rgba(34,197,94,0.14)' : 'rgba(34,197,94,0.10)') : 'transparent',
@@ -8171,11 +8171,11 @@ export default function DailyPlanner() {
                       e.stopPropagation();
                       setOpenDayMenuKey(openDayMenuKey === todayFocusKey ? null : todayFocusKey);
                     }}
-                    className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-10 h-10' : 'w-7 h-7'}`}
+                    className={`touch-target rounded-md flex items-center justify-center transition-smooth active:scale-[0.98] ${isPhone ? 'w-9 h-9' : 'w-7 h-7'}`}
                     style={{ background: 'transparent', border: `1px solid ${surfaceBdr}`, color: menuSub }}
                     title="Today's focus options"
                   >
-                    <MoreHorizontal size={isPhone ? 16 : 13} />
+                    <MoreHorizontal size={isPhone ? 15 : 13} />
                   </button>
                   {openDayMenuKey === todayFocusKey && (
                     <div

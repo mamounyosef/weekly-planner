@@ -8,3 +8,6 @@
 ## User Communication Style
 - Keep responses to the user very short, clear, and concise.
 - Avoid unnecessary code details or implementation trivia unless specifically requested.
+
+## Mobile App OTA Updates
+- **MANDATORY**: Whenever you make changes to the mobile app (`mobile/`) or its shared engine files, you **MUST ALWAYS** run `npm run publish` from the `mobile/` directory to push those changes over the air (OTA) to the phone.
