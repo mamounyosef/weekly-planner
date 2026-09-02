@@ -33,7 +33,15 @@ function readAppConfig() {
   return parsed.expo ?? parsed;
 }
 
-/** A sortable folder name, so "newest" is simply the last one alphabetically. */
+/**
+ * A sortable folder name, so "newest" is simply the last one alphabetically.
+ *
+ * This string IS the update's identity everywhere: the folder here, the
+ * `createdAt` the manifest carries, and the "Update" row on the phone under
+ * Settings > App & Data. To check whether a phone actually picked up what you
+ * published, compare the two -- they are the same characters. Do not trust the
+ * "Runtime" row for that: it is pinned (see below) and reads 1.0.0 forever.
+ */
 function stamp(now = new Date()) {
   const p = n => String(n).padStart(2, '0');
   return [
@@ -52,7 +60,37 @@ async function copyTree(from, to) {
 }
 
 async function main() {
+  // ── The gate ──────────────────────────────────────────────────────────────
+  // Metro does not typecheck, so a ReferenceError reaches the phone as a bundle
+  // that dies at launch. That has happened: `(pl as any).id.toString()` on a
+  // value with no `id` shipped over the air, the app shut itself instantly, and
+  // because a crashing process also kills the background download of the NEXT
+  // update, the fix could not land either. Recovering it meant reinstalling the
+  // APK by hand.
+  //
+  // So the typecheck is not advice here, it is the door. `--skip-check` exists
+  // only for someone who has just run it themselves.
+  if (!process.argv.includes('--skip-check')) {
+    console.log('\n\n> Type checking (a bundle that does not compile bricks the app)...');
+    try {
+      run('npx', ['tsc', '--noEmit']);
+    } catch (_) {
+      throw new Error(
+        'Type errors above. NOT publishing.\n'
+        + '  A crash at launch also kills the update download, so a broken\n'
+        + '  publish cannot be fixed by publishing again. It needs a reinstall\n'
+        + '  of the APK from the /app page.',
+      );
+    }
+  }
+
   const config = readAppConfig();
+  // NOT a build number. `runtimeVersion` is the contract with the NATIVE half:
+  // a phone only accepts an update whose runtime matches the APK it has
+  // installed. Bump it and every OTA silently stops landing until a new APK is
+  // sideloaded, so it changes ONLY when the native side does (a new native
+  // module, an Expo SDK upgrade). The thing that moves per publish is the
+  // folder stamp above.
   const runtimeVersion = config.runtimeVersion;
   if (typeof runtimeVersion !== 'string' || runtimeVersion.length === 0) {
     throw new Error('app.json has no runtimeVersion — the phone would not know what to accept.');

@@ -50,12 +50,85 @@ npx expo export --platform android   # verify it bundles
 `npx expo start` needs a **development build** on the phone, not Expo Go —
 `expo-sqlite`, `expo-notifications` and `expo-secure-store` are native modules.
 
+## Shipping a change: OTA
+
+**One command.** From `mobile/`:
+
+```bash
+npm run publish
+```
+
+It typechecks (and refuses to publish if that fails), bundles, and drops the
+result in `database/ota/<runtimeVersion>/<YYYYMMDD-HHMMSS>/`, which the planner
+server serves. On the phone: **Settings > App & Data > Check for update**, then
+Restart. It also arrives on its own the next time the app is foregrounded.
+
+**Did it land?** Settings > App & Data shows
+
+```
+Update    Today at 10:22 am
+          21 minutes ago  ·  20260902-102238
+```
+
+That stamp is the publish folder's name, character for character. Compare the
+two and you know. The **Runtime** row is not that: it is pinned and reads 1.0.0
+whatever is installed (see below).
+
+**Before you publish**, if you touched anything in `src/lib/`:
+
+```bash
+cd ../artifacts/weekly-planner && node scripts/run-all-tests.mjs
+```
+
+The engine is shared by copying (see above) and its tests live on the PC side.
+
+### What OTA cannot ship
+
+Native changes. A new native module, a new permission, anything that alters
+`app.json`'s `plugins` or `android` block. Those need `runtimeVersion` bumped
+**and a new APK built and installed by hand**, because a phone only accepts
+updates matching the runtime of the APK it has. That is why `runtimeVersion` is
+pinned at 1.0.0 and must not be treated as a version number.
+
+**So: do not add npm packages with native code to this app.** The moment you do,
+every future change needs a cable or a manual install instead of one command.
+Pure-JS dependencies are fine.
+
+### If a publish breaks the app
+
+A bundle that throws at launch kills its own process in about a second, and that
+takes the background download of the next update with it. **Publishing a fix
+often cannot reach a phone that is already broken.** Recovery, in order:
+
+1. Open the app several times in a row; the download sometimes wins the race.
+2. Roll back: rename or delete the newest folder in `database/ota/1.0.0/`, so
+   the previous publish becomes the newest again. Nothing is ever deleted by the
+   publish script for exactly this reason.
+3. Reinstall the APK from the planner's own `/app` page.
+
+The signature to look for in `database/sync-trace.log`: `OTA manifest asked`
+lines arriving with **no `/pull`** from that device. The manifest check is
+native and runs before any JS; `/pull` is the JS sync client. Manifest without
+pull means the process starts and the JavaScript dies.
+
 ## Building the APK
 
-Not yet done — this needs tooling that is not on the PC yet. Two routes:
+**You almost never need this.** A JavaScript change ships with `npm run publish`
+above. Build an APK only when the NATIVE half changes, or to rescue a phone
+whose bundle will not launch.
 
-**Local (free, no accounts).** Install JDK 17 and the Android SDK command-line
-tools, then:
+The tooling is already installed, at `C:\Users\mamou\dev-tools` (JDK 17, the Android SDK,
+and the signing key). `mobile/android/keystore.properties` and the `.jks` are
+gitignored: **losing that keystore means the app can never be updated in place
+again**, only uninstalled and reinstalled.
+
+One local quirk worth knowing: something on this PC deletes `.bat` files from
+inside the Android SDK tree (`sdkmanager.bat` and `apksigner.bat` have both
+vanished after a single run). Run `sdkmanager` from the pristine copy at
+`C:\Users\mamou\dev-tools\cmdline-runner\cmdline-tools\bin`, and invoke apksigner as
+`java -jar <build-tools>/lib/apksigner.jar`.
+
+Then:
 
 ```bash
 npx expo prebuild --platform android
