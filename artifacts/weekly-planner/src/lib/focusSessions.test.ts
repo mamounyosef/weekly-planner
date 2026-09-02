@@ -18,6 +18,8 @@ import {
   checkpointFocusTimer,
   pauseFocusTimer,
   focusRecoveryFor,
+  focusSessionTruth,
+  lastSeenAliveAt,
   safeFocusHeartbeat,
   recoveredSessionId,
   autoSessionId,
@@ -554,6 +556,226 @@ console.log('\n--- LAYER D: EXHAUSTIVE SCENARIO MATRIX ---');
   // safeFocusExcludedDates
   assertEqual(safeFocusExcludedDates(['2026-08-17', 'invalid-date', 123, '2026-08-18']).length, 2,
     'safeFocusExcludedDates keeps only valid yyyy-MM-dd strings');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER E: THE GHOST OF A SESSION THE PC WAS SWITCHED OFF DURING
+//
+// Two reported failures, both from the same root. A running session is nothing
+// but a start timestamp, so while the machine is off its elapsed seconds keep
+// growing:
+//
+//   read as LIVE time, those hours were added to the day the session started,
+//     so the previous evening was found the next morning credited with the
+//     whole night;
+//   read at a manual STOP, they were logged as one enormous session ending
+//     now, which moved yesterday evening's work onto today.
+//
+// Everything below is about trusting the last evidence anybody was watching
+// over the wall clock.
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('\n--- LAYER E: GHOST SESSIONS ---');
+
+{
+  const T0 = Date.parse('2026-09-01T20:00:00.000Z');
+  const HOUR = 3600_000;
+  const running = (over: Partial<FocusTimerState> = {}): FocusTimerState => ({
+    plannedSeconds: 3600,
+    accumulatedSeconds: 0,
+    isRunning: true,
+    lastStartedAt: new Date(T0).toISOString(),
+    sessionStartedAt: new Date(T0).toISOString(),
+    creditedSeconds: 0,
+    ...over,
+  });
+  const beatAt = (msAfterT0: number, elapsedSeconds: number, session = new Date(T0).toISOString()) => ({
+    at: new Date(T0 + msAfterT0).toISOString(),
+    sessionStartedAt: session,
+    elapsedSeconds,
+  });
+
+  // --- the witnesses ---------------------------------------------------------
+  assertEqual(lastSeenAliveAt(running(), null), 0, 'a start is not a sighting');
+  assertEqual(
+    lastSeenAliveAt(running({ updatedAt: T0 + 30_000 }), null),
+    T0 + 30_000,
+    'the timer write is a sighting',
+  );
+  assertEqual(
+    lastSeenAliveAt(running(), beatAt(45_000, 45)),
+    T0 + 45_000,
+    'so is a heartbeat for this session',
+  );
+  assertEqual(
+    lastSeenAliveAt(running({ updatedAt: T0 + 30_000 }), beatAt(45_000, 45)),
+    T0 + 45_000,
+    'and the newer of the two wins',
+  );
+  assertEqual(
+    lastSeenAliveAt(running({ updatedAt: T0 + 90_000 }), beatAt(45_000, 45)),
+    T0 + 90_000,
+    'whichever way round they fall',
+  );
+  assertEqual(
+    lastSeenAliveAt(running(), beatAt(45_000, 45, new Date(T0 - HOUR).toISOString())),
+    0,
+    'a heartbeat for a DIFFERENT session is no evidence at all',
+  );
+  for (const bad of [0, -1, NaN, Infinity, undefined]) {
+    assertEqual(
+      lastSeenAliveAt(running({ updatedAt: bad as number }), null), 0,
+      `a nonsense updatedAt (${String(bad)}) is not a sighting`,
+    );
+  }
+
+  // --- a live session is left alone -----------------------------------------
+  {
+    const live = focusSessionTruth(running({ updatedAt: T0 + 600_000 }), beatAt(600_000, 600), T0 + 605_000);
+    assertEqual(live.ghost, false, 'a session seen five seconds ago is alive');
+    assertEqual(live.seconds, 605, 'and worth what the clock says');
+  }
+  {
+    // Just started, nothing written about it yet: obviously alive.
+    const fresh = focusSessionTruth(running(), null, T0 + 5_000);
+    assertEqual(fresh.ghost, false, 'a session five seconds old is not a ghost');
+    assertEqual(fresh.seconds, 5, 'and is worth five seconds');
+  }
+  {
+    // Right on the edge of the stale window, from both sides.
+    const edge = focusSessionTruth(running({ updatedAt: T0 + 1000 }), null, T0 + 1000 + 90_000);
+    assertEqual(edge.ghost, false, 'exactly ninety seconds is still alive');
+    const over = focusSessionTruth(running({ updatedAt: T0 + 1000 }), null, T0 + 1000 + 90_001);
+    assertEqual(over.ghost, true, 'a millisecond later it is not');
+  }
+
+  // --- THE REPORTED BUG: the night the PC was off ---------------------------
+  {
+    // Worked 20:00 to 20:30, machine off, opened again at 09:00 the next day.
+    const nextMorning = T0 + 13 * HOUR;
+    const timer = running({ updatedAt: T0 + 1800_000 });
+    const truth = focusSessionTruth(timer, beatAt(1800_000, 1800), nextMorning);
+
+    assertEqual(truth.ghost, true, 'thirteen hours later it is plainly a ghost');
+    assertEqual(truth.seconds, 1800, 'worth the half hour it actually ran');
+    assertEqual(truth.endedAt, new Date(T0 + 1800_000).toISOString(), 'and it ended when it was last seen');
+
+    // The number the old code produced, for contrast: the whole night.
+    const naive = 13 * 3600;
+    assert(truth.seconds < naive / 10, 'and nothing like the whole night');
+
+    // Which day it lands on is the entire point.
+    assertEqual(truth.endedAt.slice(0, 10), '2026-09-01', 'logged on the evening it happened');
+    assert(new Date(nextMorning).toISOString().slice(0, 10) !== truth.endedAt.slice(0, 10),
+      'which is not the day it was noticed');
+  }
+
+  // --- no heartbeat at all, only the timer's own last write ------------------
+  {
+    // Ran ninety seconds, then the machine died. The heartbeat file is for an
+    // older session, so it proves nothing. The old code credited the FULL
+    // planned hour to the day it started.
+    const nextMorning = T0 + 13 * HOUR;
+    const timer = running({ updatedAt: T0 + 90_000 });
+    const stale = beatAt(-HOUR, 400, new Date(T0 - 2 * HOUR).toISOString());
+
+    const truth = focusSessionTruth(timer, stale, nextMorning);
+    assertEqual(truth.ghost, true);
+    assertEqual(truth.seconds, 90, 'ninety seconds, not a planned hour');
+
+    const rec = focusRecoveryFor(timer, stale, nextMorning);
+    assert(rec !== null, 'and the recovery agrees it is finished');
+    assertEqual(rec?.durationSeconds, 90, 'crediting the same ninety seconds');
+    assertEqual(rec?.endedAt, new Date(T0 + 90_000).toISOString());
+  }
+
+  // --- a ghost is never worth more than it was planned to be -----------------
+  {
+    // A heartbeat that overran (the session was past its planned length when
+    // the machine went off) is capped: the app would have auto-completed it.
+    const timer = running({ plannedSeconds: 1800, updatedAt: T0 + 5000_000 });
+    const truth = focusSessionTruth(timer, beatAt(5000_000, 5000), T0 + 13 * HOUR);
+    assertEqual(truth.seconds, 1800, 'capped at the planned length');
+  }
+
+  // --- a clock that moved is not evidence -----------------------------------
+  {
+    const timer = running({ updatedAt: T0 + 13 * HOUR });     // stamped in the future
+    const truth = focusSessionTruth(timer, null, T0 + 600_000);
+    assertEqual(truth.ghost, false, 'a sighting from the future is ignored, not obeyed');
+    assertEqual(truth.seconds, 600, 'and the clock is used instead');
+  }
+  {
+    // Nothing to go on at all: no heartbeat, no updatedAt, an old start. There
+    // is no honest answer but the clock, and inventing one would be worse.
+    const truth = focusSessionTruth(running(), null, T0 + 13 * HOUR);
+    assertEqual(truth.ghost, false, 'with no witness it does not pretend to know');
+  }
+
+  // --- a timer that is not running has no ghost ------------------------------
+  {
+    const idle: FocusTimerState = {
+      plannedSeconds: 3600, accumulatedSeconds: 900, isRunning: false,
+      lastStartedAt: null, sessionStartedAt: new Date(T0).toISOString(),
+    };
+    const truth = focusSessionTruth(idle, null, T0 + 13 * HOUR);
+    assertEqual(truth.ghost, false, 'a paused session is not a ghost');
+    assertEqual(truth.seconds, 900, 'and is worth what it accumulated');
+  }
+
+  // --- credited time is never counted twice ---------------------------------
+  {
+    // Editing a day's total while a session runs banks the elapsed time into
+    // the day directly. The live figure must subtract it, ghost or not.
+    const timer = running({ creditedSeconds: 600, updatedAt: T0 + 1800_000 });
+    const truth = focusSessionTruth(timer, beatAt(1800_000, 1800), T0 + 13 * HOUR);
+    const live = Math.max(0, truth.seconds - (timer.creditedSeconds ?? 0));
+    assertEqual(live, 1200, 'the banked ten minutes are not counted again');
+  }
+
+  // --- the two readings agree with each other -------------------------------
+  {
+    // focusSessionTruth drives what the day totals show; focusRecoveryFor
+    // drives what gets logged. If they ever disagreed, the number on screen
+    // would change the moment the session was written down.
+    for (const mins of [1, 5, 29, 30, 59, 61, 120]) {
+      const seen = mins * 60_000;
+      const timer = running({ updatedAt: T0 + seen });
+      const beat = beatAt(seen, mins * 60);
+      const later = T0 + 20 * HOUR;
+      const truth = focusSessionTruth(timer, beat, later);
+      const rec = focusRecoveryFor(timer, beat, later);
+      assert(rec !== null, `${mins}m session is recovered`);
+      assertEqual(rec?.durationSeconds, truth.seconds, `${mins}m: same duration both ways`);
+      assertEqual(rec?.endedAt, truth.endedAt, `${mins}m: same end both ways`);
+    }
+  }
+
+  // --- and nothing here ever produces a nonsense figure ---------------------
+  {
+    const nows = [T0, T0 + 1, T0 + 90_000, T0 + HOUR, T0 + 30 * HOUR];
+    const beats = [null, beatAt(0, 0), beatAt(60_000, 60), beatAt(60_000, -5), beatAt(60_000, 1e12)];
+    const timers = [
+      running(),
+      running({ updatedAt: T0 + 60_000 }),
+      running({ plannedSeconds: 60 }),
+      running({ accumulatedSeconds: 120, updatedAt: T0 + 60_000 }),
+      running({ creditedSeconds: 1e9, updatedAt: T0 + 60_000 }),
+    ];
+    for (const t of timers) {
+      for (const b of beats) {
+        for (const n of nows) {
+          const truth = focusSessionTruth(t, b, n);
+          assert(Number.isFinite(truth.seconds), 'seconds is a number');
+          assert(truth.seconds >= 0, 'and never negative');
+          assert(!Number.isNaN(Date.parse(truth.endedAt)), 'endedAt is a real moment');
+          if (truth.ghost) {
+            assert(truth.seconds <= t.plannedSeconds, 'a ghost never exceeds its planned length');
+            assert(Date.parse(truth.endedAt) <= n, 'and never ends in the future');
+          }
+        }
+      }
+    }
+  }
 }
 
 console.log('====================================================');

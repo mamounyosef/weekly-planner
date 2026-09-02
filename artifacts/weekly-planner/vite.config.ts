@@ -4121,7 +4121,17 @@ ${body}
             const { users } = await loadAccessConfig(rootDir);
             const authUser = getRequestUser(req, users);
             const key = url.searchParams.get('key') ?? '';
-            const out = hwBridge.claim(key, Boolean(authUser));
+            // THE DESK IS A PHYSICAL THING ON THIS MACHINE, so only a window
+            // running ON this machine may drive it. Any signed-in browser used
+            // to qualify, which meant a phone on the sofa, or a tab left open
+            // on another account, could take the lease and quietly receive the
+            // sensor's decisions -- starting ITS sessions from your chair while
+            // the window in front of you sat idle and the LCD said Ready. It is
+            // the same rule the Windows toasts already follow: a push is
+            // addressed to a device, a desk is not.
+            const local = String((req.socket as { remoteAddress?: string } | undefined)?.remoteAddress || '');
+            const fromThisPC = local === '127.0.0.1' || local === '::1' || local === '::ffff:127.0.0.1';
+            const out = hwBridge.claim(key, Boolean(authUser) && fromThisPC);
             json(out.body, out.status);
             return;
           }

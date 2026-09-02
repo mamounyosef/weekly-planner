@@ -45,6 +45,7 @@ import {
   createManualFocusSession,
   getFocusTimerElapsedSeconds,
   getFocusTimerUncreditedSeconds,
+  focusSessionTruth,
   loggableSessionSeconds,
   checkpointFocusTimer,
   pauseFocusTimer,
@@ -81,6 +82,7 @@ import {
   focusRecoveryFor,
   recoveredSessionId,
   safeFocusHeartbeat,
+  type FocusHeartbeat,
 } from '@/lib/focusSessions';
 
 function formatTimeLeft(mins: number): string {
@@ -3702,7 +3704,27 @@ export default function DailyPlanner() {
   // above only after a manual edit of that day's total, which banks the seconds
   // run so far into the logged sessions (see `creditedSeconds`). The countdown,
   // the progress ring and the session itself always use the full elapsed time.
-  const focusDayLiveSeconds = getFocusTimerUncreditedSeconds(focusTimer, nowTick);
+
+  /**
+   * The last heartbeat this window read, kept so anything that has to judge the
+   * running session can do it WITHOUT waiting for a fetch.
+   *
+   * Stopping a session is instant; the heartbeat check is a network round trip.
+   * Between a launch and that trip completing there was a window in which the
+   * ghost of a session the PC was switched off during looked perfectly live,
+   * and stopping it in that window logged the whole night as one session ending
+   * now -- yesterday evening's work landing on today.
+   */
+  const lastBeatRef = useRef<FocusHeartbeat | null>(null);
+  // Ghost-aware. A session the PC was switched off during keeps "running", and
+  // read as live time its seconds were added to the day it STARTED -- which is
+  // how a whole night appeared on the previous evening's total the next
+  // morning. The truth caps it at what it had run when it was last seen.
+  const focusDayLiveSeconds = Math.max(
+    0,
+    focusSessionTruth(focusTimer, lastBeatRef.current, nowTick).seconds
+      - Math.max(0, focusTimer.creditedSeconds ?? 0),
+  );
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
   const activeFocusDayKey = focusTimer.sessionStartedAt ? focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) : '';
@@ -4403,6 +4425,12 @@ export default function DailyPlanner() {
   // hours later (which credited a whole hour to the wrong day).
   const focusTimerRef = useRef(focusTimer);
   focusTimerRef.current = focusTimer;
+
+  /** What the running session is honestly worth, ghosts accounted for. */
+  const focusTruthNow = useCallback(
+    (now = Date.now()) => focusSessionTruth(focusTimerRef.current, lastBeatRef.current, now),
+    [],
+  );
   // Set whenever the timer stops on its OWN (hit zero, or a session recovered
   // after a shutdown). The cue effect below reads it to tell that transition
   // apart from a real pause/stop: completing RESETS the timer, so the remaining
@@ -4425,7 +4453,9 @@ export default function DailyPlanner() {
       .then(data => {
         const current = focusTimerRef.current;
         if (!current.isRunning || current.sessionStartedAt !== session) return; // moved on
-        const recovery = focusRecoveryFor(current, safeFocusHeartbeat(data));
+        const beat = safeFocusHeartbeat(data);
+        lastBeatRef.current = beat;
+        const recovery = focusRecoveryFor(current, beat);
         if (!recovery) {
           setFocusLiveSession(session);
           fetch('/api/focus-heartbeat', {
@@ -4607,6 +4637,18 @@ export default function DailyPlanner() {
   };
 
   const stopFocus = () => {
+    // Stopping a ghost must not credit the hours the machine was off, and must
+    // not stamp them on today. The truth knows when it really ended; the id
+    // matches the one the automatic recovery would use, so whichever gets there
+    // first, the session is logged exactly once.
+    const truth = focusTruthNow();
+    if (truth.ghost) {
+      completeFocusSession(truth.seconds, false, {
+        endedAt: new Date(truth.endedAt),
+        id: recoveredSessionId(focusTimerRef.current.sessionStartedAt),
+      });
+      return;
+    }
     completeFocusSession(getFocusTimerElapsedSeconds(focusTimerRef.current));
   };
 
@@ -4639,7 +4681,8 @@ export default function DailyPlanner() {
       const now = Date.now();
       const timer = focusTimerRef.current;
       const todayKey = focusDayKey(new Date(now), focusDayStartHour);
-      const liveSeconds = getFocusTimerUncreditedSeconds(timer, now);
+      const truth = focusSessionTruth(timer, lastBeatRef.current, now);
+      const liveSeconds = Math.max(0, truth.seconds - Math.max(0, timer.creditedSeconds ?? 0));
       const todaySeconds = (focusLoggedByDay.seconds.get(todayKey) ?? 0)
         + (timer.sessionStartedAt && focusDayKey(timer.sessionStartedAt, focusDayStartHour) === todayKey ? liveSeconds : 0);
 

@@ -27,6 +27,32 @@ export interface HardwareEvent {
   at: number;
 }
 
+/**
+ * The sensor's standing verdict, as opposed to the moment it changed.
+ *
+ * WHY THIS EXISTS. Presence used to reach the controller only as edges: one
+ * event per change, discarded if older than ten seconds, plus a single
+ * announcement on a window's very first poll. Every one of those can be missed
+ * -- a window that opens a moment before the filter warms up, a poll delayed
+ * past the staleness cutoff, a lease moving between windows -- and when one is
+ * missed there is NOTHING that ever puts it right. The controller sits
+ * believing the desk is empty while the sensor plainly says otherwise, and no
+ * amount of sitting there will start a session, because sitting still is not an
+ * edge. Measured on this desk: thirty-eight minutes of the filter reporting
+ * `present: true` against a controller stuck on `present: false`.
+ *
+ * A level can be compared. Handed the current verdict on every poll, the
+ * controller can notice it disagrees and correct itself, which is the one thing
+ * an edge stream can never do.
+ */
+export interface PresenceLevel {
+  present: boolean;
+  /** False while the filter is still warming up; its verdict means nothing yet. */
+  ready: boolean;
+  /** When the board last reported. Silence means the sensor, not the desk. */
+  at: number;
+}
+
 export interface HardwareBridgeOptions {
   now?: () => number;
   filter?: PresenceFilter;
@@ -107,7 +133,14 @@ export class HardwareBridge {
   // A short trail of what the controller actually decided and why. Two
   // bugs here were diagnosed by guesswork and the guesses were wrong;
   // this makes the sequence inspectable after the fact instead.
+  //
+  // TWO RINGS, on purpose. The firmware also posts raw pin edges here, and on a
+  // desk with electrically noisy buttons it posts thousands of them: a single
+  // shared ring filled with edge chatter within seconds and pushed out every
+  // decision the log exists to record. Asked for the log after a session
+  // started at the wrong moment, it could only say which pins had wobbled.
   hwLog: Array<Record<string, unknown>> = [];
+  hwEdgeLog: Array<Record<string, unknown>> = [];
 
   // The controller's own state (are you here, is a countdown pending, how
   // long have you been away). This lives on the server rather than in a
@@ -231,7 +264,18 @@ export class HardwareBridge {
     }
     const sinceNum = Number(since) || 0;
     const resultEvents = this.hwEvents.filter(e => e.id > sinceNum);
-    const result = { events: resultEvents, latest: this.hwEventSeq };
+    const snap = this.hwFilter.snapshot;
+    const result = {
+      events: resultEvents,
+      latest: this.hwEventSeq,
+      // Sent on EVERY poll, not only on change: this is what lets a controller
+      // that missed an edge put itself right. See PresenceLevel above.
+      presence: {
+        present: snap.present,
+        ready: snap.ready,
+        at: this.hwLiveAt,
+      } satisfies PresenceLevel,
+    };
 
     // since=0 is a window opening for the first time. It deliberately
     // does not replay the backlog (acting on a ten-minute-old presence
@@ -344,8 +388,14 @@ export class HardwareBridge {
   postLog(rawBody: unknown, now = this.now()): HardwareBridgeResponse {
     try {
       const parsed = parseObject(rawBody);
-      this.hwLog.push({ at: now, ...parsed });
-      while (this.hwLog.length > 200) this.hwLog.shift();
+      const entry = { at: now, ...parsed };
+      // Raw pin wobble from the firmware goes in its own ring. On this desk the
+      // buttons emit thousands of spurious edges, which filled a single shared
+      // ring in seconds and left the log unable to answer the only question it
+      // is ever asked: why did the controller do that.
+      const ring = parsed.source === 'edge' ? this.hwEdgeLog : this.hwLog;
+      ring.push(entry);
+      while (ring.length > 200) ring.shift();
       return { status: 200, body: { success: true } };
     } catch (_) {
       return { status: 400, body: { error: 'Bad log entry' } };
@@ -353,7 +403,7 @@ export class HardwareBridge {
   }
 
   getLog(): HardwareBridgeResponse {
-    return { status: 200, body: { entries: this.hwLog } };
+    return { status: 200, body: { entries: this.hwLog, edges: this.hwEdgeLog } };
   }
 
   // --- controller state, shared across windows and reloads ---

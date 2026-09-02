@@ -195,6 +195,55 @@ export interface ReducerResult {
   actions: HardwareAction[];
 }
 
+/** The sensor's standing verdict, mirrored from the bridge on every poll. */
+export interface PresenceLevel {
+  present: boolean;
+  ready: boolean;
+  /** When the board last spoke. Older than SENSOR_SILENT_MS and it has not. */
+  at: number;
+}
+
+/**
+ * How long the board may go quiet before its verdict stops meaning anything.
+ *
+ * It reports every ~100ms in batches, so a couple of seconds of silence is a
+ * hiccup and ten is the board being gone. A verdict from a sensor that is no
+ * longer talking must not be used to correct anything: unplug the board while
+ * you are sitting there and the last thing it said would otherwise keep
+ * re-arming a session for as long as the server stays up.
+ */
+export const SENSOR_SILENT_MS = 10_000;
+
+/**
+ * Notice that the controller and the sensor disagree, and say so as an input.
+ *
+ * This is the self-healing half of presence, and the whole reason the bridge
+ * now publishes a level. Edges can be missed -- a window opening a moment
+ * before the filter is ready, a poll delayed past the ten-second staleness
+ * cutoff, the lease moving between the main window and the widget -- and a
+ * missed edge used to be permanent, because sitting still generates no further
+ * edges to recover from. Comparing the level every poll turns a permanent
+ * desync into one that lasts half a second.
+ *
+ * Returns null when there is nothing to correct: no level, a filter still
+ * warming up, a board that has gone quiet, or the two already agreeing.
+ */
+export function presenceResync(
+  state: HardwareControllerState,
+  level: PresenceLevel | null | undefined,
+  now: number,
+  silentMs = SENSOR_SILENT_MS,
+): HardwareInput | null {
+  if (!level || typeof level !== 'object') return null;
+  if (!level.ready) return null;
+  if (typeof level.present !== 'boolean') return null;
+  const at = typeof level.at === 'number' && Number.isFinite(level.at) ? level.at : 0;
+  // A stamp of zero is "the board has never reported", not 1970.
+  if (at <= 0 || now - at > silentMs) return null;
+  if (state.present === level.present) return null;
+  return { kind: 'presence', present: level.present };
+}
+
 /**
  * Pure transition. Given the current controller state, what the session looks
  * like, and one input, returns the next state plus any actions to perform.
@@ -639,23 +688,29 @@ export function useHardwareController(opts: HardwareControllerOptions): {
 
       // --- drain events ---
       let inputs: HardwareInput[] = [];
+      let level: PresenceLevel | null = null;
       try {
         const res = await fetch(`/api/hardware/events?since=${lastEventIdRef.current}`);
         if (res.ok) {
           const data = await res.json();
           const events: Array<{ id: number; type: string; present?: boolean; at?: number }> = data?.events ?? [];
+          level = (data?.presence ?? null) as PresenceLevel | null;
 
           // The server keeps a backlog so a briefly-disconnected window can
           // catch up. A window that has just opened has no business replaying
           // it: acting on a presence change from ten minutes ago would pause
           // and then terminate a session that is running perfectly well. So the
           // first poll only adopts the position in the stream.
+          //
+          // It does NOT return any more. Discarding the backlog is right; going
+          // home before the level check below is what left a window that opened
+          // while you were already sitting there believing the desk was empty,
+          // with no edge ever coming to correct it.
           if (!syncedRef.current) {
             syncedRef.current = true;
             lastEventIdRef.current = Number(data?.latest) || 0;
             if (!cancelled) publishOnline(true);
-            return;
-          }
+          } else {
 
           // Crosstalk can straddle two polls, so the last button seen in the
           // previous batch is carried in and filtered alongside this one.
@@ -682,6 +737,7 @@ export function useHardwareController(opts: HardwareControllerOptions): {
             else if (e.type === 'button_b') inputs.push({ kind: 'button_b' });
             else if (e.type === 'manual_stop') inputs.push({ kind: 'manual_stop' });
           }
+          }
           if (!cancelled) publishOnline(true);
         } else if (!cancelled) {
           publishOnline(false);
@@ -690,6 +746,15 @@ export function useHardwareController(opts: HardwareControllerOptions): {
         if (!cancelled) publishOnline(false);
         // Server unreachable: still run the tick so a pending countdown does
         // not freeze mid-flight.
+      }
+
+      // The sensor's standing verdict, used to correct a controller that
+      // missed an edge. Appended rather than substituted: a real edge in this
+      // batch is the better evidence and is processed first, after which the
+      // two agree and this adds nothing.
+      if (!inputs.some(i => i.kind === 'presence')) {
+        const resync = presenceResync(stateRef.current, level, now);
+        if (resync) inputs.push(resync);
       }
 
       // A window that does not hold the lease still tracks state so it can

@@ -89,6 +89,112 @@ export interface FocusRecovery {
 }
 
 /**
+ * The last moment anything can prove this session was still being watched.
+ *
+ * Two witnesses, because each one alone has a hole in it:
+ *
+ *   the HEARTBEAT is written every ten seconds by every live window, but only
+ *     for the session it names, so it is silent for the first few seconds of a
+ *     new one and useless if the file was lost;
+ *   the TIMER'S OWN `updatedAt` is stamped on every write of the timer, so it
+ *     covers the case the heartbeat misses.
+ *
+ * `lastStartedAt` is deliberately NOT one of them. It says when the session
+ * began, not that anybody was still watching it, and counting it as a sighting
+ * would make every abandoned session look like it ended the moment it started.
+ * Callers treat a recent start as liveness separately, which is a different
+ * question with a different answer.
+ *
+ * Taking the newer of the two is what stops a ghost being credited a whole
+ * planned hour for a session that in truth ran for ninety seconds before the
+ * machine went off.
+ */
+export function lastSeenAliveAt(timer: FocusTimerState, beat: FocusHeartbeat | null): number {
+  const stamps: number[] = [];
+  if (typeof timer.updatedAt === 'number' && Number.isFinite(timer.updatedAt) && timer.updatedAt > 0) {
+    stamps.push(timer.updatedAt);
+  }
+  if (beat && beat.sessionStartedAt === timer.sessionStartedAt) {
+    const at = Date.parse(beat.at);
+    if (Number.isFinite(at)) stamps.push(at);
+  }
+  return stamps.length ? Math.max(...stamps) : 0;
+}
+
+export interface FocusTruth {
+  /**
+   * Seconds this session has genuinely accrued. For a live session that is the
+   * clock; for a ghost it is what it had run when it was last seen, and NOT the
+   * hours the machine spent switched off.
+   */
+  seconds: number;
+  /** When it really ended, ISO. `now` while it is genuinely running. */
+  endedAt: string;
+  /** True when nobody was watching and this is reconstructed after the fact. */
+  ghost: boolean;
+}
+
+/**
+ * What a running timer is actually worth, right now.
+ *
+ * THE BUG THIS EXISTS FOR, twice over. A session left running when the PC is
+ * switched off stays "running": its start timestamp is all there is, so the
+ * elapsed seconds keep growing for as long as the machine is away.
+ *
+ *   Read as a LIVE total, those hours were added to the day the session
+ *   started — you would come back the next morning and find the previous
+ *   evening credited with the whole night.
+ *
+ *   Read at a manual STOP, they were logged as one enormous session ending
+ *   now, which put yesterday evening's work on today.
+ *
+ * Both come from trusting the wall clock over the last evidence anyone was
+ * watching. This trusts the evidence. A session whose last sighting is inside
+ * the stale window is live and answers with the clock; past it, the session
+ * ended when it was last seen and is worth exactly what it had run then.
+ */
+export function focusSessionTruth(
+  timer: FocusTimerState,
+  beat: FocusHeartbeat | null,
+  now = Date.now(),
+): FocusTruth {
+  const liveSeconds = getFocusTimerElapsedSeconds(timer, now);
+  if (!timer.isRunning || !timer.sessionStartedAt) {
+    return { seconds: liveSeconds, endedAt: new Date(now).toISOString(), ghost: false };
+  }
+
+  // A session started moments ago is obviously alive, whether or not anything
+  // has been written about it yet. Same guard `focusRecoveryFor` opens with.
+  const started = timer.lastStartedAt ? Date.parse(timer.lastStartedAt) : NaN;
+  if (Number.isFinite(started) && now - started <= FOCUS_HEARTBEAT_STALE_MS) {
+    return { seconds: liveSeconds, endedAt: new Date(now).toISOString(), ghost: false };
+  }
+
+  const seen = lastSeenAliveAt(timer, beat);
+  // No witness at all, or one in the future (a clock that moved): there is
+  // nothing better than the clock, so use it rather than inventing a figure.
+  if (!seen || seen > now) {
+    return { seconds: liveSeconds, endedAt: new Date(now).toISOString(), ghost: false };
+  }
+  if (now - seen <= FOCUS_HEARTBEAT_STALE_MS) {
+    return { seconds: liveSeconds, endedAt: new Date(now).toISOString(), ghost: false };
+  }
+
+  // A ghost. The heartbeat carries the elapsed figure it saw, which is exact;
+  // without one, recompute the elapsed as it stood at the last sighting.
+  const matched = beat && beat.sessionStartedAt === timer.sessionStartedAt ? beat : null;
+  const atSighting = matched
+    ? Math.floor(matched.elapsedSeconds)
+    : getFocusTimerElapsedSeconds(timer, seen);
+
+  return {
+    seconds: Math.max(0, Math.min(atSighting, timer.plannedSeconds)),
+    endedAt: new Date(seen).toISOString(),
+    ghost: true,
+  };
+}
+
+/**
  * Decide whether the "running" timer is actually the ghost of a session that
  * died with the machine, and if so where it really ended. Returns null for a
  * genuinely live session.
@@ -122,9 +228,21 @@ export function focusRecoveryFor(
   // the moment it would have finished rather than now.
   const elapsed = getFocusTimerElapsedSeconds(timer, now);
   if (elapsed <= timer.plannedSeconds + FOCUS_HEARTBEAT_STALE_MS / 1000) return null;
+
+  // The timer's own last write is still a witness, even with no heartbeat. It
+  // used to be ignored, and a session that ran for ninety seconds before the
+  // machine went off was credited the FULL planned hour on the day it started.
+  // Whichever came first, the last sighting or the planned finish, is the
+  // latest moment it can honestly be said to have been running.
+  const plannedEnd = Date.parse(timer.sessionStartedAt) + timer.plannedSeconds * 1000;
+  const seen = lastSeenAliveAt(timer, null);
+  const endedAtMs = seen > 0 && seen < plannedEnd ? seen : plannedEnd;
   return {
-    endedAt: new Date(Date.parse(timer.sessionStartedAt) + timer.plannedSeconds * 1000).toISOString(),
-    durationSeconds: timer.plannedSeconds,
+    endedAt: new Date(endedAtMs).toISOString(),
+    durationSeconds: Math.max(
+      0,
+      Math.min(timer.plannedSeconds, getFocusTimerElapsedSeconds(timer, endedAtMs)),
+    ),
   };
 }
 

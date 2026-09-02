@@ -16,6 +16,7 @@ const testFiles = [
   'src/lib/hardwareBridge.test.ts',
   'src/lib/hardwareController.test.ts',
   'src/lib/deskIntegration.test.ts',
+  'src/lib/deskSensor.test.ts',
   'src/lib/shortcuts.test.ts',
   'src/lib/backup.test.ts',
   'src/lib/notifications.test.ts',

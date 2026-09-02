@@ -32,6 +32,7 @@ import {
   formatFocusDuration,
   getFocusTimerElapsedSeconds,
   getFocusTimerUncreditedSeconds,
+  focusSessionTruth,
   loggableSessionSeconds,
   checkpointFocusTimer,
   pauseFocusTimer,
@@ -66,6 +67,7 @@ import {
   focusRecoveryFor,
   recoveredSessionId,
   safeFocusHeartbeat,
+  type FocusHeartbeat,
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, parseDate, getEventWeekOverlap } from '@/lib/recurrence';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
@@ -663,6 +665,11 @@ export default function Widget() {
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
   const focusRemainingSeconds = Math.max(0, focusTimer.plannedSeconds - focusElapsedSeconds);
   // "Today" for focus stats respects the configurable day-start hour (e.g. before
+  // The last heartbeat this window read. Kept so the running session can be
+  // judged without waiting for a fetch: a ghost left over from a PC that was
+  // switched off looks perfectly live until that round trip completes.
+  const lastBeatRef = useRef<FocusHeartbeat | null>(null);
+
   // 3 AM still counts as the previous day).
   const focusTodayKey = focusDayKey(today, focusDayStartHour);
   const focusTodayMidnight = new Date(`${focusTodayKey}T00:00:00`);
@@ -671,7 +678,8 @@ export default function Widget() {
   // there, so the two windows never disagree about today's total.
   const todayFocusSeconds = sumFocusSecondsForDay(focusSessions, focusTodayMidnight, focusDayStartHour)
     + (focusTimer.sessionStartedAt && focusDayKey(focusTimer.sessionStartedAt, focusDayStartHour) === focusTodayKey
-      ? getFocusTimerUncreditedSeconds(focusTimer, nowTick)
+      ? Math.max(0, focusSessionTruth(focusTimer, lastBeatRef.current, nowTick).seconds
+          - Math.max(0, focusTimer.creditedSeconds ?? 0))
       : 0);
   const todayFocusSessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === focusTodayKey && isCompletedFocusSession(session)).length;
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
@@ -988,7 +996,9 @@ export default function Widget() {
       .then(data => {
         const current = focusTimerRef.current;
         if (!current.isRunning || current.sessionStartedAt !== session) return; // moved on
-        const recovery = focusRecoveryFor(current, safeFocusHeartbeat(data));
+        const beat = safeFocusHeartbeat(data);
+        lastBeatRef.current = beat;
+        const recovery = focusRecoveryFor(current, beat);
         if (!recovery) {
           setFocusLiveSession(session);
           fetch('/api/focus-heartbeat', {
@@ -1168,6 +1178,17 @@ export default function Widget() {
   };
 
   const stopFocus = () => {
+    // Same rule as the main window: a ghost is logged where it really ended,
+    // with what it really ran, under the id the automatic recovery would use so
+    // the two can never log it twice.
+    const truth = focusSessionTruth(focusTimerRef.current, lastBeatRef.current, Date.now());
+    if (truth.ghost) {
+      completeFocusSession(truth.seconds, false, {
+        endedAt: new Date(truth.endedAt),
+        id: recoveredSessionId(focusTimerRef.current.sessionStartedAt),
+      });
+      return;
+    }
     completeFocusSession(focusElapsedSeconds);
   };
 
@@ -1190,7 +1211,8 @@ export default function Widget() {
       const now = Date.now();
       const timer = focusTimerRef.current;
       const todayKey = focusDayKey(new Date(now), focusDayStartHour);
-      const liveSeconds = getFocusTimerUncreditedSeconds(timer, now);
+      const liveSeconds = Math.max(0, focusSessionTruth(timer, lastBeatRef.current, now).seconds
+        - Math.max(0, timer.creditedSeconds ?? 0));
       // Recompute todaySeconds using the live time + static completed time
       const baseTodaySeconds = sumFocusSecondsForDay(focusSessions, new Date(now), focusDayStartHour);
       const todaySeconds = baseTodaySeconds + (timer.sessionStartedAt && focusDayKey(timer.sessionStartedAt, focusDayStartHour) === todayKey ? liveSeconds : 0);
