@@ -41,7 +41,7 @@ import { Row, Text, useTheme } from '../ui/kit';
 import { TextField } from '../ui/Fields';
 import { ListChips } from '../ui/ListChips';
 import { SortableList } from '../ui/SortableList';
-import { PRESSED, radius, space } from '../theme';
+import { PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { dueDateOf, isTaskDone, taskBucket, todayYmd, type Task } from '../lib/tasks';
@@ -198,9 +198,14 @@ export function Tasks() {
   const addSubtask = async (parent: Task, title: string, siblings: Task[]) => {
     const trimmed = title.trim();
     if (!trimmed) return;
+    // A step inherits its parent's day, INCLUDING not having one. Filing the
+    // steps of an undated task on today would scatter them across the calendar
+    // while the thing they belong to sits outside it.
+    const parentDue = dueDateOf(parent);
     const id = await saveDraft('tasks', {
       title: trimmed,
-      date: dueDateOf(parent) ?? today,
+      date: parentDue ?? today,
+      undated: !parentDue,
       allDay: true,
       startMin: null,
       endMin: null,
@@ -257,6 +262,7 @@ export function Tasks() {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xl, paddingVertical: space.sm, gap: space.sm }}>
           {['datetime', 'manual', 'title'].map((mode) => (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               key={mode}
               onPress={() => setSortMode(mode as SortMode)}
               style={({ pressed }) => [{
@@ -276,6 +282,7 @@ export function Tasks() {
             const active = filters.includes(f);
             return (
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 key={f}
                 onPress={() => setFilters(active ? filters.filter(x => x !== f) : [...filters, f])}
                 style={({ pressed }) => [{
@@ -331,6 +338,7 @@ export function Tasks() {
           return (
             <View key={section.key} style={{ marginBottom: space.xl }}>
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 onPress={collapsible ? () => setShowDone(v => !v) : undefined}
                 disabled={!collapsible}
                 style={({ pressed }) => [{ paddingVertical: space.xs }, pressed ? PRESSED : null]}
@@ -350,6 +358,7 @@ export function Tasks() {
                   <Row gap={space.md} style={{ alignItems: 'center' }}>
                     {collapsible && nodes.length > 0 && (
                       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)} 
                         onPress={(e) => { 
                           e.stopPropagation();
@@ -428,6 +437,7 @@ export function Tasks() {
       </ScrollView>
 
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => setEditing({ store: 'tasks', date: today, listId: filter ?? undefined })}
         accessibilityRole="button"
         accessibilityLabel="Add a task"
@@ -508,6 +518,7 @@ function TaskCard({
       }} />
 
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => onOpen(task)}
         onLongPress={onStartDrag}
         delayLongPress={300}
@@ -551,6 +562,7 @@ function TaskCard({
         </View>
 
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={() => onCompose(!composing)}
           accessibilityRole="button"
           accessibilityLabel={`Add a step to ${task.title || 'this task'}`}
@@ -628,6 +640,7 @@ function SubtaskRow({
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={() => onOpen()}
       onLongPress={onStartDrag}
       delayLongPress={300}
@@ -679,6 +692,7 @@ function Check({ colour, done, onPress, label, size = 22 }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="checkbox"
       accessibilityState={{ checked: done }}
@@ -744,6 +758,7 @@ function Composer({ onSubmit, onClose }: {
         />
       </View>
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => (text.trim() ? void add() : onClose())}
         accessibilityRole="button"
         accessibilityLabel={text.trim() ? 'Add this step' : 'Close'}

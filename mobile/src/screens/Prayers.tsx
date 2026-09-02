@@ -45,7 +45,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Segment, Stepper, TextField, Toggle } from '../ui/Fields';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   DEFAULT_PRAYER_APPEARANCE, PRAYER_DRAW_STYLES, describePrayerAppearance,
@@ -259,6 +259,7 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
           <Text variant="display">Prayer times</Text>
           {onClose ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
@@ -331,6 +332,7 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
                     : describePrayerFreshness(lookup, now)}
                 </Text>
                 <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                   onPress={() => void refresh(true)}
                   disabled={busy}
                   hitSlop={space.sm}
@@ -523,6 +525,7 @@ function PrayerRow({
   return (
     <View style={{ borderTopWidth: first ? 0 : 1, borderTopColor: p.line }}>
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={onOpen}
         android_ripple={{ color: p.accentSoft }}
         accessibilityRole="button"
@@ -537,6 +540,7 @@ function PrayerRow({
         {/* The tick, which is the reason to open this screen when not changing
             anything: the times are right here, so ticking one off is one tap. */}
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={onToggleDone}
           disabled={!visible}
           hitSlop={space.sm}

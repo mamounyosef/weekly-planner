@@ -14,7 +14,7 @@ import * as Updates from 'expo-updates';
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
 import { ICONS } from '../ui/icons';
 import { Segment, Stepper, Toggle } from '../ui/Fields';
-import { HIT, PRESSED, radius, space, type ThemeMode } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   describeRanges, hiddenHours, rangesFromHidden, type HourRange,
@@ -261,7 +261,8 @@ export function Settings({
           {THEME_CHOICES.map(choice => {
             const on = choice.mode === themeMode;
             return (
-              <Pressable key={choice.mode} onPress={() => setThemeMode(choice.mode)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
+              <Pressable
+        unstable_pressDelay={PRESS_DELAY} key={choice.mode} onPress={() => setThemeMode(choice.mode)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{choice.label}</Text>
               </Pressable>
             );
@@ -283,6 +284,7 @@ export function Settings({
             const on = hex.toLowerCase() === display.taskColor.toLowerCase();
             return (
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 key={hex}
                 onPress={() => setDisplay({ taskColor: hex })}
                 accessibilityRole="radio"
@@ -373,7 +375,8 @@ export function Settings({
           {[5, 10, 15, 30, 60].map(mins => {
             const on = mins === interval;
             return (
-              <Pressable key={mins} onPress={() => setInterval(mins)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
+              <Pressable
+        unstable_pressDelay={PRESS_DELAY} key={mins} onPress={() => setInterval(mins)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{mins === 60 ? '1 hr' : `${mins}m`}</Text>
               </Pressable>
             );
@@ -389,13 +392,15 @@ export function Settings({
         <Row style={{ justifyContent: 'space-between' }}>
           <Row gap={space.sm} style={{ alignItems: 'center' }}>
             {section && (
-              <Pressable onPress={() => setSection(null)} accessibilityLabel="Back" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }, pressed ? PRESSED : null]}>
+              <Pressable
+        unstable_pressDelay={PRESS_DELAY} onPress={() => setSection(null)} accessibilityLabel="Back" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }, pressed ? PRESSED : null]}>
                 <Text variant="title" tone="soft">‹</Text>
               </Pressable>
             )}
             <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : 'Settings'}</Text>
           </Row>
-          <Pressable onPress={onClose} accessibilityLabel="Close" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}>
+          <Pressable
+        unstable_pressDelay={PRESS_DELAY} onPress={onClose} accessibilityLabel="Close" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}>
             <Text variant="title" tone="soft">×</Text>
           </Pressable>
         </Row>
@@ -412,6 +417,7 @@ function MenuRow({ label, hint, iconName, onPress }: { label: string; hint: stri
   if (!onPress) return null;
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', minHeight: HIT, gap: space.md, paddingVertical: space.xs }, pressed ? PRESSED : null]}
@@ -469,6 +475,7 @@ function HourStrip({ ranges, clock, onToggle }: {
         const shown = !off.has(hour);
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={hour}
             onPress={() => onToggle(hour)}
             accessibilityRole="switch"
@@ -528,6 +535,7 @@ function DayCount({ value, onChange }: { value: number; onChange: (n: number) =>
         const on = n === value;
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={n}
             onPress={() => onChange(n)}
             accessibilityRole="button"

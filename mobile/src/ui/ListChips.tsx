@@ -15,7 +15,7 @@ import React from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 
 import { Text, useTheme } from './kit';
-import { radius, space } from '../theme';
+import { PRESS_DELAY, radius, space } from '../theme';
 
 export interface ListChoice {
   id: string;
@@ -40,6 +40,7 @@ export function ListChips({ options, value, onChange, allLabel, inset = 0 }: {
     const on = value === id;
     return (
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => onChange(id)}
         accessibilityRole="button"
         accessibilityState={{ selected: on }}
@@ -67,6 +68,11 @@ export function ListChips({ options, value, onChange, allLabel, inset = 0 }: {
   return (
     <ScrollView
       horizontal
+      // Android needs telling that this belongs to a bigger scroller. Without
+      // it a vertical drag that happens to START on this strip is swallowed --
+      // the sheet does not move, the strip does not move, and it reads as the
+      // page being stuck rather than as a gesture landing on the wrong view.
+      nestedScrollEnabled
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{
         gap: space.sm,

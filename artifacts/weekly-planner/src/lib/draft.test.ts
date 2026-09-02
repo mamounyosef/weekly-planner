@@ -18,6 +18,7 @@ import {
   anchorFor,
   applyCategoryDefaults,
   blankDraft,
+  blankTaskDraft,
   buildEventRecord,
   buildTaskRecord,
   dateOfAnchor,
@@ -422,6 +423,109 @@ function main() {
     const described = describeNotify(spec);
     assert.ok(described.includes('before'), `"${described}" says before`);
     assert.ok(!described.includes('after'), 'and does not claim after');
+  }
+
+  console.log('--- 19. A TASK WITH NO DAY AT ALL ---');
+  {
+    const meta = { id: 't-undated', now: 1_700_000_000_000, weekStartsOn: 0 as const };
+
+    // The default a new task starts from, on both machines.
+    const fresh = blankTaskDraft('2026-09-02', 9 * 60 + 30);
+    assert.equal(fresh.undated, true, 'a new task is not on a day');
+    assert.equal(fresh.allDay, true, 'and has no time either');
+    assert.equal(fresh.endMin, null, 'a task has no end');
+    assert.equal(fresh.date, '2026-09-02',
+      'the date is still carried, so turning it on lands somewhere sensible');
+
+    const record = buildTaskRecord({ ...fresh, title: 'Renew the passport' }, meta);
+    assert.equal(record.title, 'Renew the passport');
+    assert.equal(record.weekKey, undefined, 'no anchor written');
+    assert.equal(record.dayIndex, undefined);
+    assert.equal(record.startTime, undefined);
+
+    // And it reads back as undated rather than as "today".
+    const back = draftFromRecord(record, 'tasks', '2026-09-10');
+    assert.equal(back.undated, true);
+    assert.equal(back.title, 'Renew the passport');
+    assert.equal(back.date, '2026-09-10', 'the fallback fills the field it cannot read');
+  }
+
+  console.log('--- 20. TAKING A DATE OFF A TASK THAT HAD ONE ---');
+  {
+    const meta = { id: 't1', now: 2_000, weekStartsOn: 0 as const };
+    const dated = buildTaskRecord(
+      { ...blankDraft('2026-09-02', 540), title: 'Pay the bill', allDay: true },
+      meta,
+    );
+    assert.equal(dated.weekKey, '2026-08-30', 'it starts on a real day');
+    assert.equal(dated.dayIndex, 3);
+
+    // The existing record is spread into the new one, so clearing has to be
+    // explicit or the old anchor simply survives.
+    const cleared = buildTaskRecord(
+      { ...draftFromRecord(dated, 'tasks', '2026-09-02'), undated: true },
+      { ...meta, now: 3_000 },
+      dated,
+    );
+    assert.equal(cleared.weekKey, undefined, 'the day really came off');
+    assert.equal(cleared.dayIndex, undefined);
+    assert.equal(cleared.title, 'Pay the bill', 'and nothing else was lost');
+    assert.equal(cleared.updatedAt, 3_000);
+
+    // ...and back on again.
+    const redated = buildTaskRecord(
+      { ...draftFromRecord(cleared, 'tasks', '2026-09-04'), undated: false, date: '2026-09-04' },
+      { ...meta, now: 4_000 },
+      cleared,
+    );
+    assert.equal(redated.weekKey, '2026-08-30');
+    assert.equal(redated.dayIndex, 5, 'Friday');
+  }
+
+  console.log('--- 21. AN UNDATED TASK CANNOT CARRY A REPEAT ---');
+  {
+    const meta = { id: 't2', now: 5_000, weekStartsOn: 0 as const };
+    // A repeat is a rule about which days something falls on. Storing one on a
+    // task with no days would be a rule that silently never fires.
+    const record = buildTaskRecord(
+      {
+        ...blankTaskDraft('2026-09-02', 540),
+        title: 'Water the plants',
+        recur: { freq: 'weekly', interval: 1 } as any,
+      },
+      meta,
+    );
+    assert.equal(record.recur, undefined, 'the rule was dropped, not kept and ignored');
+    assert.equal(record.exdates, undefined);
+
+    // The same task WITH a day keeps its rule.
+    const onADay = buildTaskRecord(
+      {
+        ...blankTaskDraft('2026-09-02', 540),
+        undated: false,
+        title: 'Water the plants',
+        recur: { freq: 'weekly', interval: 1 } as any,
+      },
+      meta,
+    );
+    assert.deepEqual(onADay.recur, { freq: 'weekly', interval: 1 });
+    assert.equal(onADay.weekKey, '2026-08-30');
+  }
+
+  console.log('--- 22. EVENTS ARE UNAFFECTED BY ANY OF THIS ---');
+  {
+    const meta = { id: 'e1', now: 6_000, weekStartsOn: 0 as const };
+    // The flag is meaningless for an event and must never reach its record: an
+    // event with no day is not a thing the grid can draw.
+    const record = buildEventRecord(
+      { ...blankDraft('2026-09-02', 540), title: 'Physics lecture', undated: true },
+      meta,
+    );
+    assert.equal(record.weekKey, '2026-08-30', 'an event keeps its day regardless');
+    assert.equal(record.dayIndex, 3);
+
+    const back = draftFromRecord(record, 'events', '2026-09-02');
+    assert.equal(back.undated, false, 'and never reads back as undated');
   }
 
   console.log('\nALL PASS (draft: anchors, week start, field names, validation)');

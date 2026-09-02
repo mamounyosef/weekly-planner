@@ -14,7 +14,7 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
-import { dark, radius, resolvePalette, space, type as typeScale, HIT, type Palette, type ThemeMode } from '../theme';
+import { HIT, PRESS_DELAY, dark, radius, resolvePalette, space, type Palette, type ThemeMode, type as typeScale } from '../theme';
 import { prefs } from '../lib/prefs';
 
 const ThemeContext = createContext<Palette>(dark);
@@ -145,6 +145,7 @@ export function Card({
   if (!onPress) return body;
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       android_ripple={{ color: p.accentSoft }}
       style={({ pressed }) => [pressed && { opacity: 0.85, transform: [{ scale: 0.995 }] }]}
@@ -187,6 +188,7 @@ export function Button({
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       disabled={off}
       android_ripple={{ color: variant === 'primary' ? 'rgba(0,0,0,0.15)' : p.accentSoft }}

@@ -28,7 +28,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, TextField, Toggle } from '../ui/Fields';
-import { HIT, PRESSED, clearNav, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
@@ -121,6 +121,7 @@ export function TaskSettings({ onClose }: { onClose?: () => void }) {
           <Text variant="display">Tasks</Text>
           {onClose ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
@@ -178,6 +179,7 @@ export function TaskSettings({ onClose }: { onClose?: () => void }) {
       </ScrollView>
 
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={addList}
         accessibilityRole="button"
         accessibilityLabel="Add a list"
@@ -250,6 +252,7 @@ function ListRow({ list, canMoveUp, canMoveDown, onMove, onOpen }: {
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onOpen}
       android_ripple={{ color: p.accentSoft }}
       accessibilityRole="button"
@@ -299,6 +302,7 @@ function Arrow({ label, glyph, enabled, onPress }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={enabled ? onPress : undefined}
       disabled={!enabled}
       accessibilityRole="button"
@@ -358,7 +362,8 @@ function Sheet({ existing, takenNames, suggestedColour, onSave, onDelete, onClos
       {/* Tapping anywhere off the sheet closes it. No pressed state: it is an
           invisible dismiss layer, and dimming the whole screen on touch would
           be a flash that means nothing. */}
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable
+        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
       {/*
         THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.

@@ -32,11 +32,12 @@ import { Button, Row, Text, useTheme } from '../ui/kit';
 import {
   CategoryPicker, ColourPicker, Field, Segment, Stepper, TextField, Toggle,
 } from '../ui/Fields';
-import { HIT, PRESSED, clearNav, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   applyCategoryDefaults,
   blankDraft,
+  blankTaskDraft,
   describeNotify,
   describeRecur,
   draftFromRecord,
@@ -133,20 +134,13 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
         // never overwritten by the category's default duration.
         ...(target.store === 'events'
           ? withDefaultCategory(blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()), categories)
-          // A NEW TASK IS ALL-DAY. Almost nothing on a task list happens at a
-          // clock time -- it is something to get done today, not at 14:15 --
-          // so starting it with a time meant clearing one nearly every time.
-          // `blankDraft` itself is left alone: it is shared with the PC, and
-          // this is a decision about what a task IS, not about a phone.
-          : {
-            // The real clock, not zero: the times are unused while it is
-            // all-day, but they are what the toggle falls back to the moment
-            // somebody turns it off, and 00:00 is not a time anyone meant.
-            ...blankDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes()),
-            allDay: true,
-            // A task has no end. The Ends row is not even drawn for one.
-            endMin: null,
-          }
+          // A NEW TASK IS UNDATED AND ALL-DAY, which is one decision said
+          // twice: a task is something to get done, not something that happens
+          // at 14:15 on Wednesday. The rule lives in `draft.ts` rather than
+          // here because the PC starts a new task the same way and the two
+          // write into the same store. The date it still carries is only the
+          // fallback for choosing a day afterwards.
+          : blankTaskDraft(target.date, new Date().getHours() * 60 + new Date().getMinutes())
         ),
         // Last, so a gesture that DID name a time still wins.
         ...(target.prefill ?? {}),
@@ -232,7 +226,8 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
       {/* Tapping anywhere off the sheet closes it. No pressed state: it is an
           invisible dismiss layer, and dimming the whole screen on touch would
           be a flash that means nothing. */}
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable
+        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
       {/*
         THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.
@@ -307,6 +302,10 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
           */}
           <ScrollView
             style={{ flexShrink: 1 }}
+            // Dragging the form puts the keyboard away rather than scrolling
+            // underneath it, which is both what you meant and one fewer thing
+            // being animated while the list moves.
+            keyboardDismissMode="on-drag"
             contentContainerStyle={{
               padding: space.lg,
               // The pinned action row below owns the safe-area inset now; this
@@ -333,17 +332,25 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
                   // then quietly ignored. And it starts all-day for the same
                   // reason a new one does, since switching the segment IS how
                   // most tasks get created.
-                  if (next === 'tasks') set({ allDay: true, endMin: null, daysSpan: undefined });
+                  if (next === 'tasks') {
+                    set({ undated: true, allDay: true, endMin: null, daysSpan: undefined });
+                  }
                   // Back to an event, and back to having a time: an all-day
                   // event is a real thing but it is not the common one, and
                   // inheriting the toggle from a task nobody kept is a
                   // surprise rather than a default.
-                  else if (draft.allDay) {
+                  // An event must be on a day; there is no undated event.
+                  else if (draft.undated || draft.allDay) {
                     const start = Math.ceil(
                       (new Date().getHours() * 60 + new Date().getMinutes()) / 30,
                     ) * 30;
                     const safe = Math.min(23 * 60 + 30, start);
-                    set({ allDay: false, startMin: safe, endMin: Math.min(24 * 60 - 1, safe + 60) });
+                    set({
+                      undated: false,
+                      allDay: false,
+                      startMin: safe,
+                      endMin: Math.min(24 * 60 - 1, safe + 60),
+                    });
                   }
                 }}
               />
@@ -362,10 +369,27 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
               ) : null}
             </Field>
 
-            <Field label="Day">
-              <DateStrip value={draft.date} onChange={date => set({ date })} />
+            {/*
+              A TASK CAN HAVE NO DAY. Most of them should not have one: "renew
+              the passport" is something to get done, not something that happens
+              on Wednesday, and pinning it to today means finding it apparently
+              overdue tomorrow morning having never had a deadline.
+
+              Only tasks. An event with no day is not a thing the grid can draw.
+            */}
+            <Field label={store === 'tasks' ? 'Day (optional)' : 'Day'}>
+              <DateStrip
+                value={draft.date}
+                onChange={date => set({ date, undated: false })}
+                allowNone={store === 'tasks'}
+                none={store === 'tasks' && draft.undated === true}
+                onNone={() => set({ undated: true, allDay: true, endMin: null })}
+              />
             </Field>
 
+            {/* Nothing below this belongs to a task with no day: a time needs a
+                day to be on, and so does a repeat. */}
+            {store === 'tasks' && draft.undated ? null : (
             <Field label="Time">
               <Toggle
                 label="All day"
@@ -417,6 +441,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
                 <Text variant="caption" tone="danger">{problemFor('time')}</Text>
               ) : null}
             </Field>
+            )}
 
             {store === 'events' ? (
               <Field label="Category">
@@ -446,6 +471,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
 
             {/* ── Everything else, folded but stated ── */}
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={() => setMore(v => !v)}
               style={({ pressed }) => [{ paddingVertical: space.sm }, pressed ? PRESSED : null]}
             >
@@ -459,13 +485,19 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
 
             {more ? (
               <View style={{ gap: space.lg }}>
-                <Field label="Repeat" hint={describeRecur(draft.recur)}>
-                  <RepeatEditor
-                    value={draft.recur}
-                    date={draft.date}
-                    onChange={recur => set({ recur })}
-                  />
-                </Field>
+                {/* A repeat is a rule about which DAYS something falls on, so
+                    there is nothing for it to mean here. `buildTaskRecord`
+                    drops the rule as well, rather than storing one that would
+                    silently never fire. */}
+                {store === 'tasks' && draft.undated ? null : (
+                  <Field label="Repeat" hint={describeRecur(draft.recur)}>
+                    <RepeatEditor
+                      value={draft.recur}
+                      date={draft.date}
+                      onChange={recur => set({ recur })}
+                    />
+                  </Field>
+                )}
 
                 <Field label="Reminder" hint={describeNotify(draft.notify)}>
                   <ReminderEditor value={draft.notify} onChange={notify => set({ notify })} />
@@ -697,6 +729,7 @@ function WeekdayPicker({ value, onChange }: {
         const on = value.includes(d);
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={d}
             onPress={() => onChange(on ? value.filter(x => x !== d) : [...value, d])}
             accessibilityRole="button"
@@ -780,6 +813,7 @@ function ReminderEditor({ value, onChange }: {
               </View>
               {rules.length > 1 ? (
                 <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                   onPress={() => onChange({ ...value, rules: rules.filter((_, j) => j !== i) })}
                   hitSlop={space.sm}
                   accessibilityLabel="Remove this reminder"
@@ -793,6 +827,7 @@ function ReminderEditor({ value, onChange }: {
 
           {rules.length < 4 ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={() => onChange({
                 ...value,
                 rules: [...rules, { id: `r${Date.now()}`, offsetMin: -15 }],
@@ -822,6 +857,11 @@ function OffsetPicker({ value, onChange }: {
   return (
     <ScrollView
       horizontal
+      // Android needs telling that this belongs to a bigger scroller. Without
+      // it a vertical drag that happens to START on this strip is swallowed --
+      // the sheet does not move, the strip does not move, and it reads as the
+      // page being stuck rather than as a gesture landing on the wrong view.
+      nestedScrollEnabled
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ gap: space.xs, paddingRight: space.lg }}
     >
@@ -829,6 +869,7 @@ function OffsetPicker({ value, onChange }: {
         const on = off === value;
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={off}
             onPress={() => onChange(off)}
             accessibilityRole="button"
@@ -895,6 +936,7 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
         <View style={{ width: CLEAR_SLOT, alignItems: 'flex-end' }}>
           {clearable ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={() => onChange(minutes === null ? 10 * 60 : null)}
               hitSlop={space.sm}
               accessibilityRole="button"
@@ -910,6 +952,7 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
 
         <Step label="−" onPress={() => nudge(-step)} onLongPress={() => nudge(-60)} />
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={() => (minutes === null ? onChange(9 * 60) : undefined)}
           style={({ pressed }) => [{
             minWidth: 88, height: HIT,
@@ -944,6 +987,7 @@ function Step({ label, onPress, onLongPress }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       onLongPress={onLongPress}
       delayLongPress={300}
@@ -962,11 +1006,16 @@ function Step({ label, onPress, onLongPress }: {
   );
 }
 
-function DateStrip({ value, onChange, from, days = 14 }: {
+function DateStrip({ value, onChange, from, days = 14, allowNone, none, onNone }: {
   value: string;
   onChange: (date: string) => void;
   from?: string;
   days?: number;
+  /** Offer a "No date" chip at the head of the strip. Tasks only. */
+  allowNone?: boolean;
+  /** Whether that chip is the one currently chosen. */
+  none?: boolean;
+  onNone?: () => void;
 }) {
   const p = useTheme();
   const today = ymd(new Date());
@@ -992,14 +1041,46 @@ function DateStrip({ value, onChange, from, days = 14 }: {
   return (
     <ScrollView
       horizontal
+      // Android needs telling that this belongs to a bigger scroller. Without
+      // it a vertical drag that happens to START on this strip is swallowed --
+      // the sheet does not move, the strip does not move, and it reads as the
+      // page being stuck rather than as a gesture landing on the wrong view.
+      nestedScrollEnabled
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ gap: space.xs, paddingRight: space.lg }}
     >
+      {/* First, and the width of two day chips, because it is a real answer
+          rather than an escape from the question. */}
+      {allowNone ? (
+        <Pressable
+          onPress={onNone}
+          accessibilityRole="button"
+          accessibilityState={{ selected: none === true }}
+          accessibilityLabel="No date"
+          unstable_pressDelay={PRESS_DELAY}
+          style={({ pressed }) => [{
+            minWidth: 84,
+            paddingVertical: space.sm,
+            paddingHorizontal: space.sm,
+            borderRadius: radius.md,
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: none ? p.accentSoft : p.surfaceAlt,
+            borderWidth: 1,
+            borderColor: none ? p.accent : p.line,
+          }, pressed ? PRESSED : null]}
+        >
+          <Text variant="bodyStrong" tone={none ? 'accent' : 'soft'}>No date</Text>
+          <Text variant="caption" tone="faint">anytime</Text>
+        </Pressable>
+      ) : null}
+
       {list.map(date => {
-        const on = date === value;
+        const on = !none && date === value;
         const d = new Date(`${date}T00:00:00`);
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={date}
             onPress={() => onChange(date)}
             accessibilityRole="button"

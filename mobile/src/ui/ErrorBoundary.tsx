@@ -18,7 +18,7 @@ import React from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 
 import { Text } from './kit';
-import { PRESSED, radius, space } from '../theme';
+import { PRESSED, PRESS_DELAY, radius, space } from '../theme';
 
 interface Props {
   children: React.ReactNode;
@@ -98,6 +98,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
         </View>
 
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={() => this.setState({ error: null, info: '' })}
           accessibilityRole="button"
           style={({ pressed }) => [{

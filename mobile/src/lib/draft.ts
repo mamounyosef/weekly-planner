@@ -138,6 +138,20 @@ export interface DraftInput {
   noDuration?: boolean;
   /** Editing one occurrence changes the whole series instead of detaching it. */
   locked?: boolean;
+  /**
+   * TASKS ONLY: this one is not on a day at all.
+   *
+   * Most tasks are not. "Renew the passport" is something to get done, not
+   * something that happens on Wednesday, and filing it under a date you did not
+   * choose means it appears to be overdue the next morning for no reason. A task
+   * with no `weekKey` is already what the rest of the app calls undated -- the
+   * grid gathers them onto today without claiming they belong there -- so this
+   * flag is only how the EDITOR says it, since `date` itself cannot be empty
+   * (an event always has one).
+   *
+   * Ignored for events.
+   */
+  undated?: boolean;
 }
 
 /**
@@ -300,8 +314,11 @@ export function buildTaskRecord(
     ...base,
     id: meta.id,
     title: input.title.trim(),
-    weekKey,
-    dayIndex,
+    // Cleared rather than omitted: `base` is the existing record, so leaving
+    // these out would keep whatever day it used to be on. `undefined` is how
+    // every other field here is cleared.
+    weekKey: input.undated ? undefined : weekKey,
+    dayIndex: input.undated ? undefined : dayIndex,
     updatedAt: meta.now,
   };
 
@@ -312,9 +329,13 @@ export function buildTaskRecord(
   }
   if (input.notes !== undefined) record.notes = input.notes.trim() || undefined;
   if (input.colour !== undefined) record.color = input.colour;
-  record.recur = input.recur;
+  // A repeat is a rule about which DAYS something falls on, so it cannot mean
+  // anything without one. Dropped rather than stored and quietly ignored, which
+  // is the version that has somebody wondering why their weekly task never
+  // came back.
+  record.recur = input.undated ? undefined : input.recur;
   record.notify = input.notify;
-  if (!input.recur) record.exdates = undefined;
+  if (input.undated || !input.recur) record.exdates = undefined;
   if (!existing) record.deleted = false;
   return record;
 }
@@ -354,6 +375,10 @@ export function draftFromRecord(
     noCheckbox: record.noCheckbox === true,
     noDuration: record.noDuration === true,
     locked: record.locked === true,
+    // No anchor stored means it was never on a day. `date` still carries the
+    // fallback, so turning the date back on lands somewhere sensible rather
+    // than on an empty field.
+    undated: store === 'tasks' && typeof record.weekKey !== 'string',
   };
 }
 
@@ -434,6 +459,30 @@ export function describeNotify(notify: NotifySpec | undefined): string {
 export { ordinal };
 
 /** A reasonable first draft for the "+" button: the next round half hour. */
+/**
+ * A new TASK, as both machines start one.
+ *
+ * Undated and all-day, which are the same decision said twice: a task is
+ * something to get done, not something that happens at 14:15 on Wednesday.
+ * Defaulting it onto today was a guess, and a guess that goes stale overnight --
+ * you would come back the next morning to a list of things that looked overdue
+ * and never had a deadline in the first place.
+ *
+ * The date is still carried, so choosing a day in the editor lands on something
+ * sensible instead of an empty field.
+ *
+ * Kept here rather than in either UI because the PC and the phone have to agree
+ * about it; they write into the same store and read each other's rows.
+ */
+export function blankTaskDraft(date: string, nowMinutes: number): DraftInput {
+  return {
+    ...blankDraft(date, nowMinutes),
+    allDay: true,
+    endMin: null,
+    undated: true,
+  };
+}
+
 export function blankDraft(date: string, nowMinutes: number): DraftInput {
   const start = Math.min(23 * 60 + 30, Math.ceil(nowMinutes / 30) * 30);
   return {

@@ -44,7 +44,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Divider, Empty, Row, Text, useTheme } from '../ui/kit';
-import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space, type as typeScale } from '../theme';
 import { usePlanner } from '../state/planner';
 import { addDays, dayLabel, formatClock, ymd } from '../lib/agenda';
 import {
@@ -306,6 +306,7 @@ export function Search({ onClose, onOpenItem, onOpenDate, initialQuery }: {
       }}>
         <Row gap={space.sm}>
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             onPress={onClose}
             accessibilityRole="button"
             accessibilityLabel="Close search"
@@ -348,6 +349,7 @@ export function Search({ onClose, onOpenItem, onOpenDate, initialQuery }: {
             />
             {query ? (
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)}
                 onPress={() => { setQuery(''); inputRef.current?.focus(); }}
                 accessibilityRole="button"
@@ -524,6 +526,7 @@ function Chip({ label, on, onPress, colour }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityState={{ selected: on }}
@@ -629,6 +632,7 @@ function NoResults({ query, activeFilters, onClearFilters }: {
       </Text>
       {activeFilters > 0 ? (
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={onClearFilters}
           accessibilityRole="button"
           android_ripple={{ color: p.accentSoft }}
@@ -681,6 +685,7 @@ function ResultRow({ hit, now, clock, onPress, onPressDate }: {
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={`${hit.title}, ${when}`}
@@ -724,6 +729,7 @@ function ResultRow({ hit, now, clock, onPress, onPressDate }: {
 
         <Row gap={space.xs} style={{ alignItems: 'center', flexWrap: 'wrap' }}>
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)}
             onPress={onPressDate}
             disabled={!onPressDate}

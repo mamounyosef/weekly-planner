@@ -37,7 +37,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { PanResponder, Pressable, ScrollView, View } from 'react-native';
 
 import { Text, useTheme } from '../../ui/kit';
-import { radius, space } from '../../theme';
+import { PRESS_DELAY, radius, space } from '../../theme';
 import { monthGrid } from '../../lib/grid';
 import { countsForRange } from '../../lib/agenda';
 import type { EventCategory } from '../../lib/categories';
@@ -499,6 +499,7 @@ function Cell({ date, count, total, reserve, inMonth, isToday, onPress, onPressO
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       onPressOut={onPressOut}
       accessibilityRole="button"

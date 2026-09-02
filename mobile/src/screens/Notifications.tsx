@@ -42,7 +42,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Text, useTheme } from '../ui/kit';
 import { Segment } from '../ui/Fields';
-import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space, type as typeScale } from '../theme';
 import { formatClock } from '../lib/agenda';
 import {
   KIND_LABEL,
@@ -148,6 +148,7 @@ export function Notifications(props: NotificationsProps) {
             <Text variant="caption" tone="faint">{headline(props.view, props.now)}</Text>
           </View>
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             onPress={props.onClose}
             accessibilityLabel="Close notifications"
             style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}
@@ -170,6 +171,7 @@ export function Notifications(props: NotificationsProps) {
         />
         {props.view.unread > 0 ? (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             onPress={props.onMarkAllRead}
             style={({ pressed }) => [{ minHeight: 36, justifyContent: 'center' }, pressed ? PRESSED : null]}
             accessibilityLabel="Mark everything that has fired as read"
@@ -252,7 +254,8 @@ export function Notifications(props: NotificationsProps) {
                 <Text variant="caption" tone="faint">{props.pendingNote}</Text>
               ) : null}
               {props.onOpenSettings ? (
-                <Pressable onPress={props.onOpenSettings} style={({ pressed }) => [{ minHeight: 40, justifyContent: 'center' }, pressed ? PRESSED : null]}>
+                <Pressable
+        unstable_pressDelay={PRESS_DELAY} onPress={props.onOpenSettings} style={({ pressed }) => [{ minHeight: 40, justifyContent: 'center' }, pressed ? PRESSED : null]}>
                   <Text variant="caption" tone="accent">
                     Change how early reminders arrive
                   </Text>
@@ -509,6 +512,7 @@ function Action({
   const colour = { soft: p.inkSoft, ok: p.ok, danger: p.danger }[tone];
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       android_ripple={{ color: p.accentSoft }}
       style={{

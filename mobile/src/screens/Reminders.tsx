@@ -36,7 +36,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { Field, Stepper, Toggle } from '../ui/Fields';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { formatClock } from '../lib/agenda';
@@ -99,6 +99,7 @@ export function Reminders({ onClose }: { onClose?: () => void }) {
           <Text variant="display">Reminders</Text>
           {onClose ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
@@ -349,6 +350,7 @@ function SpecCard({ title, subject, spec, offsets, onChange, anchor, anchorNote 
   return (
     <Card style={{ padding: space.md }}>
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => setOpen(v => !v)}
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
@@ -394,6 +396,7 @@ function SpecCard({ title, subject, spec, offsets, onChange, anchor, anchorNote 
                   const full = !on && chosen.length >= MAX_RULES;
                   return (
                     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                       key={off}
                       onPress={() => toggleOffset(off)}
                       accessibilityRole="button"
@@ -525,6 +528,7 @@ function ChipRow({ choices, selected, label, max, onToggle }: {
         const full = !on && selected.length >= max;
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={n}
             onPress={() => tap(n)}
             accessibilityRole="button"

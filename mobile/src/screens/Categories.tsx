@@ -24,7 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Row, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Stepper, TextField, Toggle } from '../ui/Fields';
-import { PRESSED, clearNav, radius, space } from '../theme';
+import { PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
@@ -126,6 +126,7 @@ export function Categories({ onClose }: { onClose?: () => void }) {
           <Text variant="display">Categories</Text>
           {onClose ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
@@ -161,6 +162,7 @@ export function Categories({ onClose }: { onClose?: () => void }) {
       </ScrollView>
 
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => { setEditingId(null); setCreating(true); }}
         accessibilityRole="button"
         accessibilityLabel="Add a category"
@@ -223,6 +225,7 @@ function CategoryRow({ cat, onOpen }: { cat: EventCategory; onOpen: () => void }
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onOpen}
       android_ripple={{ color: p.accentSoft }}
       accessibilityRole="button"
@@ -363,7 +366,8 @@ function Sheet({ existing, takenNames, onSave, onDelete, onClose }: {
       {/* Tapping anywhere off the sheet closes it. No pressed state: it is an
           invisible dismiss layer, and dimming the whole screen on touch would
           be a flash that means nothing. */}
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable
+        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
       {/*
         THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.

@@ -39,7 +39,7 @@ import { AppState, Pressable, RefreshControl, ScrollView, View, useWindowDimensi
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   dateKey,
@@ -395,6 +395,7 @@ export function Focus() {
                   const on = timer.plannedSeconds === mins * 60;
                   return (
                     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                       key={mins}
                       onPress={() => run({ kind: 'setPlanned', seconds: mins * 60 })}
                       accessibilityRole="button"
@@ -423,6 +424,7 @@ export function Focus() {
           ) : (
             <Row gap={space.sm} style={{ alignSelf: 'stretch' }}>
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 onPress={() => run({ kind: phase === 'running' ? 'pause' : 'resume' })}
                 accessibilityRole="button"
                 style={({ pressed }) => ({
@@ -463,6 +465,7 @@ export function Focus() {
             const on = r.id === range;
             return (
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 key={r.id}
                 onPress={() => { setRange(r.id); setSelectedDay(null); }}
                 accessibilityRole="button"
@@ -498,6 +501,7 @@ export function Focus() {
             const on = mode === rangeMode;
             return (
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 key={mode}
                 onPress={() => chooseRangeMode(mode)}
                 accessibilityRole="button"
@@ -731,6 +735,7 @@ function BigButton({ label, tone, onPress }: {
   const go = tone === 'go';
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={label}
@@ -761,6 +766,7 @@ function SmallButton({ label, tone, onPress }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={label}
@@ -806,6 +812,7 @@ function Confirm({ kind, elapsed, onCancel, onConfirm }: {
       </Text>
       <Row gap={space.sm}>
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={onCancel}
           accessibilityRole="button"
           android_ripple={{ color: p.accentSoft }}
@@ -824,6 +831,7 @@ function Confirm({ kind, elapsed, onCancel, onConfirm }: {
           <Text variant="bodyStrong">Keep going</Text>
         </Pressable>
         <Pressable
+        unstable_pressDelay={PRESS_DELAY}
           onPress={onConfirm}
           accessibilityRole="button"
           android_ripple={{ color: p.accentSoft }}
@@ -877,7 +885,8 @@ function Chart({ days, peak, compact, selectedDay, onSelect }: {
           const ratio = peak > 0 ? d.seconds / peak : 0;
           const isToday = d.date === today;
           return (
-            <Pressable key={d.date} onPress={() => onSelect?.(d.date)} style={({ pressed }) => [{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', opacity: selectedDay && selectedDay !== d.date ? 0.4 : 1 }, pressed ? PRESSED : null]}>
+            <Pressable
+        unstable_pressDelay={PRESS_DELAY} key={d.date} onPress={() => onSelect?.(d.date)} style={({ pressed }) => [{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', opacity: selectedDay && selectedDay !== d.date ? 0.4 : 1 }, pressed ? PRESSED : null]}>
               <View
                 style={{
                   width: '100%',
@@ -1013,7 +1022,8 @@ function DayDetail({
     }}>
       <Row style={{ justifyContent: 'space-between', marginBottom: space.md }}>
         <Text variant="title">{niceDate(date)}</Text>
-        <Pressable onPress={onClose} style={({ pressed }) => [{ padding: 4 }, pressed ? PRESSED : null]}>
+        <Pressable
+        unstable_pressDelay={PRESS_DELAY} onPress={onClose} style={({ pressed }) => [{ padding: 4 }, pressed ? PRESSED : null]}>
           <Text variant="bodyStrong" tone="accent">Close</Text>
         </Pressable>
       </Row>
@@ -1031,10 +1041,12 @@ function DayDetail({
           />
           <Row gap={space.sm}>
              <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                onPress={() => setEditingTotal(false)}
                style={({ pressed }) => [{ flex: 1, padding: space.sm, alignItems: 'center', borderRadius: radius.md, backgroundColor: p.surface }, pressed ? PRESSED : null]}
              ><Text variant="bodyStrong">Cancel</Text></Pressable>
              <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                onPress={() => { onEditTotal(totalMins * 60); setEditingTotal(false); }}
                style={({ pressed }) => [{ flex: 1, padding: space.sm, alignItems: 'center', borderRadius: radius.md, backgroundColor: p.accent }, pressed ? PRESSED : null]}
              ><Text variant="bodyStrong" style={{ color: p.accentInk }}>Save Total</Text></Pressable>
@@ -1044,6 +1056,7 @@ function DayDetail({
         <Row style={{ justifyContent: 'space-between', marginBottom: space.lg, paddingBottom: space.sm, borderBottomWidth: 1, borderBottomColor: p.line }}>
           <Text variant="bodyStrong">{describeDuration(total)}</Text>
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)} onPress={() => { setTotalMins(Math.round(total / 60)); setEditingTotal(true); }}>
             <Text variant="bodyStrong" tone="accent">Edit Total</Text>
           </Pressable>
@@ -1061,7 +1074,8 @@ function DayDetail({
                 <Text variant="bodyStrong">{describeDuration(s.durationSeconds)}</Text>
                 <Text variant="caption" tone="soft">{niceTime(s.startedAt)} - {niceTime(s.endedAt ?? s.startedAt)}</Text>
               </View>
-              <Pressable onPress={() => onEditSession(s.id, 0)} style={({ pressed }) => [{ padding: space.xs }, pressed ? PRESSED : null]}>
+              <Pressable
+        unstable_pressDelay={PRESS_DELAY} onPress={() => onEditSession(s.id, 0)} style={({ pressed }) => [{ padding: space.xs }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone="danger">Delete</Text>
               </Pressable>
             </Row>

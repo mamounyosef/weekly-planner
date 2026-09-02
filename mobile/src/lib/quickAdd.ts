@@ -309,6 +309,22 @@ export function parseQuickAdd(input: string, options: QuickAddOptions): QuickAdd
     endMin,
     categoryId,
     recur,
+    /**
+     * A TASK WITH NO DAY WRITTEN IN IT GETS NO DAY.
+     *
+     * "buy milk" is not a thing that happens today; it is a thing to do. Filing
+     * it on today because today is when it was typed is a guess, and one that
+     * goes stale overnight: the next morning it reads as overdue having never
+     * had a deadline. "buy milk friday" still lands on Friday, because that was
+     * asked for.
+     *
+     * Events are untouched. An event with no day cannot be drawn, so the
+     * fallback above remains the right answer for one.
+     *
+     * A repeat needs days to repeat on, so a rule that WAS written in the text
+     * ("water the plants weekly") keeps the date it implies.
+     */
+    undated: store === 'tasks' && !parsedDate && !recur,
   };
 
   // Sort matched tokens so they appear in order for the UI to highlight

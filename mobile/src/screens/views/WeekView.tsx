@@ -56,7 +56,7 @@ import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react'
 import { Animated, PanResponder, Pressable, ScrollView, View } from 'react-native';
 
 import { Text, useTheme } from '../../ui/kit';
-import { radius, space } from '../../theme';
+import { PRESS_DELAY, radius, space } from '../../theme';
 import {
   layoutDay, blockEnd, prayerChipMode,
   type Placeable, type Placed, type PrayerChipMode,
@@ -763,6 +763,7 @@ export function WeekView({
           const isTarget = drag !== null && drag.date === d.date;
           return (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               key={d.date}
               onPress={() => onOpenDay(d.date)}
               style={{
@@ -816,6 +817,7 @@ export function WeekView({
                 const done = isPrayerDone?.(d.date, pr.key) ?? false;
                 return (
                   <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                     key={pr.key}
                     onPress={() => onTogglePrayer?.(d.date, pr.key)}
                     accessibilityRole="button"
@@ -877,6 +879,7 @@ export function WeekView({
             <View key={d.date} style={{ flex: 1, paddingHorizontal: 1, gap: 2 }}>
               {d.allDay.slice(0, 2).map(item => (
                 <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                   key={item.id}
                   onPress={() => onOpenItem(item)}
                   style={{
@@ -1113,6 +1116,7 @@ export function WeekView({
           style={{ position: 'absolute', left: 0, right: 0, bottom: space.xl, alignItems: 'center' }}
         >
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             onPress={goToLive}
             accessibilityRole="button"
             accessibilityLabel="Scroll back to the current time"
@@ -1252,6 +1256,7 @@ function DayColumn({
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onOpenDay}
       style={{
         flex: 1,
@@ -1305,6 +1310,7 @@ function DayColumn({
         const isSquashed = (pl as { isHidden?: boolean }).isHidden === true;
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             // The PIECE's id, not the item's: a night split into a tail and a
             // head is two blocks, and keying both by the event they came from
             // would collide.
@@ -1465,6 +1471,7 @@ function DayColumn({
         if (prayerStyle === 'pill') {
           return (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               key={pr.key}
               onPress={() => onTogglePrayer?.(pr.key)}
               accessibilityRole="button"
@@ -1513,6 +1520,7 @@ function DayColumn({
           >
             {line}
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={() => onTogglePrayer?.(pr.key)}
               hitSlop={6}
               accessibilityRole="button"

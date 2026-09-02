@@ -135,6 +135,25 @@ export const PRESSED = { opacity: 0.55 } as const;
  * button ended up resting on the navigation line. This is a floor, not a
  * replacement: a device that reports a real inset still gets it.
  */
+/**
+ * How long a finger must be down before anything lights up.
+ *
+ * Zero -- React Native's default -- means a touch highlights the moment it
+ * lands, and a scroll begins with a touch. So dragging the editor lit up every
+ * control the thumb passed over on the way down: nothing was ever pressed, but
+ * everything flashed as though it had been, which reads as the list being
+ * confused about what you meant.
+ *
+ * A tenth of a second is long enough that a scroll never starts one and short
+ * enough that a real tap still feels immediate -- a deliberate press lasts
+ * upwards of 150ms, so the highlight is still there before the finger lifts.
+ * This is the same trick UIScrollView has used since the first iPhone.
+ *
+ * NOT used on the tab bar, which is not inside anything scrollable and where
+ * the instant ripple is the point.
+ */
+export const PRESS_DELAY = 100;
+
 export const NAV_CLEARANCE = 24;
 
 /** The bottom padding a sheet should use, given whatever the insets claim. */

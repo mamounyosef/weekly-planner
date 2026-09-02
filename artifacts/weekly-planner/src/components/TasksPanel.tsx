@@ -266,7 +266,16 @@ function TasksPanel({
 
   const [composerTitle, setComposerTitle] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
-  const [composerDate, setComposerDate] = useState<string | null>(today);
+  /**
+   * NO DATE, until one is asked for.
+   *
+   * This used to open on today, which is a guess dressed up as an answer. Most
+   * of what goes on a task list is not something that happens today -- it is
+   * something to get done -- and filing it under today means finding it in the
+   * overdue bucket tomorrow morning having never had a deadline at all. The
+   * chips are right there for Today and Tomorrow when a day IS meant.
+   */
+  const [composerDate, setComposerDate] = useState<string | null>(null);
   const prevTodayRef = useRef(today);
 
   useEffect(() => {
@@ -338,7 +347,9 @@ function TasksPanel({
 
   const resetComposer = useCallback(() => {
     setComposerTitle('');
-    setComposerDate(today);
+    // Back to no date, matching how the composer opens: typing one dated task
+    // must not silently date the next five.
+    setComposerDate(null);
     setComposerTime(null);
     setComposerRecur(undefined);
     setComposerNotes('');
@@ -970,7 +981,7 @@ function TasksPanel({
 
           {/* Composer Schedule Bar (Date & Time & Repeat & Options Picker) */}
           <AnimatePresence initial={false}>
-            {(composerFocused || composerTitle.trim() || composerDate !== today || composerTime || composerRecur || composerNotes.trim() || showTimePicker || showRepeatPicker || showNotesInput) && (
+            {(composerFocused || composerTitle.trim() || composerDate !== null || composerTime || composerRecur || composerNotes.trim() || showTimePicker || showRepeatPicker || showNotesInput) && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}

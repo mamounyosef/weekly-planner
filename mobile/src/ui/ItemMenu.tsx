@@ -35,7 +35,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from './kit';
 import { CategoryPicker, ColourPicker, type Swatch } from './Fields';
-import { HIT, PRESSED, clearNav, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
 import { scopeChoices, type OccurrenceScope } from '../lib/occurrence';
 
 /**
@@ -205,7 +205,8 @@ function Sheet({
           way out of a menu you opened by accident is a tap anywhere else. No
           pressed state on it: it is invisible, and dimming the screen on touch
           would be a flash that means nothing. */}
-      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close menu" />
+      <Pressable
+        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close menu" />
 
       {/* Pinned rather than flexed to the bottom, for the reason written out in
           full in `Editor.tsx`: the percentage cap below resolves against the
@@ -404,6 +405,7 @@ function ScopePage({ action, locked, onBack, onChoose }: {
         const risky = action === 'delete' && choice.scope !== 'one';
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={choice.scope}
             onPress={() => onChoose(choice.scope)}
             android_ripple={{ color: risky ? 'rgba(240,121,138,0.18)' : p.accentSoft }}
@@ -428,6 +430,7 @@ function ScopePage({ action, locked, onBack, onChoose }: {
       })}
 
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={onBack}
         android_ripple={{ color: p.accentSoft }}
         accessibilityRole="button"
@@ -455,6 +458,7 @@ function ActionRow({ glyph, glyphColour, label, hint, danger, expanded, onPress 
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       android_ripple={{ color: danger ? 'rgba(240,121,138,0.18)' : p.accentSoft }}
       accessibilityRole="button"

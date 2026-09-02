@@ -16,7 +16,7 @@ import React from 'react';
 import { Pressable, ScrollView, TextInput, View } from 'react-native';
 
 import { Row, Text, useTheme } from './kit';
-import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space, type as typeScale } from '../theme';
 
 // ─── Layout ──────────────────────────────────────────────────────────────────
 
@@ -91,6 +91,7 @@ export function Segment<T extends string>({ options, value, onChange }: {
         const on = opt.key === value;
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={opt.key}
             onPress={() => onChange(opt.key)}
             accessibilityRole="button"
@@ -118,6 +119,7 @@ export function Toggle({ label, hint, value, onChange }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={() => onChange(!value)}
       accessibilityRole="switch"
       accessibilityState={{ checked: value }}
@@ -159,6 +161,7 @@ export function Stepper({ value, min, max, step = 1, onChange, format }: {
 
   const Btn = ({ label, to, disabled }: { label: string; to: number; disabled: boolean }) => (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={() => onChange(clamp(to))}
       disabled={disabled}
       accessibilityRole="button"
@@ -220,6 +223,11 @@ export function ColourPicker({ value, onChange, swatches, disabled, disabledNote
   return (
     <ScrollView
       horizontal
+      // Android needs telling that this belongs to a bigger scroller. Without
+      // it a vertical drag that happens to START on this strip is swallowed --
+      // the sheet does not move, the strip does not move, and it reads as the
+      // page being stuck rather than as a gesture landing on the wrong view.
+      nestedScrollEnabled
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ gap: space.sm, paddingRight: space.lg }}
     >
@@ -227,6 +235,7 @@ export function ColourPicker({ value, onChange, swatches, disabled, disabledNote
         const on = value === sw.key || value === sw.hex;
         return (
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             key={sw.key}
             onPress={() => onChange(on ? undefined : sw.key)}
             accessibilityRole="button"
@@ -261,6 +270,7 @@ export function CategoryPicker({ value, onChange, categories }: {
     const on = value === id || (!value && !id);
     return (
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => onChange(id)}
         accessibilityRole="button"
         accessibilityState={{ selected: on }}
@@ -284,6 +294,11 @@ export function CategoryPicker({ value, onChange, categories }: {
   return (
     <ScrollView
       horizontal
+      // Android needs telling that this belongs to a bigger scroller. Without
+      // it a vertical drag that happens to START on this strip is swallowed --
+      // the sheet does not move, the strip does not move, and it reads as the
+      // page being stuck rather than as a gesture landing on the wrong view.
+      nestedScrollEnabled
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={{ gap: space.sm, paddingRight: space.lg }}
     >

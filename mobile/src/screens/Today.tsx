@@ -50,7 +50,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Row, StatusDot, Text, useTheme } from '../ui/kit';
 import { useNowMinute } from '../ui/useNow';
 import { ICONS } from '../ui/icons';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { WeekView } from './views/WeekView';
@@ -492,6 +492,7 @@ export function Today({
         }}>
           <View style={{ flex: 1 }}>
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)} onPress={refresh} hitSlop={space.sm}>
               <Row gap={space.sm} style={{ alignItems: 'center', marginBottom: 2 }}>
                 <StatusDot tone={statusTone as any} />
@@ -501,6 +502,7 @@ export function Today({
               </Row>
             </Pressable>
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)}
               onPress={() => setSelected(today)}
               disabled={showingToday}
@@ -516,6 +518,7 @@ export function Today({
               is the obvious thing to press to get back. */}
           {!showingToday ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={() => setSelected(today)}
               accessibilityRole="button"
               accessibilityLabel="Back to today"
@@ -575,6 +578,7 @@ export function Today({
             const on = mode === view;
             return (
               <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                 key={mode}
                 onPress={() => chooseView(mode)}
                 accessibilityRole="button"
@@ -821,6 +825,7 @@ export function Today({
           alignItems: 'center',
         }} pointerEvents="box-none">
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             onPress={handleGoToLive}
             accessibilityRole="button"
             accessibilityLabel="Go to Live"
@@ -850,6 +855,7 @@ export function Today({
 
       {/* ── Add ────────────────────────────────────────────────────────── */}
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => setEditing({ store: 'events', date: selected })}
         // The same button, held: typing one line is often faster than filling a
         // sheet, and the two belong on the same control rather than making the
@@ -911,6 +917,7 @@ function HeaderButton({ iconName, onPress, a11y, badge }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={a11y}
@@ -957,6 +964,7 @@ function DayCell({ date, selected, isToday, load, onPress }: {
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityState={{ selected }}
@@ -1036,6 +1044,7 @@ function Spotlight({ item, live, onPress, clock }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={() => onPress(item)}
       android_ripple={{ color: p.accentSoft }}
       style={({ pressed }) => ({
@@ -1107,6 +1116,7 @@ function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
       ) : null}
 
       <Pressable
+        unstable_pressDelay={PRESS_DELAY}
         onPress={() => onOpen(item)}
         onLongPress={onHold ? () => onHold(item) : undefined}
         delayLongPress={280}
@@ -1178,6 +1188,7 @@ function Check({ done, round, colour, onPress, label }: {
   const p = useTheme();
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="checkbox"
       accessibilityState={{ checked: done }}
@@ -1263,6 +1274,7 @@ function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onToggle}
       accessibilityRole="checkbox"
       accessibilityState={{ checked: done }}

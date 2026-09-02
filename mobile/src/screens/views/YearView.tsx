@@ -15,7 +15,7 @@ import React, { useMemo } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 
 import { Text, useTheme } from '../../ui/kit';
-import { radius, space } from '../../theme';
+import { PRESS_DELAY, radius, space } from '../../theme';
 import { monthGrid } from '../../lib/grid';
 import { countsForRange } from '../../lib/agenda';
 
@@ -86,6 +86,7 @@ function MiniMonth({ first, counts, today, weekStartsOn, onPress }: {
 
   return (
     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={new Date(`${first}T00:00:00`)

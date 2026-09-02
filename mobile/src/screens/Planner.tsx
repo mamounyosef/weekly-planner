@@ -26,7 +26,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { Field, Segment } from '../ui/Fields';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
@@ -74,6 +74,7 @@ export function Planner({ onClose }: { onClose?: () => void }) {
         <Row gap={space.md} style={{ alignItems: 'center' }}>
           {onClose ? (
             <Pressable
+        unstable_pressDelay={PRESS_DELAY}
               onPress={onClose}
               accessibilityRole="button"
               accessibilityLabel="Back"
@@ -125,6 +126,7 @@ export function Planner({ onClose }: { onClose?: () => void }) {
                   const on = day.id === s.weekStartsOn;
                   return (
                     <Pressable
+        unstable_pressDelay={PRESS_DELAY}
                       key={day.id}
                       onPress={() => set({ weekStartsOn: day.id })}
                       accessibilityRole="radio"

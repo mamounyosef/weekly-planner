@@ -15,7 +15,7 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Divider, Empty, Row, Text, useTheme } from '../ui/kit';
-import { HIT, PRESSED, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import type { SyncConflict } from '../lib/sync';
 import { groupConflicts, type GroupedConflict } from '../lib/conflictText';
@@ -51,6 +51,7 @@ export function Conflicts({ onClose }: { onClose: () => void }) {
               : conflicts.length === 1 ? '1 conflict' : `${conflicts.length} conflicts`}
           </Text>
           <Pressable
+        unstable_pressDelay={PRESS_DELAY}
             onPress={onClose}
             accessibilityLabel="Close"
             style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}

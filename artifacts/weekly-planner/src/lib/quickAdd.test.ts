@@ -255,6 +255,48 @@ function main() {
   }
 
 
+  console.log('--- 13. A TASK WITH NO DAY IN IT GETS NO DAY ---');
+  {
+    // The thing being guarded: "buy milk" is not something that happens today,
+    // it is something to do. Filing it on today because today is when it was
+    // typed is a guess that goes stale overnight -- the next morning it reads
+    // as overdue having never had a deadline.
+    for (const text of ['buy milk', 'renew the passport', 'call the bank']) {
+      const res = parse(text);
+      assert.equal(res.store, 'tasks', `"${text}" is a task`);
+      assert.equal(res.draft.undated, true, `"${text}" gets no day`);
+      assert.equal(res.draft.allDay, true, 'and no time either');
+      // The date is still carried, as the fallback for choosing one later.
+      assert.equal(res.draft.date, '2026-08-31');
+    }
+
+    // A day that WAS asked for is still obeyed.
+    for (const [text, date] of [
+      ['buy milk tomorrow', '2026-09-01'],
+      ['buy milk friday', '2026-09-04'],
+      ['pay rent sep 15', '2026-09-15'],
+    ] as const) {
+      const res = parse(text);
+      assert.equal(res.store, 'tasks', `"${text}" is a task`);
+      assert.equal(res.draft.undated, false, `"${text}" keeps the day it names`);
+      assert.equal(res.draft.date, date);
+    }
+
+    // A repeat needs days to repeat on, so it counts as naming one.
+    const weekly = parse('water the plants every week');
+    assert.ok(weekly.draft.recur, 'the rule was read');
+    assert.equal(weekly.draft.undated, false,
+      'a repeating task keeps an anchor, or the rule has nothing to repeat from');
+
+    // Events are untouched: one with no day cannot be drawn at all.
+    for (const text of ['gym 6pm', 'lecture at 9am']) {
+      const res = parse(text);
+      assert.equal(res.store, 'events', `"${text}" is an event`);
+      assert.equal(res.draft.undated, false, `"${text}" keeps today`);
+      assert.equal(res.draft.date, '2026-08-31');
+    }
+  }
+
   console.log('\nALL PASS (quickAdd: events, tasks, durations, recurrence, tags, time/date, degenerate)');
 }
 
