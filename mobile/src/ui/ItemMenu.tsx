@@ -199,14 +199,25 @@ function Sheet({
   const back = () => setStep({ page: 'actions' });
 
   return (
-    <View style={{ flex: 1, justifyContent: 'flex-end' }}>
+    <View style={{ flex: 1 }}>
       <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: p.scrim, opacity: t }]} />
       {/* The whole area above the sheet dismisses it. On a phone the quickest
-          way out of a menu you opened by accident is a tap anywhere else. */}
-      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close menu" />
+          way out of a menu you opened by accident is a tap anywhere else. No
+          pressed state on it: it is invisible, and dimming the screen on touch
+          would be a flash that means nothing. */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close menu" />
 
+      {/* Pinned rather than flexed to the bottom, for the reason written out in
+          full in `Editor.tsx`: the percentage cap below resolves against the
+          parent, and a parent sized BY its child has no height to resolve
+          against, so the cap did nothing and the sheet sat short of the bottom
+          with a band of scrim under it. */}
       <Animated.View
         style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
           transform: [{ translateY: slide }],
           backgroundColor: p.surface,
           borderTopLeftRadius: radius.lg,

@@ -21,7 +21,9 @@
 // makes deleting safe from here.
 
 import React, { useMemo, useState } from 'react';
-import { Alert, Modal, Pressable, ScrollView, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, View,
+  StyleSheet,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Row, Spacer, Text, useTheme } from '../ui/kit';
@@ -352,16 +354,41 @@ function Sheet({ existing, takenNames, suggestedColour, onSave, onDelete, onClos
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'flex-end' }}>
-      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close" />
+    <View style={{ flex: 1, backgroundColor: p.scrim }}>
+      {/* Tapping anywhere off the sheet closes it. No pressed state: it is an
+          invisible dismiss layer, and dimming the whole screen on touch would
+          be a flash that means nothing. */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
+      {/*
+        THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.
+
+        It used to be `justifyContent: 'flex-end'` with a flexible spacer above
+        it, and it did not sit flush: a band of scrim was left underneath, wide
+        enough to read the tab bar through, which looked exactly like the sheet
+        had been cropped.
+
+        The cause was `maxHeight: '92%'`. A percentage resolves against the
+        PARENT's height, and the parent here had no height of its own -- it was
+        sized by this very view. Against an indefinite parent the percentage is
+        undefined, so the cap did nothing and the column's arithmetic came out
+        wrong.
+
+        Positioning it absolutely settles both halves at once: `bottom: 0` is
+        not an opinion about leftover space, and the cap now resolves against
+        the modal's own full-screen root, which is definite.
+      */}
       <View style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        maxHeight: '92%',
         backgroundColor: p.surface,
         borderTopLeftRadius: radius.lg,
         borderTopRightRadius: radius.lg,
         borderTopWidth: 1,
         borderColor: p.line,
-        maxHeight: '92%',
       }}>
         <View style={{ alignItems: 'center', paddingTop: space.sm }}>
           <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: p.line }} />

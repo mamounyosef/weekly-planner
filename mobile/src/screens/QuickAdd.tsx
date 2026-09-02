@@ -18,6 +18,7 @@ import {
   ScrollView,
   TextInput,
   View,
+  StyleSheet,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -205,17 +206,48 @@ function Sheet({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'flex-end' }}>
-      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close" />
+    <View style={{ flex: 1, backgroundColor: p.scrim }}>
+      {/* Tapping anywhere off the sheet closes it. No pressed state: it is an
+          invisible dismiss layer, and dimming the whole screen on touch would
+          be a flash that means nothing. */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      {/*
+        THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.
+
+        It used to be `justifyContent: 'flex-end'` with a flexible spacer above
+        it, and it did not sit flush: a band of scrim was left underneath, wide
+        enough to read the tab bar through, which looked exactly like the sheet
+        had been cropped. Two rounds of fixing the wrong thing went into that
+        band -- the buttons were pinned, and the modal was told to cover the
+        navigation bar (which turned out to be a no-op, because edge-to-edge
+        already forces both translucency flags on).
+
+        The suspect is `maxHeight: '92%'` on a parent with no height of its own:
+        a percentage resolves against the parent, and this parent was sized BY
+        its child, so the cap had nothing to resolve against. But the honest
+        reason to write it this way is that it does not MATTER which of the
+        column's assumptions was wrong. `bottom: 0` is not an opinion about
+        leftover space, and the cap now resolves against the modal's own root,
+        which React Native guarantees is full-screen. There is nothing left for
+        a layout pass to get wrong.
+      */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          maxHeight: '92%',
+        }}
+      >
         <View style={{
           backgroundColor: p.surface,
           borderTopLeftRadius: radius.lg,
           borderTopRightRadius: radius.lg,
           borderTopWidth: 1,
           borderColor: p.line,
-          maxHeight: '92%',
         }}>
           <View style={{ alignItems: 'center', paddingTop: space.sm }}>
             <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: p.line }} />
