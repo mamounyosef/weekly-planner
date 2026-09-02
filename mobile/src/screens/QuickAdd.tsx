@@ -36,6 +36,18 @@ export function QuickAdd({ onClose }: { onClose: () => void }) {
       transparent
       onRequestClose={onClose}
       statusBarTranslucent
+      // Under the navigation bar as well, not just the status bar.
+      //
+      // THE STRIP AT THE BOTTOM OF EVERY SHEET. Without this the modal's
+      // window stops above the system navigation area, so the sheet ended
+      // short and the app behind it -- the tab bar -- showed through in the
+      // band below, looking like the sheet had been cropped. Each sheet
+      // already pads itself by `insets.bottom`, so covering that area is what
+      // makes the padding mean something instead of being doubled by a gap.
+      //
+      // React Native requires `statusBarTranslucent` alongside it and warns in
+      // dev if it is missing, which is why the two always appear together.
+      navigationBarTranslucent
     >
       <Sheet onClose={onClose} />
     </Modal>
