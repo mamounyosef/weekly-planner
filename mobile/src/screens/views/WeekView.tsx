@@ -337,6 +337,53 @@ export function WeekView({
   nowMinRef.current = nowMin;
 
   /**
+   * Whether the now-line has been scrolled off the screen.
+   *
+   * State, not a ref, because the button appearing IS the render. It is set
+   * from the scroll handler, which runs sixteen times a second, so it is
+   * written through a comparison: React bails out when the boolean has not
+   * changed, and it only changes when the line crosses an edge.
+   */
+  const [liveOffscreen, setLiveOffscreen] = useState(false);
+  const viewportH = useRef(0);
+
+  /** Where the now-line sits in the scrolled content, or null on a day that is
+   *  not today. */
+  const liveY = useCallback((): number | null => {
+    const minute = nowMinRef.current;
+    if (minute === null) return null;
+    return yAt(inWindow(minute));
+  }, [yAt, inWindow]);
+
+  const checkLive = useCallback((offset: number) => {
+    const y = liveY();
+    if (y === null || viewportH.current <= 0) {
+      setLiveOffscreen(false);
+      return;
+    }
+    // A margin either side, so the button does not flicker into existence for
+    // a line that is technically visible but jammed against an edge.
+    const off = y < offset + 48 || y > offset + viewportH.current - 48;
+    setLiveOffscreen(prev => (prev === off ? prev : off));
+  }, [liveY]);
+
+  /**
+   * Put the current time in the MIDDLE of the screen, the way the PC's own
+   * button does. The initial placement (`scrollTargetFor`) deliberately leaves
+   * the now-line low, with the last couple of hours above it for context; this
+   * is a different question, asked by someone who has scrolled away and wants
+   * to be taken back.
+   */
+  const goToLive = useCallback(() => {
+    const y = liveY();
+    if (y === null) return;
+    scroller.current?.scrollTo({
+      y: Math.max(0, y - viewportH.current / 2),
+      animated: true,
+    });
+  }, [liveY]);
+
+  /**
    * The position the grid is BORN at.
    *
    * THE FLASH THIS REMOVES. The grid used to mount at the top and then scroll
@@ -871,7 +918,15 @@ export function WeekView({
           if (Math.abs(scrollY.current - initialOffset.y) < 2) return;
           scroller.current?.scrollTo({ y: initialOffset.y, animated: false });
         }}
-        onScroll={e => { scrollY.current = e.nativeEvent.contentOffset.y; }}
+        onScroll={e => {
+          scrollY.current = e.nativeEvent.contentOffset.y;
+          viewportH.current = e.nativeEvent.layoutMeasurement.height;
+          checkLive(scrollY.current);
+        }}
+        onLayout={e => {
+          viewportH.current = e.nativeEvent.layout.height;
+          checkLive(scrollY.current);
+        }}
         // A little air at the top, so the first hour is not flush against
         // whatever sits above the grid.
         contentContainerStyle={{ paddingTop: space.sm, paddingBottom: space.xxl }}
@@ -946,6 +1001,29 @@ export function WeekView({
               </View>
             )) : null}
 
+            {/* The time it is now, on the rail, in the same red as the line
+                across the grid. The rail is a column of times, so the current
+                one belongs in it — and reading the clock off the thing you are
+                already looking at beats hunting for where the line crosses. */}
+            {nowMin !== null ? (
+              <View
+                pointerEvents="none"
+                style={{
+                  position: 'absolute',
+                  top: yAt(inWindow(nowMin)) - 8,
+                  right: 2,
+                  backgroundColor: p.danger,
+                  borderRadius: radius.sm,
+                  paddingHorizontal: 4,
+                  paddingVertical: 1,
+                }}
+              >
+                <Text style={{ color: '#fff', fontSize: 9, lineHeight: 12, fontWeight: '800' }}>
+                  {formatClock(nowMin, clock)}
+                </Text>
+              </View>
+            ) : null}
+
             {/* The same break the columns draw. Without it the rail reads as
                 a continuous list of times, and 1:55am sitting directly above
                 8:00am looks like a rendering fault rather than four hours
@@ -1019,6 +1097,52 @@ export function WeekView({
           ) : null}
         </View>
       </ScrollView>
+
+      {/*
+        Go to live.
+
+        Only ever visible when it has something to do: the moment the red line
+        is back on screen it goes away again, so it is never a button sitting
+        there asking to be ignored. Centred rather than in a corner because it
+        is not an action on anything, it is a way back — and the corner already
+        belongs to the add button.
+      */}
+      {liveOffscreen ? (
+        <View
+          pointerEvents="box-none"
+          style={{ position: 'absolute', left: 0, right: 0, bottom: space.xl, alignItems: 'center' }}
+        >
+          <Pressable
+            onPress={goToLive}
+            accessibilityRole="button"
+            accessibilityLabel="Scroll back to the current time"
+            android_ripple={{ color: p.surfaceAlt }}
+            style={({ pressed }) => ({
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 7,
+              paddingLeft: 12,
+              paddingRight: 16,
+              paddingVertical: 9,
+              borderRadius: radius.pill,
+              backgroundColor: p.surface,
+              borderWidth: 1,
+              borderColor: p.line,
+              transform: [{ scale: pressed ? 0.96 : 1 }],
+              elevation: 8,
+              shadowColor: '#000',
+              shadowOpacity: 0.35,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 5 },
+            })}
+          >
+            <View style={{
+              width: 8, height: 8, borderRadius: 4, backgroundColor: p.danger,
+            }} />
+            <Text variant="bodyStrong" style={{ color: p.ink }}>Go to live</Text>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -1417,14 +1541,68 @@ function DayColumn({
         );
       })}
 
-      {nowMin !== null ? (
-        <View style={{
-          position: 'absolute',
-          top: yAt(nowMin),
-          left: 0, right: 0, height: 1.5,
-          backgroundColor: p.danger,
-        }} />
-      ) : null}
+      {nowMin !== null ? <NowMarker top={yAt(nowMin)} /> : null}
     </Pressable>
+  );
+}
+
+/**
+ * Where you are in the day.
+ *
+ * It was a flat hairline, which on a grid already ruled with a line every few
+ * minutes is one more line among fifty — the single most important thing on the
+ * screen, drawn exactly like the least important. So it gets a head: a solid
+ * dot on the leading edge with a halo breathing out of it once every couple of
+ * seconds. Motion is what the eye finds without being asked, and nothing else
+ * on this grid moves.
+ *
+ * The pulse runs on the native driver, so it costs nothing on the JS thread and
+ * keeps going smoothly through a drag or a sync.
+ */
+function NowMarker({ top }: { top: number }) {
+  const p = useTheme();
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(pulse, {
+        toValue: 1,
+        duration: 2_200,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    // Stopped on unmount: a loop left running holds the animation frame
+    // callback alive after the column has gone.
+    return () => loop.stop();
+  }, [pulse]);
+
+  return (
+    <View
+      pointerEvents="none"
+      style={{ position: 'absolute', top: top - 5, left: 0, right: 0, height: 10 }}
+    >
+      <View style={{
+        position: 'absolute',
+        top: 4.25, left: 0, right: 0, height: 1.5,
+        backgroundColor: p.danger,
+      }} />
+      <Animated.View
+        style={{
+          position: 'absolute',
+          left: -7, top: -7,
+          width: 24, height: 24, borderRadius: 12,
+          backgroundColor: p.danger,
+          opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0] }),
+          transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }) }],
+        }}
+      />
+      <View style={{
+        position: 'absolute',
+        left: -3, top: 0,
+        width: 10, height: 10, borderRadius: 5,
+        backgroundColor: p.danger,
+      }} />
+    </View>
   );
 }
