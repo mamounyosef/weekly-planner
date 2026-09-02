@@ -108,6 +108,25 @@ export const type = {
  * 48 is Android's accessibility floor and the app holds to it everywhere —
  * a planner is used one-handed, in a hurry, often while walking.
  */
+/**
+ * What a press looks like, everywhere.
+ *
+ * The app had 106 pressable things and feedback on 31 of them. The other 75
+ * did their job perfectly and looked like they had ignored you, which is
+ * indistinguishable from being slow: with nothing acknowledging the touch, the
+ * only signal that anything happened is the screen finally changing, so every
+ * interaction felt like it took as long as its slowest part.
+ *
+ * Dimming is used rather than a ripple because it is honest on any shape. An
+ * Android ripple is masked to the view's background drawable, so on the many
+ * transparent or oddly-clipped touch targets here it would spill as a
+ * rectangle. Opacity cannot be wrong about a shape.
+ *
+ * Applied through `style={({ pressed }) => [...]}`, so it costs nothing until a
+ * finger is down.
+ */
+export const PRESSED = { opacity: 0.55 } as const;
+
 export const HIT = 48;
 
 /** The primary actions live in the lower third, within one thumb's reach. */

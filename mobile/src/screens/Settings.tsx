@@ -14,7 +14,7 @@ import * as Updates from 'expo-updates';
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
 import { ICONS } from '../ui/icons';
 import { Segment, Stepper, Toggle } from '../ui/Fields';
-import { HIT, radius, space, type ThemeMode } from '../theme';
+import { HIT, PRESSED, radius, space, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   describeRanges, hiddenHours, rangesFromHidden, type HourRange,
@@ -261,7 +261,7 @@ export function Settings({
           {THEME_CHOICES.map(choice => {
             const on = choice.mode === themeMode;
             return (
-              <Pressable key={choice.mode} onPress={() => setThemeMode(choice.mode)} accessibilityRole="button" accessibilityState={{ selected: on }} style={{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }}>
+              <Pressable key={choice.mode} onPress={() => setThemeMode(choice.mode)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{choice.label}</Text>
               </Pressable>
             );
@@ -288,13 +288,13 @@ export function Settings({
                 accessibilityRole="radio"
                 accessibilityState={{ selected: on }}
                 accessibilityLabel={`Task colour ${hex}`}
-                style={{
+                style={({ pressed }) => [{
                   width: 30, height: 30,
                   borderRadius: 15,
                   backgroundColor: hex,
                   borderWidth: on ? 3 : 1,
                   borderColor: on ? p.ink : p.line,
-                }}
+                }, pressed ? PRESSED : null]}
               />
             );
           })}
@@ -373,7 +373,7 @@ export function Settings({
           {[5, 10, 15, 30, 60].map(mins => {
             const on = mins === interval;
             return (
-              <Pressable key={mins} onPress={() => setInterval(mins)} accessibilityRole="button" accessibilityState={{ selected: on }} style={{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }}>
+              <Pressable key={mins} onPress={() => setInterval(mins)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{mins === 60 ? '1 hr' : `${mins}m`}</Text>
               </Pressable>
             );
@@ -389,13 +389,13 @@ export function Settings({
         <Row style={{ justifyContent: 'space-between' }}>
           <Row gap={space.sm} style={{ alignItems: 'center' }}>
             {section && (
-              <Pressable onPress={() => setSection(null)} accessibilityLabel="Back" style={{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }}>
+              <Pressable onPress={() => setSection(null)} accessibilityLabel="Back" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center', marginLeft: -10 }, pressed ? PRESSED : null]}>
                 <Text variant="title" tone="soft">‹</Text>
               </Pressable>
             )}
             <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : 'Settings'}</Text>
           </Row>
-          <Pressable onPress={onClose} accessibilityLabel="Close" style={{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }}>
+          <Pressable onPress={onClose} accessibilityLabel="Close" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}>
             <Text variant="title" tone="soft">×</Text>
           </Pressable>
         </Row>
@@ -414,7 +414,7 @@ function MenuRow({ label, hint, iconName, onPress }: { label: string; hint: stri
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      style={{ flexDirection: 'row', alignItems: 'center', minHeight: HIT, gap: space.md, paddingVertical: space.xs }}
+      style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', minHeight: HIT, gap: space.md, paddingVertical: space.xs }, pressed ? PRESSED : null]}
     >
       <View style={{ width: 32, alignItems: 'center' }}>
         {iconName && ICONS[iconName] ? (
@@ -474,7 +474,7 @@ function HourStrip({ ranges, clock, onToggle }: {
             accessibilityRole="switch"
             accessibilityState={{ checked: shown }}
             accessibilityLabel={`${formatHour(hour, clock)}, ${shown ? 'shown' : 'hidden'}`}
-            style={{
+            style={({ pressed }) => [{
               flex: 1,
               height: 34,
               alignItems: 'center',
@@ -483,7 +483,7 @@ function HourStrip({ ranges, clock, onToggle }: {
               borderWidth: 1,
               borderColor: shown ? p.accent : p.line,
               backgroundColor: shown ? p.accentSoft : 'transparent',
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text
               variant="caption"
@@ -532,7 +532,7 @@ function DayCount({ value, onChange }: { value: number; onChange: (n: number) =>
             onPress={() => onChange(n)}
             accessibilityRole="button"
             accessibilityState={{ selected: on }}
-            style={{
+            style={({ pressed }) => [{
               flex: 1,
               height: 34,
               alignItems: 'center',
@@ -541,7 +541,7 @@ function DayCount({ value, onChange }: { value: number; onChange: (n: number) =>
               backgroundColor: on ? p.accentSoft : p.surfaceAlt,
               borderWidth: 1,
               borderColor: on ? p.accent : p.line,
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text variant="caption" tone={on ? 'accent' : 'soft'}>{n}</Text>
           </Pressable>

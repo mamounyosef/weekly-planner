@@ -36,7 +36,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { Field, Stepper, Toggle } from '../ui/Fields';
-import { radius, space, HIT } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { formatClock } from '../lib/agenda';
@@ -102,7 +102,7 @@ export function Reminders({ onClose }: { onClose?: () => void }) {
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
-              style={{ paddingHorizontal: space.sm }}
+              style={({ pressed }) => [{ paddingHorizontal: space.sm }, pressed ? PRESSED : null]}
             >
               <Text variant="title" tone="soft">✕</Text>
             </Pressable>
@@ -352,7 +352,7 @@ function SpecCard({ title, subject, spec, offsets, onChange, anchor, anchorNote 
         onPress={() => setOpen(v => !v)}
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: HIT }}
+        style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: HIT }, pressed ? PRESSED : null]}
       >
         <View style={{ flex: 1 }}>
           <Row gap={space.sm} style={{ alignItems: 'center' }}>
@@ -399,7 +399,7 @@ function SpecCard({ title, subject, spec, offsets, onChange, anchor, anchorNote 
                       accessibilityRole="button"
                       accessibilityState={{ selected: on, disabled: full }}
                       accessibilityLabel={offsetLabel(off)}
-                      style={{
+                      style={({ pressed }) => [{
                         paddingHorizontal: space.md,
                         height: 36,
                         alignItems: 'center',
@@ -409,7 +409,7 @@ function SpecCard({ title, subject, spec, offsets, onChange, anchor, anchorNote 
                         borderWidth: 1,
                         borderColor: on ? p.accent : p.line,
                         opacity: full ? 0.4 : 1,
-                      }}
+                      }, pressed ? PRESSED : null]}
                     >
                       <Text variant="caption" tone={on ? 'accent' : 'soft'}>
                         {offsetLabel(off)}
@@ -529,7 +529,7 @@ function ChipRow({ choices, selected, label, max, onToggle }: {
             onPress={() => tap(n)}
             accessibilityRole="button"
             accessibilityState={{ selected: on, disabled: full }}
-            style={{
+            style={({ pressed }) => [{
               paddingHorizontal: space.md,
               height: 36,
               alignItems: 'center',
@@ -539,7 +539,7 @@ function ChipRow({ choices, selected, label, max, onToggle }: {
               borderWidth: 1,
               borderColor: on ? p.accent : p.line,
               opacity: full ? 0.4 : 1,
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text variant="caption" tone={on ? 'accent' : 'soft'}>{label(n)}</Text>
           </Pressable>

@@ -39,7 +39,7 @@ import { AppState, Pressable, RefreshControl, ScrollView, View, useWindowDimensi
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
-import { HIT, radius, space } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   dateKey,
@@ -400,7 +400,7 @@ export function Focus() {
                       accessibilityRole="button"
                       accessibilityState={{ selected: on }}
                       accessibilityLabel={`${mins} minute session`}
-                      style={{
+                      style={({ pressed }) => [{
                         flex: 1,
                         height: 40,
                         alignItems: 'center',
@@ -409,7 +409,7 @@ export function Focus() {
                         borderWidth: 1,
                         borderColor: on ? p.accent : p.line,
                         backgroundColor: on ? p.accentSoft : 'transparent',
-                      }}
+                      }, pressed ? PRESSED : null]}
                     >
                       <Text variant="bodyStrong" style={{ color: on ? p.accent : p.inkSoft }}>
                         {mins}
@@ -421,17 +421,29 @@ export function Focus() {
               <BigButton label="Start focus" tone="go" onPress={() => run({ kind: 'start' })} />
             </>
           ) : (
-            <>
-              <BigButton
-                label={phase === 'running' ? 'Pause' : 'Resume'}
-                tone={phase === 'running' ? 'hold' : 'go'}
+            <Row gap={space.sm} style={{ alignSelf: 'stretch' }}>
+              <Pressable
                 onPress={() => run({ kind: phase === 'running' ? 'pause' : 'resume' })}
-              />
-              <Row gap={space.sm} style={{ marginTop: space.md, alignSelf: 'stretch' }}>
-                <SmallButton label="Finish" onPress={() => setPending('finish')} />
-                <SmallButton label="Discard" tone="danger" onPress={() => setPending('discard')} />
-              </Row>
-            </>
+                accessibilityRole="button"
+                style={({ pressed }) => ({
+                  flex: 0.85,
+                  height: HIT - 4,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: radius.pill,
+                  backgroundColor: phase === 'running' ? p.surfaceAlt : p.accent,
+                  borderWidth: phase === 'running' ? 1 : 0,
+                  borderColor: p.line,
+                  opacity: pressed ? 0.9 : 1,
+                })}
+              >
+                <Text variant="bodyStrong" style={{ color: phase === 'running' ? p.ink : p.accentInk }}>
+                  {phase === 'running' ? 'Pause' : 'Resume'}
+                </Text>
+              </Pressable>
+              <SmallButton label="Finish" onPress={() => setPending('finish')} />
+              <SmallButton label="Discard" tone="danger" onPress={() => setPending('discard')} />
+            </Row>
           )}
         </View>
 
@@ -455,11 +467,11 @@ export function Focus() {
                 onPress={() => { setRange(r.id); setSelectedDay(null); }}
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
-                style={{
+                style={({ pressed }) => [{
                   flex: 1, height: 38, alignItems: 'center', justifyContent: 'center',
                   borderRadius: radius.sm,
                   backgroundColor: on ? p.accent : 'transparent',
-                }}
+                }, pressed ? PRESSED : null]}
               >
                 <Text variant="bodyStrong" style={{ color: on ? p.accentInk : p.inkSoft }}>
                   {r.label}
@@ -491,11 +503,11 @@ export function Focus() {
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
                 accessibilityLabel={explainFocusMode(mode, range)}
-                style={{
+                style={({ pressed }) => [{
                   flex: 1, height: 32, alignItems: 'center', justifyContent: 'center',
                   borderRadius: radius.sm,
                   backgroundColor: on ? p.accentSoft : 'transparent',
-                }}
+                }, pressed ? PRESSED : null]}
               >
                 <Text variant="caption" tone={on ? 'accent' : 'soft'} style={{ fontWeight: on ? '700' : '400' }}>
                   {describeFocusRange(focusPeriodRange({
@@ -755,7 +767,7 @@ function SmallButton({ label, tone, onPress }: {
       android_ripple={{ color: p.accentSoft }}
       style={({ pressed }) => ({
         flex: 1,
-        height: HIT,
+        height: HIT - 4,
         alignItems: 'center',
         justifyContent: 'center',
         borderRadius: radius.pill,
@@ -865,7 +877,7 @@ function Chart({ days, peak, compact, selectedDay, onSelect }: {
           const ratio = peak > 0 ? d.seconds / peak : 0;
           const isToday = d.date === today;
           return (
-            <Pressable key={d.date} onPress={() => onSelect?.(d.date)} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', opacity: selectedDay && selectedDay !== d.date ? 0.4 : 1 }}>
+            <Pressable key={d.date} onPress={() => onSelect?.(d.date)} style={({ pressed }) => [{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', opacity: selectedDay && selectedDay !== d.date ? 0.4 : 1 }, pressed ? PRESSED : null]}>
               <View
                 style={{
                   width: '100%',
@@ -1001,7 +1013,7 @@ function DayDetail({
     }}>
       <Row style={{ justifyContent: 'space-between', marginBottom: space.md }}>
         <Text variant="title">{niceDate(date)}</Text>
-        <Pressable onPress={onClose} style={{ padding: 4 }}>
+        <Pressable onPress={onClose} style={({ pressed }) => [{ padding: 4 }, pressed ? PRESSED : null]}>
           <Text variant="bodyStrong" tone="accent">Close</Text>
         </Pressable>
       </Row>
@@ -1020,18 +1032,19 @@ function DayDetail({
           <Row gap={space.sm}>
              <Pressable
                onPress={() => setEditingTotal(false)}
-               style={{ flex: 1, padding: space.sm, alignItems: 'center', borderRadius: radius.md, backgroundColor: p.surface }}
+               style={({ pressed }) => [{ flex: 1, padding: space.sm, alignItems: 'center', borderRadius: radius.md, backgroundColor: p.surface }, pressed ? PRESSED : null]}
              ><Text variant="bodyStrong">Cancel</Text></Pressable>
              <Pressable
                onPress={() => { onEditTotal(totalMins * 60); setEditingTotal(false); }}
-               style={{ flex: 1, padding: space.sm, alignItems: 'center', borderRadius: radius.md, backgroundColor: p.accent }}
+               style={({ pressed }) => [{ flex: 1, padding: space.sm, alignItems: 'center', borderRadius: radius.md, backgroundColor: p.accent }, pressed ? PRESSED : null]}
              ><Text variant="bodyStrong" style={{ color: p.accentInk }}>Save Total</Text></Pressable>
           </Row>
         </View>
       ) : (
         <Row style={{ justifyContent: 'space-between', marginBottom: space.lg, paddingBottom: space.sm, borderBottomWidth: 1, borderBottomColor: p.line }}>
           <Text variant="bodyStrong">{describeDuration(total)}</Text>
-          <Pressable onPress={() => { setTotalMins(Math.round(total / 60)); setEditingTotal(true); }}>
+          <Pressable
+      style={({ pressed }) => (pressed ? PRESSED : null)} onPress={() => { setTotalMins(Math.round(total / 60)); setEditingTotal(true); }}>
             <Text variant="bodyStrong" tone="accent">Edit Total</Text>
           </Pressable>
         </Row>
@@ -1048,7 +1061,7 @@ function DayDetail({
                 <Text variant="bodyStrong">{describeDuration(s.durationSeconds)}</Text>
                 <Text variant="caption" tone="soft">{niceTime(s.startedAt)} - {niceTime(s.endedAt ?? s.startedAt)}</Text>
               </View>
-              <Pressable onPress={() => onEditSession(s.id, 0)} style={{ padding: space.xs }}>
+              <Pressable onPress={() => onEditSession(s.id, 0)} style={({ pressed }) => [{ padding: space.xs }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone="danger">Delete</Text>
               </Pressable>
             </Row>

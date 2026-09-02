@@ -7,7 +7,10 @@
 
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { emptyState, makeOps, readStore, type SyncConflict, type SyncOp } from './sync';
+import {
+  DELETED_FIELD, emptyState, isTombstoned, makeOps, readStore,
+  type SyncConflict, type SyncOp,
+} from './sync';
 import { applyLocalChange, emptyClientData, type ClientData } from './syncClient';
 import { createStorage, makeDeviceId, SCHEMA_VERSION, type SqlRunner } from './syncStorage';
 
@@ -383,6 +386,244 @@ async function main() {
       assert.ok(id.startsWith('android-'), 'and says which platform it is');
     }
     assert.ok(makeDeviceId(rand, 'tablet').startsWith('tablet-'));
+  }
+
+  // ─── The split write ───────────────────────────────────────────────────────
+  // An edit is now two writes: the ops immediately, the state blob whenever the
+  // caller gets round to it. That is only allowed to be faster if it is exactly
+  // as safe, so these are about the window between the two.
+
+  console.log('--- 18. OPS ALONE ARE ENOUGH: A CRASH BEFORE THE STATE WRITE ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+
+    // Three edits, each one written the new way but with the state blob never
+    // reaching disk — the app was killed before the coalesced write fired.
+    const titles = ['Buy milk', 'Buy oat milk', 'Buy oat milk and bread'];
+    for (const title of titles) {
+      const before = data;
+      data = applyLocalChange(data, {
+        store: 'tasks', entityId: 'shopping', changes: { title }, at: 1_000,
+      });
+      await store.saveOps(data.outbox.slice(before.outbox.length));
+    }
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    assert.equal(
+      (readStore(reloaded.state, 'tasks').shopping as any)?.title,
+      'Buy oat milk and bread',
+      'every edit came back, replayed from the outbox alone',
+    );
+    assert.equal(reloaded.outbox.length, 3, 'and they are all still queued to send');
+  }
+
+  console.log('--- 19. A STATE BLOB THAT IS BEHIND CATCHES UP, NOT BACK ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 't1', changes: { title: 'First' }, at: 1_000,
+    });
+    await store.saveOps(data.outbox);
+    await store.saveState(data);          // the blob is current here
+
+    const stale = data;
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 't1', changes: { title: 'Second' }, at: 2_000,
+    });
+    await store.saveOps(data.outbox.slice(stale.outbox.length));
+    // ...and the process dies before saveState runs again.
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    assert.equal(
+      (readStore(reloaded.state, 'tasks').t1 as any)?.title, 'Second',
+      'the newer op wins over the older blob',
+    );
+  }
+
+  console.log('--- 20. REPLAY IS IDEMPOTENT: THE USUAL CASE CHANGES NOTHING ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+    for (let i = 0; i < 25; i++) {
+      data = applyLocalChange(data, {
+        store: 'events', entityId: `e${i}`, changes: { title: `Event ${i}`, dayIndex: i % 7 },
+        at: 1_000 + i,
+      });
+    }
+    await store.saveLocalEdit(data, data.outbox);   // both halves, in step
+
+    const first = await createStorage(nodeRunner(db)).load(PH);
+    const second = await createStorage(nodeRunner(db)).load(PH);
+
+    assert.deepEqual(
+      readStore(first.state, 'events'), readStore(data.state, 'events'),
+      'loading a consistent database returns exactly what was saved',
+    );
+    assert.deepEqual(
+      readStore(second.state, 'events'), readStore(first.state, 'events'),
+      'and loading it twice returns the same thing again',
+    );
+    assert.equal(first.state.lamport, data.state.lamport, 'the clock did not drift');
+  }
+
+  console.log('--- 21. REPLAY DOES NOT RESURRECT A DELETE, OR UNDO ONE ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 'doomed', changes: { title: 'Temporary' }, at: 1_000,
+    });
+    await store.saveOps(data.outbox);
+    await store.saveState(data);
+
+    const beforeDelete = data;
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 'doomed', changes: { [DELETED_FIELD]: true }, at: 2_000,
+    });
+    await store.saveOps(data.outbox.slice(beforeDelete.outbox.length));
+    // The blob still shows the task as alive.
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    assert.equal(
+      readStore(reloaded.state, 'tasks').doomed, undefined,
+      'the deletion survived a state blob that predates it',
+    );
+    assert.equal(isTombstoned(reloaded.state, 'tasks', 'doomed'), true,
+      'and it is a tombstone, not an absence, so a peer learns about it');
+  }
+
+  console.log('--- 22. AN ACKNOWLEDGED OP IS NOT REPLAYED BACK IN ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 'sent', changes: { title: 'Went to the server' }, at: 1_000,
+    });
+    await store.saveOps(data.outbox);
+    await store.saveState(data);
+
+    // The server confirmed it: the outbox empties and the cursor moves.
+    const synced: ClientData = { ...data, outbox: [], cursor: 9, lastSyncedAt: 5_000 };
+    await store.saveSynced(synced);
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    assert.equal(reloaded.outbox.length, 0, 'nothing left queued');
+    assert.equal(reloaded.cursor, 9);
+    assert.equal(
+      (readStore(reloaded.state, 'tasks').sent as any)?.title, 'Went to the server',
+      'and the value is still there',
+    );
+  }
+
+  console.log('--- 23. saveOps IS ATOMIC AND IGNORES WHAT IT ALREADY HAS ---');
+  {
+    const db = new DatabaseSync(':memory:');
+    const store = createStorage(nodeRunner(db));
+    await store.init();
+
+    let data = emptyClientData(PH);
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 'a', changes: { title: 'One' }, at: 1_000,
+    });
+    const ops = data.outbox;
+
+    await store.saveOps(ops);
+    await store.saveOps(ops);
+    await store.saveOps(ops);
+    const reloaded = await store.load(PH);
+    assert.equal(reloaded.outbox.length, ops.length, 'writing the same ops again is a no-op');
+
+    // An empty batch must not open a transaction at all.
+    let opened = 0;
+    const counting: SqlRunner = {
+      ...nodeRunner(db),
+      async transaction(fn) { opened += 1; db.exec('BEGIN'); await fn(); db.exec('COMMIT'); },
+    };
+    await createStorage(counting).saveOps([]);
+    assert.equal(opened, 0, 'nothing to write, nothing to do');
+
+    // And a failure partway rolls the whole batch back.
+    let data2 = applyLocalChange(data, {
+      store: 'tasks', entityId: 'b', changes: { title: 'Two' }, at: 2_000,
+    });
+    data2 = applyLocalChange(data2, {
+      store: 'tasks', entityId: 'c', changes: { title: 'Three' }, at: 3_000,
+    });
+    const newOps = data2.outbox.slice(ops.length);
+    assert.ok(newOps.length >= 2);
+    await assert.rejects(
+      () => createStorage(flakyRunner(db, 2)).saveOps(newOps),
+      /disk full/,
+    );
+    const after = await store.load(PH);
+    assert.equal(after.outbox.length, ops.length, 'a half-written batch left nothing behind');
+  }
+
+  console.log('--- 24. saveState NEVER TOUCHES THE OUTBOX OR THE CURSOR ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 'x', changes: { title: 'Queued' }, at: 1_000,
+    });
+    await store.saveOps(data.outbox);
+    await store.saveSynced({ ...data, cursor: 4, lastSyncedAt: 7_000 });
+
+    // A coalesced state write that lands after a sync must not move anything
+    // else. This is the ordering hazard the split creates, so it is asserted.
+    await store.saveState(data);
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    assert.equal(reloaded.cursor, 4, 'the cursor is where the sync left it');
+    assert.equal(reloaded.lastSyncedAt, 7_000);
+    assert.equal(reloaded.outbox.length, data.outbox.length);
+  }
+
+  console.log('--- 25. A BACKLOG OF OFFLINE EDITS REPLAYS IN THE RIGHT ORDER ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+
+    // Two hundred edits with no state blob at all: a phone that was killed
+    // repeatedly, or one whose very first state write never happened.
+    for (let i = 0; i < 200; i++) {
+      data = applyLocalChange(data, {
+        store: 'tasks', entityId: `t${i % 20}`, changes: { title: `Round ${i}` }, at: 1_000 + i,
+      });
+    }
+    await store.saveOps(data.outbox);
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    const tasks = readStore(reloaded.state, 'tasks');
+    assert.equal(Object.keys(tasks).length, 20);
+    for (let id = 0; id < 20; id++) {
+      // The last write to each id is the one that survives: t0 was last written
+      // at round 180, t1 at 181, and so on.
+      assert.equal(
+        (tasks[`t${id}`] as any).title, `Round ${180 + id}`,
+        `t${id} ended on its final value`,
+      );
+    }
+    assert.equal(reloaded.outbox.length, 200, 'and every op is still waiting to be sent');
+  }
+
+  console.log('--- 26. A CORRUPT OUTBOX ROW DOES NOT POISON THE REPLAY ---');
+  {
+    const { db, store } = await freshStore();
+    let data = emptyClientData(PH);
+    data = applyLocalChange(data, {
+      store: 'tasks', entityId: 'good', changes: { title: 'Fine' }, at: 1_000,
+    });
+    await store.saveOps(data.outbox);
+    db.prepare('INSERT INTO outbox (op_id, seq, json) VALUES (?, ?, ?)')
+      .run('broken', 99, '{"not json at all');
+
+    const reloaded = await createStorage(nodeRunner(db)).load(PH);
+    assert.equal((readStore(reloaded.state, 'tasks').good as any)?.title, 'Fine');
+    assert.equal(reloaded.outbox.length, 1, 'the unreadable row was dropped, the good one kept');
   }
 
   console.log('\nALL PASS (phone local database: durability, corruption, backlog)');

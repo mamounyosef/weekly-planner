@@ -26,7 +26,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { Field, Segment } from '../ui/Fields';
-import { radius, space, HIT } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
@@ -78,7 +78,7 @@ export function Planner({ onClose }: { onClose?: () => void }) {
               accessibilityRole="button"
               accessibilityLabel="Back"
               hitSlop={space.sm}
-              style={{ minWidth: HIT / 2, justifyContent: 'center' }}
+              style={({ pressed }) => [{ minWidth: HIT / 2, justifyContent: 'center' }, pressed ? PRESSED : null]}
             >
               <Text variant="title" tone="accent">‹</Text>
             </Pressable>
@@ -130,14 +130,14 @@ export function Planner({ onClose }: { onClose?: () => void }) {
                       accessibilityRole="radio"
                       accessibilityState={{ selected: on }}
                       accessibilityLabel={day.label}
-                      style={{
+                      style={({ pressed }) => [{
                         paddingHorizontal: space.md,
                         paddingVertical: 7,
                         borderRadius: radius.sm,
                         borderWidth: 1,
                         borderColor: on ? p.accent : p.line,
                         backgroundColor: on ? p.accentSoft : 'transparent',
-                      }}
+                      }, pressed ? PRESSED : null]}
                     >
                       <Text
                         variant="caption"

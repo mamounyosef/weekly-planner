@@ -16,7 +16,7 @@ import React from 'react';
 import { Pressable, ScrollView, TextInput, View } from 'react-native';
 
 import { Row, Text, useTheme } from './kit';
-import { radius, space, type as typeScale, HIT } from '../theme';
+import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
 
 // ─── Layout ──────────────────────────────────────────────────────────────────
 
@@ -95,12 +95,12 @@ export function Segment<T extends string>({ options, value, onChange }: {
             onPress={() => onChange(opt.key)}
             accessibilityRole="button"
             accessibilityState={{ selected: on }}
-            style={{
+            style={({ pressed }) => [{
               flex: 1, height: HIT - 8,
               alignItems: 'center', justifyContent: 'center',
               borderRadius: radius.sm,
               backgroundColor: on ? p.accent : 'transparent',
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text variant="bodyStrong" style={{ color: on ? p.accentInk : p.inkSoft }}>
               {opt.label}
@@ -121,10 +121,10 @@ export function Toggle({ label, hint, value, onChange }: {
       onPress={() => onChange(!value)}
       accessibilityRole="switch"
       accessibilityState={{ checked: value }}
-      style={{
+      style={({ pressed }) => [{
         flexDirection: 'row', alignItems: 'center', gap: space.md,
         paddingVertical: space.sm, minHeight: HIT,
-      }}
+      }, pressed ? PRESSED : null]}
     >
       <View style={{ flex: 1 }}>
         <Text variant="body">{label}</Text>
@@ -232,13 +232,13 @@ export function ColourPicker({ value, onChange, swatches, disabled, disabledNote
             accessibilityRole="button"
             accessibilityLabel={sw.key}
             accessibilityState={{ selected: on }}
-            style={{
+            style={({ pressed }) => [{
               width: 38, height: 38, borderRadius: 19,
               alignItems: 'center', justifyContent: 'center',
               backgroundColor: sw.hex,
               borderWidth: on ? 3 : 0,
               borderColor: p.ink,
-            }}
+            }, pressed ? PRESSED : null]}
           >
             {on ? (
               <Text style={{ color: '#fff', fontWeight: '900', fontSize: 15 }}>✓</Text>
@@ -264,14 +264,14 @@ export function CategoryPicker({ value, onChange, categories }: {
         onPress={() => onChange(id)}
         accessibilityRole="button"
         accessibilityState={{ selected: on }}
-        style={{
+        style={({ pressed }) => [{
           flexDirection: 'row', alignItems: 'center', gap: space.sm,
           paddingHorizontal: space.md, height: 38,
           borderRadius: radius.pill,
           backgroundColor: on ? p.accentSoft : p.surfaceAlt,
           borderWidth: 1,
           borderColor: on ? p.accent : p.line,
-        }}
+        }, pressed ? PRESSED : null]}
       >
         {colour ? (
           <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: colour }} />

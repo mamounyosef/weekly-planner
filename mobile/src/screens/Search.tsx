@@ -44,7 +44,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Divider, Empty, Row, Text, useTheme } from '../ui/kit';
-import { HIT, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
 import { usePlanner } from '../state/planner';
 import { addDays, dayLabel, formatClock, ymd } from '../lib/agenda';
 import {
@@ -348,6 +348,7 @@ export function Search({ onClose, onOpenItem, onOpenDate, initialQuery }: {
             />
             {query ? (
               <Pressable
+      style={({ pressed }) => (pressed ? PRESSED : null)}
                 onPress={() => { setQuery(''); inputRef.current?.focus(); }}
                 accessibilityRole="button"
                 accessibilityLabel="Clear the search"
@@ -723,6 +724,7 @@ function ResultRow({ hit, now, clock, onPress, onPressDate }: {
 
         <Row gap={space.xs} style={{ alignItems: 'center', flexWrap: 'wrap' }}>
           <Pressable
+      style={({ pressed }) => (pressed ? PRESSED : null)}
             onPress={onPressDate}
             disabled={!onPressDate}
             hitSlop={space.xs}

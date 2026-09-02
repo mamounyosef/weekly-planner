@@ -22,7 +22,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Row, Text, useTheme, Spacer } from '../ui/kit';
-import { radius, space, type as typeScale, HIT } from '../theme';
+import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
 import { usePlanner } from '../state/planner';
 import { parseQuickAdd } from '../lib/quickAdd';
 import { describeRecur, inferWeekStartsOn } from '../lib/draft';
@@ -194,7 +194,7 @@ function Sheet({ onClose }: { onClose: () => void }) {
 
   return (
     <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'flex-end' }}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close" />
 
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={{

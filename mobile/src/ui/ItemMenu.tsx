@@ -35,7 +35,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from './kit';
 import { CategoryPicker, ColourPicker, type Swatch } from './Fields';
-import { radius, space, HIT } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { scopeChoices, type OccurrenceScope } from '../lib/occurrence';
 
 /**
@@ -191,7 +191,7 @@ function Sheet({
       <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: p.scrim, opacity: t }]} />
       {/* The whole area above the sheet dismisses it. On a phone the quickest
           way out of a menu you opened by accident is a tap anywhere else. */}
-      <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close menu" />
+      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close menu" />
 
       <Animated.View
         style={{

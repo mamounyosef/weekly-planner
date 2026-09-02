@@ -15,9 +15,32 @@
 // A store hands back strings and nulls, never numbers, and the phone and the PC
 // disagreeing about whether '25' is an hour would be a layout bug on one device
 // that is invisible on the other.
+//
+// ── WHERE EACH THING LIVES, AND WHY ─────────────────────────────────────────
+// The view preferences used to be keystore entries too, one Android Keystore
+// decrypt each, dispatched on a single serial Expo queue. About fifteen of them
+// stood between tapping the icon and seeing the planner, which was the largest
+// single cost in the whole launch. None of them is a secret.
+//
+// So they moved into the SQLite database the app opens anyway, where the entire
+// set is ONE query and every later read is memory (see `prefsStore.ts`, which
+// owns the migration and its failure modes). The keystore now holds only the
+// four things that are genuinely about identity:
+//
+//     planner.session   the bearer cookie
+//     planner.deviceId  what the server's sync cursor is keyed by
+//     planner.serverUrl / planner.username
+//
+// Those four are NOT in `PREF_KEYS` and nothing in the new path can touch them,
+// which is what makes "this change signed me out" not a thing that can happen.
+//
+// The public API here is still async everywhere, so no caller changed. After
+// the first load these resolve from memory in the same tick.
 
 import * as SecureStore from 'expo-secure-store';
 import { makeDeviceId } from './syncStorage';
+import { createPrefsStore, type PrefsSql, type PrefsStore } from './prefsStore';
+import { createExpoRunner, openPlannerDatabase } from './sqlite';
 import { FULL_DAY, normaliseRanges, type HourRange } from './dayWindows';
 import { isThemeMode, type ThemeMode } from '../theme';
 import { coerceFocusRangeMode, type FocusRangeMode } from './focusPeriod';
@@ -38,10 +61,13 @@ import {
   type PrayerAppearance,
 } from './viewPrefs';
 
+// ── The keystore's four. Never in PREF_KEYS. ──
 const KEY_SERVER = 'planner.serverUrl';
 const KEY_SESSION = 'planner.session';
 const KEY_DEVICE = 'planner.deviceId';
 const KEY_USER = 'planner.username';
+
+// ── The settings, all of which live in SQLite now. ──
 const KEY_VIEW = 'planner.calendarView';
 const KEY_INTERVAL = 'planner.interval';
 const KEY_THEME = 'planner.themeMode';
@@ -56,7 +82,30 @@ const KEY_DAY_END = 'planner.dayEndH';
 const KEY_SWIPE_VIEWS = 'planner.swipeViewSwitch';
 const KEY_FOCUS_RANGE_MODE = 'planner.focusRangeMode';
 
-async function read(key: string): Promise<string | null> {
+/**
+ * Exactly what the fast store owns.
+ *
+ * Adding a key here is how a new preference gets the fast path. Removing one,
+ * or adding a credential to it, is how the launch gets slow again or how a
+ * token ends up in plain SQL — so the list is short, explicit, and reviewed.
+ */
+export const PREF_KEYS = [
+  KEY_VIEW,
+  KEY_INTERVAL,
+  KEY_THEME,
+  KEY_FOCUS_TIMER,
+  KEY_NOTIFY_CENTRE,
+  KEY_PRAYER_LOOK,
+  KEY_VISIBLE_HOURS,
+  KEY_CUSTOM_BEFORE,
+  KEY_CUSTOM_AFTER,
+  KEY_DAY_START,
+  KEY_DAY_END,
+  KEY_SWIPE_VIEWS,
+  KEY_FOCUS_RANGE_MODE,
+] as const;
+
+async function secureRead(key: string): Promise<string | null> {
   try {
     return await SecureStore.getItemAsync(key);
   } catch {
@@ -67,7 +116,7 @@ async function read(key: string): Promise<string | null> {
   }
 }
 
-async function write(key: string, value: string | null): Promise<void> {
+async function secureWrite(key: string, value: string | null): Promise<void> {
   try {
     if (value === null) await SecureStore.deleteItemAsync(key);
     else await SecureStore.setItemAsync(key, value);
@@ -76,15 +125,84 @@ async function write(key: string, value: string | null): Promise<void> {
   }
 }
 
+/**
+ * The fast store, built on first use.
+ *
+ * Built lazily rather than at import: the theme provider asks for a value
+ * before the planner has opened anything, and whichever of the two gets here
+ * first should be the one that starts the database opening. They then share the
+ * one handle, because `openPlannerDatabase` memoises its promise.
+ */
+let storePromise: Promise<PrefsStore> | null = null;
+
+function getStore(): Promise<PrefsStore> {
+  if (!storePromise) {
+    storePromise = (async () => {
+      let sql: PrefsSql | null = null;
+      try {
+        sql = createExpoRunner(await openPlannerDatabase());
+      } catch {
+        // No database means the old, slow, entirely correct path.
+        sql = null;
+      }
+      const store = createPrefsStore({
+        sql,
+        secure: {
+          get: secureRead,
+          set: (k, v) => secureWrite(k, v),
+          remove: k => secureWrite(k, null),
+        },
+        keys: PREF_KEYS,
+      });
+      await store.load();
+      return store;
+    })();
+  }
+  return storePromise;
+}
+
+/**
+ * Start the store warming without waiting for it.
+ *
+ * Called at the very top of launch so the one query is already in flight while
+ * notification channels and the sync database are being set up.
+ */
+export function warmPrefs(): void {
+  void getStore().catch(() => { /* getStore already degrades on its own */ });
+}
+
+/** Read one owned key. Resolves from memory once the first load has landed. */
+async function read(key: string): Promise<string | null> {
+  const store = await getStore();
+  return store.get(key);
+}
+
+/** Write one owned key. Applies to memory at once; the disk catches up. */
+function write(key: string, value: string | null): Promise<void> {
+  return getStore().then(store => { store.set(key, value); });
+}
+
+/** Persist anything still queued. Called when the app goes to the background. */
+export async function flushPrefs(): Promise<void> {
+  const store = await getStore().catch(() => null);
+  if (store) await store.flush();
+}
+
+/** What the launch actually did, for the diagnostics screen. */
+export async function prefsReport() {
+  const store = await getStore().catch(() => null);
+  return store?.lastReport() ?? null;
+}
+
 export const prefs = {
-  getServerUrl: () => read(KEY_SERVER),
-  setServerUrl: (url: string | null) => write(KEY_SERVER, url),
+  getServerUrl: () => secureRead(KEY_SERVER),
+  setServerUrl: (url: string | null) => secureWrite(KEY_SERVER, url),
 
-  getSession: () => read(KEY_SESSION),
-  setSession: (session: string | null) => write(KEY_SESSION, session),
+  getSession: () => secureRead(KEY_SESSION),
+  setSession: (session: string | null) => secureWrite(KEY_SESSION, session),
 
-  getUsername: () => read(KEY_USER),
-  setUsername: (name: string | null) => write(KEY_USER, name),
+  getUsername: () => secureRead(KEY_USER),
+  setUsername: (name: string | null) => secureWrite(KEY_USER, name),
 
   /**
    * This install's device id, created once and kept forever.
@@ -92,12 +210,15 @@ export const prefs = {
    * It must never change: the server tracks how far each device has synced by
    * this id, so a new one would orphan the old cursor and force a full resync —
    * and, worse, the phone would start receiving its own past ops back.
+   *
+   * Which is exactly why it stays in the keystore, alone, on the old path. It
+   * is worth one read at launch to keep it somewhere nothing else writes.
    */
   async getDeviceId(): Promise<string> {
-    const existing = await read(KEY_DEVICE);
+    const existing = await secureRead(KEY_DEVICE);
     if (existing) return existing;
     const fresh = makeDeviceId(Math.random, 'android');
-    await write(KEY_DEVICE, fresh);
+    await secureWrite(KEY_DEVICE, fresh);
     return fresh;
   },
 
@@ -107,11 +228,13 @@ export const prefs = {
    * PER DEVICE, DELIBERATELY, and the PC agrees: `calendarView` is in its
    * `DEVICE_SCOPED_KEYS`, so a phone showing the day and a desktop showing the
    * week is the correct state of affairs rather than a disagreement to resolve.
-   * Kept here rather than in the synced settings for exactly that reason.
    *
    * Returned raw because the phone has one view the PC does not (`agenda`), so
    * the caller owns the list of names and validates it there.
    */
+  getCalendarView: () => read(KEY_VIEW),
+  setCalendarView: (view: string) => write(KEY_VIEW, view),
+
   /**
    * How the focus screen reads "week", "month" and "year": the calendar period
    * you are in, or the last N days.
@@ -125,9 +248,6 @@ export const prefs = {
     return coerceFocusRangeMode(await read(KEY_FOCUS_RANGE_MODE));
   },
   setFocusRangeMode: (mode: FocusRangeMode) => write(KEY_FOCUS_RANGE_MODE, mode),
-
-  getCalendarView: () => read(KEY_VIEW),
-  setCalendarView: (view: string) => write(KEY_VIEW, view),
 
   /**
    * How coarsely times snap on this device: 5, 10, 15, 30 or 60 minutes.
@@ -156,7 +276,7 @@ export const prefs = {
   async setCustomWindow(before: number, after: number): Promise<void> {
     // Clamped on the way IN as well as on the way out. A value that is illegal
     // on read is illegal on write, and storing it anyway leaves a number in the
-    // keystore that silently becomes something else next launch.
+    // store that silently becomes something else next launch.
     const win = coerceSpanWindow(before, after);
     await write(KEY_CUSTOM_BEFORE, String(win.before));
     await write(KEY_CUSTOM_AFTER, String(win.after));
@@ -191,7 +311,7 @@ export const prefs = {
    *
    * These take the CURRENT window rather than reading it back, so the settings
    * screen stays the single source of what is on screen and a tap never waits on
-   * the keystore before the number moves. `withDayStart` carries the span along,
+   * storage before the number moves. `withDayStart` carries the span along,
    * `withDayEnd` pushes the start out of the way, and both guarantee start < end
    * whichever control the user reaches for first.
    */
@@ -320,8 +440,8 @@ export const prefs = {
     write(KEY_VISIBLE_HOURS, JSON.stringify(normaliseRanges(ranges))),
 
   async signOut(): Promise<void> {
-    await write(KEY_SESSION, null);
-    await write(KEY_USER, null);
+    await secureWrite(KEY_SESSION, null);
+    await secureWrite(KEY_USER, null);
     // The server URL and device id deliberately survive signing out: the user is
     // almost always signing back into the same planner on the same phone.
     // So do the view preferences: they describe this screen, not this account.

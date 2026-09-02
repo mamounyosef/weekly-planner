@@ -41,7 +41,7 @@ import { Row, Text, useTheme } from '../ui/kit';
 import { TextField } from '../ui/Fields';
 import { ListChips } from '../ui/ListChips';
 import { SortableList } from '../ui/SortableList';
-import { radius, space } from '../theme';
+import { PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { dueDateOf, isTaskDone, taskBucket, todayYmd, type Task } from '../lib/tasks';
@@ -259,11 +259,11 @@ export function Tasks() {
             <Pressable
               key={mode}
               onPress={() => setSortMode(mode as SortMode)}
-              style={{
+              style={({ pressed }) => [{
                 paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
                 backgroundColor: sortMode === mode ? p.accentSoft : p.surfaceAlt,
                 borderWidth: 1, borderColor: sortMode === mode ? p.accent : p.line
-              }}
+              }, pressed ? PRESSED : null]}
             >
               <Text variant="caption" tone={sortMode === mode ? 'accent' : 'faint'}>
                 {mode === 'datetime' ? 'Date' : mode === 'manual' ? 'Manual' : 'Title'}
@@ -278,11 +278,11 @@ export function Tasks() {
               <Pressable
                 key={f}
                 onPress={() => setFilters(active ? filters.filter(x => x !== f) : [...filters, f])}
-                style={{
+                style={({ pressed }) => [{
                   paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
                   backgroundColor: active ? p.accentSoft : 'transparent',
                   borderWidth: 1, borderColor: active ? p.accent : p.line
-                }}
+                }, pressed ? PRESSED : null]}
               >
                 <Text variant="caption" tone={active ? 'accent' : 'faint'}>
                   {labels[f as keyof typeof labels]}
@@ -333,7 +333,7 @@ export function Tasks() {
               <Pressable
                 onPress={collapsible ? () => setShowDone(v => !v) : undefined}
                 disabled={!collapsible}
-                style={{ paddingVertical: space.xs }}
+                style={({ pressed }) => [{ paddingVertical: space.xs }, pressed ? PRESSED : null]}
               >
                 <Row style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
                   <Text
@@ -349,7 +349,8 @@ export function Tasks() {
                   </Text>
                   <Row gap={space.md} style={{ alignItems: 'center' }}>
                     {collapsible && nodes.length > 0 && (
-                      <Pressable 
+                      <Pressable
+      style={({ pressed }) => (pressed ? PRESSED : null)} 
                         onPress={(e) => { 
                           e.stopPropagation();
 // A REPEATING task is never cleared here. Its row carries the
@@ -683,13 +684,13 @@ function Check({ colour, done, onPress, label, size = 22 }: {
       accessibilityState={{ checked: done }}
       accessibilityLabel={label}
       hitSlop={space.md}
-      style={{
+      style={({ pressed }) => [{
         width: size, height: size, borderRadius: size / 2,
         borderWidth: 2,
         borderColor: done ? colour : p.inkFaint,
         backgroundColor: done ? colour : 'transparent',
         alignItems: 'center', justifyContent: 'center',
-      }}
+      }, pressed ? PRESSED : null]}
     >
       {done ? (
         <Text style={{
@@ -747,7 +748,7 @@ function Composer({ onSubmit, onClose }: {
         accessibilityRole="button"
         accessibilityLabel={text.trim() ? 'Add this step' : 'Close'}
         hitSlop={space.sm}
-        style={{ paddingHorizontal: space.sm, height: 44, justifyContent: 'center' }}
+        style={({ pressed }) => [{ paddingHorizontal: space.sm, height: 44, justifyContent: 'center' }, pressed ? PRESSED : null]}
       >
         <Text variant="bodyStrong" tone={text.trim() ? 'accent' : 'faint'}>
           {text.trim() ? 'Add' : 'Close'}

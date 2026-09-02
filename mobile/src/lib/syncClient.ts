@@ -242,6 +242,30 @@ export function describeStatus(data: ClientData, phase: SyncPhase, now: number):
   return { phase, pending, conflicts, lastSyncedAt: data.lastSyncedAt, label };
 }
 
+/**
+ * Is this the same status, as far as anybody reading it is concerned?
+ *
+ * The sync loop moves through phases constantly — a held pull returns, the
+ * phase goes syncing, then idle, then syncing again, several times a minute
+ * forever. `describeStatus` builds a fresh object each time, so on the phone
+ * that identity change propagated through the planner context and re-rendered
+ * every screen in the app, including the calendar grid, to display a line of
+ * text that had not changed.
+ *
+ * Comparing by VALUE keeps the indicator exactly as live as it was — the
+ * moment any of these five fields differs, the new object is used — while
+ * costing nothing when the answer is the same one as last time.
+ */
+export function sameStatus(a: SyncStatus | null, b: SyncStatus | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.phase === b.phase
+    && a.pending === b.pending
+    && a.conflicts === b.conflicts
+    && a.lastSyncedAt === b.lastSyncedAt
+    && a.label === b.label;
+}
+
 export function describeAgo(ms: number): string {
   if (ms < 0) return 'just now';
   const mins = Math.floor(ms / 60_000);

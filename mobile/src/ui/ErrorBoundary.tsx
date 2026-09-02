@@ -18,7 +18,7 @@ import React from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 
 import { Text } from './kit';
-import { radius, space } from '../theme';
+import { PRESSED, radius, space } from '../theme';
 
 interface Props {
   children: React.ReactNode;
@@ -100,13 +100,13 @@ export class ErrorBoundary extends React.Component<Props, State> {
         <Pressable
           onPress={() => this.setState({ error: null, info: '' })}
           accessibilityRole="button"
-          style={{
+          style={({ pressed }) => [{
             paddingVertical: space.md,
             alignItems: 'center',
             borderRadius: radius.md,
             borderWidth: 1,
             borderColor: 'rgba(128,128,128,0.4)',
-          }}
+          }, pressed ? PRESSED : null]}
         >
           <Text variant="bodyStrong" tone="accent">Try this screen again</Text>
         </Pressable>

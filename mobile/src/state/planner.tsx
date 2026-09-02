@@ -32,6 +32,7 @@ import {
   emptyClientData,
   readClientStore,
   reconcileAfterSync,
+  sameStatus,
   syncOnce,
   withJitter,
   type ClientData,
@@ -42,7 +43,9 @@ import {
 import { createStorage, type SyncStorage } from '../lib/syncStorage';
 import { createExpoRunner, openPlannerDatabase } from '../lib/sqlite';
 import { createTransport, isAuthError, type PlannerTransport } from '../lib/syncTransport';
-import { prefs } from '../lib/prefs';
+import { prefs, flushPrefs, warmPrefs } from '../lib/prefs';
+import { createCoalescer } from '../lib/coalesce';
+import { createKeyedCache, dayCacheKey } from '../lib/dayCache';
 import {
   DEFAULT_DAY_WINDOW, DEFAULT_PRAYER_APPEARANCE, DEFAULT_SWIPE_VIEW_SWITCH,
   withDayEnd, withDayStart,
@@ -57,7 +60,7 @@ import {
   type FocusTimerAction, type FocusTimerState,
 } from '../lib/focusTimer';
 import {
-  EMPTY_CENTRE_STATE, buildCentre, centreStateFromServer, clearEntries,
+  EMPTY_CENTRE_STATE, EMPTY_CENTRE_VIEW, buildCentre, centreStateFromServer, clearEntries,
   coerceCentreState, desiredAlarms, dismiss as dismissKeys, handledKeys,
   markAllRead, markCompleted, markRead, markSynced, markUnread, mergeCentreState,
   pendingSync, pruneCentreState, recordFired, snooze as snoozeKeys,
@@ -249,9 +252,14 @@ interface PlannerContextValue {
   taskLists: any[];
   /** Focus history from the PC, newest last. Empty until it syncs. */
   focusSessions: any[];
-  /** What has fired and what is coming, joined with what you did about it. */
-  notifyCentre: CentreView;
-  /** For the badge. Only things that have actually fired can be unread. */
+  /**
+   * For the badge. Only things that have actually fired can be unread.
+   *
+   * The LIST itself is not here: it is rebuilt every thirty seconds so that
+   * "in 20 minutes" stays true, and carrying that in this value re-rendered
+   * every screen in the app twice a minute. It lives in its own context now,
+   * reached with `useNotifyCentre()`, so only the screen that draws it pays.
+   */
   unreadNotifications: number;
   /** The snooze durations the user configured on the PC. */
   snoozeOptions: number[];
@@ -318,10 +326,31 @@ interface PlannerContextValue {
 
 const PlannerContext = createContext<PlannerContextValue | null>(null);
 
+/**
+ * The reminder list, on its own wire.
+ *
+ * Separated from the planner context for one reason: it is a claim about NOW.
+ * Every entry says "in 20 minutes" or "2 hours ago", so it is rebuilt on a
+ * thirty-second tick whether or not anything has happened. While it travelled
+ * with everything else, that tick handed a new context value to every consumer
+ * in the app and re-rendered the calendar grid, the task list and the focus
+ * charts, twice a minute, forever.
+ *
+ * Only the notifications screen subscribes here. The bell needs the unread
+ * COUNT, which is a small number that usually does not change, and that stays
+ * on the main context.
+ */
+const NotifyCentreContext = createContext<CentreView>(EMPTY_CENTRE_VIEW);
+
 export function usePlanner(): PlannerContextValue {
   const ctx = useContext(PlannerContext);
   if (!ctx) throw new Error('usePlanner must be used inside <PlannerProvider>');
   return ctx;
+}
+
+/** What has fired and what is coming, joined with what you did about it. */
+export function useNotifyCentre(): CentreView {
+  return useContext(NotifyCentreContext);
 }
 
 export function PlannerProvider({ children }: { children: React.ReactNode }) {
@@ -397,25 +426,47 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
 
     (async () => {
       try {
-        await prepareNotifications();
+        // FIRST, AND WITHOUT WAITING. This starts the database opening and the
+        // single query that fetches every device preference, so that work is
+        // already in flight while the lines below set up notifications and the
+        // sync tables. It used to be fifteen separate keystore decrypts, in
+        // series, and they were the largest single thing between tapping the
+        // icon and seeing the planner.
+        warmPrefs();
+
+        // NOT awaited. Registering the Android notification channel is a native
+        // round trip that nothing on screen depends on; it only has to be done
+        // before an alarm is scheduled, and the first alarm plan is minutes of
+        // app-time away. Awaiting it here bought nothing and cost the splash.
+        void prepareNotifications().catch(() => { /* replanning reports this */ });
+
         const db = await openPlannerDatabase();
         const storage = createStorage(createExpoRunner(db));
         await storage.init();
         storageRef.current = storage;
 
-        const deviceId = await prefs.getDeviceId();
-        await storage.setDeviceId(deviceId);
-
+        // Everything at once. The four keystore reads (identity and
+        // credentials) overlap with each other and with the preference query,
+        // which by now has usually already answered.
         const [
-          url, session, user, savedInterval, savedWindow, savedDayWindow, savedSwipe, savedCalendarView,
+          deviceId, url, session, user,
+          savedInterval, savedWindow, savedDayWindow, savedSwipe, savedCalendarView,
+          savedPrayerLook, savedVisibleHours, storedTimerRaw, storedCentreRaw,
         ] = await Promise.all([
-          prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(),
-          prefs.getInterval(), prefs.getCustomWindow(),
-          prefs.getDayWindow(), prefs.getSwipeViewSwitch(),
-          prefs.getCalendarView(),
+          prefs.getDeviceId(), prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(),
+          prefs.getInterval(), prefs.getCustomWindow(), prefs.getDayWindow(),
+          prefs.getSwipeViewSwitch(), prefs.getCalendarView(),
+          prefs.getPrayerAppearance(), prefs.getVisibleHours(),
+          prefs.getFocusTimer(), prefs.getNotifyCentre(),
         ]);
-        setPrayerLook(await prefs.getPrayerAppearance());
-        setVisibleHoursState(await prefs.getVisibleHours());
+        if (cancelled) return;
+
+        // Not awaited: nothing below reads it back, and `load` prefers the id
+        // already stored anyway.
+        void storage.setDeviceId(deviceId);
+
+        setPrayerLook(savedPrayerLook);
+        setVisibleHoursState(savedVisibleHours);
         setIntervalState(savedInterval);
         setCustomWindowState(savedWindow);
         setDayWindowState(savedDayWindow);
@@ -428,7 +479,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         // the app was closed is completed at the instant it actually ran out,
         // not at the moment you reopened the app, so six hours in a pocket
         // credits the right hour to the right day.
-        const storedTimer = coerceFocusTimer(await prefs.getFocusTimer());
+        const storedTimer = coerceFocusTimer(storedTimerRaw);
         const settled = reduceFocusTimer(storedTimer, { kind: 'settle' }, Date.now());
         focusTimerRef.current = settled.state;
         setFocusTimerState(settled.state);
@@ -438,7 +489,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         // Pruned on the way in. The marks are a cache of decisions, and one for
         // a reminder three months gone can never be needed again.
         const centre = pruneCentreState(
-          coerceCentreState(await prefs.getNotifyCentre()), { now: Date.now() },
+          coerceCentreState(storedCentreRaw), { now: Date.now() },
         );
         notifyStateRef.current = centre;
         setNotifyStateRaw(centre);
@@ -474,7 +525,19 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   }
 
   // ── Alarms follow the data ──
-  const replanAlarms = useCallback(async (current: ClientData) => {
+  /**
+   * Work out what the OS should be holding, and make it so.
+   *
+   * Expensive, and in two different ways: `computeSchedule` walks every event
+   * and task in the planner and expands two days of repeats, and `syncAlarms`
+   * then makes a native round trip to read back every alarm Android currently
+   * holds before scheduling or cancelling the difference.
+   *
+   * This used to run on EVERY edit, in full, immediately after the tap that
+   * caused it — so ticking a task off spent the next frames doing this instead
+   * of drawing the tick. It is now driven by the coalescer below.
+   */
+  const replanAlarmsNow = useCallback(async (current: ClientData) => {
     try {
       const events = readClientStore(current, 'events');
       const tasks = readClientStore(current, 'tasks');
@@ -528,6 +591,49 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       setAlarmSummary('Reminders could not be scheduled. Check permissions.');
     }
   }, []);
+
+  /**
+   * One alarm plan per burst of edits, not one per edit.
+   *
+   * Reads `dataRef` at RUN time rather than carrying a snapshot, so whatever it
+   * plans against is the newest data there is — which also means a plan cannot
+   * be computed from state older than a sync that landed while it was waiting.
+   *
+   * The delay is short enough that reminders are armed before you have put the
+   * phone down, and `maxWaitMs` guarantees a plan even while a finger is still
+   * dragging. Backgrounding the app flushes it, which is the moment that
+   * actually matters: that is when the alarms have to be right, because the app
+   * will not be running to fix them.
+   */
+  const alarmPlanner = useMemo(() => createCoalescer<void>({
+    delayMs: 900,
+    maxWaitMs: 4_000,
+    run: () => replanAlarmsNow(dataRef.current),
+  }), [replanAlarmsNow]);
+
+  const replanAlarms = useCallback(() => { alarmPlanner.schedule(undefined); }, [alarmPlanner]);
+
+  /**
+   * One write of the state blob per burst, instead of one per keystroke.
+   *
+   * Safe to defer because it is a CACHE: the ops that make up an edit are
+   * written the instant the edit happens (`saveOps`), and `storage.load`
+   * replays the outbox over whatever the blob says. So the worst a lost write
+   * can cost is the few milliseconds `load` spends replaying, never an edit.
+   * See the note at the top of `syncStorage.ts`.
+   *
+   * Reading `dataRef` at run time also removes the ordering hazard the split
+   * creates: a write that fires just after a sync writes the POST-sync state,
+   * never the pre-sync snapshot it was scheduled with.
+   */
+  const statePersister = useMemo(() => createCoalescer<void>({
+    delayMs: 300,
+    maxWaitMs: 2_000,
+    run: async () => {
+      const storage = storageRef.current;
+      if (storage) await storage.saveState(dataRef.current);
+    },
+  }), []);
 
   // ── Sync ──
   /**
@@ -597,7 +703,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       } else {
         failuresRef.current = 0;
         setLastError(null);
-        await replanAlarms(merged);
+        replanAlarms();
         // Only on a healthy cycle: reconciling a timer against a server we
         // could not reach would compare it with nothing and look like a stop.
         await reconcileFocusTimerRef.current();
@@ -663,7 +769,17 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   // the phone may have been on Wi-Fi for hours with the screen off.
   useEffect(() => {
     const handler = (state: AppStateStatus) => {
-      if (state !== 'active') return;
+      if (state !== 'active') {
+        // LEAVING. Everything that was allowed to lag while the app was on
+        // screen has to be finished now, because the process may not be running
+        // in a second's time: the state blob, the device preferences, and above
+        // all the alarm plan — the OS is what fires reminders once we are gone,
+        // so it must be holding the right ones before we stop.
+        void statePersister.flush();
+        void alarmPlanner.flush();
+        void flushPrefs();
+        return;
+      }
       failuresRef.current = 0;
       // A new foreground is usually a new network, so give holding another go.
       holdBlockedUntilRef.current = 0;
@@ -689,22 +805,32 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
           void prefs.setNotifyCentre(next);
           void flushNotifyRef.current();
         }
-        void replanAlarms(dataRef.current);
+        replanAlarms();
       })();
     };
     const sub = AppState.addEventListener('change', handler);
     return () => sub.remove();
-  }, [syncNow, replanAlarms]);
+  }, [syncNow, replanAlarms, statePersister, alarmPlanner]);
 
   // ── Editing ──
   const persistEdit = useCallback(async (next: ClientData, previous: ClientData) => {
     const storage = storageRef.current;
     const newOps = next.outbox.slice(previous.outbox.length);
     commit(next);
-    if (storage) await storage.saveLocalEdit(next, newOps);
-    void replanAlarms(next);
+
+    // THE DURABLE HALF, IMMEDIATELY. Three small rows, and they are the only
+    // copy of an edit made with no PC in reach.
+    if (storage) await storage.saveOps(newOps);
+
+    // THE EXPENSIVE HALF, COALESCED. Nearly a megabyte of JSON, and only a
+    // cache: `load` replays the outbox over it, so a burst of edits writes it
+    // once at the end instead of once per tap. This is most of what made a
+    // drag stutter.
+    statePersister.schedule(undefined);
+
+    replanAlarms();
     void syncNow();
-  }, [commit, replanAlarms, syncNow]);
+  }, [commit, replanAlarms, syncNow, statePersister]);
 
   const edit = useCallback(async (
     store: SyncStore, entityId: string, changes: Record<string, unknown>,
@@ -1014,7 +1140,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     notifyStateRef.current = next;
     setNotifyStateRaw(next);
     void prefs.setNotifyCentre(next);
-    void replanAlarms(dataRef.current);
+    replanAlarms();
     void flushNotifyRef.current();
   }, [replanAlarms]);
 
@@ -1163,18 +1289,60 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const events = useCallback(() => eventsMap, [eventsMap]);
   const tasks = useCallback(() => tasksMap, [tasksMap]);
 
-  const day = useCallback((date: string) => buildDay({
-    events: eventsMap,
-    tasks: tasksMap,
-    date,
-    // Both taken from the PC rather than guessed: a repeat expands against the
-    // week start, and an item's colour comes from its category.
-    weekStartsOn,
-    categories,
-    includeUndatedTasks: date === ymd(new Date()),
-  }), [eventsMap, tasksMap, weekStartsOn, categories]);
+  /**
+   * One day's agenda, built at most once per set of inputs.
+   *
+   * `buildDay` walks every event in the planner and asks the recurrence engine
+   * about each one, which the month view then does forty-two times — and did
+   * again on every render. The cache lives inside this `useMemo`, so it is
+   * created FROM the events, tasks, week start and categories it answers for
+   * and thrown away whole the moment any of them changes. There is no partial
+   * invalidation to get wrong, and therefore no way to show a day that is no
+   * longer true. See `dayCache.ts`.
+   */
+  const dayBuilder = useMemo(
+    () => createKeyedCache(key => buildDay({
+      events: eventsMap,
+      tasks: tasksMap,
+      // The key carries a "|today" marker for the current day; the date itself
+      // is everything before it.
+      date: key.split('|')[0],
+      // Both taken from the PC rather than guessed: a repeat expands against the
+      // week start, and an item's colour comes from its category.
+      weekStartsOn,
+      categories,
+      includeUndatedTasks: key.endsWith('|today'),
+    })),
+    [eventsMap, tasksMap, weekStartsOn, categories],
+  );
 
-  const status = useMemo(() => describeStatus(data, phase, Date.now()), [data, phase]);
+  const day = useCallback(
+    // `ymd(new Date())` is read on every call, exactly as it was before the
+    // cache existed, and travels in the key. An app left open across midnight
+    // therefore starts asking a different question rather than being handed
+    // yesterday's answer.
+    (date: string) => dayBuilder.get(dayCacheKey(date, ymd(new Date()))),
+    [dayBuilder],
+  );
+
+  /**
+   * The sync line, rebuilt only when it actually says something different.
+   *
+   * The loop moves through phases several times a minute forever, and each pass
+   * produced a fresh object. That identity change flowed through the context
+   * and re-rendered every screen in the app — the calendar grid included — to
+   * redraw a line of text that had not changed. Comparing by value keeps the
+   * indicator exactly as live as it was: the instant any field differs, the new
+   * object is the one that goes out.
+   */
+  const lastStatusRef = useRef<SyncStatus | null>(null);
+  const status = useMemo(() => {
+    const next = describeStatus(data, phase, Date.now());
+    const previous = lastStatusRef.current;
+    if (sameStatus(previous, next)) return previous as SyncStatus;
+    lastStatusRef.current = next;
+    return next;
+  }, [data, phase]);
 
   // Relative wording ("in 20 minutes") is a claim about now, so it is rebuilt on
   // a slow tick rather than left to whatever last caused a render.
@@ -1190,6 +1358,16 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     settings: (shared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
   }), [notifyState, notifyClock, shared.notifications, alarmSummary]);
 
+  /**
+   * The centre, reachable from a callback without being a dependency of one.
+   *
+   * `notifyComplete` and `notifyMarkAllRead` need the CURRENT list, but closing
+   * over it would make both callbacks change every thirty seconds and drag the
+   * whole context value with them.
+   */
+  const notifyCentreRef = useRef(notifyCentre);
+  notifyCentreRef.current = notifyCentre;
+
   const snoozeOptions = useMemo(() => {
     const raw = (shared.notifications as any)?.snoozeOptions;
     return Array.isArray(raw) && raw.length
@@ -1197,9 +1375,128 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       : [5, 10, 30, 60];
   }, [shared.notifications]);
 
-  const value: PlannerContextValue = {
+  // ── Actions, all stable ──
+  // Written as callbacks rather than inline arrows so that the context value
+  // below can be memoised at all: an object rebuilt every render defeats every
+  // consumer's ability to skip work, however carefully the rest is written.
+  const notifyRead = useCallback(
+    (keys: string[]) => applyNotify((st, o) => markRead(st, keys, o)), [applyNotify]);
+  const notifyUnread = useCallback(
+    (keys: string[]) => applyNotify((st, o) => markUnread(st, keys, o)), [applyNotify]);
+  const notifyDismiss = useCallback(
+    (keys: string[]) => applyNotify((st, o) => dismissKeys(st, keys, o)), [applyNotify]);
+  const notifySnooze = useCallback(
+    (keys: string[], minutes: number) => applyNotify((st, o) => snoozeKeys(st, keys, minutes, o)),
+    [applyNotify]);
+  const notifyClear = useCallback(
+    (keys: string[]) => applyNotify((st, o) => clearEntries(st, keys, o)), [applyNotify]);
+  const notifyMarkAllRead = useCallback(
+    () => applyNotify((st, o) => markAllRead(st, notifyCentreRef.current, o)), [applyNotify]);
+
+  /**
+   * Completing from the list also ticks the thing itself.
+   *
+   * `markCompleted` only records that the reminder was dealt with; the item
+   * is a separate fact, and leaving it unticked would mean dismissing a
+   * reminder for a task that then stays open forever.
+   */
+  const notifyComplete = useCallback((keys: string[]) => {
+    applyNotify((st, o) => markCompleted(st, keys, o));
+    for (const key of keys) {
+      const entry = notifyCentreRef.current.entries.find(e => e.key === key);
+      if (!entry || !entry.refId) continue;
+      if (entry.kind !== 'task' && entry.kind !== 'event') continue;
+      void toggleDone(entry.kind === 'task' ? 'tasks' : 'events', {
+        masterId: entry.refId,
+        date: entry.occDate ?? ymd(new Date()),
+        repeating: Boolean(entry.occDate),
+        completed: false,
+      });
+    }
+  }, [applyNotify, toggleDone]);
+
+  /**
+   * Named `setSnapInterval`, NOT `setInterval`.
+   *
+   * A `const setInterval` in this scope shadows the global one, and the
+   * thirty-second clock above would then be calling this — handing a function
+   * where a number belongs, and never ticking again. It has bitten this project
+   * once already, in the settings screen.
+   */
+  const setSnapInterval = useCallback((minutes: number) => {
+    setIntervalState(minutes);
+    void prefs.setInterval(minutes);
+  }, []);
+
+  const setCalendarView = useCallback(
+    (v: 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year') => {
+      setCalendarViewState(v);
+      void prefs.setCalendarView(v);
+    }, []);
+
+  const setCustomWindow = useCallback((before: number, after: number) => {
+    setCustomWindowState({ before, after });
+    void prefs.setCustomWindow(before, after);
+  }, []);
+
+  // The repaired window is computed here and stored, rather than being read
+  // back from disk: moving one end can move the other, and the screen has to
+  // show the corrected pair immediately rather than a frame of the illegal one.
+  // Both read the window through the state updater rather than closing over it,
+  // so neither has to change when it moves.
+  const setDayStart = useCallback((hour: number) => {
+    setDayWindowState(current => {
+      const next = withDayStart(current, hour);
+      void prefs.setDayWindow(next);
+      return next;
+    });
+  }, []);
+
+  const setDayEnd = useCallback((hour: number) => {
+    setDayWindowState(current => {
+      const next = withDayEnd(current, hour);
+      void prefs.setDayWindow(next);
+      return next;
+    });
+  }, []);
+
+  const setSwipeViewSwitch = useCallback((on: boolean) => {
+    setSwipeState(on);
+    void prefs.setSwipeViewSwitch(on);
+  }, []);
+
+  const setVisibleHours = useCallback((ranges: HourRange[]) => {
+    const clean = normaliseRanges(ranges);
+    setVisibleHoursState(clean);
+    void prefs.setVisibleHours(clean);
+  }, []);
+
+  const setPrayerAppearance = useCallback((look: PrayerAppearance) => {
+    setPrayerLook(look);
+    void prefs.setPrayerAppearance(look);
+  }, []);
+
+  const signedIn = Boolean(username && transportRef.current);
+  const taskLists = useMemo(
+    () => (shared.taskLists as any[]) ?? [], [shared.taskLists]);
+  const unreadNotifications = notifyCentre.unread;
+
+  /**
+   * What every screen reads.
+   *
+   * Memoised, and deliberately WITHOUT `notifyCentre` in it. The centre is
+   * rebuilt every thirty seconds so that "in 20 minutes" stays true, and while
+   * it lived here that tick handed every consumer a brand new context value and
+   * re-rendered the entire app — the calendar grid, the task list, all of it —
+   * twice a minute, forever, for a phrase almost nobody was looking at.
+   *
+   * The bell needs only the COUNT, which is a number and usually the same
+   * number, so it stays here. The list itself moved to its own context below,
+   * where the one screen that shows it can subscribe on its own.
+   */
+  const value = useMemo<PlannerContextValue>(() => ({
     ready,
-    signedIn: Boolean(username && transportRef.current),
+    signedIn,
     username,
     serverUrl,
     data,
@@ -1222,93 +1519,62 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     shared,
     categories,
     timeFormat: shared.timeFormat,
-    taskLists: (shared.taskLists as any[]) ?? [],
+    taskLists,
     focusSessions,
     focusTimer,
     runFocusTimer,
-    notifyCentre,
-    unreadNotifications: notifyCentre.unread,
+    unreadNotifications,
     snoozeOptions,
-    notifyRead: keys => applyNotify((st, o) => markRead(st, keys, o)),
-    notifyUnread: keys => applyNotify((st, o) => markUnread(st, keys, o)),
-    notifyDismiss: keys => applyNotify((st, o) => dismissKeys(st, keys, o)),
-    notifySnooze: (keys, minutes) => applyNotify((st, o) => snoozeKeys(st, keys, minutes, o)),
-    notifyClear: keys => applyNotify((st, o) => clearEntries(st, keys, o)),
-    notifyMarkAllRead: () => applyNotify((st, o) => markAllRead(st, notifyCentre, o)),
-    /**
-     * Completing from the list also ticks the thing itself.
-     *
-     * `markCompleted` only records that the reminder was dealt with; the item
-     * is a separate fact, and leaving it unticked would mean dismissing a
-     * reminder for a task that then stays open forever.
-     */
-    notifyComplete: keys => {
-      applyNotify((st, o) => markCompleted(st, keys, o));
-      for (const key of keys) {
-        const entry = notifyCentre.entries.find(e => e.key === key);
-        if (!entry || !entry.refId) continue;
-        if (entry.kind !== 'task' && entry.kind !== 'event') continue;
-        void toggleDone(entry.kind === 'task' ? 'tasks' : 'events', {
-          masterId: entry.refId,
-          date: entry.occDate ?? ymd(new Date()),
-          repeating: Boolean(entry.occDate),
-          completed: false,
-        });
-      }
-    },
+    notifyRead,
+    notifyUnread,
+    notifyDismiss,
+    notifySnooze,
+    notifyClear,
+    notifyMarkAllRead,
+    notifyComplete,
     prayersOn,
     isPrayerDone,
     togglePrayer,
     interval,
-    setInterval: (minutes: number) => {
-      setIntervalState(minutes);
-      void prefs.setInterval(minutes);
-    },
+    setInterval: setSnapInterval,
     calendarView,
-    setCalendarView: (v: 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year') => {
-      setCalendarViewState(v);
-      void prefs.setCalendarView(v);
-    },
+    setCalendarView,
     customWindow,
-    setCustomWindow: (before: number, after: number) => {
-      setCustomWindowState({ before, after });
-      void prefs.setCustomWindow(before, after);
-    },
+    setCustomWindow,
     dayWindow,
-    // The repaired window is computed here and stored, rather than being read
-    // back from disk: moving one end can move the other, and the screen has to
-    // show the corrected pair immediately rather than a frame of the illegal one.
-    setDayStart: (hour: number) => {
-      const next = withDayStart(dayWindow, hour);
-      setDayWindowState(next);
-      void prefs.setDayWindow(next);
-    },
-    setDayEnd: (hour: number) => {
-      const next = withDayEnd(dayWindow, hour);
-      setDayWindowState(next);
-      void prefs.setDayWindow(next);
-    },
+    setDayStart,
+    setDayEnd,
     swipeViewSwitch,
-    setSwipeViewSwitch: (on: boolean) => {
-      setSwipeState(on);
-      void prefs.setSwipeViewSwitch(on);
-    },
+    setSwipeViewSwitch,
     visibleHours,
-    setVisibleHours: (ranges: HourRange[]) => {
-      const clean = normaliseRanges(ranges);
-      setVisibleHoursState(clean);
-      void prefs.setVisibleHours(clean);
-    },
+    setVisibleHours,
     prayerAppearance,
-    setPrayerAppearance: (look: PrayerAppearance) => {
-      setPrayerLook(look);
-      void prefs.setPrayerAppearance(look);
-    },
+    setPrayerAppearance,
     prayerCacheSummary,
     answerConflict,
     resetLocal,
     lastError,
-  };
+  }), [
+    ready, signedIn, username, serverUrl, data, status, alarmSummary,
+    day, events, tasks, connect, signOut, syncNow, edit, saveRecord, toggleDone,
+    saveDraft, removeItem, applyScoped, weekStartsOn, shared, categories,
+    taskLists, focusSessions, focusTimer, runFocusTimer,
+    unreadNotifications, snoozeOptions,
+    notifyRead, notifyUnread, notifyDismiss, notifySnooze, notifyClear,
+    notifyMarkAllRead, notifyComplete,
+    prayersOn, isPrayerDone, togglePrayer,
+    interval, setSnapInterval, calendarView, setCalendarView,
+    customWindow, setCustomWindow, dayWindow, setDayStart, setDayEnd,
+    swipeViewSwitch, setSwipeViewSwitch, visibleHours, setVisibleHours,
+    prayerAppearance, setPrayerAppearance, prayerCacheSummary,
+    answerConflict, resetLocal, lastError,
+  ]);
 
-  return <PlannerContext.Provider value={value}>{children}</PlannerContext.Provider>;
+  return (
+    <PlannerContext.Provider value={value}>
+      <NotifyCentreContext.Provider value={notifyCentre}>
+        {children}
+      </NotifyCentreContext.Provider>
+    </PlannerContext.Provider>
+  );
 }

@@ -51,7 +51,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   // The planner is checked last thing at night as often as first thing in the
   // morning, so both themes are real designs rather than one plus an inversion.
-  const palette = resolvePalette(mode, scheme);
+  //
+  // Memoised because this object IS the context value: rebuilding it hands a
+  // new identity to every `useTheme()` in the app, which is very nearly every
+  // component there is.
+  const palette = useMemo(() => resolvePalette(mode, scheme), [mode, scheme]);
   const modeValue = useMemo(() => ({ mode, setMode }), [mode, setMode]);
 
   return (

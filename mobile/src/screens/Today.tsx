@@ -43,12 +43,14 @@ import {
   RefreshControl,
   ScrollView,
   View,
+  Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, StatusDot, Text, useTheme } from '../ui/kit';
+import { useNowMinute } from '../ui/useNow';
 import { ICONS } from '../ui/icons';
-import { radius, space, HIT } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { WeekView } from './views/WeekView';
@@ -108,11 +110,16 @@ export function Today({
     unreadNotifications, prayerAppearance,
   } = usePlanner();
 
-  const today = ymd(new Date());
-  const [selected, setSelected] = useState(today);
+  const [selected, setSelected] = useState(() => ymd(new Date()));
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [menu, setMenu] = useState<ItemMenuTarget | null>(null);
+
+  const [scrollY, setScrollY] = useState(0);
+  const [scrollViewHeight, setScrollViewHeight] = useState(1000);
+  const [timelineY, setTimelineY] = useState(0);
+  const [nowLineY, setNowLineY] = useState<number | null>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
   /**
    * Which occurrence the menu is acting on.
    *
@@ -214,8 +221,19 @@ export function Today({
     return { ...full, allDay, timed, tasks: [], all: [...allDay, ...timed] };
   }, [day]);
 
-  const now = new Date();
+  /**
+   * The clock this screen draws itself against.
+   *
+   * Explicit, because it used to be accidental: `new Date()` was read during
+   * render and the screen happened to be re-rendered every thirty seconds by
+   * the notification centre's tick arriving through the planner context. That
+   * tick now stays where it belongs, so the calendar keeps its own minute hand.
+   */
+  const now = useNowMinute();
   const nowMin = now.getHours() * 60 + now.getMinutes();
+  // Derived from the ticking clock rather than from a value captured at mount,
+  // so an app left open overnight rolls over on its own.
+  const today = ymd(now);
   const showingToday = selected === today;
   const running = showingToday ? currentItem(agenda, nowMin) : null;
   const upNext = showingToday ? nextItem(agenda, nowMin) : null;
@@ -223,6 +241,20 @@ export function Today({
   const refresh = async () => {
     setRefreshing(true);
     try { await syncNow(); } finally { setRefreshing(false); }
+  };
+
+  const showGoToLive = showingToday && nowLineY !== null && (
+    (timelineY + nowLineY + 30 < scrollY) ||
+    (timelineY + nowLineY > scrollY + scrollViewHeight - 100)
+  );
+
+  const handleGoToLive = () => {
+    if (nowLineY !== null) {
+      scrollViewRef.current?.scrollTo({
+        y: Math.max(0, timelineY + nowLineY - scrollViewHeight / 2 + 50),
+        animated: true,
+      });
+    }
   };
 
   const statusTone =
@@ -459,7 +491,8 @@ export function Today({
           paddingHorizontal: space.xl,
         }}>
           <View style={{ flex: 1 }}>
-            <Pressable onPress={refresh} hitSlop={space.sm}>
+            <Pressable
+      style={({ pressed }) => (pressed ? PRESSED : null)} onPress={refresh} hitSlop={space.sm}>
               <Row gap={space.sm} style={{ alignItems: 'center', marginBottom: 2 }}>
                 <StatusDot tone={statusTone as any} />
                 <Text variant="caption" tone={status.conflicts > 0 ? 'warn' : 'faint'}>
@@ -468,6 +501,7 @@ export function Today({
               </Row>
             </Pressable>
             <Pressable
+      style={({ pressed }) => (pressed ? PRESSED : null)}
               onPress={() => setSelected(today)}
               disabled={showingToday}
               accessibilityRole="button"
@@ -486,13 +520,13 @@ export function Today({
               accessibilityRole="button"
               accessibilityLabel="Back to today"
               hitSlop={space.sm}
-              style={{
+              style={({ pressed }) => [{
                 paddingHorizontal: space.md, height: 30,
                 borderRadius: radius.pill,
                 alignItems: 'center', justifyContent: 'center',
                 borderWidth: 1, borderColor: p.accent,
                 backgroundColor: p.accentSoft,
-              }}
+              }, pressed ? PRESSED : null]}
             >
               <Text variant="caption" tone="accent" style={{ fontWeight: '700' }}>Today</Text>
             </Pressable>
@@ -545,7 +579,7 @@ export function Today({
                 onPress={() => chooseView(mode)}
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
-                style={{
+                style={({ pressed }) => [{
                   paddingHorizontal: space.md,
                   height: 30,
                   borderRadius: radius.pill,
@@ -554,7 +588,7 @@ export function Today({
                   backgroundColor: on ? p.accentSoft : 'transparent',
                   borderWidth: 1,
                   borderColor: on ? p.accent : p.line,
-                }}
+                }, pressed ? PRESSED : null]}
               >
                 <Text variant="caption" tone={on ? 'accent' : 'faint'}>
                   {VIEW_LABELS[mode]}
@@ -690,6 +724,15 @@ export function Today({
         />
       ) : (
       <ScrollView
+        ref={scrollViewRef}
+        onLayout={(e) => {
+          setScrollViewHeight(e.nativeEvent.layout.height);
+        }}
+        onScroll={(e) => {
+          setScrollY(e.nativeEvent.contentOffset.y);
+          setScrollViewHeight(e.nativeEvent.layoutMeasurement.height);
+        }}
+        scrollEventThrottle={16}
         contentContainerStyle={{
           paddingHorizontal: space.xl,
           paddingTop: space.lg,
@@ -719,7 +762,7 @@ export function Today({
         ) : null}
 
         {timed.length > 0 ? (
-          <Group title="Timeline">
+          <Group title="Timeline" onLayout={(e) => setTimelineY(e.nativeEvent.layout.y)}>
             {timed.map((item, i) => {
               const previous = timed[i - 1];
               // Drawn once, in the gap before the first thing still to come, so
@@ -731,7 +774,7 @@ export function Today({
                 item.startMin > nowMin &&
                 (!previous || previous.startMin === null || previous.startMin <= nowMin);
               return (
-                <View key={item.id}>
+                <View key={item.id} onLayout={crossesNow ? (e) => setNowLineY(e.nativeEvent.layout.y) : undefined}>
                   {crossesNow ? <NowLine minutes={nowMin} clock={timeFormat} /> : null}
                   <ItemRow item={item} onTick={tick} onOpen={open} onHold={hold} rail clock={timeFormat} />
                 </View>
@@ -740,7 +783,7 @@ export function Today({
             {/* The line belongs after everything if the day is already done. */}
             {showingToday && timed.length > 0
               && timed.every(i => i.startMin !== null && i.startMin <= nowMin)
-              ? <NowLine minutes={nowMin} clock={timeFormat} /> : null}
+              ? <View onLayout={(e) => setNowLineY(e.nativeEvent.layout.y)}><NowLine minutes={nowMin} clock={timeFormat} /></View> : null}
           </Group>
         ) : null}
 
@@ -767,6 +810,43 @@ export function Today({
       </ScrollView>
       )}
       </View>
+
+      {/* ── Go to Live ─────────────────────────────────────────────────── */}
+      {showGoToLive && (
+        <View style={{
+          position: 'absolute',
+          bottom: insets.bottom + space.xl,
+          left: 0,
+          right: 0,
+          alignItems: 'center',
+        }} pointerEvents="box-none">
+          <Pressable
+            onPress={handleGoToLive}
+            accessibilityRole="button"
+            accessibilityLabel="Go to Live"
+            android_ripple={{ color: p.surfaceAlt, radius: 24 }}
+            style={({ pressed }) => ({
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              paddingHorizontal: 20,
+              paddingVertical: 12,
+              borderRadius: 24,
+              backgroundColor: p.surfaceAlt,
+              borderWidth: 1,
+              borderColor: p.line,
+              transform: [{ scale: pressed ? 0.96 : 1 }],
+              elevation: 8,
+              shadowColor: '#000',
+              shadowOpacity: 0.4,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 5 },
+            })}
+          >
+            <Text variant="bodyStrong" style={{ color: p.ink }}>Go to Live</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* ── Add ────────────────────────────────────────────────────────── */}
       <Pressable
@@ -881,13 +961,13 @@ function DayCell({ date, selected, isToday, load, onPress }: {
       accessibilityRole="button"
       accessibilityState={{ selected }}
       accessibilityLabel={`${d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}, ${load.total === 0 ? 'nothing planned' : `${load.total} items`}`}
-      style={{
+      style={({ pressed }) => [{
         flex: 1,
         alignItems: 'center',
         paddingVertical: space.sm,
         borderRadius: radius.md,
         backgroundColor: selected ? p.accentSoft : 'transparent',
-      }}
+      }, pressed ? PRESSED : null]}
     >
       <Text
         variant="caption"
@@ -924,15 +1004,16 @@ function DayCell({ date, selected, isToday, load, onPress }: {
 
 // ─── Day pieces ──────────────────────────────────────────────────────────────
 
-function Group({ title, hint, hintTone = 'faint', children }: {
+function Group({ title, hint, hintTone = 'faint', onLayout, children }: {
   title: string;
   hint?: string;
   hintTone?: 'faint' | 'ok';
+  onLayout?: (e: any) => void;
   children: React.ReactNode;
 }) {
   const p = useTheme();
   return (
-    <View style={{ marginBottom: space.xl }}>
+    <View style={{ marginBottom: space.xl }} onLayout={onLayout}>
       <Row style={{ justifyContent: 'space-between', alignItems: 'baseline', marginBottom: space.sm }}>
         <Text variant="label" tone="faint" style={{ letterSpacing: 1 }}>
           {title.toUpperCase()}
@@ -1102,7 +1183,7 @@ function Check({ done, round, colour, onPress, label }: {
       accessibilityState={{ checked: done }}
       accessibilityLabel={label}
       hitSlop={space.md}
-      style={{
+      style={({ pressed }) => [{
         width: 22, height: 22,
         borderRadius: round ? 11 : 6,
         borderWidth: 2,
@@ -1110,7 +1191,7 @@ function Check({ done, round, colour, onPress, label }: {
         backgroundColor: done ? colour : 'transparent',
         alignItems: 'center',
         justifyContent: 'center',
-      }}
+      }, pressed ? PRESSED : null]}
     >
       {done ? (
         <Text style={{ color: p.accentInk, fontSize: 13, lineHeight: 15, fontWeight: '900' }}>
@@ -1123,15 +1204,40 @@ function Check({ done, round, colour, onPress, label }: {
 
 function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
   const p = useTheme();
+  const anim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.timing(anim, {
+        toValue: 1,
+        duration: 2000,
+        useNativeDriver: true,
+      })
+    ).start();
+  }, [anim]);
+
   return (
     <Row gap={space.sm} style={{ alignItems: 'center', paddingVertical: space.sm }}>
       <View style={{ width: 46, alignItems: 'flex-end' }}>
-        <Text variant="caption" style={{ color: p.danger, fontSize: 11 }}>
+        <Text variant="caption" style={{ color: p.danger, fontSize: 11, fontWeight: '700' }}>
           {formatClock(minutes, clock)}
         </Text>
       </View>
-      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: p.danger }} />
-      <View style={{ flex: 1, height: 1, backgroundColor: p.danger, opacity: 0.45 }} />
+      <View style={{ width: 8, height: 8, justifyContent: 'center', alignItems: 'center' }}>
+        <Animated.View
+          style={{
+            position: 'absolute',
+            width: 24,
+            height: 24,
+            borderRadius: 12,
+            backgroundColor: p.danger,
+            opacity: anim.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0] }),
+            transform: [{ scale: anim.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }) }]
+          }}
+        />
+        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: p.danger }} />
+      </View>
+      <View style={{ flex: 1, height: 2, backgroundColor: p.danger, opacity: 0.6 }} />
     </Row>
   );
 }

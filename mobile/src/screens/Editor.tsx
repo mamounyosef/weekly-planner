@@ -32,7 +32,7 @@ import { Button, Row, Text, useTheme } from '../ui/kit';
 import {
   CategoryPicker, ColourPicker, Field, Segment, Stepper, TextField, Toggle,
 } from '../ui/Fields';
-import { radius, space, HIT } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   applyCategoryDefaults,
@@ -203,7 +203,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
 
   return (
     <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'flex-end' }}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close" />
 
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={{
@@ -344,7 +344,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
             {/* ── Everything else, folded but stated ── */}
             <Pressable
               onPress={() => setMore(v => !v)}
-              style={{ paddingVertical: space.sm }}
+              style={({ pressed }) => [{ paddingVertical: space.sm }, pressed ? PRESSED : null]}
             >
               <Row style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <Text variant="bodyStrong" tone="accent">{more ? 'Less' : 'More'}</Text>
@@ -575,14 +575,14 @@ function WeekdayPicker({ value, onChange }: {
             accessibilityRole="button"
             accessibilityLabel={weekdayName(d)}
             accessibilityState={{ selected: on }}
-            style={{
+            style={({ pressed }) => [{
               flex: 1, height: 40,
               alignItems: 'center', justifyContent: 'center',
               borderRadius: radius.sm,
               backgroundColor: on ? p.accent : p.surfaceAlt,
               borderWidth: 1,
               borderColor: on ? p.accent : p.line,
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text
               variant="caption"
@@ -656,7 +656,7 @@ function ReminderEditor({ value, onChange }: {
                   onPress={() => onChange({ ...value, rules: rules.filter((_, j) => j !== i) })}
                   hitSlop={space.sm}
                   accessibilityLabel="Remove this reminder"
-                  style={{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }}
+                  style={({ pressed }) => [{ width: 32, height: 32, alignItems: 'center', justifyContent: 'center' }, pressed ? PRESSED : null]}
                 >
                   <Text variant="body" tone="faint">✕</Text>
                 </Pressable>
@@ -670,7 +670,7 @@ function ReminderEditor({ value, onChange }: {
                 ...value,
                 rules: [...rules, { id: `r${Date.now()}`, offsetMin: -15 }],
               })}
-              style={{ paddingVertical: space.sm }}
+              style={({ pressed }) => [{ paddingVertical: space.sm }, pressed ? PRESSED : null]}
             >
               <Text variant="caption" tone="accent">+ Another reminder</Text>
             </Pressable>
@@ -706,13 +706,13 @@ function OffsetPicker({ value, onChange }: {
             onPress={() => onChange(off)}
             accessibilityRole="button"
             accessibilityState={{ selected: on }}
-            style={{
+            style={({ pressed }) => [{
               paddingHorizontal: space.md, height: 36,
               alignItems: 'center', justifyContent: 'center',
               borderRadius: radius.pill,
               backgroundColor: on ? p.accentSoft : p.surfaceAlt,
               borderWidth: 1, borderColor: on ? p.accent : p.line,
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text variant="caption" tone={on ? 'accent' : 'soft'}>
               {offsetLabel(off)}
@@ -756,14 +756,14 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
         <Step label="−" onPress={() => nudge(-step)} onLongPress={() => nudge(-60)} />
         <Pressable
           onPress={() => (minutes === null ? onChange(9 * 60) : undefined)}
-          style={{
+          style={({ pressed }) => [{
             minWidth: 88, height: HIT,
             paddingHorizontal: space.md,
             borderRadius: radius.md,
             borderWidth: 1, borderColor: p.line,
             backgroundColor: p.surfaceAlt,
             alignItems: 'center', justifyContent: 'center',
-          }}
+          }, pressed ? PRESSED : null]}
         >
           <Text variant="bodyStrong" tone={minutes === null ? 'faint' : 'ink'}>
             {minutes === null ? 'None' : toTimeString(minutes)}
@@ -775,7 +775,7 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
           <Pressable
             onPress={() => onChange(minutes === null ? 10 * 60 : null)}
             hitSlop={space.sm}
-            style={{ paddingHorizontal: space.sm, height: HIT, justifyContent: 'center' }}
+            style={({ pressed }) => [{ paddingHorizontal: space.sm, height: HIT, justifyContent: 'center' }, pressed ? PRESSED : null]}
           >
             <Text variant="caption" tone="accent">{minutes === null ? 'Set' : 'Clear'}</Text>
           </Pressable>
@@ -851,12 +851,12 @@ function DateStrip({ value, onChange, from, days = 14 }: {
             onPress={() => onChange(date)}
             accessibilityRole="button"
             accessibilityState={{ selected: on }}
-            style={{
+            style={({ pressed }) => [{
               minWidth: 54, paddingVertical: space.sm, paddingHorizontal: space.sm,
               borderRadius: radius.md, alignItems: 'center', gap: 1,
               backgroundColor: on ? p.accentSoft : p.surfaceAlt,
               borderWidth: 1, borderColor: on ? p.accent : p.line,
-            }}
+            }, pressed ? PRESSED : null]}
           >
             <Text variant="caption" tone={on ? 'accent' : 'faint'} style={{ fontSize: 11 }}>
               {d.toLocaleDateString(undefined, { weekday: 'short' })}

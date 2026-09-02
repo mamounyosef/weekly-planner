@@ -13,8 +13,26 @@
 // THE ORDERING RULE: ops are deleted from the outbox only after the server has
 // confirmed them, and state is written in the SAME transaction as the cursor. A
 // cursor that advanced without its state would skip ops forever.
+//
+// THE TWO HALVES OF AN EDIT. The ops and the materialised state are written
+// separately (`saveOps` and `saveState`), because they have very different
+// costs and very different consequences:
+//
+//   • the ops are three small rows, and they are the ONLY copy of an edit made
+//     with no PC in reach. They are written immediately, always.
+//   • the state is the whole planner as one JSON string — most of a megabyte on
+//     a real one — and it is a CACHE. Anything it is missing is still in the
+//     outbox, and `load` replays the outbox over it. So it is allowed to lag,
+//     which is what stops a drag across an hour from stringifying a megabyte
+//     forty times and dropping every frame of the gesture.
+//
+// `saveLocalEdit` still does both in one transaction, for callers that want the
+// old all-or-nothing guarantee, and it is what the crash tests exercise.
 
-import { emptyState, sanitizeState, type SyncConflict, type SyncOp, type SyncState } from './sync';
+import {
+  emptyState, mergeOps, sanitizeState,
+  type SyncConflict, type SyncOp, type SyncState,
+} from './sync';
 import { emptyClientData, type ClientData } from './syncClient';
 
 /** The minimum a SQL driver must provide. Both drivers satisfy this exactly. */
@@ -97,26 +115,78 @@ export function createStorage(sql: SqlRunner) {
       );
       const conflictRows = await sql.all<JsonRow>('SELECT json FROM conflicts');
 
-      const state = stateRaw ? parseJson<SyncState>(stateRaw, emptyState()) : emptyState();
+      const stored = stateRaw ? parseJson<SyncState>(stateRaw, emptyState()) : emptyState();
       const base = emptyClientData(storedDevice ?? deviceId);
+
+      // A state file that survived but lost its shape must not wedge the app;
+      // an empty state simply triggers a full resync on the next connection.
+      // Same repair as the server. The phone carries its own copy of the
+      // damage, so healing only one side would leave them disagreeing.
+      const sane = stored && typeof stored === 'object' && stored.entities
+        ? sanitizeState(stored) : emptyState();
+
+      const outbox = outboxRows
+        .map(r => parseJson<SyncOp | null>(r.json, null))
+        .filter((o): o is SyncOp => o !== null);
+
+      /**
+       * REPLAY THE OUTBOX ONTO WHATEVER THE STATE BLOB SAYS.
+       *
+       * The two are written separately now: ops the instant they are made,
+       * because they are the only copy of an offline edit and must survive the
+       * process dying; the state blob a moment later, because it is most of a
+       * megabyte of JSON and stringifying it on every keystroke was costing
+       * frames during a drag.
+       *
+       * That leaves a window where the ops table is ahead of the blob. This
+       * closes it. `mergeOps` is idempotent — every op the blob already
+       * reflects is recorded in `state.applied` and ignored — so replaying an
+       * outbox that is fully accounted for costs a pass over a handful of
+       * entries and changes nothing. When the blob really is behind, it catches
+       * up here rather than waiting for the server to echo the edit back.
+       */
+      const state = outbox.length > 0 ? mergeOps(sane, outbox).state : sane;
 
       return {
         ...base,
-        // A state file that survived but lost its shape must not wedge the app;
-        // an empty state simply triggers a full resync on the next connection.
-        // Same repair as the server. The phone carries its own copy of the
-        // damage, so healing only one side would leave them disagreeing.
-        state: state && typeof state === 'object' && state.entities
-          ? sanitizeState(state) : emptyState(),
-        outbox: outboxRows
-          .map(r => parseJson<SyncOp | null>(r.json, null))
-          .filter((o): o is SyncOp => o !== null),
+        state,
+        outbox,
         conflicts: conflictRows
           .map(r => parseJson<SyncConflict | null>(r.json, null))
           .filter((c): c is SyncConflict => c !== null),
         cursor: Number(cursorRaw) || 0,
         lastSyncedAt: syncedRaw === null ? null : Number(syncedRaw),
       };
+    },
+
+    /**
+     * The ops from one edit, and nothing else.
+     *
+     * Split out of `saveLocalEdit` so that the durable half of an edit is cheap
+     * enough to do immediately. These rows ARE the edit as far as survival goes:
+     * lose them and an offline change is gone, so they are never deferred.
+     */
+    async saveOps(newOps: readonly SyncOp[]): Promise<void> {
+      if (newOps.length === 0) return;
+      await sql.transaction(async () => {
+        for (const op of newOps) {
+          await sql.run(
+            'INSERT OR IGNORE INTO outbox (op_id, seq, json) VALUES (?, ?, ?)',
+            [op.opId, op.lamport, JSON.stringify(op)],
+          );
+        }
+      });
+    },
+
+    /**
+     * The materialised state, and nothing else.
+     *
+     * The expensive half, and the one that can safely lag: anything it is
+     * missing is still in the outbox, and `load` replays it. Callers coalesce
+     * this so a drag across an hour writes once rather than forty times.
+     */
+    async saveState(data: ClientData): Promise<void> {
+      await setMeta('state', JSON.stringify(data.state));
     },
 
     /** Remember which device this is, so the id survives reinstall-free restarts. */

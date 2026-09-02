@@ -45,7 +45,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Divider, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Segment, Stepper, TextField, Toggle } from '../ui/Fields';
-import { radius, space, HIT } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   DEFAULT_PRAYER_APPEARANCE, PRAYER_DRAW_STYLES, describePrayerAppearance,
@@ -262,7 +262,7 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
-              style={{ paddingHorizontal: space.sm }}
+              style={({ pressed }) => [{ paddingHorizontal: space.sm }, pressed ? PRESSED : null]}
             >
               <Text variant="title" tone="soft">✕</Text>
             </Pressable>
@@ -336,7 +336,7 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
                   hitSlop={space.sm}
                   accessibilityRole="button"
                   accessibilityLabel="Fetch the times again"
-                  style={{ paddingHorizontal: space.sm, paddingVertical: space.xs, opacity: busy ? 0.4 : 1 }}
+                  style={({ pressed }) => [{ paddingHorizontal: space.sm, paddingVertical: space.xs, opacity: busy ? 0.4 : 1 }, pressed ? PRESSED : null]}
                 >
                   <Text variant="caption" tone="accent">Refresh</Text>
                 </Pressable>
@@ -543,14 +543,14 @@ function PrayerRow({
           accessibilityRole="checkbox"
           accessibilityState={{ checked: done, disabled: !visible }}
           accessibilityLabel={`Mark ${label} as prayed`}
-          style={{
+          style={({ pressed }) => [{
             width: 24, height: 24, borderRadius: 12,
             alignItems: 'center', justifyContent: 'center',
             borderWidth: 1.5,
             borderColor: done ? p.ok : p.line,
             backgroundColor: done ? p.ok : 'transparent',
             opacity: visible ? 1 : 0.3,
-          }}
+          }, pressed ? PRESSED : null]}
         >
           {done ? <Text style={{ color: p.bg, fontSize: 13, fontWeight: '900' }}>✓</Text> : null}
         </Pressable>

@@ -304,6 +304,26 @@ export interface CentreView {
   trimmed: number;
 }
 
+/**
+ * A centre with nothing in it.
+ *
+ * Exists so a React context can have a default that is a real, complete view
+ * rather than null: the alternative is every reader checking for null before it
+ * can count anything, for a case that only happens outside the provider.
+ */
+export const EMPTY_CENTRE_VIEW: CentreView = {
+  entries: [],
+  groups: [],
+  unread: 0,
+  unreadCritical: 0,
+  firedCount: 0,
+  upcomingCount: 0,
+  snoozedCount: 0,
+  nowIndex: 0,
+  nextAt: null,
+  trimmed: 0,
+};
+
 export interface CentreInput {
   schedule: readonly ScheduledNotification[];
   state: NotifyCentreState;

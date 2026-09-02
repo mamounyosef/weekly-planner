@@ -75,6 +75,9 @@ const testFiles = [
   'src/lib/displaySettings.test.ts',
   'src/lib/conflictText.test.ts',
   'src/lib/focusGoals.test.ts',
+  'src/lib/prefsStore.test.ts',
+  'src/lib/coalesce.test.ts',
+  'src/lib/dayCache.test.ts',
 ];
 
 console.log(`\n======================================================`);

@@ -42,7 +42,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Card, Divider, Row, Text, useTheme } from '../ui/kit';
 import { Segment } from '../ui/Fields';
-import { HIT, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, radius, space, type as typeScale } from '../theme';
 import { formatClock } from '../lib/agenda';
 import {
   KIND_LABEL,
@@ -150,7 +150,7 @@ export function Notifications(props: NotificationsProps) {
           <Pressable
             onPress={props.onClose}
             accessibilityLabel="Close notifications"
-            style={{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }}
+            style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}
           >
             <Text variant="title" tone="soft">{'✕'}</Text>
           </Pressable>
@@ -171,7 +171,7 @@ export function Notifications(props: NotificationsProps) {
         {props.view.unread > 0 ? (
           <Pressable
             onPress={props.onMarkAllRead}
-            style={{ minHeight: 36, justifyContent: 'center' }}
+            style={({ pressed }) => [{ minHeight: 36, justifyContent: 'center' }, pressed ? PRESSED : null]}
             accessibilityLabel="Mark everything that has fired as read"
           >
             <Text variant="caption" tone="accent">
@@ -252,7 +252,7 @@ export function Notifications(props: NotificationsProps) {
                 <Text variant="caption" tone="faint">{props.pendingNote}</Text>
               ) : null}
               {props.onOpenSettings ? (
-                <Pressable onPress={props.onOpenSettings} style={{ minHeight: 40, justifyContent: 'center' }}>
+                <Pressable onPress={props.onOpenSettings} style={({ pressed }) => [{ minHeight: 40, justifyContent: 'center' }, pressed ? PRESSED : null]}>
                   <Text variant="caption" tone="accent">
                     Change how early reminders arrive
                   </Text>

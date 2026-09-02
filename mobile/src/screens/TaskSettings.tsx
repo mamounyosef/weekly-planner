@@ -26,7 +26,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, TextField, Toggle } from '../ui/Fields';
-import { HIT, radius, space } from '../theme';
+import { HIT, PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
@@ -122,7 +122,7 @@ export function TaskSettings({ onClose }: { onClose?: () => void }) {
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
-              style={{ paddingHorizontal: space.sm }}
+              style={({ pressed }) => [{ paddingHorizontal: space.sm }, pressed ? PRESSED : null]}
             >
               <Text variant="title" tone="soft">✕</Text>
             </Pressable>
@@ -291,12 +291,12 @@ function Arrow({ label, glyph, enabled, onPress }: {
       accessibilityLabel={label}
       accessibilityState={{ disabled: !enabled }}
       hitSlop={4}
-      style={{
+      style={({ pressed }) => [{
         width: HIT - 8, height: HIT - 8,
         alignItems: 'center', justifyContent: 'center',
         borderRadius: radius.sm,
         opacity: enabled ? 1 : 0.25,
-      }}
+      }, pressed ? PRESSED : null]}
     >
       <Text variant="caption" tone="soft" style={{ color: p.inkSoft }}>{glyph}</Text>
     </Pressable>
@@ -341,7 +341,7 @@ function Sheet({ existing, takenNames, suggestedColour, onSave, onDelete, onClos
 
   return (
     <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'flex-end' }}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close" />
 
       <View style={{
         backgroundColor: p.surface,

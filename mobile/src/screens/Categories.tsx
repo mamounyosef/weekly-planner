@@ -22,7 +22,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Row, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, Stepper, TextField, Toggle } from '../ui/Fields';
-import { radius, space } from '../theme';
+import { PRESSED, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
@@ -127,7 +127,7 @@ export function Categories({ onClose }: { onClose?: () => void }) {
               onPress={onClose}
               accessibilityLabel="Back to settings"
               hitSlop={space.md}
-              style={{ paddingHorizontal: space.sm }}
+              style={({ pressed }) => [{ paddingHorizontal: space.sm }, pressed ? PRESSED : null]}
             >
               <Text variant="title" tone="soft">✕</Text>
             </Pressable>
@@ -346,7 +346,7 @@ function Sheet({ existing, takenNames, onSave, onDelete, onClose }: {
 
   return (
     <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'flex-end' }}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} accessibilityLabel="Close" />
+      <Pressable style={({ pressed }) => [{ flex: 1 }, pressed ? PRESSED : null]} onPress={onClose} accessibilityLabel="Close" />
 
       <View style={{
         backgroundColor: p.surface,
