@@ -105,6 +105,25 @@ export type ResolveChoice = 'winner' | 'loser' | 'delete' | 'keep';
 // ─── Local edits ─────────────────────────────────────────────────────────────
 
 /**
+ * A copy of the state that exists ONLY so the lamport counter can advance.
+ *
+ * `makeOps` numbers each op it writes by incrementing `state.lamport`, which is
+ * the one thing on a state it changes -- everything else it does is a read. So
+ * the callers below hand it a scratch copy and let `mergeOps` raise the real
+ * clock from the ops themselves.
+ *
+ * This used to be `structuredClone(data.state)`, a deep copy of every entity,
+ * every field and all seven thousand applied op ids, three times over on every
+ * save. On the phone that was tens of milliseconds of the main thread between
+ * the finger and the screen, and it grew with everything the user had ever
+ * recorded. A shallow copy is enough because `lamport` is a number: writing it
+ * on the copy cannot be seen through the shared references.
+ */
+function lamportScratch(state: SyncState): SyncState {
+  return { ...state };
+}
+
+/**
  * Apply an edit locally and queue it. Returns new data; never mutates the input,
  * so a React state update is a straight assignment.
  */
@@ -112,7 +131,7 @@ export function applyLocalChange(
   data: ClientData,
   opts: { store: SyncStore; entityId: string; changes: Record<string, unknown>; at: number },
 ): ClientData {
-  const working = structuredClone(data.state);
+  const working = lamportScratch(data.state);
   const ops = makeOps(working, {
     store: opts.store,
     entityId: opts.entityId,
@@ -147,7 +166,7 @@ export function applyLocalRecord(
   data: ClientData,
   opts: { store: SyncStore; entityId: string; record: Record<string, unknown>; at: number },
 ): ClientData {
-  const working = structuredClone(data.state);
+  const working = lamportScratch(data.state);
   const ops = snapshotToOps(working, {
     store: opts.store,
     snapshot: { [opts.entityId]: opts.record },
@@ -168,7 +187,7 @@ export function applyLocalResolution(
   choice: ResolveChoice,
   at: number,
 ): ClientData {
-  const working = structuredClone(data.state);
+  const working = lamportScratch(data.state);
   const ops = resolveConflict(working, conflict, choice, { device: data.deviceId, at });
   const merged = mergeOps(data.state, ops);
   return {

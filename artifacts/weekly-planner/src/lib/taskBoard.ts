@@ -19,6 +19,24 @@ import {
 import { resolveListId, type TaskList } from './taskLists';
 
 export type SortMode = 'datetime' | 'manual' | 'title' | 'title-desc';
+
+/** Every sort the board understands, and the one it falls back to. */
+export const SORT_MODES: readonly SortMode[] = ['datetime', 'manual', 'title', 'title-desc'];
+
+export const DEFAULT_SORT_MODE: SortMode = 'datetime';
+
+/**
+ * A stored sort mode, or the default.
+ *
+ * A store hands back strings and nulls. Deciding here, rather than at each of
+ * the two places that read one, is what stops a phone and a PC from disagreeing
+ * about whether a mode written by an older build still means anything.
+ */
+export function coerceSortMode(value: unknown): SortMode {
+  return typeof value === 'string' && (SORT_MODES as readonly string[]).includes(value)
+    ? value as SortMode
+    : DEFAULT_SORT_MODE;
+}
 export type Bucket = 'Overdue' | 'Today' | 'Tomorrow' | 'Upcoming' | 'General';
 export type SectionKey = Bucket | 'Done';
 

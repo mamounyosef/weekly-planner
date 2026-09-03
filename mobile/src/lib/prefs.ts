@@ -44,6 +44,7 @@ import { createExpoRunner, openPlannerDatabase } from './sqlite';
 import { FULL_DAY, normaliseRanges, type HourRange } from './dayWindows';
 import { isThemeMode, type ThemeMode } from '../theme';
 import { coerceFocusRangeMode, type FocusRangeMode } from './focusPeriod';
+import { coerceSortMode, type SortMode } from './taskBoard';
 import {
   DEFAULT_SWIPE_VIEW_SWITCH,
   coerceBool,
@@ -81,6 +82,7 @@ const KEY_DAY_START = 'planner.dayStartH';
 const KEY_DAY_END = 'planner.dayEndH';
 const KEY_SWIPE_VIEWS = 'planner.swipeViewSwitch';
 const KEY_FOCUS_RANGE_MODE = 'planner.focusRangeMode';
+const KEY_TASK_SORT = 'planner.taskSort';
 
 /**
  * Exactly what the fast store owns.
@@ -103,6 +105,7 @@ export const PREF_KEYS = [
   KEY_DAY_END,
   KEY_SWIPE_VIEWS,
   KEY_FOCUS_RANGE_MODE,
+  KEY_TASK_SORT,
 ] as const;
 
 async function secureRead(key: string): Promise<string | null> {
@@ -248,6 +251,18 @@ export const prefs = {
     return coerceFocusRangeMode(await read(KEY_FOCUS_RANGE_MODE));
   },
   setFocusRangeMode: (mode: FocusRangeMode) => write(KEY_FOCUS_RANGE_MODE, mode),
+
+  /**
+   * How the task board is sorted.
+   *
+   * Per device like the rest of the view preferences, and remembered because
+   * dragging a task switches the board to Manual: coming back to Date on the
+   * next launch would look exactly like the drag having been thrown away.
+   */
+  async getTaskSort(): Promise<SortMode> {
+    return coerceSortMode(await read(KEY_TASK_SORT));
+  },
+  setTaskSort: (mode: SortMode) => write(KEY_TASK_SORT, mode),
 
   /**
    * How coarsely times snap on this device: 5, 10, 15, 30 or 60 minutes.

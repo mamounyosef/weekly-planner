@@ -8,8 +8,12 @@
 // (JSON-shaped data: objects, arrays, strings, numbers, booleans, null).
 
 if (typeof globalThis.structuredClone !== 'function') {
-  // The engine clones state before merging so a failed merge cannot leave a
-  // half-mutated planner behind.
+  // Kept as a guard, not as a dependency. The sync engine used to deep clone the
+  // whole planner on every edit and this stood in for it on a runtime that had
+  // no `structuredClone` -- which meant a JSON round trip of the entire state
+  // between the finger and the screen. The engine now copies only what it
+  // writes (see `touchEntity` in `sync.ts`) and nothing here is on that path,
+  // but a missing built-in should still not be a crash.
   (globalThis as any).structuredClone = <T>(value: T): T =>
     value === undefined ? value : JSON.parse(JSON.stringify(value));
 }

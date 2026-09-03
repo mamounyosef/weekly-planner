@@ -48,6 +48,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, StatusDot, Text, useTheme } from '../ui/kit';
+import { Tick } from '../ui/Tick';
+import { applyGuesses, setPending } from '../lib/pendingDone';
 import { useNowMinute } from '../ui/useNow';
 import { ICONS } from '../ui/icons';
 import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
@@ -86,6 +88,9 @@ const VIEW_LABELS: Record<ViewMode, string> = {
 };
 
 /** The palette the menu offers, the same one the editor shows. */
+/** How long a tick is believed before the store has the last word. */
+const GUESS_TTL_MS = 4000;
+
 const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
 
 export function Today({
@@ -457,16 +462,49 @@ export function Today({
     );
   };
 
-  const tick = (item: AgendaItem) => toggleDone(item.store, {
-    masterId: item.masterId,
-    date: item.date,
-    repeating: item.repeating,
-    completed: item.completed,
-  });
+  /**
+   * Ticking, drawn before it is written.
+   *
+   * `toggleDone` commits in the same tick, but committing re-renders every
+   * screen that is being kept alive and regroups the day, and none of that is
+   * free on a phone. Holding the answer here means the box fills the instant
+   * the finger lifts and the rest catches up behind it.
+   *
+   * A guess is dropped after a few seconds whatever happened, so a write that
+   * never landed shows the truth again rather than a tick that is a lie.
+   */
+  const [guessedDone, setGuessedDone] = useState<Record<string, boolean>>({});
+  const guessTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => () => {
+    Object.values(guessTimers.current).forEach(t => clearTimeout(t));
+  }, []);
+
+  const doneKey = (i: AgendaItem) => `${i.store}:${i.masterId}:${i.date}`;
+
+  const tick = (item: AgendaItem) => {
+    const key = doneKey(item);
+    setGuessedDone(prev => ({ ...prev, [key]: !item.completed }));
+    const existing = guessTimers.current[key];
+    if (existing) clearTimeout(existing);
+    guessTimers.current[key] = setTimeout(() => {
+      delete guessTimers.current[key];
+      setGuessedDone(prev => setPending(prev, key, false));
+    }, GUESS_TTL_MS);
+
+    void toggleDone(item.store, {
+      masterId: item.masterId,
+      date: item.date,
+      repeating: item.repeating,
+      completed: item.completed,
+    });
+  };
+
+  /** The list as the user believes it to be. Identical once the store agrees. */
+  const applyGuess = (items: AgendaItem[]) => applyGuesses(items, doneKey, guessedDone);
 
   // All-day events: true of the day rather than of a moment in it.
-  const anytime = agenda.allDay;
-  const timed = agenda.timed;
+  const anytime = applyGuess(agenda.allDay);
+  const timed = applyGuess(agenda.timed);
 
   const prayers = useMemo(() => prayersOn(selected), [prayersOn, selected]);
   /** The next one still to come, for the highlight and the countdown. */
@@ -1143,7 +1181,7 @@ function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
         }} />
 
         {item.checkable ? (
-          <Check
+          <Tick
             done={item.completed}
             round={item.store === 'tasks'}
             colour={colour}
@@ -1160,7 +1198,15 @@ function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
               variant="bodyStrong"
               tone={item.completed ? 'faint' : 'ink'}
               numberOfLines={2}
-              style={{ flexShrink: 1 }}
+              /* A DEFINITE WIDTH, NOT A MEASURED ONE.
+                 `flexShrink: 1` leaves the box to be sized by measuring the
+                 string, and a wrong measurement is drawn as a title that is
+                 silently missing its last word: no ellipsis, ordinary row
+                 height, just gone. `flex: 1` gives the box the row's leftover
+                 width up front, so nothing can disagree about it.
+                 `textAlign: 'left'` keeps right to left titles where they sit
+                 today instead of jumping to the far edge of the new box. */
+              style={{ flex: 1, textAlign: 'left' }}
             >
               {item.title}
             </Text>
@@ -1181,37 +1227,6 @@ function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
   );
 }
 
-/** A tick target of its own, big enough to hit and small enough not to shout. */
-function Check({ done, round, colour, onPress, label }: {
-  done: boolean; round: boolean; colour: string; onPress: () => void; label: string;
-}) {
-  const p = useTheme();
-  return (
-    <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-      onPress={onPress}
-      accessibilityRole="checkbox"
-      accessibilityState={{ checked: done }}
-      accessibilityLabel={label}
-      hitSlop={space.md}
-      style={({ pressed }) => [{
-        width: 22, height: 22,
-        borderRadius: round ? 11 : 6,
-        borderWidth: 2,
-        borderColor: done ? colour : p.inkFaint,
-        backgroundColor: done ? colour : 'transparent',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }, pressed ? PRESSED : null]}
-    >
-      {done ? (
-        <Text style={{ color: p.accentInk, fontSize: 13, lineHeight: 15, fontWeight: '900' }}>
-          ✓
-        </Text>
-      ) : null}
-    </Pressable>
-  );
-}
 
 function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
   const p = useTheme();

@@ -272,16 +272,83 @@ export function setOwn<T>(obj: Record<string, T>, key: string, value: T): void {
   });
 }
 
-function entityOf(state: SyncState, store: SyncStore, entityId: string): EntityState {
-  let byId = getOwn(state.entities, store);
+/**
+ * An entity as it stands, for reading.
+ *
+ * Hands back a detached empty entity rather than inserting one, so that reading
+ * a state cannot change it. The old shared helper DID insert, which meant
+ * `makeOps` -- a pure question about what ops to write -- quietly grew an empty
+ * entity in the caller's state every time it was asked about something that did
+ * not exist yet.
+ */
+function readEntityState(state: SyncState, store: SyncStore, entityId: string): EntityState {
+  const byId = getOwn(state.entities, store);
+  return (byId && getOwn(byId, entityId)) || emptyEntity();
+}
+
+/**
+ * The entity a merge is about to change, COPIED ON FIRST TOUCH.
+ *
+ * WHY NOT JUST CLONE THE WHOLE STATE
+ * `mergeOps` used to begin `structuredClone(state.entities)`. That is correct,
+ * and it costs the entire planner on every single tap: ticking one task deep
+ * copied 678 entities and their 4800 fields, which on the phone is tens of
+ * milliseconds of the main thread with the finger still on the glass, growing
+ * with every event and focus session the user has ever recorded.
+ *
+ * A per-field op touches ONE entity. So the state above it is shared and only
+ * what is actually written gets copied: the store map on first touch of that
+ * store, then the entity itself. Everything else in the new state is the same
+ * object as in the old one.
+ *
+ * THE RULE THAT MAKES THIS SAFE: nothing reachable from the previous state may
+ * ever be mutated. `fields` and `sets` entries are always REPLACED, so a shallow
+ * copy of each is enough; `seen` holds arrays that are pushed to, so those are
+ * copied properly. Break that rule and a peer's history changes underneath it,
+ * which is the one failure this engine cannot recover from.
+ */
+function copyEntity(ent: EntityState): EntityState {
+  const sets: Record<string, Record<string, SetElementState>> = {};
+  for (const field of Object.keys(ent.sets)) {
+    const members = getOwn(ent.sets, field);
+    if (members) setOwn(sets, field, { ...members });
+  }
+  const seen: Record<string, string[]> = {};
+  for (const field of Object.keys(ent.seen)) {
+    const stamps = getOwn(ent.seen, field);
+    if (stamps) setOwn(seen, field, stamps.slice());
+  }
+  return { fields: { ...ent.fields }, sets, seen };
+}
+
+function touchEntity(
+  next: SyncState,
+  store: SyncStore,
+  entityId: string,
+  copied: Set<string>,
+): EntityState {
+  const storeKey = `\u0000store:${store}`;
+  let byId = getOwn(next.entities, store);
   if (!byId) {
     byId = {};
-    setOwn(state.entities, store, byId);
+    setOwn(next.entities, store, byId);
+    copied.add(storeKey);
+  } else if (!copied.has(storeKey)) {
+    byId = { ...byId };
+    setOwn(next.entities, store, byId);
+    copied.add(storeKey);
   }
+
+  const entKey = `${store}\u0000${entityId}`;
   let ent = getOwn(byId, entityId);
   if (!ent) {
     ent = emptyEntity();
     setOwn(byId, entityId, ent);
+    copied.add(entKey);
+  } else if (!copied.has(entKey)) {
+    ent = copyEntity(ent);
+    setOwn(byId, entityId, ent);
+    copied.add(entKey);
   }
   return ent;
 }
@@ -334,7 +401,7 @@ export function makeOps(
   },
 ): SyncOp[] {
   const { store, entityId, device, at, changes } = opts;
-  const ent = entityOf(state, store, entityId);
+  const ent = readEntityState(state, store, entityId);
   const ops: SyncOp[] = [];
 
   for (const field of Object.keys(changes)) {
@@ -401,10 +468,13 @@ export function makeDeleteOp(
  */
 export function mergeOps(state: SyncState, ops: readonly SyncOp[]): MergeResult {
   const next: SyncState = {
-    entities: structuredClone(state.entities),
+    // Shared, then copied on first touch. See `touchEntity`.
+    entities: { ...state.entities },
     lamport: state.lamport,
     applied: { ...state.applied },
   };
+  /** Which stores and entities this merge has already taken a copy of. */
+  const copied = new Set<string>();
   const appliedOps: SyncOp[] = [];
   const ignoredOps: SyncOp[] = [];
   const conflicts: SyncConflict[] = [];
@@ -423,7 +493,7 @@ export function mergeOps(state: SyncState, ops: readonly SyncOp[]): MergeResult 
     }
     setOwn(next.applied, op.opId, true);
 
-    const ent = entityOf(next, op.store, op.entityId);
+    const ent = touchEntity(next, op.store, op.entityId, copied);
 
     if (isSetField(op.store, op.field)) {
       applySetOp(ent, op, appliedOps, ignoredOps);

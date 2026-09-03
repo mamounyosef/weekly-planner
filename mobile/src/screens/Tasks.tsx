@@ -33,24 +33,31 @@
 // group where nothing has one falls back to the date rule below, so the screen
 // looks identical until the first move.
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, View, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
 import { TextField } from '../ui/Fields';
 import { ListChips } from '../ui/ListChips';
-import { SortableList } from '../ui/SortableList';
+import { SortableList, SortableScrollView, type DragHandle } from '../ui/SortableList';
+import { Tick } from '../ui/Tick';
 import { PRESSED, PRESS_DELAY, radius, space } from '../theme';
+import { prefs } from '../lib/prefs';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { dueDateOf, isTaskDone, taskBucket, todayYmd, type Task } from '../lib/tasks';
 import { GENERAL_LIST_ID, resolveListId, type TaskList } from '../lib/taskLists';
-import { buildTaskRows, groupTasks, type SortMode } from '../lib/taskBoard';
+import { buildTaskRows, groupTasks, DEFAULT_SORT_MODE, type SortMode } from '../lib/taskBoard';
+import { manualOrders, reorderList } from '../lib/dragSort';
+import { planTick, setPending, isPending as heldDone } from '../lib/pendingDone';
 import type { TaskFilter } from '../lib/tasks';
 
 import { formatClock } from '../lib/agenda';
 import { fromTimeString } from '../lib/draft';
+
+/** How long a ticked row stays where it is, so the tick can be seen. */
+const DONE_HOLD_MS = 420;
 
 type Bucket = 'overdue' | 'today' | 'upcoming' | 'general';
 type SectionKey = Bucket | 'done';
@@ -95,8 +102,50 @@ export function Tasks() {
   const [listFilter, setListFilter] = useState<string | null>(null);
   /** Which task, if any, has its "add a step" line open. */
   const [composingFor, setComposingFor] = useState<string | null>(null);
-  const [sortMode, setSortMode] = useState<SortMode>('datetime');
+  const [sortMode, setSortModeState] = useState<SortMode>(DEFAULT_SORT_MODE);
+  // The stored mode arrives a tick or two after the first paint. If the user
+  // has already chosen one by then (a drag switches to Manual on its own), the
+  // stored value is stale the moment it lands and must not be applied.
+  const sortTouched = useRef(false);
+  useEffect(() => {
+    void prefs.getTaskSort().then(mode => {
+      if (!sortTouched.current) setSortModeState(mode);
+    });
+  }, []);
+  const setSortMode = (mode: SortMode) => {
+    sortTouched.current = true;
+    setSortModeState(mode);
+    void prefs.setTaskSort(mode);
+  };
   const [filters, setFilters] = useState<TaskFilter[]>([]);
+
+  /**
+   * Things the user has just ticked, before the store has been told.
+   *
+   * A tick used to write straight through, which meant the row jumped into Done
+   * in the same frame the box filled in: no tick to look at, and any work the
+   * write set off (regrouping the board, replanning alarms, a sync) landed
+   * between the finger and the paint. So the box is filled from HERE the moment
+   * it is tapped, the row stays exactly where it is for a beat, and the real
+   * write happens after. Tapping again inside that beat cancels it outright and
+   * nothing is ever written, which is the cheapest undo there is.
+   *
+   * Un-ticking is not delayed. Nobody needs to admire that.
+   */
+  const [pendingDone, setPendingDone] = useState<Record<string, boolean>>({});
+  const doneTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  /** The write each held tick is waiting to make. */
+  const doneWrites = useRef<Record<string, () => void>>({});
+  useEffect(() => () => {
+    // FLUSHED, NOT CANCELLED. The screen going away while a tick is held is
+    // still the user having ticked something, and dropping the timer here would
+    // be a tap that silently did nothing.
+    Object.values(doneTimers.current).forEach(t => clearTimeout(t));
+    doneTimers.current = {};
+    const outstanding = Object.values(doneWrites.current);
+    doneWrites.current = {};
+    outstanding.forEach(write => write());
+  }, []);
 
 
   const today = todayYmd();
@@ -146,6 +195,49 @@ export function Tasks() {
     try { await syncNow(); } finally { setRefreshing(false); }
   };
 
+  const isPending = (key: string) => heldDone(pendingDone, key);
+
+  const clearPending = (key: string) => {
+    const timer = doneTimers.current[key];
+    if (timer) {
+      clearTimeout(timer);
+      delete doneTimers.current[key];
+    }
+    delete doneWrites.current[key];
+    setPendingDone(prev => setPending(prev, key, false));
+  };
+
+  /** What the tick box is actually wired to. `toggle` below does the writing. */
+  const toggleAnimated = (key: string, t: Task, occDate?: string | null) => {
+    const due = occDate !== undefined ? (occDate ?? null) : dueDateOf(t);
+    const stored = isTaskDone(t, due);
+    const plan = planTick(stored, isPending(key));
+
+    // 'write' is an un-tick, which is never held. 'cancel' is a second tap
+    // inside the hold: forget it, and nothing is ever written.
+    if (plan !== 'hold') {
+      clearPending(key);
+      if (plan === 'write') toggle(t, occDate);
+      return;
+    }
+
+    setPendingDone(prev => setPending(prev, key, true));
+    const existing = doneTimers.current[key];
+    if (existing) clearTimeout(existing);
+
+    const write = () => {
+      delete doneTimers.current[key];
+      delete doneWrites.current[key];
+      toggle(t, occDate);
+      // Same tick as the write, which commits synchronously, so the row never
+      // flickers back to undone between the two.
+      setPendingDone(prev => setPending(prev, key, false));
+    };
+
+    doneWrites.current[key] = write;
+    doneTimers.current[key] = setTimeout(write, DONE_HOLD_MS);
+  };
+
   const toggle = (t: Task, occDate?: string | null) => {
     const due = occDate !== undefined ? (occDate ?? null) : dueDateOf(t);
     const done = isTaskDone(t, due);
@@ -176,24 +268,29 @@ export function Tasks() {
    * floating among blanks would not survive the next sort. Renumbering is
    * cheap after that: only the rows whose number actually changed are written,
    * so a later swap costs two edits, not the group.
+   *
+   * The numbers are spaced ten apart, the same step the PC writes, so that a
+   * move made on one machine leaves room for one made on the other.
    */
   const moveItem = (group: Task[], fromIndex: number, toIndex: number) => {
     if (fromIndex === toIndex) return;
-    const next = [...group];
-    const [moved] = next.splice(fromIndex, 1);
-    next.splice(toIndex, 0, moved);
+    const next = reorderList(group, fromIndex, toIndex);
+    const keys = manualOrders(next.length);
     next.forEach((t, i) => {
-      if (t.order !== i) void edit('tasks', t.id, { order: i });
+      if (t.order !== keys[i]) void edit('tasks', t.id, { order: keys[i] });
     });
+    // A drag is a statement about where a thing goes, and in any other sort
+    // mode the board would answer it by putting everything straight back. The
+    // PC switches to manual on a drag for the same reason.
+    if (sortMode !== 'manual') setSortMode('manual');
   };
 
   /**
    * Add a step under a task.
    *
    * It inherits the parent's day rather than today's, so a step of something due
-   * on Friday does not quietly appear in Today on the PC. A parent with no date
-   * has nothing to inherit, and the step is filed on today instead, which is the
-   * only date the phone's own editor can write.
+   * on Friday does not quietly appear in Today on the PC -- and a parent with no
+   * date passes that on too, rather than dropping its steps onto today.
    */
   const addSubtask = async (parent: Task, title: string, siblings: Task[]) => {
     const trimmed = title.trim();
@@ -303,7 +400,7 @@ export function Tasks() {
 
 
 
-      <ScrollView
+      <SortableScrollView
         contentContainerStyle={{
           paddingHorizontal: space.xl,
           paddingTop: space.lg,
@@ -409,21 +506,22 @@ export function Tasks() {
               <View style={{ gap: space.sm, marginTop: space.sm }}>
                 <SortableList
                   data={visible}
+                  keyExtractor={n => n.row.occId}
                   onReorder={(fromIdx, toIdx) => moveItem(visible.map(n => n.row.task), fromIdx, toIdx)}
-                  renderItem={(node, index, isDragging, onDragStart) => (
+                  renderItem={(node, _index, drag) => (
                     <TaskCard
-                      key={node.row.occId}
                       node={{ task: node.row.task, children: node.children.map(c => c.task) }}
                       today={today}
                       clock={timeFormat}
                       list={filter ? null : listOf(node.row.task)}
-                      isDragging={isDragging}
+                      drag={drag}
+                      occKey={node.row.occId}
+                      pending={isPending}
                       composing={composingFor === node.row.task.id}
                       onCompose={next => setComposingFor(next ? node.row.task.id : null)}
                       onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
                       onMoveChild={(fromChild, toChild) => moveItem(node.children.map(c => c.task), fromChild, toChild)}
-                      onToggle={t => toggle(t, t.id === node.row.task.id ? node.row.due : undefined)}
-                      onStartDrag={onDragStart}
+                      onToggle={(t, key) => toggleAnimated(key, t, t.id === node.row.task.id ? node.row.due : undefined)}
                       onOpen={t => setEditing({
                         store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
                       })}
@@ -434,7 +532,7 @@ export function Tasks() {
             </View>
           );
         })}
-      </ScrollView>
+      </SortableScrollView>
 
       <Pressable
         unstable_pressDelay={PRESS_DELAY}
@@ -469,31 +567,35 @@ export function Tasks() {
 // to do" from "one thing in three parts" without reading a word.
 
 function TaskCard({
-  node, today, clock, list, isDragging, composing,
-  onMoveChild, onToggle, onOpen, onCompose, onAddSubtask, onStartDrag,
+  node, today, clock, list, drag, composing, occKey, pending,
+  onMoveChild, onToggle, onOpen, onCompose, onAddSubtask,
 }: {
   node: Node;
   today: string;
   clock?: string;
   list: TaskList | null;
-  isDragging: boolean;
+  drag: DragHandle;
   composing: boolean;
+  /** What this row is keyed by while it waits to be written. */
+  occKey: string;
+  pending: (key: string) => boolean;
   onMoveChild: (fromIndex: number, toIndex: number) => void;
-  onToggle: (t: Task) => void;
+  onToggle: (t: Task, key: string) => void;
   onOpen: (t: Task) => void;
   onCompose: (open: boolean) => void;
   onAddSubtask: (title: string) => Promise<void>;
-  onStartDrag: () => void;
 }) {
   const p = useTheme();
   const { task, children } = node;
   const due = dueDateOf(task);
-  const done = isTaskDone(task, due);
+  // Optimistic on purpose: everything below reads "done" from what the user has
+  // just done, not from what has been stored yet.
+  const done = isTaskDone(task, due) || pending(occKey);
   // An explicit colour on the task wins; otherwise the list it is filed on says
   // more at a glance than a default green does.
   const colour = task.color ?? list?.color ?? p.ok;
   const startMin = task.startTime ? fromTimeString(task.startTime) : null;
-  const doneKids = children.filter(c => isTaskDone(c, dueDateOf(c))).length;
+  const doneKids = children.filter(c => isTaskDone(c, dueDateOf(c)) || pending(c.id)).length;
 
   const meta: string[] = [];
   if (due) {
@@ -520,18 +622,17 @@ function TaskCard({
       <Pressable
         unstable_pressDelay={PRESS_DELAY}
         onPress={() => onOpen(task)}
-        onLongPress={onStartDrag}
-        delayLongPress={300}
+        {...drag.handlers}
         android_ripple={{ color: p.accentSoft }}
         style={({ pressed }) => ({
           flexDirection: 'row',
           alignItems: 'center',
           gap: space.md,
           padding: space.md,
-          opacity: pressed && !isDragging ? 0.9 : 1,
+          opacity: pressed && !drag.active ? 0.9 : 1,
         })}
       >
-        <Check colour={colour} done={done} label={task.title} onPress={() => onToggle(task)} />
+        <Tick colour={colour} done={done} label={task.title} onPress={() => onToggle(task, occKey)} />
 
         <View style={{ flex: 1 }}>
           <Row gap={space.xs} style={{ alignItems: 'center' }}>
@@ -539,7 +640,8 @@ function TaskCard({
               variant="bodyStrong"
               tone={done ? 'faint' : 'ink'}
               numberOfLines={2}
-              style={{ flexShrink: 1 }}
+              // `flex: 1`, never `flexShrink`. See the note in `Today.tsx`.
+              style={{ flex: 1, textAlign: 'left' }}
             >
               {task.title || 'Untitled'}
             </Text>
@@ -589,17 +691,17 @@ function TaskCard({
         <View style={{ borderTopWidth: 1, borderTopColor: p.line }}>
           <SortableList
             data={children}
+            keyExtractor={child => child.id}
             onReorder={onMoveChild}
-            renderItem={(child, i, isChildDragging, onChildDrag) => (
+            renderItem={(child, _i, childDrag) => (
               <SubtaskRow
-                key={child.id}
                 task={child}
                 today={today}
                 parentDue={due}
-                isDragging={isChildDragging}
-                onToggle={() => onToggle(child)}
+                drag={childDrag}
+                pending={pending(child.id)}
+                onToggle={() => onToggle(child, child.id)}
                 onOpen={() => onOpen(child)}
-                onStartDrag={onChildDrag}
               />
             )}
           />
@@ -617,20 +719,20 @@ function TaskCard({
 }
 
 function SubtaskRow({
-  task, today, parentDue, isDragging,
-  onToggle, onOpen, onStartDrag,
+  task, today, parentDue, drag, pending,
+  onToggle, onOpen,
 }: {
   task: Task;
   today: string;
   parentDue: string | null;
-  isDragging: boolean;
+  drag: DragHandle;
+  pending: boolean;
   onToggle: () => void;
   onOpen: () => void;
-  onStartDrag: () => void;
 }) {
   const p = useTheme();
   const due = dueDateOf(task);
-  const done = isTaskDone(task, due);
+  const done = isTaskDone(task, due) || pending;
   // A step is almost always due with its parent, and repeating the parent's own
   // date under every one of its steps is a column of the same word. So the date
   // appears only when it says something new: this step is late, or it is not on
@@ -642,8 +744,7 @@ function SubtaskRow({
     <Pressable
         unstable_pressDelay={PRESS_DELAY}
       onPress={() => onOpen()}
-      onLongPress={onStartDrag}
-      delayLongPress={300}
+      {...drag.handlers}
       android_ripple={{ color: p.accentSoft }}
       style={({ pressed }) => ({
         flexDirection: 'row',
@@ -652,10 +753,10 @@ function SubtaskRow({
         paddingLeft: 40,
         paddingRight: space.md,
         paddingVertical: space.sm,
-        opacity: pressed && !isDragging ? 0.9 : done ? 0.55 : 1,
+        opacity: pressed && !drag.active ? 0.9 : done ? 0.55 : 1,
       })}
     >
-      <Check
+      <Tick
         colour={p.inkFaint}
         done={done}
         size={18}
@@ -681,41 +782,6 @@ function SubtaskRow({
   );
 }
 
-/** The tick box. One shape at two sizes, so a step reads as a smaller sibling. */
-function Check({ colour, done, onPress, label, size = 22 }: {
-  colour: string;
-  done: boolean;
-  onPress: () => void;
-  label?: string;
-  size?: number;
-}) {
-  const p = useTheme();
-  return (
-    <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-      onPress={onPress}
-      accessibilityRole="checkbox"
-      accessibilityState={{ checked: done }}
-      accessibilityLabel={label}
-      hitSlop={space.md}
-      style={({ pressed }) => [{
-        width: size, height: size, borderRadius: size / 2,
-        borderWidth: 2,
-        borderColor: done ? colour : p.inkFaint,
-        backgroundColor: done ? colour : 'transparent',
-        alignItems: 'center', justifyContent: 'center',
-      }, pressed ? PRESSED : null]}
-    >
-      {done ? (
-        <Text style={{
-          color: p.accentInk, fontSize: size * 0.6, lineHeight: size * 0.7, fontWeight: '900',
-        }}>
-          ✓
-        </Text>
-      ) : null}
-    </Pressable>
-  );
-}
 
 
 

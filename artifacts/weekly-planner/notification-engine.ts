@@ -96,13 +96,43 @@ const readJson = async <T,>(file: string, fallback: T): Promise<T> => {
   }
 };
 
-/** Atomic write, so a crash mid-save can never leave a half-written store. */
+/**
+ * Atomic write, so a crash mid-save can never leave a half-written store.
+ *
+ * THE RENAME IS RETRIED AND THE TEMP FILE IS ALWAYS CLEANED UP. On Windows a
+ * rename over a file another process has open -- an indexer, a backup agent, an
+ * antivirus scanner, all of which touch a folder full of small JSON -- fails
+ * with EPERM or EBUSY for a few milliseconds at a time. Without the retry the
+ * save simply failed; without the cleanup its temp file stayed on disk forever.
+ * Both were happening: the database folder had collected hundreds of
+ * `.notifications.json.<pid>.<random>.tmp` leftovers, and every one of them is
+ * a save of the read state that never landed.
+ */
+const RENAME_ATTEMPTS = 4;
+const RENAME_BACKOFF_MS = [15, 40, 100];
+
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   const dir = path.dirname(file);
   await fsp.mkdir(dir, { recursive: true });
   const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`);
-  await fsp.writeFile(tmp, JSON.stringify(value, null, 2), 'utf-8');
-  await fsp.rename(tmp, file);
+  try {
+    await fsp.writeFile(tmp, JSON.stringify(value, null, 2), 'utf-8');
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fsp.rename(tmp, file);
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        const transient = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+        if (!transient || attempt >= RENAME_ATTEMPTS - 1) throw err;
+        await new Promise(r => setTimeout(r, RENAME_BACKOFF_MS[attempt] ?? 100));
+      }
+    }
+  } catch (err) {
+    // Never leave the temp behind, whatever went wrong.
+    await fsp.rm(tmp, { force: true }).catch(() => { /* already gone */ });
+    throw err;
+  }
 }
 
 /** Toast tags are short and must not contain anything exotic. */

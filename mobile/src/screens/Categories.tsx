@@ -254,7 +254,8 @@ function CategoryRow({ cat, onOpen }: { cat: EventCategory; onOpen: () => void }
 
       <View style={{ flex: 1 }}>
         <Row gap={space.sm} style={{ alignItems: 'center' }}>
-          <Text variant="bodyStrong" numberOfLines={1} style={{ flexShrink: 1 }}>
+          {/* `flex: 1`, never `flexShrink`. See the note in `Today.tsx`. */}
+          <Text variant="bodyStrong" numberOfLines={1} style={{ flex: 1, textAlign: 'left' }}>
             {cat.name || 'Untitled'}
           </Text>
           {cat.isDefault ? (

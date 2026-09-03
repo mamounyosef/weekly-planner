@@ -22,6 +22,9 @@ import {
   type Row,
   type SectionKey,
   type SortMode,
+  SORT_MODES,
+  DEFAULT_SORT_MODE,
+  coerceSortMode,
 } from './taskBoard';
 import { matchesFilters, type Task, type TaskData, type TaskFilter } from './tasks';
 import { GENERAL_LIST_ID, type TaskList } from './taskLists';
@@ -470,6 +473,33 @@ function main() {
     const once = JSON.stringify(flatten(group(tasks)));
     for (let i = 0; i < 25; i += 1) {
       assert.equal(JSON.stringify(flatten(group(tasks))), once, `run ${i} matches`);
+    }
+  }
+
+  console.log('--- 19. A STORED SORT MODE ---');
+  {
+    // Both machines write this one to their own store, and a value written by
+    // an older build (or by a hand editing a file) must never reach the sort.
+    for (const mode of SORT_MODES) {
+      assert.equal(coerceSortMode(mode), mode, `${mode} survives a round trip`);
+    }
+    assert.equal(coerceSortMode(null), DEFAULT_SORT_MODE, 'never set');
+    assert.equal(coerceSortMode(undefined), DEFAULT_SORT_MODE);
+    assert.equal(coerceSortMode(''), DEFAULT_SORT_MODE, 'an empty string');
+    assert.equal(coerceSortMode('Manual'), DEFAULT_SORT_MODE, 'the wrong case is not a mode');
+    assert.equal(coerceSortMode(' manual '), DEFAULT_SORT_MODE, 'padding is not trimmed into one');
+    assert.equal(coerceSortMode('date'), DEFAULT_SORT_MODE, 'a mode that never existed');
+    assert.equal(coerceSortMode(7), DEFAULT_SORT_MODE);
+    assert.equal(coerceSortMode({}), DEFAULT_SORT_MODE);
+    assert.equal(coerceSortMode(['manual']), DEFAULT_SORT_MODE);
+    assert.equal(coerceSortMode('toString'), DEFAULT_SORT_MODE, 'an inherited property is not a mode');
+    assert.equal(DEFAULT_SORT_MODE, 'datetime', 'the board opens on the date');
+    assert.ok(SORT_MODES.includes(DEFAULT_SORT_MODE), 'the default is itself a mode');
+    // And every one of them actually drives `groupTasks`, so nothing can be
+    // stored that the board would then not know what to do with.
+    const tasks = store(task('a', TODAY), task('b', TODAY), task('c', null));
+    for (const mode of SORT_MODES) {
+      assert.equal(flatten(group(tasks, { sort: mode })).length, 3, `${mode} keeps every task`);
     }
   }
 

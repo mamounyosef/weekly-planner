@@ -711,11 +711,13 @@ function ResultRow({ hit, now, clock, onPress, onPressDate }: {
 
       <View style={{ flex: 1, gap: 3 }}>
         <Row gap={space.xs} style={{ alignItems: 'center' }}>
+          {/* `flex: 1`, never `flexShrink`. See the note in `Today.tsx`. */}
           <RNText
             numberOfLines={2}
             style={[typeScale.bodyStrong, {
               color: hit.completed ? p.inkFaint : p.ink,
-              flexShrink: 1,
+              flex: 1,
+              textAlign: 'left',
               textDecorationLine: hit.completed ? 'line-through' : 'none',
             }]}
           >

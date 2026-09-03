@@ -477,7 +477,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
             >
               <Row style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <Text variant="bodyStrong" tone="accent">{more ? 'Less' : 'More'}</Text>
-                <Text variant="caption" tone="faint" numberOfLines={1} style={{ flexShrink: 1, textAlign: 'right' }}>
+                <Text variant="caption" tone="faint" numberOfLines={1} style={{ flex: 1, textAlign: 'right' }}>
                   {more ? '' : `${describeRecur(draft.recur)} · ${describeNotify(draft.notify)}`}
                 </Text>
               </Row>
