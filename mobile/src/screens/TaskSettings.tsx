@@ -28,7 +28,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Row, Spacer, Text, useTheme } from '../ui/kit';
 import { ColourPicker, Field, TextField, Toggle } from '../ui/Fields';
-import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
@@ -302,9 +302,12 @@ function Arrow({ label, glyph, enabled, onPress }: {
   const p = useTheme();
   return (
     <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-      onPress={enabled ? onPress : undefined}
-      disabled={!enabled}
+      // NOT `disabled`. A disabled Pressable does not claim the touch, so the
+      // tap fell through to the row underneath and opened the Edit sheet --
+      // press the greyed-out "up" arrow on the first list and you were asked to
+      // rename it. It stays pressable and does nothing, which is what a control
+      // that cannot act should do.
+      onPress={enabled ? onPress : () => {}}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ disabled: !enabled }}
@@ -363,7 +366,7 @@ function Sheet({ existing, takenNames, suggestedColour, onSave, onDelete, onClos
           invisible dismiss layer, and dimming the whole screen on touch would
           be a flash that means nothing. */}
       <Pressable
-        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+        unstable_pressDelay={TAP_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
       {/*
         THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.

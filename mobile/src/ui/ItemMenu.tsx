@@ -35,7 +35,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from './kit';
 import { CategoryPicker, ColourPicker, type Swatch } from './Fields';
-import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, clearNav, radius, space } from '../theme';
 import { scopeChoices, type OccurrenceScope } from '../lib/occurrence';
 
 /**
@@ -206,7 +206,7 @@ function Sheet({
           pressed state on it: it is invisible, and dimming the screen on touch
           would be a flash that means nothing. */}
       <Pressable
-        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close menu" />
+        unstable_pressDelay={TAP_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close menu" />
 
       {/* Pinned rather than flexed to the bottom, for the reason written out in
           full in `Editor.tsx`: the percentage cap below resolves against the

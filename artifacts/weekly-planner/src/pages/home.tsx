@@ -1049,7 +1049,9 @@ export default function DailyPlanner() {
   const [prayerPanelOpen, setPrayerPanelOpen] = useState(false);
   const prayerPanelRef                        = useRef<HTMLDivElement>(null);
   const [taskCheckboxShape, setTaskCheckboxShape] = useState<any>(initialSettings.taskCheckboxShape ?? 'circle');
-  const [taskFilters, setTaskFilters]         = useState<TaskFilter[]>(canonicalFilters(initialSettings.taskFilters));
+  // Lazy: the argument to `useState` is evaluated on EVERY render and thrown
+  // away on all but the first, and this page re-renders constantly.
+  const [taskFilters, setTaskFilters]         = useState<TaskFilter[]>(() => canonicalFilters(initialSettings.taskFilters));
   const [autoRollRecurringTasks, setAutoRollRecurringTasks] = useState<boolean>(initialSettings.autoRollRecurringTasks ?? true);
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [taskMenuId, setTaskMenuId]   = useState<string | null>(null);

@@ -42,14 +42,19 @@ import { TextField } from '../ui/Fields';
 import { ListChips } from '../ui/ListChips';
 import { SortableList, SortableScrollView, type DragHandle } from '../ui/SortableList';
 import { Tick } from '../ui/Tick';
-import { PRESSED, PRESS_DELAY, radius, space } from '../theme';
+import { PRESSED, PRESS_DELAY, TAP_DELAY, radius, space } from '../theme';
 import { prefs } from '../lib/prefs';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
-import { dueDateOf, isTaskDone, taskBucket, todayYmd, type Task } from '../lib/tasks';
+import {
+  dueDateOf, isStepDone, stepDoneChanges, taskBucket, todayYmd, type Task,
+} from '../lib/tasks';
 import { GENERAL_LIST_ID, resolveListId, type TaskList } from '../lib/taskLists';
-import { buildTaskRows, groupTasks, DEFAULT_SORT_MODE, type SortMode } from '../lib/taskBoard';
-import { manualOrders, reorderList } from '../lib/dragSort';
+import {
+  buildTaskRows, groupTasks, DEFAULT_SORT_MODE,
+  type Node, type Row as BoardRow, type SectionKey, type SortMode,
+} from '../lib/taskBoard';
+import { planAppendOrder, planReorder } from '../lib/dragSort';
 import { planTick, setPending, isPending as heldDone } from '../lib/pendingDone';
 import type { TaskFilter } from '../lib/tasks';
 
@@ -83,14 +88,11 @@ function applyOrderGuess(
   return out;
 }
 
-type Bucket = 'overdue' | 'today' | 'upcoming' | 'general';
-type SectionKey = Bucket | 'done';
-
-/** One root task with the steps drawn underneath it. */
-interface Node {
-  task: Task;
-  children: Task[];
-}
+// The section keys and the shape of a card's contents both come from
+// `taskBoard.ts` now. There used to be a second set of them here, in lower case
+// and holding bare tasks instead of rows, which is why the card had to be handed
+// a stripped-down copy of what the board had already worked out and could not
+// tell which DAY of a repeat one of its steps belonged to.
 
 const ORDER: { key: string; title: string; tone: 'danger' | 'accent' | 'ink' | 'faint' }[] = [
   { key: 'Overdue', title: 'Overdue', tone: 'danger' },
@@ -101,19 +103,11 @@ const ORDER: { key: string; title: string; tone: 'danger' | 'accent' | 'ink' | '
   { key: 'Done', title: 'Done', tone: 'faint' },
 ];
 
-/**
- * A task nobody has placed by hand sorts AFTER the ones somebody has.
- *
- * The alternative, treating an absent `order` as zero, would drop every task the
- * user has never touched on top of the arrangement they just made, which is the
- * one thing a manual order exists to prevent. When nothing in a group has an
- * order they all tie here and the date rule decides, which is why the screen is
- * unchanged until the first move.
- */
-const orderKey = (t: Task): number =>
-  (typeof t.order === 'number' && Number.isFinite(t.order) ? t.order : Number.MAX_SAFE_INTEGER);
-
-const byHand = (a: Task, b: Task): number => orderKey(a) - orderKey(b);
+// The rule that a task nobody has placed sorts AFTER the ones somebody has now
+// lives in `taskBoard.ts` as `orderKey`, next to the comparators that use it.
+// It was written out here, correctly, with a comment explaining the exact bug it
+// prevents -- and then never called, while the board went on reading an absent
+// order as zero and dropping new tasks on top of arranged ones.
 
 export function Tasks() {
   const p = useTheme();
@@ -210,14 +204,25 @@ export function Tasks() {
   const showChips = lists.filter(l => l.id !== GENERAL_LIST_ID).length > 0;
 
   
-  const grouped = useMemo(() => {
+  const board = useMemo(() => {
     const stored = tasks() as unknown as Record<string, Task>;
     // Only the rows that were dragged are copied; the rest of the store is the
     // same objects it always was.
     const rawTasks = applyOrderGuess(stored, orderGuess);
     const rows = buildTaskRows(rawTasks, today, true);
-    return groupTasks(rows, rawTasks, lists, filter, filters, today, sortMode);
+    const shown = groupTasks(rows, rawTasks, lists, filter, filters, today, sortMode);
+    // THE SAME BUCKETS WITH NO LIST FILTER, so a drag can be expressed against
+    // the whole arrangement rather than against the slice of it on screen. See
+    // `moveItem`. Computed only when a filter is actually on: with no filter the
+    // two are the same thing, and grouping twice for nothing is the sort of cost
+    // that turns into a stutter on a long list.
+    return {
+      shown,
+      whole: filter ? groupTasks(rows, rawTasks, lists, null, filters, today, sortMode) : shown,
+    };
   }, [tasks, today, filter, lists, filters, sortMode, orderGuess]);
+
+  const grouped = board.shown;
 
   // A guess the store has caught up with is dead weight: it makes every later
   // render copy rows for nothing.
@@ -263,17 +268,29 @@ export function Tasks() {
     setPendingDone(prev => setPending(prev, key, false));
   };
 
+  /**
+   * Exactly what a tick box is aimed at.
+   *
+   * `parent` is null for a task in its own right and the MASTER for a step. It
+   * is not decoration: a step of something that repeats is done for one day
+   * only, and the parent is the only thing that knows whether that is the case.
+   */
+  interface TickTarget {
+    task: Task;
+    parent: Task | null;
+    occDate: string | null;
+  }
+
   /** What the tick box is actually wired to. `toggle` below does the writing. */
-  const toggleAnimated = (key: string, t: Task, occDate?: string | null) => {
-    const due = occDate !== undefined ? (occDate ?? null) : dueDateOf(t);
-    const stored = isTaskDone(t, due);
+  const toggleAnimated = (key: string, target: TickTarget) => {
+    const stored = isStepDone(target.task, target.parent, target.occDate);
     const plan = planTick(stored, isPending(key));
 
     // 'write' is an un-tick, which is never held. 'cancel' is a second tap
     // inside the hold: forget it, and nothing is ever written.
     if (plan !== 'hold') {
       clearPending(key);
-      if (plan === 'write') toggle(t, occDate);
+      if (plan === 'write') toggle(target);
       return;
     }
 
@@ -284,7 +301,7 @@ export function Tasks() {
     const write = () => {
       delete doneTimers.current[key];
       delete doneWrites.current[key];
-      toggle(t, occDate);
+      toggle(target);
       // Same tick as the write, which commits synchronously, so the row never
       // flickers back to undone between the two.
       setPendingDone(prev => setPending(prev, key, false));
@@ -294,26 +311,13 @@ export function Tasks() {
     doneTimers.current[key] = setTimeout(write, DONE_HOLD_MS);
   };
 
-  const toggle = (t: Task, occDate?: string | null) => {
-    const due = occDate !== undefined ? (occDate ?? null) : dueDateOf(t);
-    const done = isTaskDone(t, due);
-    const dates: string[] = Array.isArray(t.completedDates) ? [...t.completedDates] : [];
-
-    if (t.recur && due) {
-      // A repeat is ticked for THIS occurrence, never as a whole.
-      void edit('tasks', t.id, {
-        completedDates: done ? dates.filter(d => d !== due) : [...new Set([...dates, due])],
-      });
-      return;
-    }
-    void edit('tasks', t.id, {
-      completed: !done,
-      completedAt: done ? undefined : Date.now(),
-      // Kept in step with the flag so whichever the PC happens to read agrees.
-      completedDates: due
-        ? (done ? dates.filter(d => d !== due) : [...new Set([...dates, due])])
-        : dates,
-    });
+  const toggle = (target: TickTarget) => {
+    // The rule lives in `tasks.ts`, shared with the PC. A tick that produced a
+    // slightly different record on the two machines would be a field-level
+    // merge conflict over something both of them agreed about.
+    const changes = stepDoneChanges(target.task, target.parent, target.occDate);
+    if (Object.keys(changes).length === 0) return;
+    void edit('tasks', target.task.id, changes);
   };
 
   /**
@@ -328,17 +332,18 @@ export function Tasks() {
    * The numbers are spaced ten apart, the same step the PC writes, so that a
    * move made on one machine leaves room for one made on the other.
    */
-  const moveItem = (group: Task[], fromIndex: number, toIndex: number) => {
-    if (fromIndex === toIndex) return;
-    const next = reorderList(group, fromIndex, toIndex);
-    const keys = manualOrders(next.length);
+  /**
+   * Apply a set of new positions: believe them now, write them once.
+   *
+   * The guess is what stops the row visiting three places for one gesture. It is
+   * merged rather than replaced, because a drag in one section must not drop a
+   * guess still outstanding for another.
+   */
+  const applyOrders = (changes: Array<{ id: string; order: number }>) => {
+    if (changes.length === 0) return;
 
-    // Believed first, so the board is already in the new order by the time this
-    // function returns and the row never visits a third position.
     const guess: Record<string, number> = {};
-    next.forEach((t, i) => { guess[t.id] = keys[i]; });
-    // Merged, not replaced: dragging in one section must not drop a guess that
-    // is still outstanding for another.
+    for (const c of changes) guess[c.id] = c.order;
     setOrderGuess(prev => ({ ...prev, ...guess }));
     if (orderGuessTimer.current) clearTimeout(orderGuessTimer.current);
     orderGuessTimer.current = setTimeout(() => setOrderGuess({}), ORDER_GUESS_TTL_MS);
@@ -346,10 +351,27 @@ export function Tasks() {
     // ONE write, not one per row. Five rows sent one at a time is five merges,
     // five commits and five sync pushes, and the list walks to its new order a
     // row at a time.
-    const changed = next
-      .map((t, i) => ({ id: t.id, changes: { order: keys[i] } }))
-      .filter((e, i) => next[i].order !== keys[i]);
-    if (changed.length > 0) void editMany('tasks', changed);
+    void editMany('tasks', changes.map(c => ({ id: c.id, changes: { order: c.order } })));
+  };
+
+  /**
+   * Move one task inside the group it is drawn in.
+   *
+   * `whole` is the bucket with no list filter on it; `visible` is what the user
+   * can actually see, and what the two indices refer to. THE TWO ARE NOT THE
+   * SAME LIST, and that distinction is the whole point: renumbering only what
+   * was on screen gave the Work list 0, 10, 20 -- and the Home list 0, 10, 20,
+   * and Errands 0, 10, 20 -- so clearing the filter interleaved three separate
+   * arrangements into one nobody had chosen. Every drag made under a filter was
+   * quietly wrecking the other lists.
+   *
+   * The numbers are spaced ten apart, the same step the PC writes, so that a
+   * move made on one machine leaves room for one made on the other.
+   */
+  const moveItem = (whole: Task[], visible: Task[], fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+    const plan = planReorder(whole, visible, fromIndex, toIndex);
+    applyOrders(plan.changes);
     // A drag is a statement about where a thing goes, and in any other sort
     // mode the board would answer it by putting everything straight back. The
     // PC switches to manual on a drag for the same reason.
@@ -370,6 +392,11 @@ export function Tasks() {
     // steps of an undated task on today would scatter them across the calendar
     // while the thing they belong to sits outside it.
     const parentDue = dueDateOf(parent);
+    // ONE PAST THE LAST ONE, not "how many are there". Counting gave the third
+    // step the number 2, which lands it second the moment the steps have been
+    // dragged into 0, 10, 20: a new step wedged into the middle of the list it
+    // was meant to join the end of.
+    const place = planAppendOrder(siblings);
     const id = await saveDraft('tasks', {
       title: trimmed,
       date: parentDue ?? today,
@@ -380,11 +407,16 @@ export function Tasks() {
     });
     await edit('tasks', id, {
       parentId: parent.id,
-      order: siblings.length,
+      order: place.order,
       // Only written when there is one: filing a step on "no list" explicitly
       // would be an edit that says nothing, and the parent is what decides.
       ...(parent.listId ? { listId: parent.listId } : {}),
     });
+    // Siblings that had never been placed, numbered in the order they were being
+    // drawn, so that "the end" is a place that exists.
+    if (place.changes.length > 0) {
+      void editMany('tasks', place.changes.map(c => ({ id: c.id, changes: { order: c.order } })));
+    }
   };
 
   /** The list a task is filed on, or null when it is on General. */
@@ -580,11 +612,20 @@ export function Tasks() {
                 <SortableList
                   data={visible}
                   gap={space.sm}
+                  // Done is in the order things were FINISHED, which is not
+                  // something to arrange. A drag there used to lift the row,
+                  // carry it, drop it, and have the list put it straight back.
+                  sortable={section.key !== 'Done'}
                   keyExtractor={n => n.row.occId}
-                  onReorder={(fromIdx, toIdx) => moveItem(visible.map(n => n.row.task), fromIdx, toIdx)}
+                  onReorder={(fromIdx, toIdx) => moveItem(
+                    (board.whole[section.key as SectionKey] ?? nodes).map(n => n.row.task),
+                    visible.map(n => n.row.task),
+                    fromIdx,
+                    toIdx,
+                  )}
                   renderItem={(node, _index, drag) => (
                     <TaskCard
-                      node={{ task: node.row.task, children: node.children.map(c => c.task) }}
+                      node={node}
                       today={today}
                       clock={timeFormat}
                       list={filter ? null : listOf(node.row.task)}
@@ -594,8 +635,13 @@ export function Tasks() {
                       composing={composingFor === node.row.task.id}
                       onCompose={next => setComposingFor(next ? node.row.task.id : null)}
                       onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
-                      onMoveChild={(fromChild, toChild) => moveItem(node.children.map(c => c.task), fromChild, toChild)}
-                      onToggle={(t, key) => toggleAnimated(key, t, t.id === node.row.task.id ? node.row.due : undefined)}
+                      onMoveChild={(fromChild, toChild) => {
+                        const steps = node.children.map(c => c.task);
+                        moveItem(steps, steps, fromChild, toChild);
+                      }}
+                      onToggle={(row, key, parent) => toggleAnimated(key, {
+                        task: row.task, parent, occDate: row.due,
+                      })}
                       onOpen={t => setEditing({
                         store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
                       })}
@@ -609,7 +655,7 @@ export function Tasks() {
       </SortableScrollView>
 
       <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
         onPress={() => setEditing({ store: 'tasks', date: today, listId: filter ?? undefined })}
         accessibilityRole="button"
         accessibilityLabel="Add a task"
@@ -654,22 +700,27 @@ function TaskCard({
   occKey: string;
   pending: (key: string) => boolean;
   onMoveChild: (fromIndex: number, toIndex: number) => void;
-  onToggle: (t: Task, key: string) => void;
+  /** The row that was ticked, its own hold key, and the master it belongs to. */
+  onToggle: (row: BoardRow, key: string, parent: Task | null) => void;
   onOpen: (t: Task) => void;
   onCompose: (open: boolean) => void;
   onAddSubtask: (title: string) => Promise<void>;
 }) {
   const p = useTheme();
-  const { task, children } = node;
-  const due = dueDateOf(task);
+  const task = node.row.task;
+  const children = node.children;
+  // THE ROW'S DATE, NOT THE TASK'S. For one occurrence of a repeat these are
+  // different: the task record carries the series anchor, the row carries the
+  // day being drawn.
+  const due = node.row.due;
   // Optimistic on purpose: everything below reads "done" from what the user has
   // just done, not from what has been stored yet.
-  const done = isTaskDone(task, due) || pending(occKey);
+  const done = node.row.done || pending(occKey);
   // An explicit colour on the task wins; otherwise the list it is filed on says
   // more at a glance than a default green does.
   const colour = task.color ?? list?.color ?? p.ok;
   const startMin = task.startTime ? fromTimeString(task.startTime) : null;
-  const doneKids = children.filter(c => isTaskDone(c, dueDateOf(c)) || pending(c.id)).length;
+  const doneKids = children.filter(c => c.done || pending(c.occId)).length;
 
   const meta: string[] = [];
   if (due) {
@@ -706,7 +757,7 @@ function TaskCard({
           opacity: pressed && !drag.active ? 0.9 : 1,
         })}
       >
-        <Tick colour={colour} done={done} label={task.title} onPress={() => onToggle(task, occKey)} />
+        <Tick colour={colour} done={done} label={task.title} onPress={() => onToggle(node.row, occKey, null)} />
 
         <View style={{ flex: 1 }}>
           <Row gap={space.xs} style={{ alignItems: 'center' }}>
@@ -765,17 +816,17 @@ function TaskCard({
         <View style={{ borderTopWidth: 1, borderTopColor: p.line }}>
           <SortableList
             data={children}
-            keyExtractor={child => child.id}
+            keyExtractor={child => child.occId}
             onReorder={onMoveChild}
             renderItem={(child, _i, childDrag) => (
               <SubtaskRow
-                task={child}
+                row={child}
                 today={today}
                 parentDue={due}
                 drag={childDrag}
-                pending={pending(child.id)}
-                onToggle={() => onToggle(child, child.id)}
-                onOpen={() => onOpen(child)}
+                pending={pending(child.occId)}
+                onToggle={() => onToggle(child, child.occId, task)}
+                onOpen={() => onOpen(child.task)}
               />
             )}
           />
@@ -793,10 +844,10 @@ function TaskCard({
 }
 
 function SubtaskRow({
-  task, today, parentDue, drag, pending,
+  row, today, parentDue, drag, pending,
   onToggle, onOpen,
 }: {
-  task: Task;
+  row: BoardRow;
   today: string;
   parentDue: string | null;
   drag: DragHandle;
@@ -805,8 +856,12 @@ function SubtaskRow({
   onOpen: () => void;
 }) {
   const p = useTheme();
-  const due = dueDateOf(task);
-  const done = isTaskDone(task, due) || pending;
+  const task = row.task;
+  // Under a repeat this is the PARENT'S day, and the step is done for that day
+  // alone. Reading the step's own date instead is what used to tie a step off
+  // for every future occurrence the moment it was ticked once.
+  const due = row.due;
+  const done = row.done || pending;
   // A step is almost always due with its parent, and repeating the parent's own
   // date under every one of its steps is a column of the same word. So the date
   // appears only when it says something new: this step is late, or it is not on

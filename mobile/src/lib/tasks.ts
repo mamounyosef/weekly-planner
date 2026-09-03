@@ -190,6 +190,84 @@ export function isTaskDone(t: Task, occDate?: string | null): boolean {
 }
 
 /**
+ * Is a STEP done, on the day the thing it belongs to is being drawn?
+ *
+ * WHY A STEP CANNOT USE `isTaskDone`. A step has no `recur` rule of its own --
+ * it belongs to one, through its parent -- so `isTaskDone` falls through to the
+ * boolean, and ticking "buy milk" under a shopping trip that happens every
+ * Friday tied that step off for every Friday there will ever be. The step was
+ * done once and stayed done, which is the opposite of what a repeat is for.
+ *
+ * A step under a repeat is therefore read the way its parent is read: by the
+ * DATE of the occurrence it is drawn beside. `completedDates` already exists on
+ * every task and is a set field in the sync engine, so this needs no new
+ * storage and no migration -- a step that has never been ticked has no dates and
+ * reads as open everywhere, which is exactly right.
+ *
+ * `parent` is the master, not the occurrence, and `occDate` is the occurrence's
+ * date. With no parent (or a parent that does not repeat) this is an ordinary
+ * task and answers as one.
+ */
+export function isStepDone(
+  step: Task,
+  parent: Task | null | undefined,
+  occDate: string | null,
+): boolean {
+  // WHO DECIDES WHETHER THIS REPEATS. A step has no rule of its own, so the
+  // question is answered by the thing it belongs to; a task with no parent
+  // answers for itself. Written as one line rather than two branches because the
+  // two used to be written separately and drifted.
+  const owner = parent ?? step;
+  if (owner.recur) return !!occDate && !!step.completedDates?.includes(occDate);
+  return !!step.completed;
+}
+
+/**
+ * The fields to write when a step is ticked or un-ticked on one occurrence.
+ *
+ * Returned rather than applied, because the two machines write through different
+ * doors: the phone through `edit('tasks', id, changes)` and the PC through its
+ * own store. Both must produce the SAME record or the field-level merge will see
+ * a genuine disagreement where there is none.
+ *
+ * Under a repeat only `completedDates` moves. The boolean is deliberately left
+ * alone: a step of a repeat is never done "as a whole", and setting it would
+ * make the step vanish from every other occurrence.
+ */
+export function stepDoneChanges(
+  step: Task,
+  parent: Task | null | undefined,
+  occDate: string | null,
+): Partial<Task> {
+  const dates: string[] = Array.isArray(step.completedDates) ? step.completedDates : [];
+  const now = Date.now();
+  const owner = parent ?? step;
+  const done = isStepDone(step, parent, occDate);
+
+  if (owner.recur) {
+    // No date means the caller could not say WHICH occurrence, and guessing
+    // would tick one the user is not looking at.
+    if (!occDate) return {};
+    return {
+      completedDates: done
+        ? dates.filter(d => d !== occDate)
+        : [...new Set([...dates, occDate])].sort(),
+      completedAt: done ? undefined : now,
+    };
+  }
+
+  return {
+    completed: !done,
+    completedAt: done ? undefined : now,
+    // Kept in step with the flag so whichever of the two the PC happens to read
+    // agrees with the phone.
+    completedDates: occDate
+      ? (done ? dates.filter(d => d !== occDate) : [...new Set([...dates, occDate])].sort())
+      : dates,
+  };
+}
+
+/**
  * Flip the done state of the occurrence shown as `occId`. Repeating tasks record
  * completion per occurrence date; one-off tasks use the boolean.
  */

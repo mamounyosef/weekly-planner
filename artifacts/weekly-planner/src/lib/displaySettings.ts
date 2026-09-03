@@ -55,6 +55,7 @@ export interface DisplaySettings {
    * who has not set one would expect.
    */
   focusDailyGoalSeconds: number;
+  focusExcludedDates: string[];
 }
 
 /** The desk's own defaults, so a phone with nothing synced yet agrees with it. */
@@ -66,6 +67,7 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   autoRollRecurringTasks: true,
   focusDayStartHour: 4,
   focusDailyGoalSeconds: 0,
+  focusExcludedDates: [],
 };
 
 export const WEEK_START_LABELS: { id: WeekStart; label: string; short: string }[] = [
@@ -161,6 +163,9 @@ export function coerceDisplaySettings(raw: unknown): DisplaySettings {
   if (isFocusGoalSeconds(r.focusDailyGoalSeconds)) {
     out.focusDailyGoalSeconds = r.focusDailyGoalSeconds;
   }
+  if (Array.isArray(r.focusExcludedDates)) {
+    out.focusExcludedDates = r.focusExcludedDates.filter(d => typeof d === 'string');
+  }
   return out;
 }
 
@@ -178,9 +183,29 @@ export function displayPatch(
   const next = coerceDisplaySettings({ ...now, ...patch });
   const out: Partial<DisplaySettings> = {};
   for (const key of Object.keys(next) as (keyof DisplaySettings)[]) {
-    if (next[key] !== now[key]) (out as Record<string, unknown>)[key] = next[key];
+    if (!sameSetting(next[key], now[key])) (out as Record<string, unknown>)[key] = next[key];
   }
   return out;
+}
+
+/**
+ * Are these two values of a setting the same setting?
+ *
+ * BY VALUE FOR LISTS, NOT BY REFERENCE. `coerceDisplaySettings` rebuilds every
+ * list it returns, so two identical exclusion lists are never the same object,
+ * and a straight `!==` reported them as a change. That put
+ * `focusExcludedDates: []` into EVERY patch the phone sent -- so changing the
+ * time format broadcast an empty list of excused days, and every day the user
+ * had excused on the PC was wiped by a setting that had nothing to do with
+ * them. Exactly the redundant write the rest of this function exists to avoid,
+ * except this one destroyed something on its way past.
+ */
+function sameSetting(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    return a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+  return a === b;
 }
 
 /** An hour a person can read. Never a bare number, and never a dash. */

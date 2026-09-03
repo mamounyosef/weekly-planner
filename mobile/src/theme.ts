@@ -152,7 +152,29 @@ export const PRESSED = { opacity: 0.55 } as const;
  * NOT used on the tab bar, which is not inside anything scrollable and where
  * the instant ripple is the point.
  */
+/**
+ * How long a row waits before it looks pressed.
+ *
+ * FOR ROWS INSIDE A SCROLLER, AND NOTHING ELSE. A finger that lands on a list
+ * and then drags is starting a scroll, not a press, and without this delay every
+ * such scroll begins with the row under the thumb flashing. 100ms is not a
+ * guess: it is Android's own tap timeout, which is what the platform's lists
+ * use for exactly this.
+ *
+ * On anything that is NOT a scroll child -- a floating button, a header
+ * control, the dark backdrop behind a sheet -- there is no scroll to disambiguate
+ * from, and the delay is pure latency: you press, and for a tenth of a second
+ * the app appears not to have noticed. Use `TAP_DELAY` there.
+ */
 export const PRESS_DELAY = 100;
+
+/**
+ * No delay at all, for controls that cannot be confused with a scroll.
+ *
+ * Named rather than left out so that the absence is visibly deliberate, and so
+ * the two cases read differently at a glance.
+ */
+export const TAP_DELAY = 0;
 
 export const NAV_CLEARANCE = 24;
 

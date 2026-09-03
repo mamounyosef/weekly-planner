@@ -32,7 +32,7 @@ import { Button, Row, Text, useTheme } from '../ui/kit';
 import {
   CategoryPicker, ColourPicker, Field, Segment, Stepper, TextField, Toggle,
 } from '../ui/Fields';
-import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, clearNav, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   applyCategoryDefaults,
@@ -227,7 +227,7 @@ function Sheet({ target, onClose }: { target: EditorTarget; onClose: () => void 
           invisible dismiss layer, and dimming the whole screen on touch would
           be a flash that means nothing. */}
       <Pressable
-        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+        unstable_pressDelay={TAP_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
       {/*
         THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.

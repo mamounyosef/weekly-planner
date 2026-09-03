@@ -309,6 +309,17 @@ function TasksPanel({
   const [dragOverListId, setDragOverListId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>({});
+  /**
+   * Stable, so that `TaskList` below can be memoised at all.
+   *
+   * An arrow written inline in the JSX is a NEW FUNCTION on every render of this
+   * panel, and this panel re-renders on every keystroke in the composer at the
+   * top of it. A memoised child handed a new function is a child that re-renders
+   * anyway, so the memo would have been decoration.
+   */
+  const toggleExpandedParent = useCallback((id: string) => {
+    setExpandedParents(prev => ({ ...prev, [id]: !prev[id] }));
+  }, []);
 
   const [sortMode, setSortMode] = useState<SortMode>(() => {
     try {
@@ -1345,8 +1356,8 @@ function TasksPanel({
                   pendingDoneIds={pendingDoneIds}
                   onDragStart={setDraggingId}
                   onDragOver={setDragOverId}
-                  onDrop={(srcId, tgtId, edge) => handleDropTask(srcId, tgtId, edge, list)}
-                  onToggleExpand={id => setExpandedParents(p => ({ ...p, [id]: !p[id] }))}
+                  onDrop={handleDropTask}
+                  onToggleExpand={toggleExpandedParent}
                   onToggleDone={handleToggleDoneAnimated}
                   onOpenMenu={onOpenMenu}
                 />
@@ -1381,8 +1392,8 @@ function TasksPanel({
                 pendingDoneIds={pendingDoneIds}
                 onDragStart={setDraggingId}
                 onDragOver={setDragOverId}
-                onDrop={(srcId, tgtId, edge) => handleDropTask(srcId, tgtId, edge, sections.done)}
-                onToggleExpand={id => setExpandedParents(p => ({ ...p, [id]: !p[id] }))}
+                onDrop={handleDropTask}
+                onToggleExpand={toggleExpandedParent}
                 onToggleDone={handleToggleDoneAnimated}
                 onOpenMenu={onOpenMenu}
               />
@@ -2226,7 +2237,18 @@ function Section({ name, label, count, danger, collapsed, theme, onToggle, child
 }
 
 // Task List Component
-function TaskList({
+/**
+ * MEMOISED, and every prop it is given is stable by construction.
+ *
+ * The panel above holds the new-task composer's text, so it re-renders on every
+ * keystroke; without this, so did every task on screen. On a long list that is
+ * the sluggish, half-a-word-behind typing that made adding a task feel broken.
+ *
+ * The props that legitimately change during a drag (`draggingId`, `dragOverId`)
+ * still get through, which is the point: those are real changes and the list has
+ * to answer them.
+ */
+const TaskList = React.memo(function TaskList({
   rows, today, timeFormat, theme, taskColor, taskCheckboxShape, showDate,
   listOf, listsById, showListBadge, onListHover, onMoveToList,
   expandedParents, draggingId, dragOverId, pendingDoneIds,
@@ -2246,7 +2268,9 @@ function TaskList({
   pendingDoneIds: Record<string, boolean>;
   onDragStart: (id: string | null) => void;
   onDragOver: (id: string | null) => void;
-  onDrop: (sourceOccId: string, targetOccId: string, edge: InsertEdge) => void;
+  /** The section's own rows come back with the drop, so the panel's handler can
+   *  stay one stable function instead of one closure per section. */
+  onDrop: (sourceOccId: string, targetOccId: string, edge: InsertEdge, rows: Row[]) => void;
   onToggleExpand: (id: string) => void;
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
   onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
@@ -2307,7 +2331,7 @@ function TaskList({
     e.stopPropagation();
     const target = targetFromPointer(e, list);
     if (target && draggingId !== target.row.occId) {
-      onDrop(draggingId, target.row.occId, target.edge);
+      onDrop(draggingId, target.row.occId, target.edge, list);
     }
     onDragStart(null);
     onDragOver(null);
@@ -2362,6 +2386,46 @@ function TaskList({
   /** True for the tick after a touch drag, so its trailing click is ignored. */
   const justTouchDraggedRef = useRef(false);
   const suppressClick = useCallback(() => justTouchDraggedRef.current, []);
+
+  /**
+   * ONE FUNCTION PER LIST, NOT ONE PER ROW PER FRAME.
+   *
+   * These used to be arrows written inside the `.map`, which meant every row got
+   * four brand new functions on every render of this list -- and this list
+   * re-renders on every frame of a touch drag, because the finger's offset lives
+   * in its state. No amount of memoising the row would have helped; the props
+   * were different every time by construction.
+   *
+   * The row now says WHICH row it is when it calls back, and reads the things
+   * that change (what is being dragged, what the current rows are) out of refs,
+   * so the identity of each handler never changes for the life of the list.
+   */
+  const draggingIdRef = useRef(draggingId);
+  draggingIdRef.current = draggingId;
+  const dropRef = useRef(onDrop);
+  dropRef.current = onDrop;
+  const dragStartRef = useRef(onDragStart);
+  dragStartRef.current = onDragStart;
+  const dragOverRef = useRef(onDragOver);
+  dragOverRef.current = onDragOver;
+  const expandRef = useRef(onToggleExpand);
+  expandRef.current = onToggleExpand;
+
+  const rowDragStart = useCallback((occId: string) => { dragStartRef.current(occId); }, []);
+  const rowDragOver = useCallback((occId: string, edge: InsertEdge) => {
+    dragOverRef.current(`${occId}:${edge}`);
+  }, []);
+  const rowDragEnd = useCallback(() => {
+    dragStartRef.current(null);
+    dragOverRef.current(null);
+  }, []);
+  const rowDrop = useCallback((occId: string, edge: InsertEdge) => {
+    const source = draggingIdRef.current;
+    if (source && source !== occId) dropRef.current(source, occId, edge, rowsRef.current);
+    dragStartRef.current(null);
+    dragOverRef.current(null);
+  }, []);
+  const rowToggleExpand = useCallback((id: string) => { expandRef.current(id); }, []);
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollRef.current) {
@@ -2453,7 +2517,7 @@ function TaskList({
           // task to the bottom of its own section and flipped the whole panel
           // to manual sort. Ignore it instead.
           if (target && target.occId !== hold.occId && rowsRef.current.some(r => r.occId === target.occId)) {
-            onDrop(hold.occId, target.occId, target.edge);
+            onDrop(hold.occId, target.occId, target.edge, rowsRef.current);
           }
         }
       }
@@ -2578,17 +2642,11 @@ function TaskList({
                   dragOffset={liftedId === r.occId ? dragDy : 0}
                   suppressClick={suppressClick}
                   pendingDone={!!pendingDoneIds[r.occId]}
-                  onDragStart={() => onDragStart(r.occId)}
-                  onDragOver={edge => onDragOver(insertTarget(r.occId, edge))}
-                  onDragEnd={() => { onDragStart(null); onDragOver(null); }}
-                  onDrop={edge => {
-                    if (draggingId && draggingId !== r.occId) {
-                      onDrop(draggingId, r.occId, edge);
-                    }
-                    onDragStart(null);
-                    onDragOver(null);
-                  }}
-                  onToggleExpand={kids.length ? () => onToggleExpand(r.task.id) : undefined}
+                  onDragStart={rowDragStart}
+                  onDragOver={rowDragOver}
+                  onDragEnd={rowDragEnd}
+                  onDrop={rowDrop}
+                  onToggleExpand={kids.length ? rowToggleExpand : undefined}
                   onToggleDone={onToggleDone}
                   onOpenMenu={onOpenMenu}
                 />
@@ -2621,16 +2679,10 @@ function TaskList({
                             dragOffset={liftedId === k.occId ? dragDy : 0}
                             suppressClick={suppressClick}
                             pendingDone={!!pendingDoneIds[k.occId]}
-                            onDragStart={() => onDragStart(k.occId)}
-                            onDragOver={edge => onDragOver(insertTarget(k.occId, edge))}
-                            onDragEnd={() => { onDragStart(null); onDragOver(null); }}
-                            onDrop={edge => {
-                              if (draggingId && draggingId !== k.occId) {
-                                onDrop(draggingId, k.occId, edge);
-                              }
-                              onDragStart(null);
-                              onDragOver(null);
-                            }}
+                            onDragStart={rowDragStart}
+                            onDragOver={rowDragOver}
+                            onDragEnd={rowDragEnd}
+                            onDrop={rowDrop}
                             onToggleDone={onToggleDone}
                             onOpenMenu={onOpenMenu}
                           />
@@ -2647,7 +2699,7 @@ function TaskList({
       </>
     </div>
   );
-}
+});
 
 /**
  * Where the dragged row will land. On a mouse a hairline beside a 1px cursor is
@@ -2671,7 +2723,16 @@ function InsertLine({ active, theme, touch }: { active: boolean; theme: TaskThem
 }
 
 // Single Task Row Component
-function TaskRow({
+/**
+ * MEMOISED. Everything it is handed is either a value or a function whose
+ * identity never changes, so a row only re-renders when something about THAT
+ * row is different.
+ *
+ * The list around it re-renders on every frame of a touch drag (the finger's
+ * offset is its state). Before this, so did all of its rows, which is the
+ * dropped frames that made dragging a task feel like wading.
+ */
+const TaskRow = React.memo(function TaskRow({
   row, today, timeFormat, theme, taskColor, taskCheckboxShape = 'circle', showDate, listBadge, childProgress, expanded,
   isDragging, isDragActive, lifted = false, dragOffset = 0, suppressClick, pendingDone, onDragStart, onDragOver, onDragEnd, onDrop,
   onToggleExpand, onToggleDone, onOpenMenu,
@@ -2680,8 +2741,14 @@ function TaskRow({
   taskCheckboxShape?: 'circle' | 'square';
   showDate: boolean; listBadge: TaskListDef | null; childProgress: string | null; expanded: boolean;
   isDragging?: boolean; isDragActive?: boolean; lifted?: boolean; dragOffset?: number; suppressClick?: () => boolean; pendingDone?: boolean;
-  onDragStart?: () => void; onDragOver?: (edge: InsertEdge) => void; onDragEnd?: () => void; onDrop?: (edge: InsertEdge) => void;
-  onToggleExpand?: () => void;
+  // Each of these is given the row's own occurrence id, so the list above can
+  // hand every row the SAME function instead of building a fresh closure per
+  // row per render. See the note on `rowDragStart` there.
+  onDragStart?: (occId: string) => void;
+  onDragOver?: (occId: string, edge: InsertEdge) => void;
+  onDragEnd?: () => void;
+  onDrop?: (occId: string, edge: InsertEdge) => void;
+  onToggleExpand?: (taskId: string) => void;
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
   onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
 }) {
@@ -2710,12 +2777,12 @@ function TaskRow({
           e.dataTransfer.setData('text/plain', row.occId);
           e.dataTransfer.setData('text/planner-task', row.occId);
         }
-        onDragStart?.();
+        onDragStart?.(row.occId);
       }}
       onDragOver={(e: any) => {
         e.preventDefault?.();
         e.stopPropagation?.();
-        onDragOver?.(edgeFromEvent(e));
+        onDragOver?.(row.occId, edgeFromEvent(e));
       }}
       onDragEnd={() => {
         onDragEnd?.();
@@ -2724,7 +2791,7 @@ function TaskRow({
       onDrop={(e: any) => {
         e.preventDefault?.();
         e.stopPropagation?.();
-        onDrop?.(edgeFromEvent(e));
+        onDrop?.(row.occId, edgeFromEvent(e));
       }}
       className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-smooth cursor-grab active:cursor-grabbing border overflow-hidden content-auto-task ${
         lifted ? '' : isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:shadow-md hover:-translate-y-px'
@@ -2894,7 +2961,7 @@ function TaskRow({
         {onToggleExpand && (
           <button
             type="button"
-            onClick={e => { e.stopPropagation(); onToggleExpand(); }}
+            onClick={e => { e.stopPropagation(); onToggleExpand(t.id); }}
             className="touch-target p-1 rounded-lg transition-colors flex items-center justify-center"
             style={{ color: theme.menuSub }}
             title="Toggle subtasks"
@@ -2914,4 +2981,4 @@ function TaskRow({
       </div>
     </div>
   );
-}
+});

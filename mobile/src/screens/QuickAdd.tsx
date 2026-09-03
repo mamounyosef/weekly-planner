@@ -22,7 +22,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Row, Text, useTheme, Spacer } from '../ui/kit';
-import { HIT, PRESSED, PRESS_DELAY, clearNav, radius, space, type as typeScale } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, clearNav, radius, space, type as typeScale } from '../theme';
 import { usePlanner } from '../state/planner';
 import { parseQuickAdd } from '../lib/quickAdd';
 import { describeRecur, inferWeekStartsOn } from '../lib/draft';
@@ -210,7 +210,7 @@ function Sheet({ onClose }: { onClose: () => void }) {
           invisible dismiss layer, and dimming the whole screen on touch would
           be a flash that means nothing. */}
       <Pressable
-        unstable_pressDelay={PRESS_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
+        unstable_pressDelay={TAP_DELAY} style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close" />
 
       {/*
         THE SHEET IS NAILED TO THE BOTTOM, not merely the last thing in a column.

@@ -158,6 +158,46 @@ function main() {
     // Setting something to what it already is writes NOTHING. A redundant write
     // is a sync op that can lose a race against a real one.
     assert.deepEqual(displayPatch(base, { timeFormat: base.timeFormat }), {});
+
+    // A LIST SETTING IS COMPARED BY VALUE. This one is not a nicety: the
+    // coercion rebuilds every list it returns, so a reference comparison called
+    // two identical exclusion lists a change and put `focusExcludedDates: []`
+    // into every patch the phone sent. Changing the time format then broadcast
+    // an empty list of excused days over the top of the real one on the PC.
+    assert.deepEqual(displayPatch(base, { timeFormat: '24h' }), { timeFormat: '24h' },
+      'the ONLY field in the patch is the one that moved');
+    for (const key of Object.keys(DEFAULT_DISPLAY_SETTINGS) as (keyof DisplaySettings)[]) {
+      const patch = displayPatch(base, { weekStartsOn: base.weekStartsOn === 0 ? 1 : 0 });
+      if (key !== 'weekStartsOn') {
+        assert.equal(key in patch, false, `${key} is not dragged along by an unrelated change`);
+      }
+    }
+
+    const withDays: DisplaySettings = { ...base, focusExcludedDates: ['2026-08-24', '2026-08-25'] };
+    assert.deepEqual(displayPatch(withDays, { focusExcludedDates: ['2026-08-24', '2026-08-25'] }), {},
+      'the same days, listed again, are not a change');
+    assert.deepEqual(displayPatch(withDays, { timeFormat: '24h' }), { timeFormat: '24h' },
+      'and an unrelated change leaves the days alone');
+
+    // A real change to the list IS written, in full: it is a whole-value field.
+    assert.deepEqual(displayPatch(withDays, { focusExcludedDates: ['2026-08-24'] }),
+      { focusExcludedDates: ['2026-08-24'] }, 'a day removed');
+    assert.deepEqual(
+      displayPatch(withDays, { focusExcludedDates: ['2026-08-24', '2026-08-25', '2026-08-26'] }),
+      { focusExcludedDates: ['2026-08-24', '2026-08-25', '2026-08-26'] }, 'a day added');
+    assert.deepEqual(displayPatch(withDays, { focusExcludedDates: [] }),
+      { focusExcludedDates: [] }, 'clearing them is a real change and must survive');
+
+    // ORDER IS PART OF THE VALUE, because nothing sorts this list on the way
+    // through and two orders are two different stored values.
+    assert.deepEqual(displayPatch(withDays, { focusExcludedDates: ['2026-08-25', '2026-08-24'] }),
+      { focusExcludedDates: ['2026-08-25', '2026-08-24'] });
+
+    // Rubbish inside the list is dropped by the coercion, and if what survives
+    // matches what is already stored, that is not a change either.
+    assert.deepEqual(
+      displayPatch(withDays, { focusExcludedDates: ['2026-08-24', 7, null, '2026-08-25'] as never }),
+      {}, 'the junk was never a value, so nothing moved');
     assert.deepEqual(displayPatch(base, {}), {});
     assert.deepEqual(displayPatch(base, base), {});
 

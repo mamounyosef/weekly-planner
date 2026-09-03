@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import {
   buildTaskRows,
   groupTasks,
+  orderKey,
   type Node,
   type Row,
   type SectionKey,
@@ -26,7 +27,10 @@ import {
   DEFAULT_SORT_MODE,
   coerceSortMode,
 } from './taskBoard';
-import { matchesFilters, type Task, type TaskData, type TaskFilter } from './tasks';
+import {
+  isStepDone, stepDoneChanges, matchesFilters,
+  type Task, type TaskData, type TaskFilter,
+} from './tasks';
 import { GENERAL_LIST_ID, type TaskList } from './taskLists';
 
 const TODAY = '2026-08-31';
@@ -501,6 +505,252 @@ function main() {
     for (const mode of SORT_MODES) {
       assert.equal(flatten(group(tasks, { sort: mode })).length, 3, `${mode} keeps every task`);
     }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ORDER BY HAND
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  console.log('--- 30. A TASK NOBODY HAS PLACED SORTS AFTER THE ONES SOMEBODY HAS ---');
+  {
+    // THE REGRESSION. Manual positions are written 0, 10, 20. Reading an absent
+    // one as zero made a brand new task tie with the FIRST row of an
+    // arrangement the user had just made -- and win, on the tiebreak -- so it
+    // appeared on top of work that had been ordered on purpose.
+    assert.equal(orderKey(task('x', null)), Number.MAX_SAFE_INTEGER, 'absent is last');
+    assert.equal(orderKey(task('x', null, { order: 0 })), 0, 'and zero is a real place');
+    assert.ok(orderKey(task('x', null, { order: 0 })) < orderKey(task('y', null)),
+      'a task placed FIRST still beats one never placed at all');
+
+    const tasks = store(
+      task('placed-a', TODAY, { order: 0 }),
+      task('placed-b', TODAY, { order: 10 }),
+      task('fresh', TODAY),
+    );
+    assert.deepEqual(
+      group(tasks, { sort: 'manual' }).Today.map(n => n.row.occId),
+      ['placed-a', 'placed-b', 'fresh'],
+      'the new one goes to the bottom, not the top',
+    );
+  }
+
+  console.log('--- 31. RUBBISH IN THE FIELD IS TREATED AS ABSENT, NEVER AS A NUMBER ---');
+  {
+    // NaN is the dangerous one: `NaN - n` is NaN, which a comparator reads as
+    // "equal", and a comparator with ties lets the list reshuffle itself
+    // between renders for no reason the user can see.
+    for (const junk of [undefined, null, NaN, Infinity, -Infinity, '5', {}, [], true]) {
+      assert.equal(orderKey(task('x', null, { order: junk as never })), Number.MAX_SAFE_INTEGER,
+        `${String(junk)} is not a position`);
+    }
+    // -0 IS a real number and must be kept, or a task placed at the very top by
+    // a subtraction lands at the bottom instead.
+    assert.equal(orderKey(task('x', null, { order: -0 })), -0);
+    assert.equal(orderKey(task('x', null, { order: -50 })), -50, 'negatives are places too');
+
+    const tasks = store(
+      task('good', TODAY, { order: 10 }),
+      task('nan', TODAY, { order: NaN as never }),
+      task('inf', TODAY, { order: Infinity as never }),
+    );
+    const out = group(tasks, { sort: 'manual' }).Today.map(n => n.row.occId);
+    assert.equal(out[0], 'good', 'the only real position wins');
+    assert.deepEqual(out.slice(1).sort(), ['inf', 'nan'], 'and the rest are settled by the tiebreak');
+  }
+
+  console.log('--- 32. EVERY MIX OF PLACED AND UNPLACED, IN EVERY ARRIVAL ORDER ---');
+  {
+    // Exhaustive rather than anecdotal. Three tasks, each either placed or not,
+    // in all six arrival orders: the placed ones must come first, in their own
+    // order, and the unplaced ones must never overtake them.
+    const ids = ['a', 'b', 'c'];
+    for (let mask = 0; mask < 8; mask += 1) {
+      const placed = ids.filter((_, i) => (mask >> i) & 1);
+      const built = ids.map((id, i) =>
+        ((mask >> i) & 1) ? task(id, TODAY, { order: i * 10 }) : task(id, TODAY));
+
+      for (const order of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]]) {
+        const out = group(store(...order.map(i => built[i])), { sort: 'manual' })
+          .Today.map(n => n.row.occId);
+        assert.deepEqual(out.slice(0, placed.length), placed,
+          `mask ${mask}: the placed ones lead, in their numbers' order`);
+        assert.deepEqual([...out].sort(), ids, `mask ${mask}: nothing lost`);
+      }
+    }
+  }
+
+  console.log('--- 33. THE SAME RULE INSIDE A CARD, FOR STEPS ---');
+  {
+    const parent = task('p', TODAY);
+    const tasks = store(
+      parent,
+      task('s-placed', TODAY, { parentId: 'p', order: 0 }),
+      task('s-fresh', TODAY, { parentId: 'p' }),
+      task('s-placed-2', TODAY, { parentId: 'p', order: 10 }),
+    );
+    const card = group(tasks).Today.find(n => n.row.occId === 'p');
+    assert.ok(card, 'the parent is drawn');
+    assert.deepEqual(card.children.map(c => c.occId), ['s-placed', 's-placed-2', 's-fresh'],
+      'a step nobody has moved joins the end, not the middle');
+  }
+
+  console.log('--- 34. THE DATE SORT USES THE SAME RULE FOR ITS TIEBREAK ---');
+  {
+    // Two tasks on the same day at the same time: the placed one decides, and
+    // the unplaced one does not jump ahead of it by being read as zero.
+    const tasks = store(
+      task('placed', TODAY, { order: 30, startTime: '09:00' }),
+      task('fresh', TODAY, { startTime: '09:00' }),
+    );
+    assert.deepEqual(group(tasks, { sort: 'datetime' }).Today.map(n => n.row.occId),
+      ['placed', 'fresh'], 'placed first, even at 30');
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STEPS UNDER A REPEATING TASK
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  console.log('--- 35. A STEP OF A REPEAT NESTS INSTEAD OF BECOMING ITS OWN CARD ---');
+  {
+    // THE REGRESSION. Repeating masters were deliberately left out of the parent
+    // index, so a step whose parentId named one found no parent at all and was
+    // drawn as a task in its own right, sitting in the same bucket next to the
+    // thing it belongs to. The PC nested these correctly the whole time.
+    const tasks = store(
+      task('trip', TODAY, { recur: { freq: 'daily', interval: 1 } as never }),
+      task('milk', TODAY, { parentId: 'trip' }),
+    );
+    const out = group(tasks);
+    const cards = SECTIONS.flatMap(k => out[k]);
+    assert.equal(cards.length, 1, 'ONE card, not two');
+    assert.equal(cards[0].row.task.id, 'trip');
+    assert.deepEqual(cards[0].children.map(c => c.task.id), ['milk'], 'with the step inside it');
+  }
+
+  console.log('--- 36. A STEP IS DRAWN UNDER EVERY OCCURRENCE ON SCREEN, AND DATED BY IT ---');
+  {
+    // A repeat ticked on one day shows that day AND its next open one, so both
+    // occurrences are on the board at once. The step belongs to both, and the
+    // row it is drawn as must carry the PARENT'S day, not its own.
+    const tasks = store(
+      task('trip', day(-1), {
+        recur: { freq: 'daily', interval: 1 } as never,
+        completedDates: [day(-1)],
+      }),
+      task('milk', day(-1), { parentId: 'trip' }),
+    );
+    const out = group(tasks);
+    const cards = SECTIONS.flatMap(k => out[k]);
+    assert.equal(cards.length, 2, 'the finished day and the open one');
+
+    const seen = new Set<string>();
+    for (const card of cards) {
+      assert.equal(card.children.length, 1, 'the step is under both');
+      const child = card.children[0];
+      assert.equal(child.due, card.row.due, "the step carries its parent's day");
+      assert.ok(!seen.has(child.occId), 'and the two copies never share a key');
+      seen.add(child.occId);
+    }
+  }
+
+  console.log('--- 37. TICKING A STEP OF A REPEAT TICKS IT FOR THAT DAY ALONE ---');
+  {
+    // THE REGRESSION, and the worse half of it. A step has no repeat rule of its
+    // own, so its done-ness was read from the boolean: tick "buy milk" once and
+    // it was tied off for every Friday there would ever be.
+    const parent = task('trip', TODAY, { recur: { freq: 'weekly', interval: 1 } as never });
+    const step = task('milk', TODAY, { parentId: 'trip' });
+
+    assert.equal(isStepDone(step, parent, TODAY), false, 'open to begin with');
+
+    const changes = stepDoneChanges(step, parent, TODAY);
+    assert.deepEqual(changes.completedDates, [TODAY], 'one day recorded');
+    assert.equal('completed' in changes, false, 'and the boolean is NEVER touched');
+
+    const ticked = { ...step, ...changes } as Task;
+    assert.equal(isStepDone(ticked, parent, TODAY), true, 'done today');
+    assert.equal(isStepDone(ticked, parent, day(7)), false, 'and open again next week');
+    assert.equal(isStepDone(ticked, parent, day(-7)), false, 'and last week too');
+
+    // Un-ticking takes that day back out and leaves the others alone.
+    const twice = { ...ticked, ...stepDoneChanges(ticked, parent, day(7)) } as Task;
+    assert.deepEqual(twice.completedDates, [TODAY, day(7)].sort(), 'both days');
+    const undone = { ...twice, ...stepDoneChanges(twice, parent, TODAY) } as Task;
+    assert.deepEqual(undone.completedDates, [day(7)], 'only the day tapped is removed');
+  }
+
+  console.log('--- 38. A STEP OF A ONE-OFF TASK IS UNCHANGED ---');
+  {
+    const parent = task('house', TODAY);
+    const step = task('paint', TODAY, { parentId: 'house' });
+    const changes = stepDoneChanges(step, parent, TODAY);
+    assert.equal(changes.completed, true, 'the boolean, as it always was');
+    assert.deepEqual(changes.completedDates, [TODAY], 'kept in step for the PC');
+    assert.equal(isStepDone({ ...step, ...changes } as Task, parent, TODAY), true);
+
+    // And with no parent at all, which is what a plain task is.
+    const plain = task('solo', TODAY);
+    assert.equal(isStepDone(plain, null, TODAY), false);
+    assert.equal(stepDoneChanges(plain, null, TODAY).completed, true);
+    // A repeating task with no parent answers for itself, by date.
+    const rep = task('rep', TODAY, { recur: { freq: 'daily', interval: 1 } as never });
+    assert.equal('completed' in stepDoneChanges(rep, null, TODAY), false,
+      'a repeat is never ticked as a whole, parent or not');
+    assert.deepEqual(stepDoneChanges(rep, null, null), {}, 'and never without a day to tick');
+  }
+
+  console.log('--- 39. THE BOARD SHOWS A STEP OPEN ON A DAY IT WAS NOT DONE ---');
+  {
+    // End to end, through the board rather than through the helper: the step is
+    // finished on the completed occurrence and open on the live one.
+    const tasks = store(
+      task('trip', day(-1), {
+        recur: { freq: 'daily', interval: 1 } as never,
+        completedDates: [day(-1)],
+      }),
+      task('milk', day(-1), { parentId: 'trip', completedDates: [day(-1)] }),
+    );
+    const cards = SECTIONS.flatMap(k => group(tasks)[k]);
+    for (const card of cards) {
+      const done = card.children[0].done;
+      assert.equal(done, card.row.due === day(-1),
+        `the step is done on ${day(-1)} and open on ${card.row.due}`);
+    }
+  }
+
+  console.log('--- 40. A STEP WHOSE PARENT IS NOT ON SCREEN IS STILL REACHABLE ---');
+  {
+    // Unchanged behaviour, asserted again because the parent lookup was
+    // rewritten underneath it: better a step out of place than one nobody can
+    // find. Here the parent is not in the store at all, which is what a delete
+    // that raced a sync leaves behind.
+    const orphan = store(task('milk', TODAY, { parentId: 'trip' }));
+    const ids = SECTIONS.flatMap(k => group(orphan)[k]).map(n => n.row.task.id);
+    assert.ok(ids.includes('milk'), 'drawn on its own rather than dropped');
+
+    // A step belongs to its PARENT'S list, so a filter that hides the parent
+    // hides the step with it -- the card is the unit, and half a card is worse
+    // than none. (`listOfTask` in `groupTasks` resolves through the parent.)
+    const filed = store(
+      task('trip', TODAY, { listId: 'work', recur: { freq: 'daily', interval: 1 } as never }),
+      task('milk', TODAY, { parentId: 'trip' }),
+    );
+    const general = SECTIONS.flatMap(k => group(filed, { activeListId: GENERAL_LIST_ID })[k]);
+    assert.equal(general.length, 0, 'neither half shows on the other list');
+    const work = SECTIONS.flatMap(k => group(filed, { activeListId: 'work' })[k]);
+    assert.equal(work.length, 1, 'and the card is whole on its own list');
+    assert.deepEqual(work[0].children.map(c => c.task.id), ['milk']);
+
+    // A step of a step attaches to nothing: nesting is one level deep.
+    const deep = store(
+      task('p', TODAY),
+      task('s', TODAY, { parentId: 'p' }),
+      task('ss', TODAY, { parentId: 's' }),
+    );
+    const card = group(deep).Today.find(n => n.row.task.id === 'p');
+    assert.deepEqual(card?.children.map(c => c.task.id), ['s'], 'one level, no more');
+    assert.ok(group(deep).Today.some(n => n.row.task.id === 'ss'), 'and the grandchild is a root');
   }
 
   console.log('\nALL PASS (taskBoard: sections, subtasks, cycles, filters, total order)');

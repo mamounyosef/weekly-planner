@@ -24,25 +24,31 @@
 // ── The visible day ──────────────────────────────────────────────────────────
 
 /**
- * The window is expressed in whole hours from midnight, and it stays inside a
- * single calendar day.
+ * The window is expressed in whole hours from midnight, and it may run PAST
+ * midnight into the next day.
  *
- * The PC allows `dayEndH` up to 48, which is its way of drawing a night shift
- * that runs past midnight. The phone's grid is clamped to 24 by construction,
- * so allowing 25 here would store a value the phone silently ignores, which is
- * worse than not offering it.
+ * 48 rather than 24 because a day that ends at 2am is an ordinary way to live
+ * and an impossible thing to express otherwise: `dayEndH` of 26 means "until
+ * 2am tomorrow", and the grid simply keeps drawing. Hours past 24 are printed
+ * modulo the clock (`formatHour`), so 26 reads as 2am rather than as a number
+ * no clock has ever shown.
+ *
+ * This comment used to say the opposite -- that the phone was capped at 24 and
+ * the PC was not -- which was left behind when the phone learned to draw the
+ * night. Nothing on the PC imports this file at all; it is the tested original,
+ * and the phone is the only thing that runs it.
  */
 export const DAY_HOUR_MIN = 0;
-export const DAY_HOUR_MAX = 24;
+export const DAY_HOUR_MAX = 48;
 
 /** 7am to 11pm: an ordinary waking day, and what the PC ships with. */
 export const DEFAULT_DAY_START_HOUR = 7;
 export const DEFAULT_DAY_END_HOUR = 23;
 
 export interface DayWindow {
-  /** First hour drawn. 0 to 23. */
+  /** First hour drawn. 0 to 47. */
   start: number;
-  /** Hour the grid stops at. Always strictly greater than `start`. 1 to 24. */
+  /** Hour the grid stops at. Always strictly greater than `start`. 1 to 48. */
   end: number;
 }
 
@@ -161,15 +167,22 @@ export type ClockFormat = '12h' | '24h';
  * One hour as a person would say it.
  *
  * Compact on purpose ("7am", not "7:00 AM"): this goes inside a sentence, and a
- * sentence full of ":00" reads like a log line. 24 is written as midnight
- * rather than "24:00", which is a time no clock has ever shown.
+ * sentence full of ":00" reads like a log line. Hours past midnight are said
+ * the way a clock says them, so a day ending at 26 reads "2am" and 24 itself
+ * reads "midnight" rather than "24:00", which is a time no clock has shown.
  */
 export function formatHour(hour: number, clock: ClockFormat = '12h'): string {
+  // `Math.min`/`Math.max` pass NaN straight through, and every comparison below
+  // is then false, so an hour that was never a number came out of here as the
+  // string "NaNpm" -- printed into a sentence on the settings screen. Nothing
+  // stored can produce it, but `dayEndH - dayStartH` on a half-written pair can.
+  if (!Number.isFinite(hour)) return clock === '24h' ? '00:00' : 'midnight';
   const h = Math.min(DAY_HOUR_MAX, Math.max(DAY_HOUR_MIN, Math.round(hour)));
   if (clock === '24h') return `${String(h % 24).padStart(2, '0')}:00`;
-  if (h === 0 || h === 24) return 'midnight';
-  if (h === 12) return 'noon';
-  return h < 12 ? `${h}am` : `${h - 12}pm`;
+  const mod = h % 24;
+  if (mod === 0) return 'midnight';
+  if (mod === 12) return 'noon';
+  return mod < 12 ? `${mod}am` : `${mod - 12}pm`;
 }
 
 /**
@@ -356,7 +369,7 @@ export function coercePrayerAppearance(raw: unknown): PrayerAppearance {
 
 /** What a person reads back on the settings screen. No dashes, ever. */
 export function describePrayerAppearance(a: PrayerAppearance): string {
-  if (!a.showOnCalendar) return 'Not drawn on this device. The times are still shared.';
+  if (!a.showOnCalendar) return 'Not drawn on this phone. The times are still shared.';
   const shape = PRAYER_DRAW_STYLES.find(s => s.id === a.style)?.label ?? 'Marker line';
   const lang = a.language === 'arabic' ? 'in Arabic' : 'in English';
   // The row style has no line to label, so promising a name either way would be

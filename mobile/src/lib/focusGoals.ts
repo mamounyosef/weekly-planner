@@ -69,15 +69,18 @@ export function computeGoalStats(
     if (meetsGoal(secs)) {
       currentRun++;
       if (currentRun > bestStreak) bestStreak = currentRun;
-    } else if (!excludedSet.has(day) || day === today) {
-      // Break the streak if the goal isn't met AND it's not an excluded date.
-      // (We don't skip exclusions on 'today' because you either meet it today or you don't.
-      // Actually, if today is an excluded date, maybe we shouldn't break the streak yet?
-      // For consistency with how skipping works: if today is excluded and you don't meet it,
-      // the streak from yesterday is still intact.)
-      if (!excludedSet.has(day)) {
-        currentRun = 0;
-      }
+    } else if (!excludedSet.has(day)) {
+      // A DAY YOU EXCUSED YOURSELF FROM DOES NOT BREAK A STREAK. That is the
+      // entire purpose of excusing it: a Friday off, a day ill, a holiday.
+      // Nor does it extend one -- nothing happened, so the run is carried
+      // across the gap rather than incremented over it.
+      //
+      // Today is not a special case. If today is excused and the goal has not
+      // been met, yesterday's run is still intact, which is exactly what
+      // carrying it across says. The outer test used to read
+      // `!excluded || day === today`, whose second half could never reach the
+      // assignment underneath it.
+      currentRun = 0;
     }
     
     if (i === days.length - 2) {

@@ -15,7 +15,7 @@
 // that has happened, so they surface as a badge on the calendar and open over
 // it. On a good day the screen does not exist.
 
-import React, { useCallback, useEffect, useState, useTransition } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
 import { ActivityIndicator, StatusBar, View, BackHandler } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -30,6 +30,9 @@ import { Conflicts } from './src/screens/Conflicts';
 import { Settings } from './src/screens/Settings';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { KeepAlive } from './src/ui/KeepAlive';
+import {
+  backAction, topOverlay, type OverlayFlags, type OverlayName,
+} from './src/lib/overlayStack';
 import { Categories } from './src/screens/Categories';
 import { TaskSettings } from './src/screens/TaskSettings';
 import { Reminders } from './src/screens/Reminders';
@@ -134,40 +137,78 @@ function Shell() {
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   /** A result tapped in search, handed to the calendar to open. */
-  const [pendingOpen, setPendingOpen] = useState<{ date: string } | null>(null);
+  /**
+   * Something to show on the calendar: a day, or a day AND the item on it.
+   *
+   * `item` used to be dropped on the floor here. Search built a complete answer
+   * -- which store, which master, which occurrence -- and this kept only the
+   * date, so tapping a result scrolled the calendar to the right day and left
+   * the user to find the thing themselves. The two callbacks below were
+   * identical, which is what that looks like in code.
+   */
+  const [pendingOpen, setPendingOpen] = useState<
+    { date: string; item?: { store: 'events' | 'tasks'; id: string; date: string } } | null
+  >(null);
 
+
+  /**
+   * Which screens are open, as one value.
+   *
+   * Ten booleans scattered across this component were being read in two places
+   * that had to agree and did not: the chain that decides what to DRAW, and the
+   * back handler. Gathering them here means both ask the same question of the
+   * same object.
+   */
+  const overlayFlags: OverlayFlags = useMemo(() => ({
+    diagnostics: showDiagnostics,
+    conflicts: showConflicts,
+    categories: showCategories,
+    taskSettings: showTaskSettings,
+    reminders: showReminders,
+    prayers: showPrayers,
+    planner: showPlanner,
+    search: showSearch,
+    notifications: showNotifications,
+  }), [
+    showDiagnostics, showConflicts, showCategories, showTaskSettings,
+    showReminders, showPrayers, showPlanner, showSearch, showNotifications,
+  ]);
+
+  /** How to shut each one, by the same name the order uses. */
+  const closeOverlay: Record<OverlayName, () => void> = useMemo(() => ({
+    diagnostics: () => setShowDiagnostics(false),
+    conflicts: () => setShowConflicts(false),
+    categories: () => setShowCategories(false),
+    taskSettings: () => setShowTaskSettings(false),
+    reminders: () => setShowReminders(false),
+    prayers: () => setShowPrayers(false),
+    planner: () => setShowPlanner(false),
+    search: () => setShowSearch(false),
+    notifications: () => setShowNotifications(false),
+  }), []);
 
   useEffect(() => {
-    // IN THE ORDER THEY ARE DRAWN, TOPMOST FIRST. Back must close whatever is
-    // actually covering the screen. Quick add lives inside the tab stack rather
-    // than in the overlay chain, so it sits UNDER any overlay and is closed
-    // after them, not before.
+    // THE ORDER IS NOT WRITTEN HERE. It lives in `lib/overlayStack.ts`, beside
+    // the one that decides what is DRAWN, because they are the same order --
+    // and keeping them apart is exactly how they came to be each other's
+    // reverse. Back was closing a screen sitting behind the one covering the
+    // display, so the press appeared to do nothing while quietly dismantling
+    // what was underneath.
+    //
+    // Quick add lives inside the tab stack rather than in the overlay chain, so
+    // it sits UNDER any overlay and is closed after them, not before.
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (showDiagnostics) { setShowDiagnostics(false); return true; }
-      if (showNotifications) { setShowNotifications(false); return true; }
-      if (showSearch) { setShowSearch(false); return true; }
-      if (showPlanner) { setShowPlanner(false); return true; }
-      if (showPrayers) { setShowPrayers(false); return true; }
-      if (showReminders) { setShowReminders(false); return true; }
-      if (showCategories) { setShowCategories(false); return true; }
-      if (showTaskSettings) { setShowTaskSettings(false); return true; }
-      if (showConflicts) { setShowConflicts(false); return true; }
-      if (showQuickAdd) { setShowQuickAdd(false); return true; }
-      
-      if (pressedTab !== 'calendar') {
-        goToTab('calendar');
-        return true;
-      }
-      
-      // If we are at the calendar tab and no modals are open, exit the app
+      const action = backAction(overlayFlags, { sheetOpen: showQuickAdd, tab: pressedTab });
+
+      if (action.kind === 'close-overlay') { closeOverlay[action.overlay](); return true; }
+      if (action.kind === 'close-sheet') { setShowQuickAdd(false); return true; }
+      if (action.kind === 'go-home') { goToTab('calendar'); return true; }
+      // Nothing is covering anything and we are already on the calendar: this
+      // is the only press that may leave the app.
       return false;
     });
     return () => sub.remove();
-  }, [
-    showDiagnostics, showQuickAdd, showNotifications, showSearch,
-    showPlanner, showPrayers, showReminders, showCategories, showTaskSettings,
-    showConflicts, pressedTab, goToTab,
-  ]);
+  }, [overlayFlags, closeOverlay, showQuickAdd, pressedTab, goToTab]);
 
   // The splash lasts only as long as opening SQLite; there is no network in this
   // path, so it is over before it registers even on a slow phone.
@@ -179,17 +220,7 @@ function Shell() {
    * the chain of ternaries had, kept exactly: two of these can be open at once
    * (the bell can open reminders), and this is what decides which one wins.
    */
-  const overlay =
-    showDiagnostics ? 'diagnostics'
-      : showConflicts ? 'conflicts'
-      : showCategories ? 'categories'
-        : showTaskSettings ? 'taskSettings'
-          : showReminders ? 'reminders'
-            : showPrayers ? 'prayers'
-              : showPlanner ? 'planner'
-                : showSearch ? 'search'
-                  : showNotifications ? 'notifications'
-                    : null;
+  const overlay = topOverlay(overlayFlags);
 
   if (!ready) {
     return (
@@ -235,6 +266,7 @@ function Shell() {
                     onOpenNotifications={() => setShowNotifications(true)}
                     onOpenQuickAdd={() => setShowQuickAdd(true)}
                     goToDate={pendingOpen?.date}
+                    goToItem={pendingOpen?.item}
                     onWentToDate={() => setPendingOpen(null)}
                   />
                 </ErrorBoundary>
@@ -300,7 +332,12 @@ function Shell() {
               onClose={() => setShowSearch(false)}
               onOpenItem={target => {
                 setShowSearch(false);
-                setPendingOpen({ date: target.date });
+                setPendingOpen({
+                  date: target.date,
+                  // A dateless task opens on today, which is what its own date
+                  // already resolves to; the editor needs a day either way.
+                  item: { store: target.store, id: target.id, date: target.date },
+                });
               }}
               onOpenDate={date => {
                 setShowSearch(false);

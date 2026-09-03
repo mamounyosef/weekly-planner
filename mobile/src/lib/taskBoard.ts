@@ -14,7 +14,7 @@
  */
 import {
   type Task, type TaskData, type TaskFilter,
-  expandTaskRange, isTaskDone, matchesFilters
+  expandTaskRange, isStepDone, isTaskDone, makeOccId, matchesFilters
 } from './tasks';
 import { resolveListId, type TaskList } from './taskLists';
 
@@ -37,6 +37,32 @@ export function coerceSortMode(value: unknown): SortMode {
     ? value as SortMode
     : DEFAULT_SORT_MODE;
 }
+/**
+ * Where a task sits in a hand-made order. Something nobody has placed sorts
+ * AFTER everything somebody has.
+ *
+ * THIS IS THE WHOLE BUG THAT ORDER-BY-HAND USED TO HAVE. Positions are written
+ * as 0, 10, 20, so reading an absent one as zero made every task the user had
+ * never touched tie with the FIRST row of the arrangement they had just made,
+ * and win the tie often enough to land on top of it. A new task appeared above
+ * work that had been ordered on purpose, which is the one thing a manual order
+ * exists to prevent.
+ *
+ * When nothing in a group has been placed they all tie here, and the rule below
+ * this one decides -- which is why a list looks completely unchanged until the
+ * first thing is moved.
+ *
+ * Rubbish is treated as absent on purpose: `NaN` and `Infinity` have both
+ * reached this field from older builds, and either one poisons a comparator
+ * (`NaN - n` is `NaN`, which sorts as "equal to everything" and lets the list
+ * reshuffle itself between renders).
+ */
+export function orderKey(t: Task): number {
+  return typeof t.order === 'number' && Number.isFinite(t.order)
+    ? t.order
+    : Number.MAX_SAFE_INTEGER;
+}
+
 export type Bucket = 'Overdue' | 'Today' | 'Tomorrow' | 'Upcoming' | 'General';
 export type SectionKey = Bucket | 'Done';
 
@@ -122,30 +148,59 @@ export function groupTasks(
     ? rows.filter(r => listOfTask(r.task) === activeListId)
     : rows;
 
-  const byId = new Map<string, Row>();
+  /**
+   * Every row a task is drawn as, by the task's own id.
+   *
+   * A LIST, NOT A ROW, BECAUSE A REPEAT IS DRAWN MORE THAN ONCE. The old index
+   * kept one row per id and deliberately left repeating masters out of it
+   * altogether, so a step whose `parentId` named a repeat found no parent at all
+   * and was drawn as a task in its own right: "buy milk" sitting in Today as a
+   * separate card, next to the shopping trip it belongs to. The PC has always
+   * nested these correctly, which is how the two screens came to disagree about
+   * what the same database contained.
+   *
+   * Only rows that are not themselves steps go in. Nesting is one level deep,
+   * and a step of a step would otherwise attach.
+   */
+  const rowsByTaskId = new Map<string, Row[]>();
   for (const r of allVisibleRows) {
-    byId.set(r.occId, r);
-    if (!r.task.recur) byId.set(r.task.id, r);
+    if (r.task.parentId) continue;
+    const list = rowsByTaskId.get(r.task.id);
+    if (list) list.push(r); else rowsByTaskId.set(r.task.id, [r]);
   }
 
-  const parentOf = (r: Row): Row | null => {
-    if (!r.task.parentId || r.task.parentId === r.task.id) return null;
-    const parent = byId.get(r.task.parentId);
-    if (!parent || parent.task.parentId) return null;
-    return parent;
+  const parentRowsOf = (r: Row): Row[] => {
+    if (!r.task.parentId || r.task.parentId === r.task.id) return [];
+    return rowsByTaskId.get(r.task.parentId) ?? [];
   };
 
   const roots: Row[] = [];
   const kids = new Map<string, Row[]>();
 
   for (const r of allVisibleRows) {
-    const parent = parentOf(r);
-    if (!parent) {
+    const parents = parentRowsOf(r);
+    if (parents.length === 0) {
+      // Either a task in its own right, or a step whose parent is not on screen
+      // (a different list, filtered out, deleted). Drawn on its own rather than
+      // dropped, because a step nobody can reach is worse than one out of place.
       roots.push(r);
-    } else {
-      const siblings = kids.get(parent.occId) ?? [];
-      siblings.push(r);
-      kids.set(parent.occId, siblings);
+      continue;
+    }
+    for (const parent of parents) {
+      // A step of a REPEAT is drawn under every occurrence of it, and is done
+      // for each one separately -- so the row handed to the UI carries the
+      // parent's date, not the step's own, and an occurrence id of its own so
+      // two copies of the same step never share a React key.
+      const child: Row = parent.task.recur
+        ? {
+            occId: makeOccId(r.task.id, parent.due ?? ''),
+            task: r.task,
+            due: parent.due,
+            done: isStepDone(r.task, parent.task, parent.due),
+          }
+        : r;
+      const siblings = kids.get(parent.occId);
+      if (siblings) siblings.push(child); else kids.set(parent.occId, [child]);
     }
   }
 
@@ -161,7 +216,7 @@ export function groupTasks(
     if (!matchesFilters(r.task, r.due, filters, today)) continue;
 
     const children = (kids.get(r.occId) ?? []).sort((a, b) =>
-      (a.task.order ?? 0) - (b.task.order ?? 0)
+      orderKey(a.task) - orderKey(b.task)
       || (a.task.title ?? '').localeCompare(b.task.title ?? '')
       // The id last, always. Without it two subtasks with the same name and the
       // same order compare equal, and a comparator that returns 0 lets the sort
@@ -189,7 +244,7 @@ export function groupTasks(
     const tie = ar.occId < br.occId ? -1 : ar.occId > br.occId ? 1 : 0;
 
     if (sortMode === 'manual') {
-      return (ar.task.order ?? 0) - (br.task.order ?? 0)
+      return orderKey(ar.task) - orderKey(br.task)
         || (ar.due ?? '9999').localeCompare(br.due ?? '9999')
         || (ar.task.title ?? '').localeCompare(br.task.title ?? '')
         || tie;
@@ -202,7 +257,7 @@ export function groupTasks(
     }
     return (ar.due ?? '9999').localeCompare(br.due ?? '9999')
       || (ar.task.startTime ?? '99:99').localeCompare(br.task.startTime ?? '99:99')
-      || (ar.task.order ?? 0) - (br.task.order ?? 0)
+      || orderKey(ar.task) - orderKey(br.task)
       || (ar.task.title ?? '').localeCompare(br.task.title ?? '')
       || tie;
   };

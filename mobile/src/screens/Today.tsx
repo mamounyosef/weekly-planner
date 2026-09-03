@@ -96,7 +96,7 @@ const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex
 
 export function Today({
   onOpenConflicts, onOpenSearch, onOpenNotifications, onOpenQuickAdd,
-  goToDate, onWentToDate,
+  goToDate, goToItem, onWentToDate,
 }: {
   onOpenConflicts: () => void;
   onOpenSearch?: () => void;
@@ -104,6 +104,16 @@ export function Today({
   onOpenQuickAdd?: () => void;
   /** A day handed over from search or the bell. Shown, then acknowledged. */
   goToDate?: string;
+  /**
+   * An item to OPEN, not merely a day to show.
+   *
+   * Search hands back the store, the master id and the occurrence date, and all
+   * of that used to be thrown away at the App level: the calendar jumped to the
+   * right day and the thing the user had actually tapped was never opened. The
+   * date alone is not the answer to "show me this"; it is the answer to a
+   * question nobody asked.
+   */
+  goToItem?: { store: 'events' | 'tasks'; id: string; date: string };
   onWentToDate?: () => void;
 }) {
   const p = useTheme();
@@ -186,10 +196,16 @@ export function Today({
    * calendar to that day and quietly undo every swipe afterwards.
    */
   useEffect(() => {
-    if (!goToDate) return;
-    setSelected(goToDate);
+    if (!goToDate && !goToItem) return;
+    // The day first, so the editor opens over the day the item is on rather
+    // than over whatever was on screen a moment ago.
+    if (goToDate) setSelected(goToDate);
+    if (goToItem) {
+      setSelected(goToItem.date);
+      setEditing({ store: goToItem.store, id: goToItem.id, date: goToItem.date });
+    }
     onWentToDate?.();
-  }, [goToDate, onWentToDate]);
+  }, [goToDate, goToItem, onWentToDate]);
   const chooseView = (next: ViewMode) => setCalendarView(next);
 
   /**
@@ -1288,13 +1304,22 @@ function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
   const anim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.loop(
+    const loop = Animated.loop(
       Animated.timing(anim, {
         toValue: 1,
         duration: 2000,
         useNativeDriver: true,
-      })
-    ).start();
+      }),
+    );
+    loop.start();
+    // STOPPED ON UNMOUNT. A loop that is never stopped goes on driving frames
+    // after the row it belongs to has gone, and this row is remade whenever the
+    // day changes -- so the loops accumulated, one per now-line the app had ever
+    // drawn, all of them pulsing something nobody can see. The Calendar tab
+    // stays mounted while you are on another one, so they never even stopped
+    // when you looked away. The week view's marker has always done this; this
+    // one did not.
+    return () => loop.stop();
   }, [anim]);
 
   return (
@@ -1333,7 +1358,7 @@ function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
  * before anything is read.
  */
 function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
-  prayer: { key: string; label: string; arabic: string; minutes: number };
+  prayer: { key: string; label: string; secondary: string; minutes: number };
   clock?: string;
   done: boolean;
   next: boolean;
@@ -1375,7 +1400,9 @@ function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
         </Text>
       </View>
 
-      <Text variant="body" tone="faint" style={{ fontSize: 15 }}>{prayer.arabic}</Text>
+      {prayer.secondary ? (
+        <Text variant="body" tone="faint" style={{ fontSize: 15 }}>{prayer.secondary}</Text>
+      ) : null}
 
       <View style={{
         width: 20, height: 20, borderRadius: 10,

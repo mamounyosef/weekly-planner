@@ -14,7 +14,7 @@ import * as Updates from 'expo-updates';
 import { Button, Card, Divider, Row, Spacer, Text, useTheme, useThemeMode } from '../ui/kit';
 import { ICONS } from '../ui/icons';
 import { Segment, Stepper, Toggle } from '../ui/Fields';
-import { HIT, PRESSED, PRESS_DELAY, radius, space, type ThemeMode } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, radius, space, type ThemeMode } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   describeRanges, hiddenHours, rangesFromHidden, type HourRange,
@@ -410,7 +410,7 @@ export function Settings({
             <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : 'Settings'}</Text>
           </Row>
           <Pressable
-        unstable_pressDelay={PRESS_DELAY} onPress={onClose} accessibilityLabel="Close" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}>
+        unstable_pressDelay={TAP_DELAY} onPress={onClose} accessibilityLabel="Close" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}>
             <Text variant="title" tone="soft">×</Text>
           </Pressable>
         </Row>

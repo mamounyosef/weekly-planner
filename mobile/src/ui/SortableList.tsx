@@ -1,6 +1,29 @@
 /**
  * Drag a row to reorder it.
  *
+ * WHY THE DROP IS THE HARDEST PART OF THIS FILE
+ *
+ * A row is drawn in its slot and then pushed away from it by a transform. Those
+ * are two different machines: the transform is set imperatively and reaches the
+ * screen on the very next frame, while the slot comes from a React render that
+ * lands whenever React gets round to it. On a drop, BOTH have to change -- the
+ * transform back to nothing, the slot to the new position -- and if they do not
+ * change together the row is drawn wrong in between.
+ *
+ * They did not change together. Clearing the transform reached the screen at
+ * once; the re-render with the new order came only after the drop's write had
+ * gone through the merge, the database and the start of a sync, which on a real
+ * list is the better part of a second. The whole of that window was painted as
+ * the OLD order with no transform: the row sitting exactly where it had been
+ * picked up. Then the render landed and it jumped. Drop, snap back, wait, jump.
+ *
+ * THE RULE THIS FILE NOW KEEPS: never change one without the other. On release
+ * the transform is snapped to the exact offset of the slot being dropped into,
+ * and the order on screen is FROZEN as it was. That picture -- old order, full
+ * transforms -- is pixel for pixel the picture of the new order with no
+ * transforms at all. So when the render finally lands and swaps one for the
+ * other, nothing moves, however long it took to arrive.
+ *
  * THE THREE THINGS THAT MADE THE OLD ONE DO NOTHING
  *
  * 1. The list lives inside a ScrollView. On Android the scroller intercepts a
@@ -30,12 +53,21 @@ import {
   Vibration, View,
 } from 'react-native';
 import {
-  dropIndexFor, shiftThreshold, slotSpan, type RowBox,
+  bridgeVerdict, dropIndexFor, reorderList, shiftThreshold, slotSpan, type RowBox,
 } from '../lib/dragSort';
+import { NO_HOLDS, isHeld, setHold } from '../lib/scrollLock';
 import { radius } from '../theme';
 
 /** How long a press has to be held before it becomes a drag. */
 export const DRAG_HOLD_MS = 220;
+
+/**
+ * How long the list will go on showing a move the parent has not confirmed.
+ *
+ * Long enough to cover a slow write on a full database, short enough that a
+ * move which genuinely failed does not sit there looking like it worked.
+ */
+export const SETTLE_TTL_MS = 4000;
 
 /** What a row needs to take part. Spread `handlers` onto its Pressable. */
 export interface DragHandle {
@@ -65,17 +97,42 @@ let nextListId = 1;
  * left unable to scroll.
  */
 export function SortableScrollView({ children, ...props }: ScrollViewProps) {
-  const held = useRef<Set<number>>(new Set()).current;
+  const scroller = useRef<ScrollView>(null);
+  const held = useRef<readonly number[]>(NO_HOLDS);
   const [locked, setLocked] = useState(false);
+  const allowed = props.scrollEnabled !== false;
 
   const lock = useMemo<Lock>(() => (id, on) => {
-    if (on) held.add(id); else held.delete(id);
-    setLocked(held.size > 0);
-  }, [held]);
+    const next = setHold(held.current, id, on);
+    if (next === held.current) return;
+    held.current = next;
+
+    // IMPERATIVELY FIRST, AND THROUGH STATE AS WELL.
+    //
+    // A long press is accepted in JS, and the scroller is asked to stop
+    // scrolling. Going through state alone, that request does not reach the
+    // native view until React has committed a render -- and on Android the
+    // native ScrollView decides whether to take a vertical drag BEFORE the JS
+    // responder system is consulted. A finger that starts moving inside that
+    // gap is taken by the scroller, the drag never happens, and the page scrolls
+    // instead. It is rare, it is entirely dependent on how busy the thread is,
+    // and it is exactly the kind of thing that reads as "the app is flaky".
+    //
+    // `setNativeProps` reaches the view in this same tick. The state update
+    // follows so the next render agrees with what the view is already doing,
+    // rather than handing it the old value back.
+    try {
+      scroller.current?.setNativeProps({ scrollEnabled: allowed && !isHeld(next) });
+    } catch {
+      // An unmounted or not-yet-mounted scroller. The state update below is the
+      // fallback, and it is correct, just a frame later.
+    }
+    setLocked(isHeld(next));
+  }, [allowed]);
 
   return (
     <ScrollLock.Provider value={lock}>
-      <ScrollView {...props} scrollEnabled={props.scrollEnabled !== false && !locked}>
+      <ScrollView {...props} ref={scroller} scrollEnabled={allowed && !locked}>
         {children}
       </ScrollView>
     </ScrollLock.Provider>
@@ -90,6 +147,7 @@ export function SortableList<T>({
   renderItem,
   onReorder,
   gap = 0,
+  sortable = true,
 }: {
   data: readonly T[];
   keyExtractor: (item: T, index: number) => string;
@@ -97,9 +155,31 @@ export function SortableList<T>({
   onReorder: (from: number, to: number) => void;
   /** Space between rows. Counted into the slot a dragged row leaves behind. */
   gap?: number;
+  /**
+   * Whether a hand-made order means anything in this list.
+   *
+   * False for a list that is sorted by something else entirely -- Done is in the
+   * order things were finished -- where a drag would lift the row, move it, drop
+   * it, and have the list put it straight back. Offering a gesture that cannot
+   * work is worse than not offering it: the user is left thinking the app is
+   * broken rather than that the list is not theirs to arrange.
+   */
+  sortable?: boolean;
 }) {
   const [active, setActive] = useState<number | null>(null);
   const activeRef = useRef<number | null>(null);
+
+  /**
+   * The new order, drawn by this list until the parent's own order agrees.
+   *
+   * A BRIDGE, NOT A SECOND SOURCE OF TRUTH. The parent owns where things go;
+   * this only covers the gap between the finger lifting and the parent saying
+   * so, which is as long as a merge, a database write and the start of a sync
+   * take. It is dropped the moment `data` matches it, and dropped anyway after
+   * a few seconds if it never does.
+   */
+  const [settled, setSettled] = useState<readonly T[] | null>(null);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Whether the pan actually took the gesture. A long press that is released
   // without moving never grants, and only that case may be cancelled by the
   // row's own press-out -- the same press-out arrives when the pan TAKES the
@@ -129,6 +209,7 @@ export function SortableList<T>({
 
   const buzz = (ms: number) => { try { Vibration.vibrate(ms); } catch { /* no vibrator */ } };
 
+  /** Give up the gesture with nothing moved: the picture is already right. */
   const finish = () => {
     activeRef.current = null;
     granted.current = false;
@@ -137,10 +218,15 @@ export function SortableList<T>({
   };
 
   const start = (index: number) => {
+    if (!sortable) return;
     activeRef.current = index;
     granted.current = false;
     pan.setValue(0);
     setActive(index);
+    // A new drag ends any bridge the last one left behind. Its own drop is
+    // about to say where everything goes.
+    setSettled(null);
+    if (settleTimer.current) { clearTimeout(settleTimer.current); settleTimer.current = null; }
     buzz(12);
   };
 
@@ -169,26 +255,92 @@ export function SortableList<T>({
     onPanResponderRelease: (_, g) => {
       const from = activeRef.current;
       if (from === null) { finish(); return; }
-      const to = dropIndexFor(boxes.current, from, g.dy, dataRef.current.length);
-      // THE REORDER FIRST, THEN THE DRAG LETS GO. Both are state changes inside
-      // one event, so React commits them together and the row is already at its
-      // new index in the very frame the transform is cleared. The other way
-      // round it is one frame back where it came from, which is the flick that
-      // made a drop look like it had been refused.
-      if (to !== from) {
-        buzz(8);
-        reorderRef.current(from, to);
-      }
-      finish();
+
+      const items = dataRef.current;
+      const to = dropIndexFor(boxes.current, from, g.dy, items.length);
+
+      // Dropped where it was picked up: the settled picture is this one with no
+      // transform, so clearing it now is already correct.
+      if (to === from) { finish(); return; }
+
+      buzz(8);
+
+      // 1. SNAP THE TRANSFORM TO THE SLOT, IMMEDIATELY. This is imperative and
+      //    reaches the screen on the next frame no matter how busy the JS
+      //    thread is about to get. The row lands in the gap the moment the
+      //    finger leaves it, which is the whole feel of a drop. Half measured
+      //    lists fall back to where the finger actually was, which is within
+      //    half a row of right and never wrong enough to look broken.
+      const offset = shiftThreshold(boxes.current, from, to);
+      pan.setValue(offset === null ? g.dy : offset);
+
+      // 2. Tell the parent. Everything from here on may block for a long time
+      //    -- the merge, the database, the start of a sync -- and none of it
+      //    can spoil the picture any more, because the picture is not waiting
+      //    on it. Until the render below lands, the screen goes on showing the
+      //    OLD order with the transform above, which IS the dropped layout.
+      reorderRef.current(from, to);
+
+      // 3. The new order with the transforms gone, in ONE render. Every state
+      //    change in this handler lands in that single commit, so the screen
+      //    never sees the new order still carrying a transform, nor the old one
+      //    without it -- which was the row appearing back where it started.
+      //    Before and after are the same picture, so nothing moves when it
+      //    arrives, however late that is.
+      activeRef.current = null;
+      granted.current = false;
+      setSettled(reorderList(items, from, to));
+      setActive(null);
+
+      // The bridge is dropped as soon as the parent's own order agrees with it,
+      // in the effect below. This is the safety net for the case where it never
+      // does -- a write that failed, a sync that overruled it -- so that the
+      // screen goes back to telling the truth rather than showing a move that
+      // did not happen.
+      if (settleTimer.current) clearTimeout(settleTimer.current);
+      settleTimer.current = setTimeout(() => {
+        settleTimer.current = null;
+        setSettled(null);
+      }, SETTLE_TTL_MS);
     },
     onPanResponderTerminate: () => finish(),
   })).current;
+
+  /**
+   * What is on screen: the bridged order while a drop is settling, and simply
+   * what the parent says the rest of the time.
+   */
+  const shown = settled ?? data;
+
+  // The bridge lives exactly as long as the parent takes to catch up, and not
+  // one render longer.
+  useEffect(() => {
+    if (!settled) return;
+
+    const drop = () => {
+      setSettled(null);
+      if (settleTimer.current) { clearTimeout(settleTimer.current); settleTimer.current = null; }
+    };
+
+    // The decision itself is in `dragSort.ts`, where it is tested. Getting it
+    // wrong shows either a stale list or the flicker this exists to remove, and
+    // neither is something a thumb can reliably reproduce.
+    const verdict = bridgeVerdict(
+      settled.map((item, i) => keyExtractor(item, i)),
+      data.map((item, i) => keyExtractor(item, i)),
+    );
+    if (verdict !== 'waiting') drop();
+  }, [data, settled, keyExtractor]);
+
+  useEffect(() => () => {
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+  }, []);
 
   const span = active === null ? 0 : slotSpan(boxes.current, active);
 
   return (
     <View style={gap > 0 ? { gap } : undefined} {...responder.panHandlers}>
-      {data.map((item, index) => {
+      {shown.map((item, index) => {
         const isActive = index === active;
 
         // Every row that the dragged one has passed slides one whole slot out

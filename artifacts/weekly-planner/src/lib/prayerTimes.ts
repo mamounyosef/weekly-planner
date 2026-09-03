@@ -185,6 +185,16 @@ export interface PrayerOccurrence {
   key: PrayerKey;
   label: string;
   arabic: string;
+  /**
+   * The name to print BESIDE the label, or '' when there is nothing to add.
+   *
+   * Both screens draw the name in two scripts, which is the point when the label
+   * is "Fajr" and the second is the Arabic. Set the language to Arabic and the
+   * label becomes the Arabic too, so the row read the same word twice with a
+   * space between them. Deciding it here rather than at each of the two places
+   * that draw a prayer is what stops one of them being fixed and the other not.
+   */
+  secondary: string;
   /** 'HH:MM' in local time, offsets already applied. */
   time: string;
   minutes: number;
@@ -235,6 +245,11 @@ export function buildPrayerDay(
       key,
       label: language === 'arabic' ? PRAYER_ARABIC[key] : PRAYER_LABELS[key],
       arabic: PRAYER_ARABIC[key],
+      // Compared by value rather than keyed off the language, so a label that
+      // ever comes to match by another route says nothing twice either.
+      secondary: (language === 'arabic' ? PRAYER_ARABIC[key] : PRAYER_LABELS[key]) === PRAYER_ARABIC[key]
+        ? ''
+        : PRAYER_ARABIC[key],
       time,
       minutes: clampedMinutes,
       dateStr,

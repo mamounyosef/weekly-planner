@@ -113,11 +113,11 @@ function main() {
       for (const probe of probes) {
         const moved = withDayStart(w, probe);
         assert.ok(moved.start < moved.end, `withDayStart(${w.start}..${w.end}, ${String(probe)})`);
-        assert.ok(moved.start >= 0 && moved.end <= 24, 'still inside the day');
+        assert.ok(moved.start >= DAY_HOUR_MIN && moved.end <= DAY_HOUR_MAX, 'still inside the range');
 
         const movedEnd = withDayEnd(w, probe);
         assert.ok(movedEnd.start < movedEnd.end, `withDayEnd(${w.start}..${w.end}, ${String(probe)})`);
-        assert.ok(movedEnd.start >= 0 && movedEnd.end <= 24, 'still inside the day');
+        assert.ok(movedEnd.start >= DAY_HOUR_MIN && movedEnd.end <= DAY_HOUR_MAX, 'still inside the range');
       }
     }
   }
@@ -176,8 +176,15 @@ function main() {
     // stop before it starts. It is refused like any other rubbish, and the start
     // beside it is still honoured.
     assert.deepEqual(coerceDayWindow('0', '0'), { start: 0, end: DEFAULT_DAY_END_HOUR });
-    assert.deepEqual(coerceDayWindow('24', '24'), { start: DEFAULT_DAY_START_HOUR, end: 24 },
-      'a start of 24 is out of range for a start and is refused; the end of 24 is legal');
+    // 24 is a legal START now that a window may run into the night: it means
+    // "from midnight tonight". The pair still has to be repaired, because a
+    // window cannot stop at the hour it begins.
+    assert.deepEqual(coerceDayWindow('24', '24'), { start: 24, end: 25 },
+      'the end gives way, as it always does');
+    assert.deepEqual(coerceDayWindow('47', '47'), { start: 47, end: 48 }, 'and at the far end');
+    // The last hour there is cannot be a start, because nothing could follow it.
+    assert.deepEqual(coerceDayWindow('48', '30'), { start: DEFAULT_DAY_START_HOUR, end: 30 },
+      'a start of 48 is refused; the end beside it is still honoured');
     assert.deepEqual(coerceDayWindow('23', '24'), { start: 23, end: 24 }, 'the last legal hour');
     assert.deepEqual(coerceDayWindow('0', '1'), { start: 0, end: 1 }, 'the first legal hour');
   }
@@ -186,13 +193,18 @@ function main() {
   {
     // Moving the start carries the span with it, so a whole day shifts rather
     // than being trimmed.
-    assert.deepEqual(withDayStart({ start: 7, end: 23 }, 9), { start: 9, end: 24 },
-      'a 16 hour window that no longer fits stops at midnight');
+    // 25, not 24: a sixteen-hour day starting at 9am ends at 1am, and that is
+    // now something the window can say. It used to be trimmed at midnight,
+    // which quietly shortened the day every time the start was moved late.
+    assert.deepEqual(withDayStart({ start: 7, end: 23 }, 9), { start: 9, end: 25 },
+      'the span is carried into the night rather than trimmed');
     assert.deepEqual(withDayStart({ start: 8, end: 12 }, 10), { start: 10, end: 14 }, 'the span is kept');
     assert.deepEqual(withDayStart({ start: 8, end: 12 }, 0), { start: 0, end: 4 }, 'and going earlier too');
-    assert.deepEqual(withDayStart({ start: 8, end: 12 }, 23), { start: 23, end: 24 },
-      'pinned at the top, the span is the only thing that can give');
-    assert.deepEqual(withDayStart({ start: 8, end: 12 }, 99), { start: 23, end: 24 }, 'clamped, not defaulted');
+    assert.deepEqual(withDayStart({ start: 8, end: 12 }, 23), { start: 23, end: 27 },
+      'a four hour window starting at 11pm ends at 3am');
+    assert.deepEqual(withDayStart({ start: 8, end: 12 }, 47), { start: 47, end: 48 },
+      'pinned at the very top, the span is the only thing that can give');
+    assert.deepEqual(withDayStart({ start: 8, end: 12 }, 99), { start: 47, end: 48 }, 'clamped, not defaulted');
     assert.deepEqual(withDayStart({ start: 8, end: 12 }, -99), { start: 0, end: 4 });
     assert.deepEqual(withDayStart({ start: 8, end: 12 }, 'abc'), { start: 8, end: 12 }, 'rubbish leaves it alone');
 
@@ -203,7 +215,8 @@ function main() {
     assert.deepEqual(withDayEnd({ start: 8, end: 20 }, 1), { start: 0, end: 1 }, 'right down to midnight');
     assert.deepEqual(withDayEnd({ start: 8, end: 20 }, 0), { start: 0, end: 1 },
       'an end of 0 is clamped to the first legal hour');
-    assert.deepEqual(withDayEnd({ start: 8, end: 20 }, 99), { start: 8, end: 24 });
+    assert.deepEqual(withDayEnd({ start: 8, end: 20 }, 26), { start: 8, end: 26 }, 'into the night');
+    assert.deepEqual(withDayEnd({ start: 8, end: 20 }, 99), { start: 8, end: 48 });
     assert.deepEqual(withDayEnd({ start: 8, end: 20 }, 'abc'), { start: 8, end: 20 });
 
     // Order independence: reaching the same pair by either route lands in the
@@ -227,7 +240,8 @@ function main() {
     assert.deepEqual(normalizeDayWindow({ start: 7.4, end: 22.6 }), { start: 7, end: 23 },
       'a float that reached the type is rounded rather than refused');
     assert.deepEqual(normalizeDayWindow({ start: -3, end: -1 }), { start: 0, end: 1 });
-    assert.deepEqual(normalizeDayWindow({ start: 40, end: 60 }), { start: 23, end: 24 });
+    assert.deepEqual(normalizeDayWindow({ start: 40, end: 60 }), { start: 40, end: 48 });
+    assert.deepEqual(normalizeDayWindow({ start: 60, end: 70 }), { start: 47, end: 48 });
     assert.deepEqual(normalizeDayWindow({ start: 10, end: 10 }), { start: 10, end: 11 });
     assert.equal(dayWindowSpan({ start: 5, end: 5 }), 1, 'a span is never zero');
   }
@@ -242,7 +256,11 @@ function main() {
       // And a second trip, in case the first quietly moved something.
       assert.deepEqual(roundTripWindow(roundTripWindow(w)), w, `${w.start}..${w.end} is stable`);
     }
-    assert.equal(allWindows().length, 300, 'all 300 legal windows were checked');
+    // 1176 = 48 x 49 / 2: every start paired with every end above it, now that
+    // a window may run into the night. It was 300 when the range stopped at 24.
+    assert.equal(allWindows().length, (DAY_HOUR_MAX * (DAY_HOUR_MAX + 1)) / 2,
+      'every legal window was checked, not a subset of them');
+    assert.equal(allWindows().length, 1176);
 
     for (const n of SNAP_INTERVALS) {
       assert.equal(coerceSnapInterval(String(n)), n, `snap ${n} survives storage`);
@@ -350,7 +368,7 @@ function main() {
     assert.deepEqual(coerceSpanWindow(DEFAULT_SPAN_BEFORE, DEFAULT_SPAN_AFTER), DEFAULT_SPAN_WINDOW);
     assert.equal(DEFAULT_SWIPE_VIEW_SWITCH, true, 'swiping is on until turned off, as on the PC');
     assert.equal(DAY_HOUR_MIN, 0);
-    assert.equal(DAY_HOUR_MAX, 24);
+    assert.equal(DAY_HOUR_MAX, 48, 'the window may run past midnight into the next day');
   }
 
   console.log('--- 11. HOW THIS DEVICE DRAWS PRAYERS ---');
@@ -443,6 +461,80 @@ function main() {
     }
   }
 
+
+
+  console.log('--- A DAY THAT RUNS PAST MIDNIGHT ---');
+  {
+    // This is the phone's whole reason for a 48-hour range, and until now it was
+    // tested nowhere: the file lived on the PC as the tested original while the
+    // phone ran a copy that had grown past it, so every hour after 24 was code
+    // no test had ever executed.
+    assert.equal(DAY_HOUR_MAX, 48, 'a window may end at 2am tomorrow');
+    assert.equal(DAY_HOUR_MIN, 0);
+
+    // The window is accepted, kept, and comes back the same.
+    for (const end of [25, 26, 30, 36, 47, 48]) {
+      const win = coerceDayWindow(7, end);
+      assert.deepEqual(win, { start: 7, end }, `7 to ${end} survives`);
+    }
+    assert.deepEqual(coerceDayWindow(7, 49), { start: 7, end: DEFAULT_DAY_END_HOUR },
+      'and one hour past the end is refused, not clamped');
+
+    // A start inside the night is legal too, which is what a night shift is.
+    assert.deepEqual(coerceDayWindow(22, 30), { start: 22, end: 30 });
+    assert.deepEqual(coerceDayWindow(47, 48), { start: 47, end: 48 }, 'the last hour there is');
+
+    // The invariant still holds across the whole doubled range: start < end,
+    // whichever way the two controls were moved.
+    for (let start = DAY_HOUR_MIN; start <= DAY_HOUR_MAX - 1; start += 1) {
+      for (const end of [0, 1, start - 1, start, start + 1, 24, 25, 47, 48]) {
+        const win = normalizeDayWindow({ start, end });
+        assert.ok(win.start < win.end, `${start}/${end} is drawable`);
+        assert.ok(win.start >= DAY_HOUR_MIN && win.start <= DAY_HOUR_MAX - 1, `${start}/${end} start in range`);
+        assert.ok(win.end >= DAY_HOUR_MIN + 1 && win.end <= DAY_HOUR_MAX, `${start}/${end} end in range`);
+      }
+    }
+  }
+
+  console.log('--- AN HOUR PAST MIDNIGHT IS SAID THE WAY A CLOCK SAYS IT ---');
+  {
+    // 26 is 2am. Printing "26am", or clamping it to midnight, would make the
+    // setting unreadable in exactly the case it exists for.
+    assert.equal(formatHour(24), 'midnight');
+    assert.equal(formatHour(25), '1am');
+    assert.equal(formatHour(26), '2am');
+    assert.equal(formatHour(30), '6am');
+    assert.equal(formatHour(36), 'noon', 'noon tomorrow is still noon');
+    assert.equal(formatHour(37), '1pm');
+    assert.equal(formatHour(47), '11pm');
+    assert.equal(formatHour(48), 'midnight', 'and the far end wraps to midnight again');
+
+    assert.equal(formatHour(24, '24h'), '00:00');
+    assert.equal(formatHour(26, '24h'), '02:00');
+    assert.equal(formatHour(36, '24h'), '12:00');
+    assert.equal(formatHour(47, '24h'), '23:00');
+    assert.equal(formatHour(48, '24h'), '00:00');
+
+    // Every hour in the range prints something a person could read: no "24am",
+    // no "0pm", no empty string, and the same hour of the clock reads the same
+    // whether it is today's or tomorrow's.
+    for (let h = DAY_HOUR_MIN; h <= DAY_HOUR_MAX; h += 1) {
+      const text = formatHour(h);
+      assert.ok(text.length > 0, `${h} says something`);
+      assert.ok(/^(midnight|noon|([1-9]|1[01])(am|pm))$/.test(text), `${h} reads as "${text}"`);
+      if (h >= 24) {
+        assert.equal(text, formatHour(h - 24), `${h} reads the same as ${h - 24}`);
+        assert.equal(formatHour(h, '24h'), formatHour(h - 24, '24h'), `${h} in 24h too`);
+      }
+    }
+
+    // Out of range and rubbish still land somewhere sayable rather than
+    // throwing, because this goes straight into a sentence on the screen.
+    assert.equal(formatHour(-5), 'midnight');
+    assert.equal(formatHour(999), 'midnight');
+    assert.equal(formatHour(26.4), '2am', 'a fraction rounds to the hour it is in');
+    assert.equal(formatHour(NaN), 'midnight');
+  }
 
   console.log('\nALL PASS (viewPrefs: day window invariant, storage round trip, rubbish tolerance)');
 }

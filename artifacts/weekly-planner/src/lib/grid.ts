@@ -27,7 +27,20 @@ export interface Placed<T> {
   height: number;
 }
 
-/** Below this a block is unreadable, so it is drawn taller than it is long. */
+/**
+ * Below this a block is unreadable, so it is drawn taller than it is long.
+ *
+ * THIS IS THE ONE NUMBER IN THIS FILE THAT DIFFERS BETWEEN THE TWO MACHINES,
+ * and it differs on purpose: 20 minutes on the PC, 15 on the phone. A minute is
+ * the same length everywhere, but a readable block is not -- it is however many
+ * pixels a title needs, and a phone row is denser than a desktop one.
+ *
+ * It is written down here because for a long time it was not: the two files were
+ * copies that had drifted, nobody could say which value was intended, and the
+ * next copy in either direction would have silently unified them. `grid.test.ts`
+ * pins each side so that a stray copy fails a test instead of quietly changing
+ * how every short event on one of the two screens is drawn.
+ */
 export const MIN_BLOCK_MINUTES = 20;
 
 export function blockEnd(item: Placeable): number {

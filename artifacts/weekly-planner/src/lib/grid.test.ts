@@ -280,6 +280,28 @@ function main() {
   }
 
 
+
+  console.log('--- THE ONE CONSTANT THAT IS SUPPOSED TO DIFFER FROM THE PHONE ---');
+  {
+    // `grid.ts` is copied between the two machines like the rest of the shared
+    // engine, EXCEPT for this: a readable block is however many pixels a title
+    // needs, and a phone row is denser than a desktop one. The two values drifted
+    // apart by accident once and nobody could say which was intended. Pinning it
+    // here means a stray copy in either direction fails a test instead of quietly
+    // changing how every short event on one of the two screens is drawn.
+    assert.equal(MIN_BLOCK_MINUTES, 20, 'the PC draws nothing shorter than 20 minutes');
+
+    // And it really is the floor, whatever it is handed.
+    assert.equal(blockEnd({ id: 'z', startMin: 600, endMin: 600 }) - 600, MIN_BLOCK_MINUTES,
+      'an item with no length at all');
+    assert.equal(blockEnd({ id: 'b', startMin: 600, endMin: 540 }) - 600, MIN_BLOCK_MINUTES,
+      'and one that ends before it starts');
+    assert.equal(blockEnd({ id: 'o', startMin: 600, endMin: null }) - 600, MIN_BLOCK_MINUTES,
+      'and one with no end at all');
+    assert.equal(layoutDay([at('short', 10, 10 + 5 / 60)], { pxPerHour: 60 })[0].height, MIN_BLOCK_MINUTES,
+      'a five-minute event is drawn at the floor, not at five');
+  }
+
   console.log('\nALL PASS (grid: overlap columns, positions, month shape)');
 }
 

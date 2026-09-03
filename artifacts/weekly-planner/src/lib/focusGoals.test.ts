@@ -233,6 +233,114 @@ function main() {
   }
 
 
+
+  // ═══ EXCUSED DAYS ═════════════════════════════════════════════════════════
+  // A day you excused yourself from must not break a streak. This is the phone's
+  // Focus screen; the PC copy of this file did not have the feature at all, so
+  // the behaviour the user actually sees was tested nowhere.
+
+  /** One hour of focus on `day`. */
+  const hour = (day: string) => s(day, `${day}T10:00:00Z`, `${day}T11:00:00Z`, 3600);
+  const GOAL = { goalSeconds: 3600 };
+  const streakOn = (days: string[], excluded: string[], today: string) =>
+    // Midday, not 23:00: the day a moment belongs to is worked out in LOCAL
+    // time, so a late-evening UTC stamp is tomorrow on any clock east of
+    // Greenwich and the whole fixture would slide by a day.
+    computeGoalStats(days.map(hour), { now: `${today}T12:00:00Z`, ...GOAL, excludedDates: excluded });
+
+  console.log('--- E1. AN EXCUSED DAY IN THE MIDDLE CARRIES THE STREAK ACROSS ---');
+  {
+    // Mon, Tue worked; Wed off; Thu, Fri worked. Five days, one excused: the
+    // streak is four, not two.
+    const st = streakOn(
+      ['2026-08-24', '2026-08-25', '2026-08-27', '2026-08-28'],
+      ['2026-08-26'],
+      '2026-08-28',
+    );
+    assert.equal(st.currentStreak, 4, 'the excused day does not break it');
+    assert.equal(st.bestStreak, 4, 'nor does it extend it: nothing happened that day');
+
+    // Without the excuse, the same days are a streak of two.
+    const broken = streakOn(
+      ['2026-08-24', '2026-08-25', '2026-08-27', '2026-08-28'], [], '2026-08-28',
+    );
+    assert.equal(broken.currentStreak, 2, 'and an ordinary missed day still breaks it');
+  }
+
+  console.log('--- E2. TWO AND THREE EXCUSED DAYS IN A ROW ---');
+  {
+    for (const gap of [
+      ['2026-08-26'],
+      ['2026-08-26', '2026-08-27'],
+      ['2026-08-26', '2026-08-27', '2026-08-28'],
+    ]) {
+      // The excused run has to be the WHOLE gap: a day that is merely missed
+      // inside it still breaks the streak, which is what excusing is for.
+      const last = `2026-08-${26 + gap.length}`;
+      const st = streakOn(['2026-08-24', '2026-08-25', last], gap, last);
+      assert.equal(st.currentStreak, 3, `${gap.length} excused days in a row are crossed`);
+
+      // One day of that run left un-excused, and the streak is back to one.
+      const partial = streakOn(['2026-08-24', '2026-08-25', last], gap.slice(1), last);
+      assert.equal(partial.currentStreak, 1,
+        `${gap.length}: an ordinary missed day inside the gap still breaks it`);
+    }
+  }
+
+  console.log('--- E3. AN EXCUSED DAY YOU WORKED ANYWAY STILL COUNTS ---');
+  {
+    // Excusing a day is permission, not a prohibition. An hour done on a day off
+    // is an hour done.
+    const st = streakOn(
+      ['2026-08-24', '2026-08-25', '2026-08-26'], ['2026-08-26'], '2026-08-26',
+    );
+    assert.equal(st.currentStreak, 3, 'it extends the streak like any other day');
+    assert.equal(st.todayTotal, 3600);
+  }
+
+  console.log('--- E4. TODAY EXCUSED, AND NOT MET ---');
+  {
+    // Yesterday's run is intact: today has not failed, it does not count.
+    const st = streakOn(['2026-08-24', '2026-08-25'], ['2026-08-26'], '2026-08-26');
+    assert.equal(st.currentStreak, 2, "today off does not cost you yesterday's streak");
+    assert.equal(st.todayTotal, 0);
+    assert.equal(st.todayProgress, 0, 'and the bar is honest about the day being empty');
+  }
+
+  console.log('--- E5. AN EXCUSED DAY AT EITHER END ---');
+  {
+    // At the start: there is nothing before it to carry, so it changes nothing.
+    const start = streakOn(['2026-08-25', '2026-08-26'], ['2026-08-24'], '2026-08-26');
+    assert.equal(start.currentStreak, 2);
+
+    // Every day excused and nothing done at all: no streak, and no crash.
+    const all = computeGoalStats([], {
+      now: '2026-08-26T12:00:00Z', ...GOAL,
+      excludedDates: ['2026-08-24', '2026-08-25', '2026-08-26'],
+    });
+    assert.equal(all.currentStreak, 0, 'a streak of nothing is nothing');
+    assert.equal(all.bestStreak, 0);
+  }
+
+  console.log('--- E6. EXCUSING DAYS THAT ARE NOT THERE ---');
+  {
+    // Dates from another year, duplicates, rubbish. None of it may change an
+    // answer or throw: this list is edited by hand on the PC and synced.
+    const days = ['2026-08-24', '2026-08-25', '2026-08-26'];
+    const plain = streakOn(days, [], '2026-08-26');
+    for (const junk of [
+      [], ['2020-01-01'], ['2026-08-26', '2026-08-26'], ['not-a-date'], ['', ' '],
+    ]) {
+      const st = streakOn(days, junk as string[], '2026-08-26');
+      assert.equal(st.currentStreak, junk.includes('2026-08-26') ? plain.currentStreak : plain.currentStreak,
+        `${JSON.stringify(junk)} changes nothing about a streak already unbroken`);
+      assert.equal(st.bestStreak, plain.bestStreak);
+    }
+    // Omitting the option entirely is the same as an empty list.
+    const none = computeGoalStats(days.map(hour), { now: '2026-08-26T12:00:00Z', ...GOAL });
+    assert.equal(none.currentStreak, plain.currentStreak);
+  }
+
   console.log('\nALL PASS (focusGoals)');
 }
 

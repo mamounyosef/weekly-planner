@@ -35,9 +35,9 @@ The Daily Planner application is a multi-user weekly/daily planning, task tracki
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
 | M1 | Recurrence Engine & Calendar Model Hardening | `src/lib/recurrence.ts`, `src/lib/tasks.ts`, `src/components/TasksPanel.tsx`, `src/pages/home.tsx` | none | DONE |
-| M2 | Server Middleware, Storage, Persistence & Multi-User | `vite.config.ts`, `server-user-db.ts` | none | IN_PROGRESS |
-| M3 | Client-Server Sync, Hydration & UI Consistency | `src/pages/home.tsx`, `src/pages/widget.tsx`, `src/lib/usePrayerTimes.ts` | M1, M2 | PLANNED |
-| M4 | Final Verification & Test Suite Compliance | All test suites (`focusSessions.test.ts`, `hardwareController.test.ts`, `sensorFilter.test.ts`), `tsc`, `vite build` | M1, M2, M3 | PLANNED |
+| M2 | Server Middleware, Storage, Persistence & Multi-User | `vite.config.ts`, `server-user-db.ts` | none | DONE |
+| M3 | Client-Server Sync, Hydration & UI Consistency | `src/pages/home.tsx`, `src/pages/widget.tsx`, `src/lib/usePrayerTimes.ts` | M1, M2 | DONE |
+| M4 | Final Verification & Test Suite Compliance | All test suites (`focusSessions.test.ts`, `hardwareController.test.ts`, `sensorFilter.test.ts`), `tsc`, `vite build` | M1, M2, M3 | DONE |
 
 ## Interface Contracts
 ### Client ↔ Server Persistence

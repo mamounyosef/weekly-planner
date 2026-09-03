@@ -73,6 +73,8 @@ const testFiles = [
   'src/lib/search.test.ts',
   'src/lib/taskBoard.test.ts',
   'src/lib/dragSort.test.ts',
+  'src/lib/scrollLock.test.ts',
+  'src/lib/overlayStack.test.ts',
   'src/lib/pendingDone.test.ts',
   'src/lib/liveMarker.test.ts',
   'src/lib/quickAdd.test.ts',

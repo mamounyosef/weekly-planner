@@ -31,13 +31,15 @@ export function computeGoalStats(
      * directly, and counting it here as well would show the same minutes twice.
      */
     liveSeconds?: number;
+    excludedDates?: string[];
   }
 ): FocusGoalStats {
-  const { now, goalSeconds, dayStartHour = 0 } = opts;
+  const { now, goalSeconds, dayStartHour = 0, excludedDates = [] } = opts;
   const live = typeof opts.liveSeconds === 'number' && Number.isFinite(opts.liveSeconds)
     ? Math.max(0, opts.liveSeconds)
     : 0;
   const totals = new Map<string, number>();
+  const excludedSet = new Set(excludedDates);
 
   for (const s of sessions) {
     if (!s || typeof s.durationSeconds !== 'number' || Number.isNaN(s.durationSeconds) || s.durationSeconds < 0) continue;
@@ -67,7 +69,17 @@ export function computeGoalStats(
     if (meetsGoal(secs)) {
       currentRun++;
       if (currentRun > bestStreak) bestStreak = currentRun;
-    } else {
+    } else if (!excludedSet.has(day)) {
+      // A DAY YOU EXCUSED YOURSELF FROM DOES NOT BREAK A STREAK. That is the
+      // entire purpose of excusing it: a Friday off, a day ill, a holiday.
+      // Nor does it extend one -- nothing happened, so the run is carried
+      // across the gap rather than incremented over it.
+      //
+      // Today is not a special case. If today is excused and the goal has not
+      // been met, yesterday's run is still intact, which is exactly what
+      // carrying it across says. The outer test used to read
+      // `!excluded || day === today`, whose second half could never reach the
+      // assignment underneath it.
       currentRun = 0;
     }
     

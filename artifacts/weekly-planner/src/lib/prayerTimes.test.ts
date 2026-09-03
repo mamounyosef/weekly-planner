@@ -262,4 +262,58 @@ const testDates = [
 const neededMonths = monthsForDates(testDates);
 assert.deepEqual(neededMonths, ['2026-8', '2026-9']);
 
+// ─── The name is not printed twice ──────────────────────────────────────────
+// Both screens draw a prayer's name in two scripts: "Fajr", and beside it the
+// Arabic. Set the language to Arabic and the label BECAME the Arabic while the
+// second slot still held the Arabic, so the row read the same word twice with a
+// space between them. `secondary` decides it in one place, so the two screens
+// cannot be fixed separately and drift apart again.
+{
+  const english = buildPrayerDay('2026-08-25', dayTimes, DEFAULT_PRAYER_SETTINGS, 'english');
+  assert.ok(english.length > 0, 'there is a day to look at');
+  for (const row of english) {
+    assert.notEqual(row.label, row.arabic, 'the English label is not the Arabic one');
+    assert.equal(row.secondary, row.arabic, 'so the Arabic is worth printing beside it');
+    assert.notEqual(row.secondary, '', 'and it is actually printed');
+  }
+
+  const arabic = buildPrayerDay('2026-08-25', dayTimes, DEFAULT_PRAYER_SETTINGS, 'arabic');
+  assert.equal(arabic.length, english.length, 'the same prayers either way');
+  for (const row of arabic) {
+    assert.equal(row.label, row.arabic, 'the label IS the Arabic now');
+    assert.equal(row.secondary, '', 'so there is nothing to add beside it');
+  }
+
+  // The default, with no language given at all, is English and says both.
+  for (const row of buildPrayerDay('2026-08-25', dayTimes, DEFAULT_PRAYER_SETTINGS)) {
+    assert.notEqual(row.secondary, '', 'the default prints both scripts');
+  }
+
+  // Whatever else is switched on or off, the rule holds: a row never says the
+  // same word twice, and never loses the second script when it has one to give.
+  const variants = [
+    { ...DEFAULT_PRAYER_SETTINGS, showSunrise: true },
+    { ...DEFAULT_PRAYER_SETTINGS, hidden: ['fajr', 'isha'] as never },
+    { ...DEFAULT_PRAYER_SETTINGS, offsets: { ...DEFAULT_PRAYER_SETTINGS.offsets, fajr: 45 } },
+  ];
+  for (const settings of variants) {
+    for (const language of ['english', 'arabic'] as const) {
+      for (const row of buildPrayerDay('2026-08-25', dayTimes, settings, language)) {
+        assert.notEqual(row.secondary, row.label,
+          `${language}: a row never prints its own name twice`);
+        if (language === 'english') {
+          assert.notEqual(row.secondary, '', 'English rows keep the Arabic beside them');
+        } else {
+          assert.equal(row.secondary, '', 'Arabic rows have nothing to add');
+        }
+        // The Arabic itself is always carried, drawn or not: the settings screen
+        // prints it whatever the language, because that is where the language is
+        // chosen and a row that renamed itself as you changed it would be a
+        // puzzle of its own.
+        assert.notEqual(row.arabic, '', 'the Arabic name is always available');
+      }
+    }
+  }
+}
+
 console.log('\nALL PASS (prayerTimes)');

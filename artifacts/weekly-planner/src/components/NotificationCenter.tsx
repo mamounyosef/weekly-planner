@@ -193,13 +193,18 @@ export function NotificationPanel({
   return (
     <>
       <div
-        className="fixed inset-0 z-[85]"
+        // 86, not 85: the phone's bottom navigation is also at 85, and two
+        // things on the same layer are ordered by which happens to be written
+        // later in the document. The bar was landing on top of the scrim, so on
+        // a phone it stayed tappable while the panel was open and a tap there
+        // went to the tab bar instead of dismissing.
+        className="fixed inset-0 z-[86]"
         style={{ background: 'rgba(0,0,0,0.52)' }}
         onClick={onClose}
       />
 
       <aside
-        className="fixed z-[86] flex flex-col shadow-2xl gpu-layer touch-scroll"
+        className="fixed z-[87] flex flex-col shadow-2xl gpu-layer touch-scroll"
         style={{
           top: 0,
           right: 0,
@@ -328,7 +333,13 @@ export function NotificationPanel({
                     style={{
                       borderBottom: `1px solid ${theme.bdr}`,
                       background: highlighted ? `${theme.accent}14` : rec.read ? 'transparent' : `${art.color}0d`,
-                      contain: 'paint layout',
+                      // LAYOUT ONLY, NEVER PAINT. `contain: paint` clips every
+                      // descendant to this box, and the snooze options hang
+                      // BELOW the row they belong to: the popover opened into
+                      // the clip and simply was not there. The scrolling win
+                      // this was added for comes from the layout containment
+                      // and from `content-auto` above, neither of which clips.
+                      contain: 'layout',
                     }}
                     onClick={e => {
                       if ((e.target as HTMLElement).closest('button, [role="button"], a, input, select, textarea')) {

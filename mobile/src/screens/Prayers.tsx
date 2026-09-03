@@ -225,6 +225,11 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
     // settings underneath them remain reachable with no signal and no cache.
     return PRAYER_KEYS.map(key => ({
       key, label: PRAYER_LABELS[key], arabic: PRAYER_ARABIC[key],
+      // This screen always lists the English name, because it is where the
+      // language itself is chosen: a settings row that renamed itself as you
+      // changed the setting would be its own puzzle. So the second script
+      // always says something here.
+      secondary: PRAYER_ARABIC[key],
       time: '', minutes: -1, dateStr: today, id: `${today}::${key}`,
     }));
   }, [s, today, lookup.days]);
@@ -308,7 +313,7 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
                     key={row.key}
                     prayerKey={row.key}
                     label={row.label}
-                    arabic={row.arabic}
+                    arabic={row.secondary}
                     minutes={row.minutes}
                     first={i === 0}
                     settings={s}
@@ -562,7 +567,7 @@ function PrayerRow({
         <View style={{ flex: 1, opacity: visible ? 1 : 0.45 }}>
           <Row gap={space.sm} style={{ alignItems: 'baseline' }}>
             <Text variant="bodyStrong">{label}</Text>
-            <Text variant="caption" tone="faint">{arabic}</Text>
+            {arabic ? <Text variant="caption" tone="faint">{arabic}</Text> : null}
           </Row>
           <Text variant="caption" tone={offset === 0 ? 'faint' : 'accent'} style={{ marginTop: 2 }}>
             {!visible ? 'Hidden' : offset === 0 ? (isNext ? 'Next today' : describeOffset(0)) : describeOffset(offset)}

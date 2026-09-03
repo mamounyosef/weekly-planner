@@ -39,7 +39,7 @@ import { AppState, Pressable, RefreshControl, ScrollView, View, useWindowDimensi
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
-import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, radius, space } from '../theme';
 import { usePlanner } from '../state/planner';
 import {
   dateKey,
@@ -1023,7 +1023,7 @@ function DayDetail({
       <Row style={{ justifyContent: 'space-between', marginBottom: space.md }}>
         <Text variant="title">{niceDate(date)}</Text>
         <Pressable
-        unstable_pressDelay={PRESS_DELAY} onPress={onClose} style={({ pressed }) => [{ padding: 4 }, pressed ? PRESSED : null]}>
+        unstable_pressDelay={TAP_DELAY} onPress={onClose} style={({ pressed }) => [{ padding: 4 }, pressed ? PRESSED : null]}>
           <Text variant="bodyStrong" tone="accent">Close</Text>
         </Pressable>
       </Row>
