@@ -89,11 +89,14 @@ export function SortableList<T>({
   keyExtractor,
   renderItem,
   onReorder,
+  gap = 0,
 }: {
   data: readonly T[];
   keyExtractor: (item: T, index: number) => string;
   renderItem: (item: T, index: number, drag: DragHandle) => React.ReactNode;
   onReorder: (from: number, to: number) => void;
+  /** Space between rows. Counted into the slot a dragged row leaves behind. */
+  gap?: number;
 }) {
   const [active, setActive] = useState<number | null>(null);
   const activeRef = useRef<number | null>(null);
@@ -167,11 +170,16 @@ export function SortableList<T>({
       const from = activeRef.current;
       if (from === null) { finish(); return; }
       const to = dropIndexFor(boxes.current, from, g.dy, dataRef.current.length);
-      finish();
+      // THE REORDER FIRST, THEN THE DRAG LETS GO. Both are state changes inside
+      // one event, so React commits them together and the row is already at its
+      // new index in the very frame the transform is cleared. The other way
+      // round it is one frame back where it came from, which is the flick that
+      // made a drop look like it had been refused.
       if (to !== from) {
         buzz(8);
         reorderRef.current(from, to);
       }
+      finish();
     },
     onPanResponderTerminate: () => finish(),
   })).current;
@@ -179,7 +187,7 @@ export function SortableList<T>({
   const span = active === null ? 0 : slotSpan(boxes.current, active);
 
   return (
-    <View {...responder.panHandlers}>
+    <View style={gap > 0 ? { gap } : undefined} {...responder.panHandlers}>
       {data.map((item, index) => {
         const isActive = index === active;
 

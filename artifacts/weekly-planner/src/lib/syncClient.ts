@@ -158,6 +158,55 @@ export function applyLocalDelete(
 }
 
 /**
+ * Apply several edits as ONE local change.
+ *
+ * WHY THIS EXISTS. Dragging a task to a new place renumbers the whole group, so
+ * a five row list is five edits. Sent one at a time that is five merges, five
+ * React commits, five rows written to the op table and five sync pushes, and
+ * the list visibly walks to its new order one row at a time. As one change it
+ * is one of each, and the new order appears in a single frame.
+ *
+ * EACH ENTITY MAY APPEAR ONLY ONCE. Ops carry the stamp of the field head they
+ * were written on top of, read from the state as it is BEFORE any of this
+ * batch. Naming the same entity twice would have the second set of ops claim a
+ * base that the first set has already replaced, which is exactly the shape of a
+ * false conflict. The caller merges its own duplicates first; this refuses them
+ * rather than trusting that it did.
+ */
+export function applyLocalChanges(
+  data: ClientData,
+  edits: ReadonlyArray<{ store: SyncStore; entityId: string; changes: Record<string, unknown> }>,
+  at: number,
+): ClientData {
+  if (edits.length === 0) return data;
+
+  const seen = new Set<string>();
+  for (const edit of edits) {
+    const key = `${edit.store}\u0000${edit.entityId}`;
+    if (seen.has(key)) {
+      throw new Error(`applyLocalChanges: ${edit.store}/${edit.entityId} appears twice in one batch`);
+    }
+    seen.add(key);
+  }
+
+  const working = lamportScratch(data.state);
+  const ops: SyncOp[] = [];
+  for (const edit of edits) {
+    ops.push(...makeOps(working, {
+      store: edit.store,
+      entityId: edit.entityId,
+      device: data.deviceId,
+      at,
+      changes: edit.changes,
+    }));
+  }
+  if (ops.length === 0) return data;
+
+  const merged = mergeOps(data.state, ops);
+  return { ...data, state: merged.state, outbox: [...data.outbox, ...ops] };
+}
+
+/**
  * Apply a whole edited record at once — how a form save actually arrives from
  * the UI. Diffing here rather than in every screen means a screen cannot forget
  * to emit an op for a field it changed.

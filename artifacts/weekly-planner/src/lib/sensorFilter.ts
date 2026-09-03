@@ -150,6 +150,10 @@ export type HoldReason =
   | 'no-consensus'
   /** Every recent sample is inside a masked ramp; there is nothing to judge. */
   | 'ramp-masked'
+  /** Nothing was masked -- every recent reading was physically impossible.
+   *  A different fault entirely: a dead transducer, a broken wire, or a module
+   *  ringing, rather than a target the filter has chosen to disbelieve. */
+  | 'no-valid-samples'
   /** Over-range readings, which this desk treats as never proving absence. */
   | 'over-range-ignored';
 
@@ -407,8 +411,17 @@ export class PresenceFilter {
             // timed-out 400 is the single most misleading number in the run,
             // and it is exactly the one a "hold the last valid reading" scheme
             // would keep.
-            for (let i = this.samples.length - 1, n = 0; i >= 0 && n < c.rampMinSteps - 1; i--, n++) {
+            // COUNTING WHAT IT MASKS, NOT HOW FAR IT WALKS. An echo timeout
+            // in the middle of a ramp is already masked and does not reset the
+            // run, so a loop that counted indices spent one of its steps on
+            // that sample and left the FIRST reading of the ramp -- the 80 cm
+            // between a seated 30 and a timed-out 400, the single most
+            // misleading number in the run -- sitting unmasked in the window.
+            let toMask = c.rampMinSteps - 1;
+            for (let i = this.samples.length - 1; i >= 0 && toMask > 0; i--) {
+              if (this.samples[i].masked) continue;
               this.samples[i].masked = true;
+              toMask--;
             }
           }
         } else if (Math.abs(step) <= c.clusterTolCm) {
@@ -457,7 +470,14 @@ export class PresenceFilter {
     if (usable.length === 0) {
       this.arriveSince = null;
       this.awaySince = null;
-      snap.holding = 'ramp-masked';
+      // WHICH KIND OF NOTHING. Masked samples mean the filter is deliberately
+      // disbelieving a ramp; impossible samples with nothing masked mean the
+      // hardware is not reporting anything usable at all. Calling both
+      // "ramp-masked" sent anyone reading the diagnostics after a broken wire
+      // looking for a moving target that was never there.
+      snap.holding = this.samples.some(x => x.masked && x.kind !== 'invalid')
+        ? 'ramp-masked'
+        : 'no-valid-samples';
       snap.holdingMs = this.trackHold(now);
       this.last = snap;
       return snap;

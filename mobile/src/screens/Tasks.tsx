@@ -57,7 +57,31 @@ import { formatClock } from '../lib/agenda';
 import { fromTimeString } from '../lib/draft';
 
 /** How long a ticked row stays where it is, so the tick can be seen. */
-const DONE_HOLD_MS = 420;
+const DONE_HOLD_MS = 300;
+
+/** How long a drag is believed if the write it started never comes back. */
+const ORDER_GUESS_TTL_MS = 4000;
+
+/**
+ * The store as the user has just dragged it, without touching the store.
+ *
+ * Returns the SAME object when there is nothing to guess, so the board's memo
+ * is not invalidated by an empty map.
+ */
+function applyOrderGuess(
+  stored: Record<string, Task>,
+  guess: Record<string, number>,
+): Record<string, Task> {
+  const ids = Object.keys(guess);
+  if (ids.length === 0) return stored;
+  const out = { ...stored };
+  for (const id of ids) {
+    const task = stored[id];
+    if (!task || task.order === guess[id]) continue;
+    out[id] = { ...task, order: guess[id] };
+  }
+  return out;
+}
 
 type Bucket = 'overdue' | 'today' | 'upcoming' | 'general';
 type SectionKey = Bucket | 'done';
@@ -94,7 +118,7 @@ const byHand = (a: Task, b: Task): number => orderKey(a) - orderKey(b);
 export function Tasks() {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { tasks, syncNow, edit, saveDraft, removeItem, timeFormat, taskLists } = usePlanner();
+  const { tasks, syncNow, edit, editMany, saveDraft, removeItem, timeFormat, taskLists } = usePlanner();
 
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
@@ -132,6 +156,26 @@ export function Tasks() {
    *
    * Un-ticking is not delayed. Nobody needs to admire that.
    */
+  /**
+   * The order the user has just dragged things into, before the store has it.
+   *
+   * WITHOUT THIS A DROP LOOKS BROKEN. The row is under the finger at its new
+   * place, the finger lifts, the drag lets go -- and the list still holds the
+   * OLD order, so the row snaps back to where it came from and only arrives
+   * where it was dropped once the writes have gone through. Three positions for
+   * one gesture.
+   *
+   * So the new numbers are believed here first and folded into the board in the
+   * same frame the finger lifts. They are dropped again the moment the store
+   * agrees, which is the ordinary case a few milliseconds later, and after a
+   * few seconds regardless so that a write which never landed shows the truth.
+   */
+  const [orderGuess, setOrderGuess] = useState<Record<string, number>>({});
+  const orderGuessTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (orderGuessTimer.current) clearTimeout(orderGuessTimer.current);
+  }, []);
+
   const [pendingDone, setPendingDone] = useState<Record<string, boolean>>({});
   const doneTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   /** The write each held tick is waiting to make. */
@@ -167,10 +211,22 @@ export function Tasks() {
 
   
   const grouped = useMemo(() => {
-    const rawTasks = tasks() as unknown as Record<string, Task>;
+    const stored = tasks() as unknown as Record<string, Task>;
+    // Only the rows that were dragged are copied; the rest of the store is the
+    // same objects it always was.
+    const rawTasks = applyOrderGuess(stored, orderGuess);
     const rows = buildTaskRows(rawTasks, today, true);
     return groupTasks(rows, rawTasks, lists, filter, filters, today, sortMode);
-  }, [tasks, today, filter, lists, filters, sortMode]);
+  }, [tasks, today, filter, lists, filters, sortMode, orderGuess]);
+
+  // A guess the store has caught up with is dead weight: it makes every later
+  // render copy rows for nothing.
+  useEffect(() => {
+    if (Object.keys(orderGuess).length === 0) return;
+    const stored = tasks() as unknown as Record<string, Task>;
+    const settled = Object.keys(orderGuess).every(id => stored[id]?.order === orderGuess[id]);
+    if (settled) setOrderGuess({});
+  }, [tasks, orderGuess]);
 
 
   
@@ -276,9 +332,24 @@ export function Tasks() {
     if (fromIndex === toIndex) return;
     const next = reorderList(group, fromIndex, toIndex);
     const keys = manualOrders(next.length);
-    next.forEach((t, i) => {
-      if (t.order !== keys[i]) void edit('tasks', t.id, { order: keys[i] });
-    });
+
+    // Believed first, so the board is already in the new order by the time this
+    // function returns and the row never visits a third position.
+    const guess: Record<string, number> = {};
+    next.forEach((t, i) => { guess[t.id] = keys[i]; });
+    // Merged, not replaced: dragging in one section must not drop a guess that
+    // is still outstanding for another.
+    setOrderGuess(prev => ({ ...prev, ...guess }));
+    if (orderGuessTimer.current) clearTimeout(orderGuessTimer.current);
+    orderGuessTimer.current = setTimeout(() => setOrderGuess({}), ORDER_GUESS_TTL_MS);
+
+    // ONE write, not one per row. Five rows sent one at a time is five merges,
+    // five commits and five sync pushes, and the list walks to its new order a
+    // row at a time.
+    const changed = next
+      .map((t, i) => ({ id: t.id, changes: { order: keys[i] } }))
+      .filter((e, i) => next[i].order !== keys[i]);
+    if (changed.length > 0) void editMany('tasks', changed);
     // A drag is a statement about where a thing goes, and in any other sort
     // mode the board would answer it by putting everything straight back. The
     // PC switches to manual on a drag for the same reason.
@@ -503,9 +574,12 @@ export function Tasks() {
                 </Row>
               </Pressable>
 
-              <View style={{ gap: space.sm, marginTop: space.sm }}>
+              {/* The gap belongs to the LIST, not to this wrapper: a wrapper's
+                  gap sits between its own children, and it has exactly one. */}
+              <View style={{ marginTop: space.sm }}>
                 <SortableList
                   data={visible}
+                  gap={space.sm}
                   keyExtractor={n => n.row.occId}
                   onReorder={(fromIdx, toIdx) => moveItem(visible.map(n => n.row.task), fromIdx, toIdx)}
                   renderItem={(node, _index, drag) => (

@@ -311,8 +311,21 @@ export function reduceHardware(
 
   if (input.kind === 'presence') {
     const present = Boolean(input.present);
+    const isEdge = present !== Boolean(state.present);
     next.present = present;
     if (!settings.sensorEnabled) return { state: next, actions };
+
+    // A PRESENCE INPUT THAT SAYS WHAT WE ALREADY BELIEVE IS NOT AN EVENT.
+    // The level is published on every poll and there are two separate paths
+    // that can turn it into an input -- `presenceResync`, which only ever
+    // synthesises a genuine disagreement, and the bridge's announce-on-connect,
+    // which re-sends the current level to a window that has just opened. The
+    // announce used to land a second or two after the resync had already put
+    // the state right, and arriving-again restarted the arming countdown: the
+    // "starting in 5s" on the LCD jumped back to 30. The same guard makes a
+    // repeated "away" harmless, which otherwise kept pushing the terminate
+    // countdown back and left an abandoned session paused all day.
+    if (!isEdge) return { state: next, actions };
 
     if (present) {
       // Being at the desk ends the absence, whatever else is true. Leaving this
@@ -361,6 +374,10 @@ export function reduceHardware(
         if (session.isRunning) {
           next.pausedByAway = true;
           actions.push('pause');
+        } else {
+          // It was already paused when you got up, so the desk did not pause
+          // it and has no business resuming it when you sit back down.
+          next.pausedByAway = false;
         }
       }
     }
@@ -444,6 +461,12 @@ export function reduceHardware(
     // stale, and firing it would kill a session that is running perfectly well.
     if (!session.hasSession || session.isRunning || !settings.awayPauseEnabled) {
       next.awaySince = null;
+      // AND THE CLAIM THAT WENT WITH IT. `pausedByAway` means "the desk paused
+      // this, so the desk may resume it". Once the session is gone, running
+      // again, or away-pausing is off, that claim describes nothing -- and
+      // leaving it set was enough to have the desk resume a session the user
+      // had paused by hand, several steps later, on the next return.
+      next.pausedByAway = false;
     } else if (now - state.awaySince >= settings.awayTerminateSeconds * 1000) {
       next.awaySince = null;
       next.pausedByAway = false;
@@ -543,6 +566,54 @@ export function dropCrosstalkButtons<T extends { type: string; at?: number }>(
   }
   return kept;
 }
+/** The most recent genuine button press, carried between polls. */
+export interface ButtonCarry {
+  type: string;
+  at: number;
+}
+
+/**
+ * Clean one poll's worth of events, and say what to carry into the next one.
+ *
+ * WHY THE CARRY EXISTS. Crosstalk straddles polls: press A at the end of one
+ * batch and the phantom B it induces 80ms later can land at the start of the
+ * next. So the last genuine button of the previous batch is prepended, filtered
+ * alongside this one, and then removed again.
+ *
+ * WHY IT COMES OUT OF THE CLEAN LIST. It used to be taken from the raw events,
+ * which meant the ghost itself became the reference for the next batch. Press A,
+ * have its phantom B dropped, press A again a fraction later, and that genuine
+ * second press was compared against the ghost and discarded as crosstalk. The
+ * reference has to be something the filter actually believed.
+ *
+ * `fallbackAt` stands in for an event with no timestamp of its own, which is
+ * what a board with an unset clock sends.
+ */
+export function filterButtonBatch<T extends { id: number; type: string; at?: number }>(
+  events: readonly T[],
+  carry: ButtonCarry | null,
+  fallbackAt: number,
+  windowMs = CROSSTALK_WINDOW_MS,
+): { clean: T[]; carry: ButtonCarry | null } {
+  type Tagged = { id: number; type: string; at?: number; carried?: boolean };
+  const withCarry: Tagged[] = carry
+    ? [{ id: -1, type: carry.type, at: carry.at, carried: true }, ...(events as readonly Tagged[])]
+    : [...(events as readonly Tagged[])];
+
+  const clean = dropCrosstalkButtons(withCarry, windowMs)
+    .filter(e => !e.carried) as unknown as T[];
+
+  let nextCarry = carry;
+  for (let i = clean.length - 1; i >= 0; i--) {
+    const e = clean[i];
+    if (e.type === 'button_a' || e.type === 'button_b') {
+      nextCarry = { type: e.type, at: typeof e.at === 'number' ? e.at : fallbackAt };
+      break;
+    }
+  }
+  return { clean, carry: nextCarry };
+}
+
 const controllerKey = `hw-${Math.random().toString(36).slice(2)}-${Date.now()}`;
 
 /**
@@ -712,21 +783,13 @@ export function useHardwareController(opts: HardwareControllerOptions): {
             if (!cancelled) publishOnline(true);
           } else {
 
-          // Crosstalk can straddle two polls, so the last button seen in the
-          // previous batch is carried in and filtered alongside this one.
-          const carried = lastButtonRef.current
-            ? [{ id: -1, type: lastButtonRef.current.type, at: lastButtonRef.current.at, carried: true }, ...events]
-            : events;
-          const clean = dropCrosstalkButtons(carried as Array<{ id: number; type: string; at?: number; carried?: boolean }>)
-            .filter(e => !(e as { carried?: boolean }).carried) as typeof events;
+          // Crosstalk can straddle two polls, so the last button believed in
+          // the previous batch is carried in and filtered alongside this one.
+          const batch = filterButtonBatch(events, lastButtonRef.current, now);
+          const clean = batch.clean;
+          lastButtonRef.current = batch.carry;
 
           for (const e of events) lastEventIdRef.current = Math.max(lastEventIdRef.current, e.id);
-          for (const e of [...events].reverse()) {
-            if (e.type === 'button_a' || e.type === 'button_b') {
-              lastButtonRef.current = { type: e.type, at: typeof e.at === 'number' ? e.at : now };
-              break;
-            }
-          }
 
           for (const e of clean) {
             // Belt and braces: an event that has been sitting unconsumed for a

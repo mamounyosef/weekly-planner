@@ -35,7 +35,7 @@
 //    every interface uses for removed text. It is now a filled check and a
 //    quieter card, which is what finishing something looks like.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Image,
   PanResponder,
@@ -53,6 +53,7 @@ import { applyGuesses, setPending } from '../lib/pendingDone';
 import { useNowMinute } from '../ui/useNow';
 import { ICONS } from '../ui/icons';
 import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
+import { goToLiveOffset, nowLineOffscreen } from '../lib/liveMarker';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import { WeekView } from './views/WeekView';
@@ -120,10 +121,40 @@ export function Today({
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [menu, setMenu] = useState<ItemMenuTarget | null>(null);
 
-  const [scrollY, setScrollY] = useState(0);
-  const [scrollViewHeight, setScrollViewHeight] = useState(1000);
+  /**
+   * Where the day is scrolled to, and how tall the window is.
+   *
+   * REFS, NOT STATE. These used to be state written from `onScroll` at sixty
+   * frames a second, which re-rendered the whole day -- every card, every
+   * prayer row, the timeline -- on every frame of every scroll. Nothing on the
+   * screen actually wants the number. The only thing that wants anything is the
+   * "go to live" pill, and all it needs to know is whether the now-line is off
+   * screen: one boolean that changes twice per scroll rather than a number that
+   * changes sixty times a second.
+   */
+  const scrollYRef = useRef(0);
+  const viewportRef = useRef(1000);
+  const [liveOffscreen, setLiveOffscreen] = useState(false);
+  const liveOffscreenRef = useRef(false);
   const [timelineY, setTimelineY] = useState(0);
   const [nowLineY, setNowLineY] = useState<number | null>(null);
+  // Mirrored so the scroll handler can read them without being rebuilt on every
+  // layout pass, and so a layout that reports the same number as last time
+  // costs nothing at all.
+  const timelineYRef = useRef(0);
+  const nowLineYRef = useRef<number | null>(null);
+
+  const noteTimelineY = useCallback((y: number) => {
+    if (timelineYRef.current === y) return;
+    timelineYRef.current = y;
+    setTimelineY(y);
+  }, []);
+
+  const noteNowLineY = useCallback((y: number) => {
+    if (nowLineYRef.current === y) return;
+    nowLineYRef.current = y;
+    setNowLineY(y);
+  }, []);
   const scrollViewRef = useRef<ScrollView>(null);
   /**
    * Which occurrence the menu is acting on.
@@ -248,15 +279,37 @@ export function Today({
     try { await syncNow(); } finally { setRefreshing(false); }
   };
 
-  const showGoToLive = showingToday && nowLineY !== null && (
-    (timelineY + nowLineY + 30 < scrollY) ||
-    (timelineY + nowLineY > scrollY + scrollViewHeight - 100)
-  );
+  /**
+   * Is the now-line out of sight? Recomputed on every scroll frame, but only
+   * WRITTEN when the answer flips, which is what keeps the day still.
+   */
+  const checkLive = useCallback(() => {
+    const off = nowLineOffscreen({
+      scrollY: scrollYRef.current,
+      viewport: viewportRef.current,
+      timelineY: timelineYRef.current,
+      nowLineY: nowLineYRef.current,
+    });
+    if (liveOffscreenRef.current === off) return;
+    liveOffscreenRef.current = off;
+    setLiveOffscreen(off);
+  }, []);
+
+  // The line and the timeline move for reasons other than scrolling: the clock
+  // ticks, the day changes, an item is added above it.
+  useEffect(() => { checkLive(); }, [checkLive, timelineY, nowLineY, selected, nowMin]);
+
+  const showGoToLive = showingToday && nowLineY !== null && liveOffscreen;
 
   const handleGoToLive = () => {
     if (nowLineY !== null) {
       scrollViewRef.current?.scrollTo({
-        y: Math.max(0, timelineY + nowLineY - scrollViewHeight / 2 + 50),
+        y: goToLiveOffset({
+          scrollY: scrollYRef.current,
+          viewport: viewportRef.current,
+          timelineY,
+          nowLineY,
+        }),
         animated: true,
       });
     }
@@ -768,11 +821,13 @@ export function Today({
       <ScrollView
         ref={scrollViewRef}
         onLayout={(e) => {
-          setScrollViewHeight(e.nativeEvent.layout.height);
+          viewportRef.current = e.nativeEvent.layout.height;
+          checkLive();
         }}
         onScroll={(e) => {
-          setScrollY(e.nativeEvent.contentOffset.y);
-          setScrollViewHeight(e.nativeEvent.layoutMeasurement.height);
+          scrollYRef.current = e.nativeEvent.contentOffset.y;
+          viewportRef.current = e.nativeEvent.layoutMeasurement.height;
+          checkLive();
         }}
         scrollEventThrottle={16}
         contentContainerStyle={{
@@ -804,7 +859,7 @@ export function Today({
         ) : null}
 
         {timed.length > 0 ? (
-          <Group title="Timeline" onLayout={(e) => setTimelineY(e.nativeEvent.layout.y)}>
+          <Group title="Timeline" onLayout={(e) => noteTimelineY(e.nativeEvent.layout.y)}>
             {timed.map((item, i) => {
               const previous = timed[i - 1];
               // Drawn once, in the gap before the first thing still to come, so
@@ -816,7 +871,7 @@ export function Today({
                 item.startMin > nowMin &&
                 (!previous || previous.startMin === null || previous.startMin <= nowMin);
               return (
-                <View key={item.id} onLayout={crossesNow ? (e) => setNowLineY(e.nativeEvent.layout.y) : undefined}>
+                <View key={item.id} onLayout={crossesNow ? (e) => noteNowLineY(e.nativeEvent.layout.y) : undefined}>
                   {crossesNow ? <NowLine minutes={nowMin} clock={timeFormat} /> : null}
                   <ItemRow item={item} onTick={tick} onOpen={open} onHold={hold} rail clock={timeFormat} />
                 </View>
@@ -825,7 +880,7 @@ export function Today({
             {/* The line belongs after everything if the day is already done. */}
             {showingToday && timed.length > 0
               && timed.every(i => i.startMin !== null && i.startMin <= nowMin)
-              ? <View onLayout={(e) => setNowLineY(e.nativeEvent.layout.y)}><NowLine minutes={nowMin} clock={timeFormat} /></View> : null}
+              ? <View onLayout={(e) => noteNowLineY(e.nativeEvent.layout.y)}><NowLine minutes={nowMin} clock={timeFormat} /></View> : null}
           </Group>
         ) : null}
 

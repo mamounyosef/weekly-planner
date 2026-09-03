@@ -22,7 +22,12 @@ export async function diagnoseConnection(
   const control = new AbortController();
   const bail = setTimeout(() => control.abort(), 8000);
   try {
-    const res = await fetchFn('/api/ping', { cache: 'no-store', signal: control.signal });
+    // Against `where`, not against whatever origin this page happens to be on.
+    // They are the same thing for the button on this page, which is why nobody
+    // noticed -- but a helper whose message names an address it never actually
+    // contacted is a diagnosis waiting to be wrong.
+    const target = new URL('/api/ping', where).toString();
+    const res = await fetchFn(target, { cache: 'no-store', signal: control.signal });
     if (res.ok) return `The planner answered at ${where}, so the connection is fine. Check the username and password.`;
     return `${where} answered with an error (${res.status}). The planner is running but refused the request.`;
   } catch (_) {

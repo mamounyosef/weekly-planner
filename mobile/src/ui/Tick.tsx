@@ -14,9 +14,14 @@
  * frame. The fill is a separate disc that scales in OVER the outline rather
  * than a background colour that animates, which is what keeps it that way.
  *
- * The screen still decides WHEN something is done. This only draws it, from
- * whatever `done` it is handed -- which is why the screens hand it their
- * optimistic answer (see `pendingDone` in `Tasks.tsx`) and not the stored one.
+ * AND IT STARTS IN THE TOUCH HANDLER, NOT IN A RENDER. Even an optimistic
+ * `done` prop has to travel through a React commit to get here, and on a list
+ * of thirty cards that commit is the last few milliseconds of lag you can still
+ * feel. So the tap plays the animation immediately and tells the screen
+ * afterwards; the prop is only used to CORRECT the box if the screen ends up
+ * disagreeing, which happens when a held tick is cancelled or a write fails.
+ *
+ * The screen still decides WHEN something is done. This only draws it.
  */
 import React, { useEffect, useRef } from 'react';
 import { Animated, Easing, Pressable, View } from 'react-native';
@@ -44,16 +49,18 @@ export function Tick({
   const fill = useRef(new Animated.Value(done ? 1 : 0)).current;
   const pop = useRef(new Animated.Value(0)).current;
   const halo = useRef(new Animated.Value(0)).current;
-  // The first render is a state, not an event: a list of things already done
-  // must not play twenty animations while it scrolls into view.
-  const settled = useRef(done);
+  // What the box is currently DRAWING. Not React state: changing it must not
+  // cost a render, and the first render is a state rather than an event -- a
+  // list of things already done must not play twenty animations as it scrolls
+  // into view.
+  const drawn = useRef(done);
 
-  useEffect(() => {
-    if (settled.current === done) return;
-    settled.current = done;
+  const playRef = useRef((_next: boolean) => {});
+  playRef.current = (next: boolean) => {
+    drawn.current = next;
 
     Animated.spring(fill, {
-      toValue: done ? 1 : 0,
+      toValue: next ? 1 : 0,
       useNativeDriver: true,
       friction: 6,
       tension: 140,
@@ -67,25 +74,38 @@ export function Tick({
       Animated.spring(pop, { toValue: 0, useNativeDriver: true, friction: 4, tension: 180 }),
     ]).start();
 
-    if (done) {
-      halo.setValue(0);
+    halo.setValue(0);
+    if (next) {
       Animated.timing(halo, {
         toValue: 1,
         duration: 420,
         easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }).start();
-    } else {
-      halo.setValue(0);
     }
-  }, [done, fill, pop, halo]);
+  };
+
+  // Only ever a CORRECTION. In the ordinary case the tap has already played the
+  // animation and the prop arrives agreeing, so this does nothing.
+  //
+  // Deliberately on EVERY render rather than on a change of `done`: a row
+  // component can be handed a different item than it drew last time, and then
+  // "the prop did not change" is not the same question as "the box is drawing
+  // the right thing". A ref comparison costs nothing.
+  useEffect(() => {
+    if (drawn.current !== done) playRef.current(done);
+  });
 
   const radius = round ? size / 2 : Math.max(6, size * 0.28);
 
   return (
     <Pressable
       unstable_pressDelay={PRESS_DELAY}
-      onPress={onPress}
+      onPress={() => {
+        // Draw first, tell the screen second.
+        playRef.current(!drawn.current);
+        onPress();
+      }}
       accessibilityRole="checkbox"
       accessibilityState={{ checked: done }}
       accessibilityLabel={label}

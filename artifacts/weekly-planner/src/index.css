@@ -337,6 +337,15 @@ html, body, #root {
   height: 100%;
 }
 
+html {
+  /* KEEP THE SCROLLBAR'S SPACE EVEN WHEN THERE IS NO SCROLLBAR.
+     Opening Settings sets `overflow: hidden` on <html> so the page behind
+     cannot scroll. Without a reserved gutter that takes the scrollbar away,
+     and the whole planner jumps sideways by its width on the way in and back
+     again on the way out. Reserving it costs nothing and the shift is gone. */
+  scrollbar-gutter: stable;
+}
+
 body {
   /* Chrome's pull-to-refresh would reload the whole planner mid-scroll, and
      the horizontal chain would bounce the page while swiping between weeks. */

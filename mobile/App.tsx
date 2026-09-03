@@ -138,9 +138,12 @@ function Shell() {
 
 
   useEffect(() => {
+    // IN THE ORDER THEY ARE DRAWN, TOPMOST FIRST. Back must close whatever is
+    // actually covering the screen. Quick add lives inside the tab stack rather
+    // than in the overlay chain, so it sits UNDER any overlay and is closed
+    // after them, not before.
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (showDiagnostics) { setShowDiagnostics(false); return true; }
-      if (showQuickAdd) { setShowQuickAdd(false); return true; }
       if (showNotifications) { setShowNotifications(false); return true; }
       if (showSearch) { setShowSearch(false); return true; }
       if (showPlanner) { setShowPlanner(false); return true; }
@@ -149,6 +152,7 @@ function Shell() {
       if (showCategories) { setShowCategories(false); return true; }
       if (showTaskSettings) { setShowTaskSettings(false); return true; }
       if (showConflicts) { setShowConflicts(false); return true; }
+      if (showQuickAdd) { setShowQuickAdd(false); return true; }
       
       if (pressedTab !== 'calendar') {
         goToTab('calendar');
@@ -176,7 +180,8 @@ function Shell() {
    * (the bell can open reminders), and this is what decides which one wins.
    */
   const overlay =
-    showConflicts ? 'conflicts'
+    showDiagnostics ? 'diagnostics'
+      : showConflicts ? 'conflicts'
       : showCategories ? 'categories'
         : showTaskSettings ? 'taskSettings'
           : showReminders ? 'reminders'
@@ -256,6 +261,7 @@ function Shell() {
                     onOpenReminders={() => setShowReminders(true)}
                     onOpenPrayers={() => setShowPrayers(true)}
                     onOpenPlanner={() => setShowPlanner(true)}
+                    onOpenDiagnostics={() => setShowDiagnostics(true)}
                   />
                 </ErrorBoundary>
               </KeepAlive>
@@ -273,7 +279,9 @@ function Shell() {
             />
           </KeepAlive>
 
-          {overlay === 'conflicts' ? (
+          {overlay === 'diagnostics' ? (
+            <Diagnostics onClose={() => setShowDiagnostics(false)} />
+          ) : overlay === 'conflicts' ? (
             <Conflicts onClose={() => setShowConflicts(false)} />
           ) : overlay === 'categories' ? (
             // Over the settings tab rather than a tab of its own: categories are

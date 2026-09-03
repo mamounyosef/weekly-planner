@@ -25,6 +25,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import {
   applyLocalChange,
+  applyLocalChanges,
   applyLocalRecord,
   applyLocalResolution,
   backoffDelay,
@@ -214,6 +215,14 @@ interface PlannerContextValue {
   signOut(): Promise<void>;
   syncNow(): Promise<void>;
   edit(store: SyncStore, entityId: string, changes: Record<string, unknown>): Promise<void>;
+  /**
+   * Several edits, one commit.
+   *
+   * For a reorder, which renumbers a whole group at once. Sent one at a time
+   * the list walks to its new order a row per frame; sent together it arrives
+   * in one. Duplicate ids are merged, last one wins.
+   */
+  editMany(store: SyncStore, edits: ReadonlyArray<{ id: string; changes: Record<string, unknown> }>): Promise<void>;
   saveRecord(store: SyncStore, entityId: string, record: Record<string, unknown>): Promise<void>;
   toggleDone(store: SyncStore, item: { masterId: string; date: string; repeating: boolean; completed: boolean }): Promise<void>;
   /** Create or update one item from the editor. Returns the id it wrote. */
@@ -837,6 +846,34 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   ) => {
     const previous = dataRef.current;
     const next = applyLocalChange(previous, { store, entityId, changes, at: Date.now() });
+    if (next === previous) return;
+    await persistEdit(next, previous);
+  }, [persistEdit]);
+
+  const editMany = useCallback(async (
+    store: SyncStore,
+    edits: ReadonlyArray<{ id: string; changes: Record<string, unknown> }>,
+  ) => {
+    if (edits.length === 0) return;
+
+    // `applyLocalChanges` refuses a batch that names one entity twice, because
+    // the second set of ops would claim a base the first set already replaced.
+    // Folding them here is the honest reading of "set this, then set that on the
+    // same row": one edit with the later value.
+    const byId = new Map<string, Record<string, unknown>>();
+    const order: string[] = [];
+    for (const e of edits) {
+      const existing = byId.get(e.id);
+      if (existing) Object.assign(existing, e.changes);
+      else { byId.set(e.id, { ...e.changes }); order.push(e.id); }
+    }
+
+    const previous = dataRef.current;
+    const next = applyLocalChanges(
+      previous,
+      order.map(id => ({ store, entityId: id, changes: byId.get(id)! })),
+      Date.now(),
+    );
     if (next === previous) return;
     await persistEdit(next, previous);
   }, [persistEdit]);
@@ -1515,6 +1552,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     signOut,
     syncNow,
     edit,
+    editMany,
     saveRecord,
     toggleDone,
     saveDraft,
@@ -1561,7 +1599,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     lastError,
   }), [
     ready, signedIn, username, serverUrl, data, status, alarmSummary,
-    day, events, tasks, connect, signOut, syncNow, edit, saveRecord, toggleDone,
+    day, events, tasks, connect, signOut, syncNow, edit, editMany, saveRecord, toggleDone,
     saveDraft, removeItem, applyScoped, weekStartsOn, shared, categories,
     taskLists, focusSessions, focusTimer, runFocusTimer,
     unreadNotifications, snoozeOptions,

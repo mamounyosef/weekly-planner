@@ -266,6 +266,7 @@ function FilterReadout({ f, textPrimary, textSecondary, cardBdr }: {
     'unstable': 'the readings disagree too much to be one object',
     'no-consensus': 'no group of readings is big enough to speak for the window',
     'ramp-masked': 'the readings are mid-jump; waiting for them to settle',
+    'no-valid-samples': 'no usable reading at all; check the sensor wiring',
     'over-range-ignored': 'over-range readings never count as away on this desk',
   };
 

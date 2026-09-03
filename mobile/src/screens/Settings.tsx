@@ -45,6 +45,7 @@ import {
 
 export function Settings({
   onClose, onOpenCategories, onOpenTasks, onOpenReminders, onOpenPrayers, onOpenPlanner,
+  onOpenDiagnostics,
 }: {
   onClose: () => void;
   onOpenCategories?: () => void;
@@ -52,6 +53,7 @@ export function Settings({
   onOpenReminders?: () => void;
   onOpenPrayers?: () => void;
   onOpenPlanner?: () => void;
+  onOpenDiagnostics?: () => void;
 }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
@@ -204,6 +206,14 @@ export function Settings({
         <MenuRow label="Tasks" hint="Lists, and overdue repeats" iconName="check-square" onPress={onOpenTasks} />
         <MenuRow label="Notifications" hint="Alarms and permissions" iconName="bell" onPress={onOpenReminders} />
         <MenuRow label="Prayer Times" hint="Calculation methods and display" iconName="compass" onPress={onOpenPrayers} />
+      </Section>
+      <Section title="Support">
+        <MenuRow
+          label="Diagnostics"
+          hint="Sync health, and when this phone last spoke to the PC"
+          iconName="activity"
+          onPress={onOpenDiagnostics}
+        />
       </Section>
     </ScrollView>
   );

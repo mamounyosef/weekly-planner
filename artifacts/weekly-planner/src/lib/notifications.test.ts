@@ -856,6 +856,57 @@ console.log(`all-day anchor ${DEFAULT_NOTIFICATION_SETTINGS.allDayHour}:00, task
   const pingThrows = await diagnoseConnection(origin, async () => { throw new Error('Failed to fetch'); }, true);
   check('diagnose: ping throw reports cannot reach origin',
     pingThrows.includes('Cannot reach http://localhost:5000'));
+
+  // 5. IT PINGS THE ADDRESS IT NAMES. The message quotes `where`; the request
+  // used to go to a relative '/api/ping', so on any origin other than the one
+  // being asked about the answer described a server it had never contacted.
+  {
+    const asked: string[] = [];
+    const record = async (url: unknown) => {
+      asked.push(String(url));
+      return new Response('{"ok":true}', { status: 200 });
+    };
+
+    await diagnoseConnection('http://192.168.1.50:5000', record as typeof fetch, true);
+    check('diagnose: pings the host it was asked about',
+      asked[0] === 'http://192.168.1.50:5000/api/ping');
+
+    // A trailing slash, a path, and an https host: all resolve to that host's
+    // own /api/ping, never to a path underneath whatever was passed in.
+    asked.length = 0;
+    await diagnoseConnection('https://planner.example.net/', record as typeof fetch, true);
+    check('diagnose: a trailing slash does not change the target',
+      asked[0] === 'https://planner.example.net/api/ping');
+
+    asked.length = 0;
+    await diagnoseConnection('https://planner.example.net/login', record as typeof fetch, true);
+    check('diagnose: a path on the address is replaced, not appended to',
+      asked[0] === 'https://planner.example.net/api/ping');
+
+    // A port, which is how this planner is actually reached.
+    asked.length = 0;
+    await diagnoseConnection('http://localhost:5000', record as typeof fetch, true);
+    check('diagnose: the port survives',
+      asked[0] === 'http://localhost:5000/api/ping');
+
+    // The offline branch answers before any request is made.
+    asked.length = 0;
+    await diagnoseConnection('http://localhost:5000', record as typeof fetch, false);
+    check('diagnose: an offline device is not asked to make a request',
+      asked.length === 0);
+  }
+
+  // 6. An address that is not a URL at all must not take the whole page down
+  // with it -- a diagnosis that throws is worse than one that says nothing.
+  {
+    let threw = false;
+    try {
+      await diagnoseConnection('not a url', async () => new Response('', { status: 200 }), true);
+    } catch (_) {
+      threw = true;
+    }
+    check('diagnose: a malformed address does not throw', threw === false);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -19,7 +19,9 @@ import {
   emptyState, mergeOps, makeOps, readEntity, setMembers,
   type SyncOp, type SyncState,
 } from './sync';
-import { applyLocalChange, emptyClientData, readClientStore } from './syncClient';
+import {
+  applyLocalChange, applyLocalChanges, emptyClientData, readClientStore,
+} from './syncClient';
 
 let seq = 0;
 function op(partial: Partial<SyncOp> & { entityId: string; field: string }): SyncOp {
@@ -336,6 +338,166 @@ async function main() {
     assert.equal(readEntity(after, 'tasks', 'a')?.title, 'Changed');
     assert.equal(readEntity(after, 'tasks', 'b'), null);
     assert.deepEqual(readEntity(after, 'tasks', 'a')?.completedDates, []);
+    console.log('  ok');
+  }
+
+  console.log('--- 16. A BATCH IS THE SAME AS THE EDITS ONE AT A TIME ---');
+  {
+    // This is the whole claim `applyLocalChanges` makes. A reorder renumbers a
+    // group; sent together or sent one at a time, the planner must end up in
+    // exactly the same place.
+    const rows = ['r1', 'r2', 'r3', 'r4', 'r5'];
+    const seed = (data: ReturnType<typeof emptyClientData>) => {
+      let d = data;
+      rows.forEach((id, i) => {
+        d = applyLocalChange(d, { store: 'tasks', entityId: id, changes: { title: id, order: i * 10 }, at: 1 });
+      });
+      return d;
+    };
+
+    const oneAtATime = (() => {
+      let d = seed(emptyClientData('phone'));
+      rows.forEach((id, i) => {
+        d = applyLocalChange(d, { store: 'tasks', entityId: id, changes: { order: (rows.length - i) * 10 }, at: 2 });
+      });
+      return d;
+    })();
+
+    const batched = applyLocalChanges(
+      seed(emptyClientData('phone')),
+      rows.map((id, i) => ({ store: 'tasks' as const, entityId: id, changes: { order: (rows.length - i) * 10 } })),
+      2,
+    );
+
+    const orders = (d: typeof batched) =>
+      rows.map(id => readClientStore(d, 'tasks')[id]?.order);
+    assert.deepEqual(orders(batched), orders(oneAtATime), 'the same orders');
+    assert.deepEqual(orders(batched), [50, 40, 30, 20, 10]);
+    assert.equal(batched.outbox.length, oneAtATime.outbox.length, 'the same number of ops');
+    console.log('  ok');
+  }
+
+  console.log('--- 17. EVERY OP IN A BATCH GETS ITS OWN STAMP ---');
+  {
+    // Two ops sharing a lamport from the same device is two ops with the same
+    // identity: the second is dropped as a duplicate and one row never moves.
+    let data = emptyClientData('phone');
+    data = applyLocalChanges(data, [
+      { store: 'tasks', entityId: 'a', changes: { order: 0, title: 'A' } },
+      { store: 'tasks', entityId: 'b', changes: { order: 10, title: 'B' } },
+      { store: 'tasks', entityId: 'c', changes: { order: 20, title: 'C' } },
+    ], 5);
+
+    const ids = data.outbox.map(o => o.opId);
+    assert.equal(new Set(ids).size, ids.length, 'no two ops share an id');
+    const stamps = data.outbox.map(o => o.lamport);
+    assert.equal(new Set(stamps).size, stamps.length, 'no two share a lamport');
+    assert.equal(data.state.lamport, Math.max(...stamps), 'the clock ends at the highest');
+
+    const tasks = readClientStore(data, 'tasks');
+    assert.deepEqual([tasks.a?.order, tasks.b?.order, tasks.c?.order], [0, 10, 20]);
+    assert.deepEqual([tasks.a?.title, tasks.b?.title, tasks.c?.title], ['A', 'B', 'C']);
+    console.log('  ok');
+  }
+
+  console.log('--- 18. ONE ENTITY TWICE IN A BATCH IS REFUSED ---');
+  {
+    // Not merged silently: the second set of ops would claim a base stamp the
+    // first set has already replaced, which reads downstream as a conflict the
+    // user never caused. The caller folds its own duplicates.
+    const data = emptyClientData('phone');
+    assert.throws(
+      () => applyLocalChanges(data, [
+        { store: 'tasks', entityId: 'a', changes: { order: 1 } },
+        { store: 'tasks', entityId: 'a', changes: { order: 2 } },
+      ], 1),
+      /appears twice/,
+    );
+    // The same id in a DIFFERENT store is a different entity and is fine.
+    const ok = applyLocalChanges(data, [
+      { store: 'tasks', entityId: 'x', changes: { title: 'task' } },
+      { store: 'events', entityId: 'x', changes: { title: 'event' } },
+    ], 1);
+    assert.equal(readClientStore(ok, 'tasks').x?.title, 'task');
+    assert.equal(readClientStore(ok, 'events').x?.title, 'event');
+    console.log('  ok');
+  }
+
+  console.log('--- 19. A BATCH THAT CHANGES NOTHING ---');
+  {
+    let data = emptyClientData('phone');
+    assert.equal(applyLocalChanges(data, [], 1), data, 'an empty batch is the same object');
+    data = applyLocalChange(data, { store: 'tasks', entityId: 'a', changes: { order: 7 }, at: 1 });
+
+    // A REGISTER FIELD IS NOT DIFFED. Writing the value it already holds is
+    // still a write, exactly as it is through `applyLocalChange`, because "set
+    // this to what it already is" is a real statement about ordering that the
+    // other machine may need. Callers that do not mean it -- the reorder, which
+    // renumbers a whole group -- skip the rows that did not move themselves.
+    const same = applyLocalChanges(data, [{ store: 'tasks', entityId: 'a', changes: { order: 7 } }], 2);
+    assert.equal(same.outbox.length, data.outbox.length + 1, 'it queues the write');
+    assert.equal(readClientStore(same, 'tasks').a?.order, 7);
+
+    // A SET field, which IS diffed, is the other case: nothing to say, nothing
+    // queued, and the same object comes back.
+    let withDates = applyLocalChange(data, {
+      store: 'tasks', entityId: 'a', changes: { completedDates: ['2026-09-01'] }, at: 3,
+    });
+    const unchanged = applyLocalChanges(withDates, [
+      { store: 'tasks', entityId: 'a', changes: { completedDates: ['2026-09-01'] } },
+    ], 4);
+    assert.equal(unchanged, withDates, 'nothing to write, the same object back');
+    console.log('  ok');
+  }
+
+  console.log('--- 20. A BATCH DOES NOT TOUCH THE DATA IT WAS GIVEN ---');
+  {
+    let data = emptyClientData('phone');
+    data = applyLocalChange(data, { store: 'tasks', entityId: 'a', changes: { order: 1 }, at: 1 });
+    const was = snapshot(data.state);
+    const outboxWas = data.outbox.length;
+    const lamportWas = data.state.lamport;
+
+    applyLocalChanges(data, [
+      { store: 'tasks', entityId: 'a', changes: { order: 99 } },
+      { store: 'tasks', entityId: 'b', changes: { order: 100 } },
+    ], 2);
+
+    assert.equal(snapshot(data.state), was, 'state untouched');
+    assert.equal(data.outbox.length, outboxWas, 'outbox untouched');
+    assert.equal(data.state.lamport, lamportWas, 'even the clock');
+    console.log('  ok');
+  }
+
+  console.log('--- 21. A REORDER ARRIVES SOMEWHERE ELSE WITHOUT A CONFLICT ---');
+  {
+    // The point of getting the base stamps right: the other machine applies the
+    // whole reorder cleanly and nobody is asked to answer a card about it.
+    let phone = emptyClientData('phone');
+    const rows = ['r1', 'r2', 'r3', 'r4'];
+    rows.forEach((id, i) => {
+      phone = applyLocalChange(phone, { store: 'tasks', entityId: id, changes: { title: id, order: i * 10 }, at: 1 });
+    });
+
+    // The PC starts from everything the phone has so far.
+    let pc = mergeOps(emptyState(), phone.outbox);
+    assert.deepEqual(pc.conflicts, []);
+
+    const moved = applyLocalChanges(phone, [
+      { store: 'tasks', entityId: 'r3', changes: { order: 0 } },
+      { store: 'tasks', entityId: 'r1', changes: { order: 10 } },
+      { store: 'tasks', entityId: 'r2', changes: { order: 20 } },
+      { store: 'tasks', entityId: 'r4', changes: { order: 30 } },
+    ], 2);
+
+    const fresh = moved.outbox.slice(phone.outbox.length);
+    pc = mergeOps(pc.state, fresh);
+    assert.deepEqual(pc.conflicts, [], 'no conflict cards for a drag');
+    assert.deepEqual(
+      rows.map(id => readEntity(pc.state, 'tasks', id)?.order),
+      [10, 20, 0, 30],
+      'and the PC agrees about the new order',
+    );
     console.log('  ok');
   }
 
