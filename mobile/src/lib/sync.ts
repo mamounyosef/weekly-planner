@@ -944,6 +944,43 @@ export function readStore(
   return out;
 }
 
+/**
+ * The record as it stands, INCLUDING one that has been deleted.
+ *
+ * FOR SHOWING, NEVER FOR THE PLANNER. `readEntity` refuses a tombstone on
+ * purpose: a deleted event must not come back onto the grid because something
+ * asked for it by id. But a conflict card about a deletion has to be able to
+ * say WHAT was deleted, and reading it through the same door meant the one card
+ * that most needed a name was the one card that could never have one -- every
+ * "deleted here, edited there" said "Untitled item".
+ *
+ * The tombstone flag is left on the record so the caller can see it and say so.
+ */
+export function peekEntity(
+  state: SyncState,
+  store: SyncStore,
+  entityId: string,
+): Record<string, unknown> | null {
+  const byId = getOwn(state.entities, store);
+  const ent = byId ? getOwn(byId, entityId) : undefined;
+  if (!ent) return null;
+
+  const out: Record<string, unknown> = {};
+  for (const field of Object.keys(ent.fields)) {
+    // The tombstone field is skipped and then set from `isDeleted` below, never
+    // copied. Its raw value is one op's opinion; whether the record IS deleted
+    // is the merge's answer, and an edit that out-ranked the delete leaves the
+    // two disagreeing. Copying it verbatim said "deleted" about a record the
+    // planner was happily showing.
+    if (field === DELETED_FIELD) continue;
+    if (isSetField(store, field)) continue;
+    const v = ent.fields[field]!.value;
+    if (v !== undefined) setOwn(out, field, v);
+  }
+  if (isDeleted(ent)) setOwn(out, DELETED_FIELD, true);
+  return out;
+}
+
 /** True if the entity exists but is tombstoned — needed so a peer can delete it
  *  locally rather than treating a missing record as "never existed". */
 export function isTombstoned(state: SyncState, store: SyncStore, entityId: string): boolean {

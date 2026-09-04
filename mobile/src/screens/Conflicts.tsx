@@ -23,19 +23,23 @@ import { groupConflicts, type GroupedConflict } from '../lib/conflictText';
 export function Conflicts({ onClose }: { onClose: () => void }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { conflicts, answerConflict, status, events, tasks } = usePlanner();
+  const { conflicts, answerConflict, status, peek } = usePlanner();
 
   const now = Date.now();
   
-  // Recompute groups whenever conflicts change. `events` and `tasks` are passed
-  // solely to look up the item's title, making the cards human-readable.
-  const groups = useMemo(() => {
-    return groupConflicts(conflicts, now, (store, id) => {
-      if (store === 'events') return events()[id]?.title as string | undefined;
-      if (store === 'tasks') return tasks()[id]?.title as string | undefined;
-      return undefined;
-    });
-  }, [conflicts, now, events, tasks]);
+  /**
+   * Recomputed whenever the conflicts change.
+   *
+   * `peek` rather than `events()`/`tasks()`: it reaches every store, not two of
+   * eight, and it reads THROUGH a tombstone. Both of those were why almost
+   * every card said "Untitled item" -- a focus session was a store the lookup
+   * did not know, and a deleted event was a record the lookup refused to
+   * return.
+   */
+  const groups = useMemo(
+    () => groupConflicts(conflicts, now, peek),
+    [conflicts, now, peek],
+  );
 
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
@@ -131,23 +135,23 @@ function GroupCard({
         backgroundColor: p.surfaceAlt,
       }}>
         <Text variant="label" tone="ink">{group.itemTitle}</Text>
-        <Text variant="caption" tone="faint">
-          {group.store === 'tasks' ? 'Task' : 'Event'} edited on both devices
-        </Text>
+        {/* WHAT IT IS, and whether it still exists. This line used to call
+            everything that was not a task an event, so a focus session was
+            announced as one. */}
+        <Text variant="caption" tone="faint">{group.subtitle}</Text>
       </View>
 
       <View style={{ padding: space.lg, gap: space.xl }}>
         {group.conflicts.map(c => (
           <View key={c.fieldFriendlyName} style={{ gap: space.md }}>
             <Text variant="label" tone="warn">
-              {c.isDelete ? 'Deleted here, edited there' : `Disagreement on ${c.fieldFriendlyName}`}
+              {c.isDelete ? 'Deleted on one device' : `Two answers for ${c.fieldFriendlyName}`}
             </Text>
             
             {c.isDelete ? (
               <Text variant="body">
-                One device deleted this while the other was still changing it. The delete has
-                been applied for now, so it is hidden on both devices. Nothing is lost, and
-                "Keep it" brings it back with your change.
+                Deleted on one device, changed on the other. It is hidden for now,
+                and nothing is lost either way.
               </Text>
             ) : (
               <Row gap={space.sm} align="stretch">

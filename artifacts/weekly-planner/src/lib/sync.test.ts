@@ -22,6 +22,7 @@ import {
   mergeOps,
   opsSince,
   pruneLog,
+  peekEntity,
   readEntity,
   readStore,
   resolveConflict,
@@ -705,6 +706,64 @@ console.log('--- 26. DANGEROUS KEYS ARE DATA, NOT PROTOTYPE ACCESS ---');
   pc3.edit('ev1', { exdates: ['__proto__', 'constructor', '2026-09-01'] });
   assert.deepEqual(pc3.read('ev1')!.exdates, ['2026-09-01', '__proto__', 'constructor'],
     'Dangerous strings are ordinary set members');
+}
+
+// ─── Reading a deleted record, on purpose ───────────────────────────────────
+// `readEntity` refuses a tombstone, which is the whole point of one: a deleted
+// event must not reappear on the grid because something asked for it by id.
+// But the conflicts screen has to be able to say WHAT was deleted, and asking
+// through that same door meant the one card that most needed a name -- "deleted
+// on one device, changed on the other" -- was the one card that could never
+// have one. Every single one of them said "Untitled item".
+{
+  console.log('--- PEEKING AT A DELETED RECORD ---');
+
+  const pc = new Peer(PC);
+  pc.edit('ev1', { title: 'Dentist', weekKey: '2026-08-31', notes: 'bring the form' }, 1_000);
+
+  // Alive: both doors give the same answer.
+  assert.equal(pc.read('ev1')!.title, 'Dentist');
+  assert.equal(peekEntity(pc.state, 'events', 'ev1')!.title, 'Dentist');
+  assert.equal(peekEntity(pc.state, 'events', 'ev1')!.__deleted, undefined,
+    'a living record is not flagged as deleted');
+
+  pc.remove('ev1', 2_000);
+
+  // Deleted: the planner sees nothing, which is correct and must not change.
+  assert.equal(pc.read('ev1'), null, 'the planner still refuses a tombstone');
+
+  // The card can still name it, and can tell that it is gone.
+  const peeked = peekEntity(pc.state, 'events', 'ev1');
+  assert.ok(peeked, 'the record is still there to be described');
+  assert.equal(peeked!.title, 'Dentist', 'and it still knows what it was called');
+  assert.equal(peeked!.weekKey, '2026-08-31', 'and when it was');
+  assert.equal(peeked!.__deleted, true, 'and that it has been deleted');
+
+  // Something that never existed is still nothing, either way round.
+  assert.equal(peekEntity(pc.state, 'events', 'never'), null);
+  assert.equal(peekEntity(pc.state, 'tasks', 'ev1'), null, 'and the store has to match');
+
+  // A field edited after the delete arrives is still readable: this is exactly
+  // the "deleted here, edited there" shape, where the other device went on
+  // changing the thing and the user has to decide which way it goes.
+  const ph = new Peer(PH);
+  ph.ingest(pc.log.filter(o => o.at < 2_000));
+  ph.edit('ev1', { title: 'Dentist (moved)' }, 3_000);
+  syncBoth(pc, ph);
+
+  // Which of the two wins is the engine's business and has its own tests. What
+  // matters HERE is that whichever way it lands, the card can still name the
+  // thing: peeking never returns nothing where the record exists at all.
+  const contested = peekEntity(pc.state, 'events', 'ev1');
+  assert.ok(contested, 'the record can always be described');
+  assert.equal(contested!.title, 'Dentist (moved)', 'with the edit that is in dispute');
+  assert.equal(contested!.__deleted === true, pc.read('ev1') === null,
+    'and the two doors agree about whether it is deleted');
+
+  // Undeleting brings it back through the front door, unchanged.
+  pc.edit('ev1', { __deleted: false }, 4_000);
+  assert.ok(pc.read('ev1'), 'and it comes back when the delete is undone');
+  assert.equal(peekEntity(pc.state, 'events', 'ev1')!.__deleted, undefined);
 }
 
 console.log('\nALL PASS (sync core: merge, conflicts, clock skew, convergence)');

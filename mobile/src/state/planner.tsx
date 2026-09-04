@@ -74,7 +74,7 @@ import {
   inferWeekStartsOn,
   type DraftInput,
 } from '../lib/draft';
-import { DELETED_FIELD } from '../lib/sync';
+import { DELETED_FIELD, peekEntity } from '../lib/sync';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
   buildPrayerDay,
@@ -210,6 +210,14 @@ interface PlannerContextValue {
   day(date: string): AgendaDay;
   events(): Record<string, Record<string, unknown>>;
   tasks(): Record<string, Record<string, unknown>>;
+  /**
+   * One record from any store, INCLUDING a deleted one.
+   *
+   * For the conflicts screen, which has to be able to name a thing that was
+   * deleted on one device. `events()` and `tasks()` cannot: they hide
+   * tombstones, which is correct everywhere except there.
+   */
+  peek(store: SyncStore, entityId: string): Record<string, unknown> | null;
 
   connect(serverUrl: string, username: string, password: string): Promise<void>;
   signOut(): Promise<void>;
@@ -1332,6 +1340,18 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const tasks = useCallback(() => tasksMap, [tasksMap]);
 
   /**
+   * One record out of any store, deleted or not, for the conflicts screen.
+   *
+   * Deliberately not routed through `events()`/`tasks()`: those hide deleted
+   * records, which is right for the planner and exactly wrong for a card whose
+   * whole subject is something that was deleted.
+   */
+  const peek = useCallback(
+    (store: SyncStore, entityId: string) => peekEntity(dataRef.current.state, store, entityId),
+    [],
+  );
+
+  /**
    * One day's agenda, built at most once per set of inputs.
    *
    * `buildDay` walks every event in the planner and asks the recurrence engine
@@ -1548,6 +1568,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     day,
     events,
     tasks,
+    peek,
     connect,
     signOut,
     syncNow,
@@ -1610,7 +1631,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     customWindow, setCustomWindow, dayWindow, setDayStart, setDayEnd,
     swipeViewSwitch, setSwipeViewSwitch, visibleHours, setVisibleHours,
     prayerAppearance, setPrayerAppearance, prayerCacheSummary,
-    answerConflict, resetLocal, lastError,
+    answerConflict, resetLocal, lastError, peek,
   ]);
 
   return (
