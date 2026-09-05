@@ -363,6 +363,24 @@ export interface SyncOutcome {
   pulled: number;
   /** Set when the cycle failed; the outbox is intact and it is safe to retry. */
   error?: string;
+  /**
+   * Whether this cycle changed anything a screen could show.
+   *
+   * THE IDLE CASE IS THE COMMON CASE. The phone parks a pull for fifteen
+   * seconds, is told nothing changed, and used to rebuild the entire planner
+   * anyway: the outcome was spread into a new object, every `readClientStore`
+   * memo keys on that object, so 209 events, 29 tasks and 438 focus sessions
+   * were reassembled field by field from CRDT metadata, the day cache was
+   * thrown away, every mounted screen re-rendered including the ones nobody was
+   * looking at, and nearly a megabyte of JSON was re-encoded and written to
+   * SQLite. Four times a minute, for as long as the screen was on.
+   *
+   * Stated explicitly rather than inferred from object identity, because
+   * getting it wrong in the other direction leaves the screen showing stale
+   * data -- so it is computed from what actually happened: ops pushed, ops
+   * pulled, a moved cursor, a full resync, or a changed set of conflicts.
+   */
+  changed: boolean;
   didFullResync?: boolean;
 }
 
@@ -401,7 +419,7 @@ export async function syncOnce(
     try {
       res = await transport.push(next.deviceId, sending);
     } catch (err) {
-      return { data: next, phase: 'offline', pushed: 0, pulled: 0, error: messageOf(err) };
+      return { data: next, phase: 'offline', pushed: 0, pulled: 0, changed: next !== data, error: messageOf(err) };
     }
     // Only the ops we actually sent leave the queue — anything added while the
     // request was in flight must survive, or a fast typist loses an edit.
@@ -434,7 +452,7 @@ export async function syncOnce(
       holdRejected = true;
     }
   } catch (err) {
-    return { data: next, phase: 'offline', pushed, pulled: 0, error: messageOf(err) };
+    return { data: next, phase: 'offline', pushed, pulled: 0, changed: next !== data, error: messageOf(err) };
   }
 
   if (pull.needsFullResync) {
@@ -442,7 +460,7 @@ export async function syncOnce(
       next = await fullResync(next, transport);
       didFullResync = true;
     } catch (err) {
-      return { data: next, phase: 'error', pushed, pulled: 0, error: messageOf(err) };
+      return { data: next, phase: 'error', pushed, pulled: 0, changed: next !== data, error: messageOf(err) };
     }
   } else {
     // The cursor comes from the SERVER, always. It is a position in the server's
@@ -494,13 +512,31 @@ export async function syncOnce(
     }
   }
 
+  // What actually moved. `state`, `outbox` and `conflicts` are compared by
+  // REFERENCE on purpose: every function that touches them returns the input
+  // unchanged when it changes nothing, which is the invariant this relies on
+  // and which the tests pin.
+  const changed =
+    pushed > 0
+    || pulled > 0
+    || didFullResync
+    || next.cursor !== data.cursor
+    || next.state !== data.state
+    || next.outbox !== data.outbox
+    || next.conflicts !== data.conflicts;
+
   return {
+    // `lastSyncedAt` is the one field that moves on a cycle that did nothing,
+    // and it belongs to the status line rather than to the planner. Spreading
+    // it makes a new ClientData, but `state`, `outbox` and `conflicts` keep
+    // their identities, so nothing downstream that watches those rebuilds.
     data: { ...next, lastSyncedAt: now },
     holdRejected,
     phase: 'idle',
     pushed,
     pulled,
     didFullResync,
+    changed,
   };
 }
 
@@ -558,12 +594,29 @@ export function reconcileAfterSync(
     ? outcome.data.state
     : mergeOps(outcome.data.state, madeDuring).state;
 
-  return {
-    ...outcome.data,
-    state,
-    outbox: [...outcome.data.outbox, ...stillQueued],
-    conflicts: outcome.data.conflicts.filter(c => !isMeaninglessConflict(c)),
-  };
+  // IDENTITY IS LOAD-BEARING BELOW THIS LINE.
+  //
+  // Both of these used to allocate unconditionally -- a spread and a `filter`
+  // -- so the result of a cycle that changed nothing was structurally identical
+  // to its input and yet new to every memo watching it. That identity is what
+  // rebuilt the whole planner four times a minute on an idle phone. Returning
+  // the same arrays when nothing was added or removed is the entire fix, and it
+  // is safe precisely because these values are never mutated in place.
+  const outbox = stillQueued.length === 0
+    ? outcome.data.outbox
+    : [...outcome.data.outbox, ...stillQueued];
+  const kept = outcome.data.conflicts.filter(c => !isMeaninglessConflict(c));
+  const conflicts = kept.length === outcome.data.conflicts.length
+    ? outcome.data.conflicts
+    : kept;
+
+  if (state === outcome.data.state
+      && outbox === outcome.data.outbox
+      && conflicts === outcome.data.conflicts) {
+    return outcome.data;
+  }
+
+  return { ...outcome.data, state, outbox, conflicts };
 }
 
 /**

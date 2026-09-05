@@ -84,7 +84,7 @@ export function Connect() {
           <Text variant="label" tone="accent">Daily Planner</Text>
           <Text variant="display">Connect to your planner</Text>
           <Text variant="body" tone="soft" style={{ marginTop: space.sm }}>
-            Sign in once. After that the app works with your PC switched off — everything
+            Sign in once. After that the app works with your PC switched off. Everything
             lives on this phone and syncs when the two can see each other.
           </Text>
         </View>

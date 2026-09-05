@@ -12,6 +12,11 @@ import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 // place that decides what they mean, so there must be exactly one copy of it.
 import { createPresenceFilter, coerceSensorFilterConfig } from './src/lib/sensorFilter';
 import { createHardwareBridge } from './src/lib/hardwareBridge';
+// The focus timer's rules live in one place and the server obeys them too: the
+// hotkey and the desk sensor reach the timer with no window open, and doing the
+// arithmetic again here is how an overnight hibernate turned into invented work.
+import { coerceFocusTimer, reduceFocusTimer, type FocusSessionRecord } from './src/lib/focusTimer';
+import { dedupeFocusHistory, foldFocusSessions } from './src/lib/focusStats';
 import {
   loadAccessConfig,
   getUserDbPaths,
@@ -19,6 +24,7 @@ import {
   migrateLegacyDatabase,
   createSessionToken,
   getAuthUser,
+  isLocalAddress,
   autoBackupPaths,
   sanitizeUsername,
   SESSION_COOKIE,
@@ -85,14 +91,81 @@ function isEmptyJsonValue(text: string, kind: 'object' | 'array'): boolean {
  * id. Sessions are append-only in normal use, so a row the sender doesn't know
  * about is one another window just logged — never a deletion. Newest first.
  */
-async function mergeFocusSessions(filePath: string, body: string): Promise<string> {
-  let incoming: unknown;
+/**
+ * Add one finished session to a user's history, on the server.
+ *
+ * Needed because the hotkey and the desk sensor can now END a session, and
+ * there may be no window open to write it down. Deduplicated on the way in for
+ * the same reason every other reader does it: the same session may already be
+ * there under one of the older id spellings.
+ */
+async function appendFocusSession(
+  userPaths: { focusPath: string; backupDir?: string },
+  session: FocusSessionRecord,
+): Promise<void> {
+  let existing: unknown[] = [];
   try {
-    incoming = JSON.parse(body);
+    const parsed = JSON.parse(await fsp.readFile(userPaths.focusPath, 'utf-8'));
+    if (Array.isArray(parsed)) existing = parsed;
+  } catch { existing = []; }
+  const merged = dedupeFocusHistory([session, ...existing] as any)
+    .sort((a, b) => String(b.endedAt ?? '').localeCompare(String(a.endedAt ?? '')))
+    .slice(0, 1000);
+  await safeWriteJsonFile({
+    filePath: userPaths.focusPath,
+    backupDir: userPaths.backupDir,
+    baseName: 'focus-sessions',
+    body: JSON.stringify(merged),
+    kind: 'array',
+    force: true,
+  });
+}
+
+/** The session array out of either accepted body shape. */
+function focusSessionsOf(body: string): unknown[] {
+  try {
+    const parsed = JSON.parse(body);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).sessions)) {
+      return (parsed as any).sessions;
+    }
+  } catch { /* fall through */ }
+  return [];
+}
+
+/** The ids the sender says it deliberately removed, if it said anything. */
+function focusRemovedIdsOf(body: string): string[] {
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).removedIds)) {
+      return (parsed as any).removedIds.filter((v: unknown): v is string => typeof v === 'string');
+    }
+  } catch { /* fall through */ }
+  return [];
+}
+
+/**
+ * Fold a client's save into what is on disk.
+ *
+ * The rule itself lives in `src/lib/focusStats.ts` as `foldFocusSessions`, with
+ * its reasoning and its tests. This is only the file handling around it: a
+ * deletion that can be undone by the next save from another window is how one
+ * Tuesday came to report thirty hours, and that is not a rule to keep a second
+ * copy of.
+ */
+async function mergeFocusSessions(filePath: string, body: string): Promise<string> {
+  const incoming = focusSessionsOf(body);
+  // An unparseable or wrongly shaped body is handed straight on so
+  // `safeWriteJsonFile` can reject it, rather than being silently read as "the
+  // user deleted everything".
+  try {
+    const parsed = JSON.parse(body);
+    const shaped = Array.isArray(parsed)
+      || (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).sessions));
+    if (!shaped) return body;
   } catch {
-    return body; // let safeWriteJsonFile reject it
+    return body;
   }
-  if (!Array.isArray(incoming)) return body;
 
   let existing: unknown[] = [];
   try {
@@ -101,22 +174,11 @@ async function mergeFocusSessions(filePath: string, body: string): Promise<strin
   } catch {
     existing = [];
   }
-  if (existing.length === 0) return body;
 
-  const byId = new Map<string, Record<string, unknown>>();
-  // Existing first, then incoming — so the sender's version of a row it does
-  // know about (e.g. an edited duration) wins.
-  for (const list of [existing, incoming as unknown[]]) {
-    for (const row of list) {
-      if (!row || typeof row !== 'object') continue;
-      const id = (row as Record<string, unknown>).id;
-      if (typeof id !== 'string') continue;
-      byId.set(id, row as Record<string, unknown>);
-    }
-  }
-
-  const merged = [...byId.values()].sort((a, b) =>
-    String(b.endedAt ?? '').localeCompare(String(a.endedAt ?? ''))
+  const merged = foldFocusSessions(
+    existing as any,
+    incoming as any,
+    focusRemovedIdsOf(body),
   ).slice(0, 1000);
   return JSON.stringify(merged);
 }
@@ -1137,6 +1199,17 @@ export default defineConfig({
                 endTime,
                 content: gEv.summary,
                 color: resolvedColor,
+                // SPELLED OUT, NOT LEFT ABSENT. Both pull passes merge with
+                // `{ ...ev, ...g }`, so a key this branch does not write falls
+                // through from the old local record. An event that was all-day
+                // and is given a start time in Google therefore kept
+                // `allDay: true` and its stale `daysSpan` while adopting the
+                // new time: it went on rendering in the all-day band, across
+                // however many days it used to span, wearing a time it did not
+                // honour. The all-day branch always wrote the key, which is why
+                // the other direction worked and this one did not.
+                allDay: undefined,
+                daysSpan: undefined,
                 ...(gCalHex ? { gCalHex } : {}),
                 weekKey,
                 ...(recur ? { recur } : {}),
@@ -1202,12 +1275,17 @@ export default defineConfig({
           // Build the Google event body for an app-owned event. The first occurrence
           // is the master's anchor (weekKey + dayIndex); repetition (if any) comes
           // from `ev.recur` via buildGoogleRecurrence, so app and Google agree 1:1.
-          function constructGoogleEventBody(ev, format, addDays, buildRecur, plannerId) {
+          function constructGoogleEventBody(ev, format, addDays, buildRecur, plannerId, weekStartsOn) {
             const weekStartDate = new Date((ev.weekKey || '0000-01-01') + 'T00:00:00');
             const eventDate = addDays(weekStartDate, ev.dayIndex || 0);
             const dateStr = format(eventDate, 'yyyy-MM-dd');
             const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-            const recurrence = ev.recur ? buildRecur(ev, tz) : undefined;
+            // The week start goes INTO the rule as WKST. Without it Google expands
+            // a fortnightly repeat against its own RFC 5545 default of Monday
+            // while this app expands it against the user's setting, so the two
+            // silently land on different dates the moment that setting is
+            // anything but Monday.
+            const recurrence = ev.recur ? buildRecur(ev, tz, weekStartsOn) : undefined;
             const googleColorId = ev.color ? SWATCH_TO_GOOGLE_COLOR_ID[ev.color] : undefined;
 
             if (ev.allDay) {
@@ -1941,7 +2019,7 @@ export default defineConfig({
                   if (!policy.gcalPushOtherCalendars) continue;
                   if (ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt)) {
                     try {
-                      const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
+                      const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id, weekStartsOnOpt);
                       const updRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(ev.gCalCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
@@ -1978,7 +2056,7 @@ export default defineConfig({
 
                 if (!ev.gCalId) {
                   try {
-                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
+                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id, weekStartsOnOpt);
                     const insRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
@@ -2001,7 +2079,7 @@ export default defineConfig({
                 }
                 else if (ev.updatedAt && (!ev.lastSyncedAt || ev.updatedAt > ev.lastSyncedAt)) {
                   try {
-                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id);
+                    const body = constructGoogleEventBody(ev, format, addDays, buildGoogleRecurrence, id, weekStartsOnOpt);
                     const updRes = await gfetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events/${encodeURIComponent(ev.gCalId)}`, {
                       method: 'PUT',
                       headers: { 'Content-Type': 'application/json' },
@@ -3032,12 +3110,17 @@ ${body}
            * save the app builds from it can be merged against the right
            * baseline rather than against whatever is on disk by then.
            */
-          const noteServed = (username: string, store: 'events' | 'tasks', raw: string) => {
+          const noteServed = (
+            username: string, store: 'events' | 'tasks', raw: string,
+          ): string | undefined => {
             try {
               const parsed = JSON.parse(raw);
-              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
-              syncService.noteBase(username, store, parsed);
-            } catch { /* not JSON yet */ }
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+              // Returned so the copy can be NAMED to the client. Without a name
+              // it could never be asked for again, which is why every save fell
+              // back to diffing against disk.
+              return syncService.noteBase(username, store, parsed);
+            } catch { /* not JSON yet */ return undefined; }
           };
 
           /** The base id the client stamped onto this save, if any. */
@@ -3057,7 +3140,13 @@ ${body}
             if (req.method === 'GET') {
               try {
                 const data = await fs.readFile(userPaths.dbPath, 'utf-8');
-                noteServed(auth.user.username, 'events', data);
+                const servedBase = noteServed(auth.user.username, 'events', data);
+                // The name of the copy this window is about to build its
+                // next save from. It comes back on that save as
+                // `x-planner-base`, and the diff is taken against this
+                // exact version rather than against whatever is on disk by
+                // then.
+                if (servedBase) res.setHeader('x-planner-base', servedBase);
                 res.setHeader('Content-Type', 'application/json');
                 res.end(data);
               } catch (err) {
@@ -3104,7 +3193,13 @@ ${body}
             if (req.method === 'GET') {
               try {
                 const data = await fs.readFile(userPaths.tasksPath, 'utf-8');
-                noteServed(auth.user.username, 'tasks', data);
+                const servedBase = noteServed(auth.user.username, 'tasks', data);
+                // The name of the copy this window is about to build its
+                // next save from. It comes back on that save as
+                // `x-planner-base`, and the diff is taken against this
+                // exact version rather than against whatever is on disk by
+                // then.
+                if (servedBase) res.setHeader('x-planner-base', servedBase);
                 res.setHeader('Content-Type', 'application/json');
                 res.end(data);
               } catch {
@@ -3145,6 +3240,13 @@ ${body}
         // as accurate as the API was that day).
         server.middlewares.use('/api/prayer-times', async (req, res, next) => {
           if (req.method !== 'GET') { next(); return; }
+          // SIGNED IN, like every other data route. This was the one that was
+          // not, and it takes arbitrary city and country strings, fetches
+          // api.aladhan.com on demand, and writes each distinct query into one
+          // shared file that nothing ever prunes -- so anyone who could reach
+          // the public Funnel URL could drive unbounded outbound requests from
+          // this machine and grow that file without limit.
+          if (!(await requireAuth(req, res))) return;
           const fs = await import('fs/promises');
           const path = await import('path');
           const cachePath = path.resolve(import.meta.dirname, '..', '..', 'database', 'prayer-times.json');
@@ -3288,6 +3390,17 @@ ${body}
             rootDir,
             listUsers: async () => (await loadAccessConfig(rootDir)).users.map(u => u.username),
             ensureUser: (username: string) => ensureUserDb(rootDir, username),
+            // A "Done" pressed on a Windows toast writes database.json or
+            // tasks.json directly, which is the one writer that does not pass
+            // through /api/events or the per-user queue. Routing the result
+            // into the same ingest every other save uses means the tick becomes
+            // ops like anything else, instead of a raw file write that a
+            // concurrent rebuild would revert.
+            onStoreWritten: (username, store, snapshot) => {
+              void ensureUserDb(rootDir, username).then(userPaths =>
+                syncService.ingestFile(username, syncPathsOf(userPaths), store, snapshot as any),
+              ).catch(err => console.error('[notify] ingest failed:', err));
+            },
           });
           notifications.start();
 
@@ -3702,7 +3815,13 @@ ${body}
             req.on('end', async () => {
               try {
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
-                const merged = force ? body : await mergeFocusSessions(userPaths.focusPath, body);
+                // `force` replaces the file outright (a restore, an import).
+                // It still has to cope with the `{ sessions, removedIds }`
+                // shape, or a client that sends one would write an object into
+                // a file every reader expects to be an array.
+                const merged = force
+                  ? JSON.stringify(dedupeFocusHistory(focusSessionsOf(body) as any))
+                  : await mergeFocusSessions(userPaths.focusPath, body);
                 const result = await safeWriteJsonFile({ filePath: userPaths.focusPath, backupDir: userPaths.backupDir, baseName: 'focus-sessions', body: merged, kind: 'array', force });
                 res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
@@ -3768,7 +3887,23 @@ ${body}
               lastSent[name] = data;
               // The app builds its next save from this frame, so this version
               // has to be one the merge can look up later.
-              if (name === 'events' || name === 'tasks') noteServed(user.username, name, data);
+              // THE FRAME CARRIES ITS OWN BASELINE ID.
+              //
+              // The 40-deep baseline history exists so a save can be diffed
+              // against the exact copy the writer built it from, rather than
+              // against whatever is on disk by the time it lands -- the
+              // difference between "what did this window change" and "how
+              // does this differ from the PC's newer state". The client had
+              // no way to name that copy, so it never sent one, and the
+              // machinery maintained on every GET and every frame was inert.
+              //
+              // SSE's own `id:` field is exactly "which frame is this", it
+              // reaches the browser as `evt.lastEventId`, and this server
+              // ignores Last-Event-ID on reconnect, so nothing else reads it.
+              const baseId = (name === 'events' || name === 'tasks')
+                ? noteServed(user.username, name, data)
+                : undefined;
+              if (baseId) res.write(`id: ${baseId}\n`);
               res.write(`event: ${name}\ndata: ${formatSsePayload(data)}\n\n`);
             } catch (_) { /* not written yet */ }
           };
@@ -3987,12 +4122,32 @@ ${body}
           const url = new URL(req.url ?? '', 'http://x');
           const route = url.pathname.replace(/\/+$/, '');
 
-          res.setHeader('Access-Control-Allow-Origin', '*');
+          // NO WILDCARD CORS, AND NO WRITES FROM OFF THIS NETWORK.
+          //
+          // The desk controller is an ESP32 on the LAN. It is not a browser, so
+          // it never needed a CORS header at all, and `Allow-Origin: *` on a set
+          // of unauthenticated POST routes meant any web page open in any
+          // browser on this machine could reach them on localhost:5173 and drive
+          // the LCD, the presence config and the controller state. The planner's
+          // own page is same-origin and is unaffected by removing it.
+          //
+          // The read routes stay open to the LAN so the board can poll them; the
+          // write routes are refused to anything that arrived through the
+          // Funnel, which is what `x-forwarded-for` marks.
           res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
           res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
           if (req.method === 'OPTIONS') {
             res.statusCode = 204;
             res.end();
+            return;
+          }
+
+          const hwRemote = (req.socket as any)?.remoteAddress || '';
+          const hwProxied = Boolean(req.headers?.['x-forwarded-for']);
+          if (req.method === 'POST' && (hwProxied || !isLocalAddress(String(hwRemote)))) {
+            res.statusCode = 403;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'The desk is reachable from this network only.' }));
             return;
           }
 
@@ -4161,35 +4316,40 @@ ${body}
 
           const fs = await import('fs/promises');
           try {
-            let timer: Record<string, unknown> = { plannedSeconds: 3600, accumulatedSeconds: 0, isRunning: false, lastStartedAt: null, sessionStartedAt: null, lastPausedAt: null };
+            // THROUGH THE SHARED REDUCER, not arithmetic written out again here.
+            //
+            // This used to rebuild the timer field by field and do its own sum:
+            // if it said running, add `now - lastStartedAt` to the accumulated
+            // seconds and pause. With the PC hibernated overnight that
+            // difference is the whole night, so sitting down at the desk the
+            // next morning banked hours into a one-hour session, which then
+            // landed on the NEW day as work nobody had done. It also dropped
+            // `updatedAt` on every toggle -- the very stamp that lets a ghost
+            // session be recognised as a ghost -- so it made the detection of
+            // its own damage harder.
+            //
+            // `reduceFocusTimer` settles an overdue session at the moment it
+            // ran out, caps what can be banked, keeps every field, and is the
+            // same code the phone runs.
+            let stored: unknown = null;
             try {
-              const parsed = JSON.parse(await fs.readFile(userPaths.timerPath, 'utf-8'));
-              if (parsed && typeof parsed === 'object') {
-                timer = {
-                  plannedSeconds: Number(parsed.plannedSeconds) || 3600,
-                  accumulatedSeconds: Math.max(0, Number(parsed.accumulatedSeconds) || 0),
-                  isRunning: Boolean(parsed.isRunning),
-                  lastStartedAt: typeof parsed.lastStartedAt === 'string' ? parsed.lastStartedAt : null,
-                  sessionStartedAt: typeof parsed.sessionStartedAt === 'string' ? parsed.sessionStartedAt : null,
-                  lastPausedAt: typeof parsed.lastPausedAt === 'string' ? parsed.lastPausedAt : null,
-                  creditedSeconds: Math.max(0, Number(parsed.creditedSeconds) || 0),
-                };
-              }
+              stored = JSON.parse(await fs.readFile(userPaths.timerPath, 'utf-8'));
             } catch (_) { /* no file yet → defaults */ }
 
-            const nowIso = new Date().toISOString();
-            if (timer.isRunning) {
-              const ran = timer.lastStartedAt
-                ? Math.max(0, Math.floor((Date.now() - new Date(timer.lastStartedAt as string).getTime()) / 1000))
-                : 0;
-              timer = { ...timer, accumulatedSeconds: (timer.accumulatedSeconds as number) + ran, isRunning: false, lastStartedAt: null, lastPausedAt: nowIso };
-            } else {
-              timer = { ...timer, isRunning: true, lastStartedAt: nowIso, sessionStartedAt: timer.sessionStartedAt || nowIso, lastPausedAt: null };
+            const before = coerceFocusTimer(stored);
+            const out = reduceFocusTimer(before, { kind: 'toggle' }, Date.now(), 'desk');
+
+            await safeWriteJsonFile({ filePath: userPaths.timerPath, backupDir: userPaths.backupDir, baseName: 'focus-timer', body: JSON.stringify(out.state), kind: 'object', force: true });
+
+            // A session the toggle FINISHED is history, and has to be written as
+            // such. The old endpoint could not produce one, so an hour ended by
+            // the hotkey sat in the timer until a window happened to open.
+            if (out.session) {
+              await appendFocusSession(userPaths, out.session);
             }
 
-            await safeWriteJsonFile({ filePath: userPaths.timerPath, backupDir: userPaths.backupDir, baseName: 'focus-timer', body: JSON.stringify(timer), kind: 'object', force: true });
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: true, isRunning: timer.isRunning, timer }));
+            res.end(JSON.stringify({ success: true, isRunning: out.state.isRunning, timer: out.state, logged: out.session ?? null }));
           } catch (err) {
             res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');
@@ -4376,7 +4536,11 @@ ${body}
               return next();
             }
             let file = path.join(distDir, decodeURIComponent(urlPath));
-            if (!file.startsWith(distDir)) return next();
+            // `distDir + sep`, not `distDir`. `path.join` normalises `..` away
+            // before this runs, so real traversal was already blocked -- but a
+            // plain prefix test on the string also admits any SIBLING whose
+            // name starts with the same characters (`dist/public-anything`).
+            if (!file.startsWith(distDir + path.sep)) return next();
             let stat = await fs.stat(file).catch(() => null);
             // Client-side routes (/settings, /widget) have no file of their own
             // and must be answered with the shell.

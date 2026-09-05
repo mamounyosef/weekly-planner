@@ -9,7 +9,7 @@
 // Run with: npx tsx src/lib/syncClient.test.ts
 
 import assert from 'node:assert/strict';
-import { emptyState, makeOps, mergeOps, readStore, type SyncConflict, type SyncOp } from './sync';
+import { emptyState, makeOps, mergeOps, readEntity, readStore, type SyncConflict, type SyncOp } from './sync';
 import { opsToSnapshot, snapshotToOps, type Snapshot } from './syncBridge';
 import {
   applyLocalChange,
@@ -28,7 +28,9 @@ import {
   reconcileConflicts,
   syncOnce,
   withJitter,
+  reconcileAfterSync,
   type ClientData,
+  type SyncOutcome,
   type PullResponse,
   type PushResponse,
   type SnapshotResponse,
@@ -761,6 +763,85 @@ console.log('--- 23. DEGENERATE AND HOSTILE SERVER REPLIES ---');
   // A reply with an empty ops array and no conflicts is a normal quiet sync.
   const quiet = await syncOnce(dbl.data, rewind, 13_000);
   assert.equal(quiet.phase, 'idle');
+}
+
+// ─── A cycle that changed nothing must LOOK like it changed nothing ─────────
+//
+// The phone parks a pull on the server for fifteen seconds, is told nothing
+// changed, and then used to rebuild the whole planner anyway. Not because the
+// data differed -- it was the same records, object for object -- but because
+// the wrapper around them was rebuilt, and every derived store, the day cache
+// and every mounted screen key on that wrapper. Roughly four times a minute,
+// for as long as the screen was on, plus a near-megabyte JSON encode and a
+// SQLite transaction to store exactly what was already stored.
+//
+// So identity is now part of the contract, and these tests pin it. They are
+// written against REFERENCES on purpose: "deepEqual" would pass on the broken
+// version too, which is exactly why the bug survived so long.
+{
+  console.log('\n--- AN IDLE CYCLE COSTS NOTHING ---');
+
+  const DEVICE = 'phone-1';
+
+  const emptyOutcome = (data: ClientData): SyncOutcome => ({
+    data, phase: 'idle', pushed: 0, pulled: 0, changed: false,
+  });
+
+  // ── reconcileAfterSync keeps every reference it was given ─────────────────
+  const base = emptyClientData(DEVICE);
+  const same = reconcileAfterSync(base, base, emptyOutcome(base));
+  assert.equal(same, base, 'nothing happened, so the very same object comes back');
+  assert.equal(same.state, base.state, 'and the state is the same object');
+  assert.equal(same.outbox, base.outbox, 'and the outbox');
+  assert.equal(same.conflicts, base.conflicts, 'and the conflict list');
+
+  // ── But a cycle that DID change something must still come through ─────────
+  // The dangerous failure is the other direction: calling a real change a no-op
+  // leaves the screen showing stale data, which is far worse than the waste.
+  const edited = applyLocalChange(base, {
+    store: 'events',
+    entityId: 'e1',
+    changes: { title: 'Dentist' },
+    at: 1_000,
+  });
+  assert.notEqual(edited, base, 'a local edit really does produce a new object');
+  assert.notEqual(edited.state, base.state, 'with new state');
+  assert.notEqual(edited.outbox, base.outbox, 'and a new outbox');
+
+  // An outcome that came back WITHOUT an edit the user made mid-flight must
+  // carry that edit forward, and must therefore not be identity-preserved.
+  const folded = reconcileAfterSync(base, edited, emptyOutcome(base));
+  assert.notEqual(folded, base, 'an edit made during the round trip is folded back in');
+  assert.equal(folded.outbox.length, edited.outbox.length,
+    'and its ops are still queued, so the server still gets them');
+  assert.ok(readEntity(folded.state, 'events', 'e1'), 'and the record is present');
+
+  // Replaying the same fold is a no-op: the ops are already there, so the
+  // second pass must not queue them twice.
+  const twice = reconcileAfterSync(edited, edited, emptyOutcome(folded));
+  assert.equal(twice.outbox.length, folded.outbox.length, 'folding twice queues nothing extra');
+
+  // ── A conflict list that loses nothing keeps its identity ────────────────
+  // `reconcileAfterSync` filters meaningless conflicts out. When it filters
+  // none -- the overwhelmingly common case -- it must hand back the array it
+  // was given rather than a fresh copy of it.
+  const withCards: ClientData = {
+    ...base,
+    conflicts: [{
+      id: 'c1', kind: 'field', store: 'events', entityId: 'e1', field: 'title',
+      // Two DIFFERENT values, or `isMeaninglessConflict` would drop the card
+      // and the identity check below would be measuring the wrong thing.
+      winner: { value: 'A', device: DEVICE, at: 2, lamport: 2 },
+      loser: { value: 'B', device: 'pc', at: 3, lamport: 3 },
+      detectedAt: 3,
+    }] as SyncConflict[],
+  };
+  const keptCards = reconcileAfterSync(withCards, withCards, emptyOutcome(withCards));
+  assert.equal(keptCards.conflicts, withCards.conflicts,
+    'a conflict list with nothing to drop is the same array');
+  assert.equal(keptCards, withCards, 'and so is the whole thing');
+
+  console.log('  An idle cycle returns exactly what it was handed');
 }
 
 console.log('\nALL PASS (client sync engine: outbox, retries, resync, conflicts)');

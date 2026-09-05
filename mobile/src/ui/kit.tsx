@@ -14,7 +14,7 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
-import { HIT, PRESS_DELAY, dark, radius, resolvePalette, space, type Palette, type ThemeMode, type as typeScale } from '../theme';
+import { HIT, MAX_FONT_SCALE, PRESS_DELAY, TAP_DELAY, dark, radius, resolvePalette, space, type Palette, type ThemeMode, type as typeScale } from '../theme';
 import { prefs } from '../lib/prefs';
 
 const ThemeContext = createContext<Palette>(dark);
@@ -78,12 +78,15 @@ export function Text({
   style,
   children,
   numberOfLines,
+  maxFontSizeMultiplier,
 }: {
   variant?: TextVariant;
   tone?: 'ink' | 'soft' | 'faint' | 'accent' | 'ok' | 'warn' | 'danger' | 'onAccent';
   style?: StyleProp<TextStyle>;
   children: React.ReactNode;
   numberOfLines?: number;
+  /** Overrides the variant's cap. `0` opts out of capping entirely. */
+  maxFontSizeMultiplier?: number;
 }) {
   const p = useTheme();
   const colour = {
@@ -91,9 +94,15 @@ export function Text({
     ok: p.ok, warn: p.warn, danger: p.danger, onAccent: p.accentInk,
   }[tone];
 
+  // Capped by variant unless the caller says otherwise. `0` is React Native's
+  // own way of saying "do not cap", and is passed through untouched so a screen
+  // whose whole purpose is large type can still opt out.
+  const cap = maxFontSizeMultiplier ?? MAX_FONT_SCALE[variant];
+
   return (
     <RNText
       numberOfLines={numberOfLines}
+      maxFontSizeMultiplier={cap === 0 ? undefined : cap}
       style={[
         typeScale[variant],
         { color: colour },
@@ -188,7 +197,13 @@ export function Button({
 
   return (
     <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+      /* NO DELAY. A `Button` is a committed action -- Save, Cancel, Delete,
+         Sign in -- always laid out as a full-width control and never as a row
+         you might be about to scroll past. `theme.ts` names this case exactly:
+         with nothing to disambiguate from, the hundred milliseconds are pure
+         latency, and they were being paid on the primary action of nearly
+         every sheet in the app. */
+      unstable_pressDelay={TAP_DELAY}
       onPress={onPress}
       disabled={off}
       android_ripple={{ color: variant === 'primary' ? 'rgba(0,0,0,0.15)' : p.accentSoft }}

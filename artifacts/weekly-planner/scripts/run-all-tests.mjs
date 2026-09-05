@@ -85,6 +85,8 @@ const testFiles = [
   'src/lib/prefsStore.test.ts',
   'src/lib/coalesce.test.ts',
   'src/lib/dayCache.test.ts',
+  'src/lib/gcalColor.test.ts',
+  'src/lib/focusIntegrity.test.ts',
 ];
 
 console.log(`\n======================================================`);

@@ -76,6 +76,8 @@ import {
   type FocusCueSlot,
   claimFocusCompletion,
   autoSessionId,
+  focusSessionId,
+  applyTypedDayTotals,
   dedupeFocusSessions,
   FOCUS_HEARTBEAT_INTERVAL_MS,
   MIN_RECOVERED_SESSION_SECONDS,
@@ -105,6 +107,7 @@ import {
   loadShortcuts,
   findConflicts,
   isReservedCombo,
+  SHORTCUT_DEFAULTS_VERSION,
 } from '@/lib/shortcuts';
 import {
   type Recurrence,
@@ -126,7 +129,7 @@ import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
 import { FocusLiveCountdown, FocusLiveProgress, FocusLiveStartingLabel } from '@/components/FocusLiveBits';
 import { publishLiveClock } from '@/lib/liveClock';
-import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, type EventCategory } from '@/lib/categories';
+import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
 import {
@@ -146,6 +149,7 @@ import {
 } from '@/lib/settingsSync';
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
+  resolveNotificationSettings,
   resolveSpec,
   specOrigin,
   type NotificationSettings,
@@ -232,7 +236,7 @@ const PRAYER_ROW_MIN_H = 28;
 const clampPanelWidth = (w: number) =>
   Math.max(TASK_PANEL_MIN_W, Math.min(TASK_PANEL_MAX_W, Math.round(Number.isFinite(w) ? w : 340)));
 
-// â”€â”€â”€ TEMP DEBUG: surface the real error the overlay hides â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── TEMP DEBUG: surface the real error the overlay hides ───────────────────────
 if (typeof window !== 'undefined' && !(window as any).__errDbg) {
   (window as any).__errDbg = true;
   window.addEventListener('error', (e) => {
@@ -243,7 +247,7 @@ if (typeof window !== 'undefined' && !(window as any).__errDbg) {
       line: e.lineno,
       col: e.colno,
       errorType: e.error?.constructor?.name ?? typeof e.error,
-      stack: e.error?.stack ?? '(no stack — likely ResizeObserver / cross-origin)',
+      stack: e.error?.stack ?? '(no stack, likely ResizeObserver / cross-origin)',
     });
   }, true);
   window.addEventListener('unhandledrejection', (e) => {
@@ -257,13 +261,13 @@ if (typeof window !== 'undefined' && !(window as any).__errDbg) {
   });
 }
 
-// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Types ────────────────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
 type EventColor    = 'sage' | 'peach' | 'blue' | 'sand' | 'lilac' | 'rose' | 'teal' | 'lavender' | 'emerald' | 'coral' | string;
 type TimeFormat    = '12h' | '24h';
 type WeekStartsOn  = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0=Sun … 6=Sat
 
-// Calendar zoom levels, narrowest â†’ widest. Ctrl+wheel steps along this axis.
+// Calendar zoom levels, narrowest ─ widest. Ctrl+wheel steps along this axis.
 type CalendarView = 'day' | 'week' | 'month' | 'year' | 'custom';
 const CALENDAR_VIEWS: CalendarView[] = ['day', 'week', 'month', 'year'];
 // 'custom' sits outside the zoom axis (it has its own width) but is still a
@@ -307,7 +311,7 @@ interface PlannerEvent {
   gCalRecurSig?: string;
   lastSyncedAt?: number;
   updatedAt?: number;
-  // â”€â”€ Recurrence (Google-style, see src/lib/recurrence.ts) â”€â”€
+  // ── Recurrence (Google-style, see src/lib/recurrence.ts) ──
   weekKey?: string;            // week-start date of the anchor (first) occurrence
   recur?: Recurrence;          // absent = does not repeat
   exdates?: string[];          // 'yyyy-MM-dd' occurrence dates removed individually
@@ -326,7 +330,7 @@ interface PlannerEvent {
 
 type PlannerData = Record<string, PlannerEvent>;
 
-// â”€â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Constants ────────────────────────────────────────────────────────────────
 const STORAGE_KEY      = 'planner-v3';
 const INTERVAL_KEY     = 'planner-interval';
 /* Per-device: what the focus station collapses to once it scrolls away. */
@@ -442,7 +446,7 @@ function matchPresetColor(hex: string | undefined): EventColor | null {
   return null;
 }
 
-// â”€â”€â”€ Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Utilities ─────────────────────────────────────────────────────────────────
 function timeToMin(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
@@ -534,7 +538,7 @@ function yToMin(y: number, interval: IntervalMin, dayStartH: number): number {
   return snapMin(dayStartH * 60 + (y / SLOT_H[interval]) * interval, POSITION_SNAP);
 }
 
-// â”€â”€â”€ All-Day Layout Stacking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── All-Day Layout Stacking ───────────────────────────────────────────────
 function layoutAllDay(
   events: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }>,
 ): Map<string, { row: number; visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }> {
@@ -580,8 +584,8 @@ function layoutAllDay(
 
 
 
-// â”€â”€â”€ Parallel layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Returns a map of eventId â†’ { col, numCols } for events within a single day column.
+// ─── Parallel layout ──────────────────────────────────────────────────────────
+// Returns a map of eventId ─ { col, numCols } for events within a single day column.
 // Uses a greedy sweep to assign sub-columns, then computes numCols per event based
 // on the maximum number of concurrent events during that event's span.  This way
 // a lone event elsewhere in the column never gets compressed by a crowded hour.
@@ -632,7 +636,7 @@ function layoutParallel(
   return result;
 }
 
-// â”€â”€â”€ Recurrence editor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Recurrence editor ───────────────────────────────────────────────────────
 // Google-style repeat controls: a preset row (Does not repeat / Daily / Weekly /
 // Monthly / Yearly / Custom) plus, when Custom, an interval + unit, weekday chips
 // (weekly), and an end condition (Never / On date / After N).
@@ -744,7 +748,7 @@ function RecurrenceEditor({ recur, anchorWeekday, onChange, theme }: {
   );
 }
 
-// â”€â”€â”€ Main Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Main Component ────────────────────────────────────────────────────────────
 export default function DailyPlanner() {
   const { user, logout } = useAuth();
   // Initialize state from local settings cache for instant display
@@ -796,13 +800,31 @@ export default function DailyPlanner() {
   const [autoBackup, setAutoBackup] = useState<AutoBackupCfg>(initialSettings.autoBackup);
   const [notificationSettings, setNotificationSettings] =
     useState<NotificationSettings>(initialSettings.notifications ?? DEFAULT_NOTIFICATION_SETTINGS);
+  /** Whether both machines run one set of reminder rules. Shared, and on by default. */
+  const [shareNotificationSettings, setShareNotificationSettings] =
+    useState<boolean>(initialSettings.shareNotificationSettings !== false);
+  /** This PC's own rules, used only while sharing is off. Absent until it has any. */
+  const [notificationsLocal, setNotificationsLocal] = useState<NotificationSettings | undefined>(undefined);
+
+  /**
+   * What this machine actually alerts by.
+   *
+   * Every reader below uses this rather than the shared copy, so switching
+   * sharing off changes what fires without changing anything about how it is
+   * read. With sharing on -- the default -- it IS the shared copy.
+   */
+  const effectiveNotifications = useMemo(() => resolveNotificationSettings({
+    shared: notificationSettings,
+    local: notificationsLocal,
+    share: shareNotificationSettings,
+  }), [notificationSettings, notificationsLocal, shareNotificationSettings]);
 
   // The notification centre. The store itself is owned by the server; this only
   // mirrors it, raises the in-app banner, and keeps this device's push
   // subscription and offline plan current.
   const notify = useNotifications({
-    soundEnabled: notificationSettings.sound,
-    inAppEnabled: notificationSettings.inApp,
+    soundEnabled: effectiveNotifications.sound,
+    inAppEnabled: effectiveNotifications.inApp,
   });
   const adoptNotificationFrame = notify.adoptStreamFrame;
   const [notifyPanelOpen, setNotifyPanelOpen] = useState(false);
@@ -853,6 +875,11 @@ export default function DailyPlanner() {
   useEffect(() => { recordingActionRef.current = recordingAction; }, [recordingAction]);
   const showShortcutHelpRef = useRef(false);
   useEffect(() => { showShortcutHelpRef.current = showShortcutHelp; }, [showShortcutHelp]);
+  // Read by the global Escape handler, which is registered once and must not be
+  // rebuilt every time one of these opens or closes.
+  const settingsOpenRef = useRef(false);
+  const filterMenuOpenRef = useRef(false);
+  const confirmFocusModalRef = useRef(false);
   // Late-bound handles for the shortcut runner: the global keydown effect is set
   // up long before these functions exist, so it calls through this ref instead.
   const navRef = useRef({
@@ -978,7 +1005,7 @@ export default function DailyPlanner() {
   const [sidebarStyle, setSidebarStyle]     = useState<SidebarStyle>(initialSettings.sidebarStyle);
   const [timeFormat, setTimeFormat]         = useState<TimeFormat>(initialSettings.timeFormat);
   const [weekStartsOn, setWeekStartsOn]     = useState<WeekStartsOn>(initialSettings.weekStartsOn);
-  // Zoom levels, narrowest â†’ widest. Ctrl+wheel steps through them.
+  // Zoom levels, narrowest ─ widest. Ctrl+wheel steps through them.
   const [calendarView, setCalendarView] = useState<CalendarView>(() => {
     if (isCalendarView(initialSettings.calendarView)) return initialSettings.calendarView;
     return 'week';
@@ -996,6 +1023,7 @@ export default function DailyPlanner() {
   const [zoomDraft, setZoomDraft] = useState('100');
   const [editingZoom, setEditingZoom] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
   // ── Mobile shell ──────────────────────────────────────────────────────────
   // A phone can't show the calendar, the tasks panel and the focus timer side
   // by side, so on a narrow screen they become tabs behind a bottom bar. On a
@@ -1029,7 +1057,7 @@ export default function DailyPlanner() {
   useEffect(() => { settingsRouteOpenRef.current = settingsRouteOpen; }, [settingsRouteOpen]);
   // Whether the focus banner is unfolded on a phone (desktop always shows it).
   const [focusBannerOpen, setFocusBannerOpen] = useState(false);
-  // â”€â”€ Tasks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Tasks ──────────────────────────────────────────────────────────────────
   const [tasksPanelOpen, setTasksPanelOpen]   = useState<boolean>(initialSettings.tasksPanelOpen);
   const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
   const [showTaskRow, setShowTaskRow]         = useState<boolean>(initialSettings.showTaskRow);
@@ -1157,6 +1185,7 @@ export default function DailyPlanner() {
     [hiddenCategoriesByView, currentFilterKey],
   );
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  useEffect(() => { filterMenuOpenRef.current = filterMenuOpen; }, [filterMenuOpen]);
   const [filterMenuPos, setFilterMenuPos] = useState<{ x: number; y: number } | null>(null);
   const filterBtnRef = useRef<HTMLButtonElement | null>(null);
   const [analysisRangeMode, setAnalysisRangeMode] = useState<FocusRangeMode>('calendar');
@@ -1200,6 +1229,7 @@ export default function DailyPlanner() {
     oldSeconds: number;
     newSeconds: number;
   } | null>(null);
+  useEffect(() => { confirmFocusModalRef.current = confirmFocusModal !== null; }, [confirmFocusModal]);
   // Google Calendar Integration State
   const [gCalStatus, setGCalStatus] = useState<{
     configured: boolean;
@@ -2291,7 +2321,7 @@ export default function DailyPlanner() {
       window.history.replaceState({}, document.title, window.location.pathname);
       showToast(
         authError === 'access_denied'
-          ? 'Google sign-in was cancelled — not connected.'
+          ? 'Google sign-in was cancelled. Nothing is connected.'
           : `Google sign-in failed: ${authError}`,
         'error',
       );
@@ -2371,7 +2401,7 @@ export default function DailyPlanner() {
   }, [tasks, taskMenuId, tasksSyncReady, triggerTasksSync]);
 
 
-  // â”€â”€ Derived â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Derived ───────────────────────────────────────────────────────────────
   const weekStart   = startOfWeek(currentDate, { weekStartsOn });
   const days        = eachDayOfInterval({ start: weekStart, end: endOfWeek(currentDate, { weekStartsOn }) });
   // Day view reuses the whole week grid but paints a single column. Events keep
@@ -2544,7 +2574,7 @@ export default function DailyPlanner() {
       ?? { bg: '#e0f2fe', border: '#7dd3fc', text: '#0c4a6e', textMuted: '#0369a1' },
     [darkMode, eventColorStyle, pageBg, taskColor]);
 
-  // â”€â”€ Modification domain / week resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Modification domain / week resolution ──────────────────────────────────
   const viewedWeekKey     = weekKeyOf(currentDate, weekStartsOn);
   const currentRealWeekKey = weekKeyOf(new Date(nowTick), weekStartsOn);
   const isPastWeek        = viewedWeekKey < currentRealWeekKey;
@@ -2607,7 +2637,7 @@ export default function DailyPlanner() {
   }, [allDayLayout]);
   const allDayHeight = maxAllDayRowIndex > 0 ? (maxAllDayRowIndex * 28 + 8) : 36;
 
-  // â”€â”€ Task bands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Task bands ─────────────────────────────────────────────────────────────
   // Tasks visible in the viewed week, split by kind. Unlike all-day events a task
   // never spans days, so the dated band needs no packing layout — each chip sits
   // in its own day column.
@@ -2648,13 +2678,13 @@ export default function DailyPlanner() {
     ? Math.max(TASK_ROW_MIN_H, maxTasksInAnyCol * (TASK_CHIP_H + 2) + 8)
     : 0;
 
-  // â”€â”€ Prayer times â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Prayer times ────────────────────────────────────────────────────────
   // Drawn from the API-backed cache, never from the events store: a prayer has a
   // start time and no duration, so it is a marker on the grid, not a block.
   const visibleColsSig = visibleCols.join(',');
   const prayerDates = useMemo(() => {
     const days = visibleCols.map(c => dayAt(c));
-    // A column for day D runs D dayStart â†’ D+1 dayStart, so the day AFTER the last
+    // A column for day D runs D dayStart ─ D+1 dayStart, so the day AFTER the last
     // column can still contribute its pre-dawn prayers and has to be loaded too.
     if (days.length) days.push(addDays(days[days.length - 1], 1));
     return days;
@@ -2726,7 +2756,7 @@ export default function DailyPlanner() {
    * Total height of every fixed band above the scrollable time grid: the day
    * header, the All Day row, the task row and the prayer row.
    *
-   * EVERY mouse-Y â†’ minute conversion and every absolutely-positioned overlay
+   * EVERY mouse-Y ─ minute conversion and every absolutely-positioned overlay
    * inside `daysGridRef` MUST use this instead of adding the pieces up itself —
    * that is what keeps a new band from silently breaking drag, resize, marquee
    * select and click-to-create. There must be no `HEADER_PX + allDayHeight`
@@ -2932,6 +2962,7 @@ export default function DailyPlanner() {
         (s as unknown as Record<string, unknown>)[k];
     }
     const handled: Record<keyof AppSettings, true> = {
+      shareNotificationSettings: true,
       interval: true, darkMode: true, darkPreset: true, lightPreset: true,
       widgetDarkPreset: true, widgetLightPreset: true, eventColorStyle: true,
       sidebarStyle: true, timeFormat: true, weekStartsOn: true, dayStartH: true,
@@ -2963,6 +2994,7 @@ export default function DailyPlanner() {
     setShortcuts(s.shortcuts);
     setAutoBackup(s.autoBackup);
     setNotificationSettings(s.notifications);
+    setShareNotificationSettings(s.shareNotificationSettings !== false);
     setTaskColor(s.taskColor);
     setTaskCheckboxShape(s.taskCheckboxShape);
     setTaskFilters(canonicalFilters(s.taskFilters));
@@ -3009,6 +3041,7 @@ export default function DailyPlanner() {
       timeFormat,
       weekStartsOn,
       focusDayStartHour,
+      focusDailyGoalSeconds: initialSettings.focusDailyGoalSeconds,
       focusChime,
       focusCues,
       focusExcludedDates,
@@ -3031,11 +3064,26 @@ export default function DailyPlanner() {
       gcalMirrorLocalDeletions: initialSettings.gcalMirrorLocalDeletions,
       gcalMirrorGoogleDeletions: initialSettings.gcalMirrorGoogleDeletions,
       prayer,
+      // MUST BE HERE. This snapshot is both what gets broadcast to the other
+      // windows AND what gets saved to settings.json, and `coerceSettings`
+      // fills in anything absent with the DEFAULTS -- whose prayer spec is off.
+      //
+      // So leaving it out meant: turn prayer reminders on, let this window save
+      // settings for any reason at all, and the whole `notifications` object
+      // was rewritten as defaults. Prayer reminders went off on their own, on
+      // refresh, every time. And because `notifications` is a shared setting,
+      // the defaulted copy synced to the phone and turned them off there too --
+      // which is why it looked like two separate bugs.
+      //
+      // An absent key here is not "unchanged", it is "reset".
+      notifications: notificationSettings,
+      shareNotificationSettings,
       hardware,
       categories,
       taskLists,
+      shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,
     });
-  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, autoRollRecurringTasks, googleTasksSync, prayer, hardware, categories, taskLists, initialSettings]);
+  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, autoRollRecurringTasks, googleTasksSync, prayer, notificationSettings, shareNotificationSettings, hardware, categories, taskLists, initialSettings]);
 
   // ── This device's own settings ───────────────────────────────────────────
   // Everything the shared file no longer speaks for: which view fits this
@@ -3068,11 +3116,12 @@ export default function DailyPlanner() {
     hiddenCategoryIds,
     hiddenCategoriesByView,
     prayerLanguage,
+    notificationsLocal,
   }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, mobileSwipeViewSwitch, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
        appZoom, mobileContentZoom, mobileUiZoom, analysisTab, analysisRangeMode, mobileTab, hiddenCategoryIds, hiddenCategoriesByView,
-       prayerLanguage]);
+       prayerLanguage, notificationsLocal]);
 
   /** Adopt a stored device snapshot into the live state. */
   const applyDeviceSettings = useCallback((d: DeviceSettings) => {
@@ -3216,7 +3265,13 @@ export default function DailyPlanner() {
     for (const [id, ev] of Object.entries(eventsRef.current)) {
       const catColor = ev.categoryId ? next[ev.categoryId] : undefined;
       if (catColor && recoloured.has(ev.categoryId as string) && ev.color !== catColor) {
-        updated[id] = { ...ev, color: catColor };
+        // `updatedAt`, or the push pass never looks at it. That pass sends an
+        // event only when `updatedAt > lastSyncedAt`, so after any previous
+        // sync a repaint written without a stamp was invisible to it -- and the
+        // exact failure this effect exists to prevent (the app showing green
+        // while Google still shows orange) happened anyway, for every event
+        // whose category was recoloured.
+        updated[id] = { ...ev, color: catColor, updatedAt: Date.now() };
         touched = true;
       } else {
         updated[id] = ev;
@@ -3316,9 +3371,21 @@ export default function DailyPlanner() {
   }, [showToast]);
 
   const handleDeleteCategory = useCallback((catId: string) => {
-    setCategories(prev => prev.filter(c => c.id !== catId));
+    // The filter menu's editor used to be a plain `filter`, so deleting the
+    // last category here wrote an empty array -- which `coerceCategories`
+    // reads as corruption and replaces with the two built-in defaults, which
+    // then sync to every device. The settings page always refused this; this
+    // one silently did the opposite of what it said.
+    setCategories(prev => {
+      if (!canDeleteCategory(prev, catId)) return prev;
+      return deleteCategory(prev, catId);
+    });
+    if (!canDeleteCategory(categories, catId)) {
+      showToast(LAST_CATEGORY_MESSAGE, 'error');
+      return;
+    }
     showToast('Category deleted', 'info');
-  }, [showToast]);
+  }, [showToast, categories]);
 
   // ── Linked items ────────────────────────────────────────────────────────────
   // A link group is a plain shared id. Membership is resolved against what is
@@ -3396,17 +3463,23 @@ export default function DailyPlanner() {
   // Delete the occurrence shown as `id`. `mode` scopes a repeating item's delete
   // ('one' = just this occurrence; 'following'; 'all'). Non-repeating ignores it.
   const applyDelete = useCallback((id: string, mode: DeleteMode = 'one') => {
-    writeEvents(deleteScoped(eventsRef.current, id, mode));
-  }, [writeEvents]);
+    // THE SAME WEEK PHASE THE GRID DREW IT ON. `deleteScoped` expands the
+    // series to answer "is this the first occurrence, so 'following' collapses
+    // to delete-all?", and it used to expand against Sunday while the grid the
+    // user clicked in used their real setting. For any weekly rule repeating
+    // every second week or longer the two disagree from the second occurrence,
+    // so the decision was made about a series nobody was looking at.
+    writeEvents(deleteScoped(eventsRef.current, id, mode, weekStartsOn));
+  }, [writeEvents, weekStartsOn]);
   const applyDeleteRef = useRef(applyDelete);
   useEffect(() => { applyDeleteRef.current = applyDelete; }, [applyDelete]);
 
   // Delete several visible occurrences at once (keyboard delete = 'one' each).
   const applyDeleteMany = useCallback((ids: Iterable<string>) => {
     let map = eventsRef.current;
-    for (const id of ids) map = deleteScoped(map, id, 'one');
+    for (const id of ids) map = deleteScoped(map, id, 'one', weekStartsOn);
     writeEvents(map);
-  }, [writeEvents]);
+  }, [writeEvents, weekStartsOn]);
   const applyDeleteManyRef = useRef(applyDeleteMany);
   useEffect(() => { applyDeleteManyRef.current = applyDeleteMany; }, [applyDeleteMany]);
 
@@ -3583,7 +3656,7 @@ export default function DailyPlanner() {
     setEditingId(null);
   }, []);
 
-  // â”€â”€ Live time indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Live time indicator ────────────────────────────────────────────────────
   const nowDate = useMemo(() => new Date(nowTick), [nowTick]);
   const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
@@ -3673,7 +3746,7 @@ export default function DailyPlanner() {
       setShowLiveBtn(false);
       return;
     }
-    // No line on screen (other week / month view / analysis) â†’ jump to now first.
+    // No line on screen (other week / month view / analysis) ─ jump to now first.
     pendingLiveScrollRef.current = true;
     setDirection(0);
     setCurrentDate(new Date());
@@ -3737,7 +3810,10 @@ export default function DailyPlanner() {
   const focusLoggedByDay = useMemo(() => {
     const seconds = new Map<string, number>();
     const sessions = new Map<string, number>();
-    for (const s of focusSessions) {
+    // The same two rules `summariseFocus` applies, because this screen buckets
+    // the history itself rather than going through it: collapse a session
+    // logged twice, and let a typed day total stand in for the day it corrected.
+    for (const s of applyTypedDayTotals(focusSessions, focusDayStartHour)) {
       const k = focusDayKey(s.endedAt, focusDayStartHour);
       seconds.set(k, (seconds.get(k) ?? 0) + s.durationSeconds);
       if (isCompletedFocusSession(s)) sessions.set(k, (sessions.get(k) ?? 0) + 1);
@@ -3791,16 +3867,20 @@ export default function DailyPlanner() {
     };
   }, [activeFocusDayKey, focusDayLiveSeconds, focusLoggedWeek, todayFocusKey]);
 
-  // â”€â”€ Focus analysis (month / year) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Focus analysis (month / year) ──────────────────────────────────────────
   const focusAnalysis = useMemo(() => {
     const byDaySeconds = new Map<string, number>();
     const byDaySessions = new Map<string, number>();
-    for (const s of focusSessions) {
+    // The same two rules `summariseFocus` applies, because this screen buckets
+    // the history itself rather than going through it: collapse a session
+    // logged twice, and let a typed day total stand in for the day it corrected.
+    const corrected = applyTypedDayTotals(focusSessions, focusDayStartHour);
+    for (const s of corrected) {
       const k = focusDayKey(s.endedAt, focusDayStartHour);
       byDaySeconds.set(k, (byDaySeconds.get(k) ?? 0) + s.durationSeconds);
       if (isCompletedFocusSession(s)) byDaySessions.set(k, (byDaySessions.get(k) ?? 0) + 1);
     }
-    const completedSessions = focusSessions.filter(isCompletedFocusSession);
+    const completedSessions = corrected.filter(isCompletedFocusSession);
 
     // Week view — every day of the cursored week with its exact logged time.
     //
@@ -4055,7 +4135,10 @@ export default function DailyPlanner() {
       if (uiBusyRef.current) return;
       if (Date.now() - lastLocalTasksWriteRef.current < 3000) return;
       fetch('/api/tasks')
-        .then(r => r.json())
+        .then(r => {
+          tasksBaseIdRef.current = r.headers.get('x-planner-base') ?? tasksBaseIdRef.current;
+          return r.json();
+        })
         .then(data => {
           if (!data || typeof data !== 'object') return;
           const next = coerceTasks(data);
@@ -4089,6 +4172,10 @@ export default function DailyPlanner() {
           if (!data || typeof data !== 'object' || Object.keys(data).length === 0) return;
           const next = migrateEvents(data as PlannerData).events;
           if (JSON.stringify(next) === JSON.stringify(eventsRef.current)) return;
+          // Adopted, so THIS frame is the copy the next save is built from.
+          // Recorded only here, never for a frame that was ignored.
+          const frameBase = (evt as MessageEvent).lastEventId;
+          if (frameBase) eventsBaseIdRef.current = frameBase;
           writeEvents(next);
         } catch (_) { /* ignore */ }
       });
@@ -4108,23 +4195,47 @@ export default function DailyPlanner() {
           // cleared), so this only guards against a malformed payload.
           const next = coerceTasks(data);
           if (JSON.stringify(next) === JSON.stringify(tasksRef.current)) return;
+          const frameBase = (evt as MessageEvent).lastEventId;
+          if (frameBase) tasksBaseIdRef.current = frameBase;
           writeTasks(next);
         } catch (_) { /* ignore */ }
       });
     } catch (_) { /* fall back to the poll */ }
 
-    // Safety net only — the stream is what makes this feel instant.
-    const focusPollId = setInterval(() => {
+    // SAFETY NET, NOT THE MECHANISM. The stream above is what makes a change
+    // land instantly; this only covers the stream being dead. While it is alive
+    // a 15s poll is pure waste -- two requests and two full `JSON.stringify` of
+    // the whole task store, on the main thread, four times a minute forever,
+    // growing with the database. The focus-timer poll beside this one already
+    // backs off on `onopen` for exactly that reason; this one never did.
+    //
+    // It also stops entirely while the tab is hidden, and catches up on the way
+    // back through the `visibilitychange` handler below.
+    let focusPollId = 0 as unknown as ReturnType<typeof setInterval>;
+    const pullBoth = () => {
+      if (document.visibilityState === 'hidden') return;
       loadFocusSessions();
       loadTasks();
-    }, 15000);
+    };
+    const setTaskPoll = (ms: number) => {
+      clearInterval(focusPollId);
+      focusPollId = setInterval(pullBoth, ms);
+    };
+    setTaskPoll(15_000);
+    if (dbStream) {
+      dbStream.addEventListener('open', () => setTaskPoll(60_000));
+      dbStream.addEventListener('error', () => setTaskPoll(15_000));
+    }
 
     const onWakeTasks = () => {
       loadTasks();
     };
     window.addEventListener('focus', onWakeTasks);
     const onVisChange = () => {
-      if (document.visibilityState === 'visible') loadTasks();
+      if (document.visibilityState === 'visible') {
+        loadTasks();
+        loadFocusSessions();
+      }
     };
     document.addEventListener('visibilitychange', onVisChange);
 
@@ -4247,16 +4358,39 @@ export default function DailyPlanner() {
     };
   }, []);
 
-  const persistFocusSessions = useCallback((sessions: FocusSession[], force = false) => {
+  /**
+   * Save the history, saying what was deliberately removed.
+   *
+   * WHY THE REMOVALS HAVE TO BE NAMED. The server folds a client's list into
+   * what is on disk and keeps anything the client did not mention, so that a
+   * window saving a slightly old list cannot wipe a session another window
+   * logged in the meantime. Sound, except it made deletion impossible: a
+   * corrected day total removed that day's rows, and the very next save from
+   * the widget put them all back. The typed total then sat on top of the
+   * sessions it was meant to replace, and correcting the day a second time
+   * added a second typed total beside the first.
+   *
+   * That is the whole of how a Tuesday came to report thirty hours. Absence
+   * cannot mean "delete this" when it also means "I had not heard of it";
+   * saying so explicitly is the only thing that separates the two.
+   */
+  const persistFocusSessions = useCallback((
+    sessions: FocusSession[],
+    opts?: { removedIds?: string[]; replaceAll?: boolean },
+  ) => {
     const json = JSON.stringify(sessions);
     // Record what we're about to save, so the server echoing it straight back
     // over the stream is recognised as our own write and dropped.
     lastFocusSessionsJsonRef.current = json;
     localStorage.setItem(FOCUS_SESSIONS_KEY, json);
-    fetch(`/api/focus-sessions${force ? '?force=1' : ''}`, {
+    const removedIds = opts?.removedIds ?? [];
+    const body = removedIds.length > 0
+      ? JSON.stringify({ sessions, removedIds })
+      : json;
+    fetch(`/api/focus-sessions${opts?.replaceAll ? '?force=1' : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: json,
+      body,
     }).catch(err => console.error('Failed to save focus sessions:', err));
   }, []);
 
@@ -4328,6 +4462,7 @@ export default function DailyPlanner() {
     }
 
     setFocusSessions(prev => {
+      const replaced = prev.filter(s => focusDayKey(s.endedAt, focusDayStartHour) === dateKeyVal);
       const remaining = prev.filter(s => focusDayKey(s.endedAt, focusDayStartHour) !== dateKeyVal);
       const updated = [...remaining];
 
@@ -4336,7 +4471,9 @@ export default function DailyPlanner() {
         updated.push(newSession);
       }
 
-      persistFocusSessions(updated, true);
+      // The rows this edit REPLACES, named so the server drops them instead of
+      // handing them back on the next save from any other window.
+      persistFocusSessions(updated, { removedIds: replaced.map(s => s.id) });
       return updated;
     });
   }, [focusDayStartHour, focusTimer, persistFocusSessions]);
@@ -4403,7 +4540,13 @@ export default function DailyPlanner() {
     const session: FocusSession = {
       // Auto-completions get a deterministic id so the main window and the widget
       // (which both hit zero independently) collapse into a single logged session.
-      id: opts?.id ?? (auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : focusUid()),
+      // ONE ID PER SESSION, however it ended.
+      //
+      // A hand stop used to take a random uid, so stopping on the PC an hour
+      // the phone had also stopped wrote two rows for one hour -- and the
+      // deduplication that was meant to catch that compares ids. The session's
+      // own start is the only thing both machines agree on.
+      id: opts?.id ?? focusSessionId(focusTimer.sessionStartedAt, endedAt.toISOString()),
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
@@ -4418,7 +4561,7 @@ export default function DailyPlanner() {
     setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
   }, [focusTimer, persistFocusSessions]);
 
-  // â”€â”€ Shutdown / sleep recovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Shutdown / sleep recovery ───────────────────────────────────────────────
   // Nothing of ours runs while the PC is off, so a session that was interrupted
   // by a shutdown has to be reconstructed on the next launch — from the
   // heartbeat, which is the last moment any window saw the session alive. The
@@ -4482,7 +4625,7 @@ export default function DailyPlanner() {
           setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
         }
       })
-      // No server to ask â†’ don't hold the normal completion hostage.
+      // No server to ask ─ don't hold the normal completion hostage.
       .catch(() => setFocusLiveSession(session));
   }, []);
 
@@ -4749,7 +4892,7 @@ export default function DailyPlanner() {
     setEditingFocusMinutes(false);
   };
 
-  // â”€â”€ Persistence & Backend Sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Persistence & Backend Sync ───────────────────────────────────────────
   const isInitialMount = useRef(true);
   const settingsLoaded = useRef(false);
 
@@ -4760,7 +4903,12 @@ export default function DailyPlanner() {
 
     // Fetch from backend file database
     fetch('/api/events')
-      .then(r => r.json())
+      .then(r => {
+        // The name of exactly this copy, so the save built from it is diffed
+        // against it rather than against whatever is on disk by then.
+        eventsBaseIdRef.current = r.headers.get('x-planner-base') ?? eventsBaseIdRef.current;
+        return r.json();
+      })
       .then(data => {
         if (data && typeof data === 'object' && Object.keys(data).length > 0) {
           setEvents(migrateEvents(data as PlannerData).events);
@@ -4774,7 +4922,10 @@ export default function DailyPlanner() {
     const savedTasks = localStorage.getItem(TASKS_STORAGE_KEY);
     if (savedTasks) { try { writeTasks(coerceTasks(JSON.parse(savedTasks))); } catch (_) {} }
     fetch('/api/tasks')
-      .then(r => r.json())
+      .then(r => {
+        tasksBaseIdRef.current = r.headers.get('x-planner-base') ?? tasksBaseIdRef.current;
+        return r.json();
+      })
       .then(data => {
         if (data && typeof data === 'object') writeTasks(coerceTasks(data));
       })
@@ -4953,7 +5104,7 @@ export default function DailyPlanner() {
       // Refuse combos the OS owns — binding Alt+F4 would make the shortcut close
       // the app rather than run the action.
       if (isReservedCombo(combo)) {
-        showToast(`${formatCombo(combo)} is reserved by Windows — pick another key.`, 'error');
+        showToast(`${formatCombo(combo)} is reserved by Windows. Pick another key.`, 'error');
         setRecordingAction(null);
         return;
       }
@@ -5000,13 +5151,39 @@ export default function DailyPlanner() {
     const url = Object.keys(events).length === 0 ? '/api/events?force=1' : '/api/events';
     fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: saveHeaders(eventsBaseIdRef.current),
       body: JSON.stringify(events),
     }).catch(err => console.error('Failed to save events to backend database:', err));
   }, [events]);
 
   // Same for tasks. Gated on the initial load having resolved so an empty map is
   // never written over a populated tasks.json.
+  /**
+   * WHICH COPY THIS WINDOW BUILT ITS NEXT SAVE FROM.
+   *
+   * The server keeps the last forty versions of each store it has handed out,
+   * so a whole-file save can be diffed against the exact one the writer started
+   * from -- "what did this window change" -- instead of against whatever is on
+   * disk by the time it lands, which is a different question and the wrong one
+   * when the phone has written in between. It reads `x-planner-base` off the
+   * save to find that copy, and nothing in the app had ever sent it, so the
+   * whole mechanism sat inert while still being maintained on every GET and
+   * every stream frame.
+   *
+   * Never cleared. If this window has saved several times since, the id names
+   * the version before all of them, and the diff simply reproduces changes the
+   * log already holds -- ops are idempotent, so that is safe, and it is still
+   * a far better baseline than the disk.
+   */
+  const eventsBaseIdRef = useRef<string | null>(null);
+  const tasksBaseIdRef = useRef<string | null>(null);
+  /** The save headers, with the baseline named when we have one. */
+  const saveHeaders = (baseId: string | null): Record<string, string> => (
+    baseId
+      ? { 'Content-Type': 'application/json', 'x-planner-base': baseId }
+      : { 'Content-Type': 'application/json' }
+  );
+
   const isInitialTasksMount = useRef(true);
   useEffect(() => {
     if (isInitialTasksMount.current) { isInitialTasksMount.current = false; return; }
@@ -5016,12 +5193,12 @@ export default function DailyPlanner() {
     const url = Object.keys(tasks).length === 0 ? '/api/tasks?force=1' : '/api/tasks';
     fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: saveHeaders(tasksBaseIdRef.current),
       body: JSON.stringify(tasks),
     }).catch(err => console.error('Failed to save tasks to backend database:', err));
   }, [tasks]);
 
-  // â”€â”€ Undo / Redo history â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Undo / Redo history ────────────────────────────────────────────────────
   const undoStack      = useRef<PlannerData[]>([]);
   const redoStack      = useRef<PlannerData[]>([]);
   const prevEventsRef  = useRef<PlannerData>({});
@@ -5071,7 +5248,7 @@ export default function DailyPlanner() {
   const undoRef = useRef(undo); useEffect(() => { undoRef.current = undo; }, [undo]);
   const redoRef = useRef(redo); useEffect(() => { redoRef.current = redo; }, [redo]);
 
-  // â”€â”€ Backup & Restore â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Backup & Restore ──────────────────────────────────────────────────────
   // Covers all three database files (events, settings, focus-sessions) so a
   // single exported file is a complete snapshot of the whole app's data.
   // v3 adds `tasks`. Readers must accept 1 (bare events map), 2 (no tasks) and 3 —
@@ -5210,7 +5387,9 @@ export default function DailyPlanner() {
         if (sessions) {
           const safeSessions = safeFocusSessions(sessions);
           setFocusSessions(safeSessions);
-          persistFocusSessions(safeSessions, true);
+          // An IMPORT is the one save that genuinely means "this is the whole
+          // history now", so it replaces rather than folds.
+          persistFocusSessions(safeSessions, { replaceAll: true });
         }
 
         showToast(
@@ -5278,7 +5457,7 @@ export default function DailyPlanner() {
     }
   }, [editingId]);
 
-  // â”€â”€ Close menu on outside click / Escape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Close menu on outside click / Escape ─────────────────────────────────
   useEffect(() => {
     if (!menuId) return;
     const onDown = (e: MouseEvent) => {
@@ -5300,7 +5479,7 @@ export default function DailyPlanner() {
     };
   }, [menuId]);
 
-  // â”€â”€ Mouse coordinates tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Mouse coordinates tracking ───────────────────────────────────────────
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       mousePosRef.current = { x: e.clientX, y: e.clientY };
@@ -5344,7 +5523,7 @@ export default function DailyPlanner() {
     return { dayIndex, slot, snappedMin: snapped };
   }, [interval, dayStartMin, dayEndMin, topBandsHeight]);
 
-  // â”€â”€ Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Keyboard Shortcuts (Escape, Delete/Backspace, Copy/Paste) ─────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // While recording a new binding in Settings, swallow everything.
@@ -5371,7 +5550,7 @@ export default function DailyPlanner() {
         return;
       }
 
-      // â”€â”€ Rebindable navigation / view actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Rebindable navigation / view actions ──────────────────────────────
       if (!inTextField) {
         const nav: Array<[ShortcutAction, () => void]> = [
           ['prevWeek',      () => navRef.current.prev()],
@@ -5393,6 +5572,27 @@ export default function DailyPlanner() {
         }
       }
 
+      // ── Escape closes the topmost overlay, cursor or no cursor ────────────
+      //
+      // BEFORE the text-field guard below, deliberately. Escape is the one key
+      // whose whole job is "get me out of this", and the overlays it has to
+      // close are exactly the ones that contain a text field -- so guarding it
+      // the same way as a view shortcut meant Escape did nothing at all while a
+      // cursor sat in an input, which is where it was reached for most.
+      //
+      // Three overlays were also simply never listed: the settings drawer, the
+      // filter menu, and the focus-day confirmation, which is the one where a
+      // stuck overlay matters most because it is asking a question.
+      //
+      // Topmost first, and one per press, so Escape peels the stack rather than
+      // clearing it.
+      if (e.key === 'Escape') {
+        if (confirmFocusModalRef.current) { setConfirmFocusModal(null); e.preventDefault(); return; }
+        if (showShortcutHelpRef.current)  { setShowShortcutHelp(false); e.preventDefault(); return; }
+        if (settingsOpenRef.current)      { setSettingsOpen(false);     e.preventDefault(); return; }
+        if (filterMenuOpenRef.current)    { setFilterMenuOpen(false);   e.preventDefault(); return; }
+      }
+
       const active = document.activeElement;
       // Do not trigger shortcuts if typing inside text fields
       if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return;
@@ -5400,11 +5600,7 @@ export default function DailyPlanner() {
       // Escape: Close the shortcut sheet first, then clear selection & menus
       if (e.key === 'Escape') {
         let changed = false;
-        if (showShortcutHelpRef.current) {
-          setShowShortcutHelp(false);
-          e.preventDefault();
-          return;
-        }
+        // The overlays were dealt with above; what is left is grid state.
         if (selectedIdsRef.current.size > 0) {
           setSelectedIds(new Set());
           changed = true;
@@ -5537,7 +5733,7 @@ export default function DailyPlanner() {
         const clip = clipboardRef.current;
         if (!clip || clip.length === 0) return;
         if (!pasteAtCursor(clip)) {
-          // Not over the grid â†’ drop copies near the originals (+10 min).
+          // Not over the grid ─ drop copies near the originals (+10 min).
           const wk = editCtxRef.current.viewedWeekKey;
           const stampedNew: PlannerData = {};
           const pastedIds: string[] = [];
@@ -5564,7 +5760,7 @@ export default function DailyPlanner() {
     return () => document.removeEventListener('keydown', onKey);
   }, [getGridCoords, topBandsHeight]);
 
-  // â”€â”€ Global mouse move / up â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Global mouse move / up ────────────────────────────────────────────────
   useEffect(() => {
     /**
      * How far the cursor has travelled since the grab, measured in the GRID's
@@ -6213,7 +6409,7 @@ export default function DailyPlanner() {
     };
   }, [taskMenuId]);
 
-  // â”€â”€ Event CRUD helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Event CRUD helpers ────────────────────────────────────────────────────
   const handleColClick = (e: React.MouseEvent<HTMLDivElement>, dayIdx: number) => {
     if (didDragRef.current) return;
     if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
@@ -6481,7 +6677,7 @@ export default function DailyPlanner() {
     setMenuId(null); setMenuPos(null);
   };
 
-  // â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Navigation ────────────────────────────────────────────────────────────
   const goBack  = () => { setDirection(-1); setCurrentDate(d => subWeeks(d, 1)); setEditingId(null); setMenuId(null); };
   const goNext  = () => { setDirection(1);  setCurrentDate(d => addWeeks(d, 1));  setEditingId(null); setMenuId(null); };
   const goToday = () => { setDirection(0);  setCurrentDate(nowDate);          setEditingId(null); setMenuId(null); };
@@ -6872,7 +7068,7 @@ export default function DailyPlanner() {
     setEditingZoom(false);
   };
 
-  // â”€â”€ Display props (override during drag/resize/batch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Display props (override during drag/resize/batch) ─────────────────────
   const normDuration = (ev: PlannerEvent) => {
     if (ev.noDuration || ev.endTime === ev.startTime) return 10;
     const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
@@ -6969,7 +7165,7 @@ export default function DailyPlanner() {
   const menuTaskKind = menuTask ? taskKind(menuTask) : 'general';
   const menuTaskDone = menuTask ? isTaskDone(menuTask, menuTaskDue) : false;
 
-  // â”€â”€ Current menu event (for popover rendering) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Current menu event (for popover rendering) ────────────────────────────
   const isDraft = !!(draft && menuId === draft.id);
   const menuEvent = isDraft
     ? draft
@@ -6986,7 +7182,7 @@ export default function DailyPlanner() {
     setMenuPos(null);
   };
 
-  // â”€â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div
       className={`flex flex-col font-sans select-none transition-colors duration-300 relative overflow-hidden ${
@@ -7009,7 +7205,7 @@ export default function DailyPlanner() {
     >
       {/* Outer side ambient canvas — see components/CanvasAmbient.tsx */}
       <CanvasAmbient style={sidebarStyle} dark={darkMode} lite={isPhone} />
-      {/* â”€â”€ Content column + tasks panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      {/* ── Content column + tasks panel ───────────────────────────────────
           The tasks panel sits in normal flow beside the content rather than
           overlaying it, so opening it NARROWS the header, the focus banner and
           the grid together (they all centre themselves with `mx-auto` inside
@@ -7025,7 +7221,7 @@ export default function DailyPlanner() {
           className="flex-1 min-w-0 flex flex-col relative"
           style={isPhone && mobileTab === 'tasks' ? { display: 'none' } : undefined}
         >
-      {/* â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* ── Header ──────────────────────────────────────────────────────── */}
       {/* No backdrop-blur here. It spans the full window width, so every frame of
           the tasks-panel animation (and anything else that changes this column's
           width) had to re-blur the whole strip. At 95% opacity there is almost
@@ -7080,8 +7276,8 @@ export default function DailyPlanner() {
                         ? format(currentDate, 'yyyy')
                         : calendarView === 'custom'
                           ? dayAt(customFrom).getFullYear() === dayAt(customTo - 1).getFullYear()
-                            ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
-                            : `${format(dayAt(customFrom), 'MMM d, yyyy')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
+                            ? `${format(dayAt(customFrom), 'MMM d')} to ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
+                            : `${format(dayAt(customFrom), 'MMM d, yyyy')} to ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
                           : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                   </div>
                   <div className="text-[10px] font-medium leading-tight" style={{ color: headerInactive }}>
@@ -7104,7 +7300,7 @@ export default function DailyPlanner() {
                     onClick={() => navigateToSettings('integrations')}
                     className="w-9 h-9 rounded-xl flex items-center justify-center active:scale-95 transition-transform"
                     style={{ background: 'rgba(239,68,68,0.14)', border: '1px solid rgba(239,68,68,0.5)', color: '#f87171' }}
-                    title="Google disconnected — tap to reconnect"
+                    title="Google disconnected. Tap to reconnect"
                   >
                     <AlertTriangle size={16} />
                   </button>
@@ -7126,7 +7322,7 @@ export default function DailyPlanner() {
                     onClick={() => { haptic(6); setMobilePrayerOpen(true); }}
                     className="flex items-center gap-1.5 h-9 px-2.5 rounded-xl text-[12px] font-bold tabular-nums active:scale-95 transition-transform"
                     style={{ background: `${prayer.color}1f`, border: `1px solid ${prayer.color}55`, color: prayer.color }}
-                    title={nextPrayer ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)} — tap for today's prayer times` : "Today's prayer times"}
+                    title={nextPrayer ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)}. Tap for today's prayer times` : "Today's prayer times"}
                   >
                     <Moon size={13} style={{ color: prayer.color }} />
                     <span>{nextPrayer ? formatTimeLabel(nextPrayer.minutes, timeFormat) : 'Prayers'}</span>
@@ -7253,8 +7449,8 @@ export default function DailyPlanner() {
                       ? format(currentDate, 'yyyy')
                       : calendarView === 'custom'
                         ? dayAt(customFrom).getFullYear() === dayAt(customTo - 1).getFullYear()
-                          ? `${format(dayAt(customFrom), 'MMM d')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
-                          : `${format(dayAt(customFrom), 'MMM d, yyyy')} – ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
+                          ? `${format(dayAt(customFrom), 'MMM d')} to ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
+                          : `${format(dayAt(customFrom), 'MMM d, yyyy')} to ${format(dayAt(customTo - 1), 'MMM d, yyyy')}`
                         : format(calendarView === 'month' ? currentDate : weekStart, 'MMMM yyyy')}
                 </span>
                 {/* Which week of the shown month this is (week view only). */}
@@ -7492,7 +7688,7 @@ export default function DailyPlanner() {
                 style={{ background: 'rgba(239,68,68,0.14)', border: '1px solid rgba(239,68,68,0.5)', color: '#f87171' }}
               >
                 <AlertTriangle size={12} />
-                Google disconnected — reconnect
+                Google disconnected, reconnect
               </button>
             )}
             {/* Live sync indicator — quiet when idle, spins while syncing. */}
@@ -7524,7 +7720,7 @@ export default function DailyPlanner() {
                 <button
                   onClick={() => setPrayerPanelOpen(v => !v)}
                   title={nextPrayer
-                    ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)} — click for the whole day`
+                    ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)}. Click for the whole day`
                     : "Today's prayer times"}
                   className="flex items-center gap-1 px-1.5 py-1.5 rounded-lg text-[11px] font-semibold transition-colors shadow-sm"
                   style={{
@@ -7575,7 +7771,7 @@ export default function DailyPlanner() {
                               style={{ background: isNext ? `${prayer.color}1f` : 'transparent' }}
                               onMouseEnter={e => { if (!isNext) e.currentTarget.style.background = hoverBg; }}
                               onMouseLeave={e => { if (!isNext) e.currentTarget.style.background = 'transparent'; }}
-                              title={done ? `${p.label} — done` : `Mark ${p.label} as done`}
+                              title={done ? `${p.label} is done` : `Mark ${p.label} as done`}
                             >
                               <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color, opacity: done ? 1 : 0.75 }}>
                                 {done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
@@ -7701,11 +7897,11 @@ export default function DailyPlanner() {
         )}
       </header>
 
-      {/* â”€â”€ Notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* ── Notifications ──────────────────────────────────────────── */}
       <NotificationBanner
         rec={notify.banner}
         theme={notifyTheme}
-        snoozeOptions={notificationSettings.snoozeOptions}
+        snoozeOptions={effectiveNotifications.snoozeOptions}
         onDismiss={notify.dismissBanner}
         onRead={notify.markRead}
         onSnooze={notify.snooze}
@@ -7719,7 +7915,7 @@ export default function DailyPlanner() {
         grouped={notify.grouped}
         unread={notify.unread}
         theme={notifyTheme}
-        snoozeOptions={notificationSettings.snoozeOptions}
+        snoozeOptions={effectiveNotifications.snoozeOptions}
         onRead={notify.markRead}
         onUnread={notify.markUnread}
         onReadAll={notify.markAllRead}
@@ -7732,7 +7928,7 @@ export default function DailyPlanner() {
         highlightKey={notifyHighlight}
       />
 
-      {/* â”€â”€ Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* ── Grid ────────────────────────────────────────────────────────── */}
       <main
         ref={mainRef}
         className={`relative flex-1 min-h-0 touch-scroll ${isPhone ? 'touch-scroll-main' : ''} ${settingsRouteOpen ? 'overflow-hidden' : 'overflow-auto'} ${(calendarView === 'month' || calendarView === 'year') && !showFocusAnalysis ? 'flex flex-col' : ''}`}
@@ -7987,7 +8183,7 @@ export default function DailyPlanner() {
                             className={`cursor-pointer hover:underline ${day.isExcluded ? 'line-through text-amber-500 opacity-75' : ''}`}
                             title="Double-click to edit focus time"
                           >
-                            {day.seconds > 0 ? formatFocusDuration(day.seconds) : '—'}
+                            {day.seconds > 0 ? formatFocusDuration(day.seconds) : '0m'}
                           </span>
                         )}
                       </div>
@@ -8832,7 +9028,7 @@ export default function DailyPlanner() {
                                         opacity: taskDragId === t.id ? 0.4 : done ? 0.5 : 1,
                                         filter: done ? 'saturate(0.4)' : 'none',
                                       }}
-                                      title={isTouch ? t.title : `${t.title} — drag to another day, or up and down to reorder`}
+                                      title={isTouch ? t.title : `${t.title}. Drag to another day, or up and down to reorder`}
                                     >
                                       <span
                                         role="button"
@@ -9177,7 +9373,7 @@ export default function DailyPlanner() {
                           const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
                           const timeDisplayStr = isNoDur
                             ? formatTimeLabel(activeStart24, timeFormat)
-                            : `${formatTimeLabel(activeStart24, timeFormat)} – ${formatTimeLabel(activeEnd24, timeFormat)}`;
+                            : `${formatTimeLabel(activeStart24, timeFormat)} to ${formatTimeLabel(activeEnd24, timeFormat)}`;
 
                           const durationLabel = durationMin < 60
                             ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
@@ -9291,7 +9487,7 @@ export default function DailyPlanner() {
                               {isBatchDrag && batchDisp?.[ev.id] && (
                                 <div className="absolute z-50 pointer-events-none" style={{ top: -24, left: '50%', transform: 'translateX(-50%)' }}>
                                   <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
-                                    {formatTimeLabel(batchDisp[ev.id].startMin, timeFormat)} – {formatTimeLabel(batchDisp[ev.id].startMin + durationMin, timeFormat)}
+                                    {formatTimeLabel(batchDisp[ev.id].startMin, timeFormat)} to {formatTimeLabel(batchDisp[ev.id].startMin + durationMin, timeFormat)}
                                   </div>
                                 </div>
                               )}
@@ -9649,7 +9845,7 @@ export default function DailyPlanner() {
                                 opacity: taskDragId === t.id ? 0.4 : done ? 0.45 : 1,
                                 filter: done ? 'saturate(0.4)' : 'none',
                               }}
-                              title={isTouch ? t.title : `${t.title} — drag to top of day or another day`}
+                              title={isTouch ? t.title : `${t.title}. Drag to the top of a day, or to another day`}
                             >
                               <div className="flex items-start gap-1 px-1.5 py-1">
                                 <span
@@ -9884,7 +10080,7 @@ export default function DailyPlanner() {
             </ViewShell>
         </div>
         ) : calendarView === 'year' ? (
-        /* â”€â”€ Year overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Year overview ──────────────────────────────────────────── */
         (() => {
         const yearMaxDayCount = Math.max(1, ...yearMatrix.flatMap(m => m.cells.map(c => c.count)));
         return (
@@ -10340,7 +10536,7 @@ export default function DailyPlanner() {
               {selRange && selRange.daysCount > 1 && (
                 <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 bg-blue-600/95 text-white px-3.5 py-1.5 rounded-full text-xs font-semibold shadow-xl pointer-events-none flex items-center gap-2 backdrop-blur-sm animate-in fade-in zoom-in-95 duration-100">
                   <CalendarRange size={13} />
-                  <span>{selRange.daysCount} days · {format(selRange.start, 'MMM d')} – {format(selRange.end, 'MMM d')}</span>
+                  <span>{selRange.daysCount} days · {format(selRange.start, 'MMM d')} to {format(selRange.end, 'MMM d')}</span>
                 </div>
               )}
 
@@ -10545,7 +10741,7 @@ export default function DailyPlanner() {
                               className="text-[10px] font-bold tabular-nums text-center truncate"
                               style={{ color: d.seconds > 0 ? (isTodayCol ? '#60a5fa' : menuText) : menuSub, opacity: d.seconds > 0 ? 1 : 0.5 }}
                             >
-                              <span>{d.seconds > 0 ? formatFocusDuration(d.seconds) : '—'}</span>
+                              <span>{d.seconds > 0 ? formatFocusDuration(d.seconds) : '0m'}</span>
                             </div>
                             <div className="flex-1 flex items-end">
                               <div
@@ -10715,7 +10911,7 @@ export default function DailyPlanner() {
                         ['Total', formatFocusDuration(focusAnalysis.monthSeconds + monthLiveExtraSeconds)],
                         ['Sessions', `${focusAnalysis.monthSessions}`],
                         ['Active Days', `${focusAnalysis.monthActiveDays}`],
-                        ['Best Day', focusAnalysis.monthActiveDays > 0 ? format(focusAnalysis.monthBestDay, 'MMM d') : '—'],
+                        ['Best Day', focusAnalysis.monthActiveDays > 0 ? format(focusAnalysis.monthBestDay, 'MMM d') : 'None'],
                       ].map(([label, value]) => (
                         <div key={label} className="min-w-0">
                           <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
@@ -10850,7 +11046,7 @@ export default function DailyPlanner() {
                                   onClick={e => e.stopPropagation()}
                                 />
                               ) : (
-                                <span>{secs > 0 ? formatFocusDuration(secs) : '—'}</span>
+                                <span>{secs > 0 ? formatFocusDuration(secs) : '0m'}</span>
                               )}
                             </span>
                             {isExcluded ? (
@@ -10893,7 +11089,7 @@ export default function DailyPlanner() {
                         ['Total', formatFocusDuration(focusAnalysis.yearSeconds)],
                         ['Sessions', `${focusAnalysis.yearSessions}`],
                         ['Active Days', `${focusAnalysis.yearActiveDays}`],
-                        ['Best Month', focusAnalysis.yearBestMonth ? format(focusAnalysis.yearBestMonth.month, 'MMM') : '—'],
+                        ['Best Month', focusAnalysis.yearBestMonth ? format(focusAnalysis.yearBestMonth.month, 'MMM') : 'None'],
                       ].map(([label, value]) => (
                         <div key={label} className="min-w-0">
                           <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
@@ -11071,7 +11267,7 @@ export default function DailyPlanner() {
                 <div>
                   <span className="font-semibold block mb-0.5">A session is running on this day</span>
                   The {formatFocusDuration(focusDayLiveSeconds)} it has counted so far is included in the new total.
-                  The session keeps running — only time from now on will be added.
+                  The session keeps running. Only time from now on will be added.
                 </div>
               </div>
             )}
@@ -11219,7 +11415,7 @@ export default function DailyPlanner() {
 
 
 
-      {/* â”€â”€ Settings drawer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* ── Settings drawer ─────────────────────────────────────────────── */}
       <AnimatePresence>
         {settingsOpen && (
           <>
@@ -11231,7 +11427,11 @@ export default function DailyPlanner() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
               onClick={() => setSettingsOpen(false)}
-              className={`fixed inset-0 top-14 z-[140] ${isPhone ? '' : 'backdrop-blur-[6px]'}`}
+              /* FULL SCREEN, not `top-14`. Leaving the top bar live behind the
+                 scrim meant the drawer could be open and the filter menu opened
+                 on top of it, at which point the two were tied at z-[150] and
+                 which one covered the other was decided by DOM order. */
+              className={`fixed inset-0 z-[140] ${isPhone ? '' : 'backdrop-blur-[6px]'}`}
               style={{
                 background: darkMode ? 'rgba(0, 0, 0, 0.52)' : 'rgba(0, 0, 0, 0.22)',
               }}
@@ -11402,7 +11602,7 @@ export default function DailyPlanner() {
                       if (displayH === 12) return '12pm';
                       return displayH < 12 ? `${displayH}am` : `${displayH - 12}pm`;
                     };
-                    return `${formatHourLabel(dayStartH)} – ${formatHourLabel(dayEndH)} (${dayEndH - dayStartH}h visible)`;
+                    return `${formatHourLabel(dayStartH)} to ${formatHourLabel(dayEndH)} (${dayEndH - dayStartH}h visible)`;
                   })()}
                 </p>
               </div>
@@ -11899,7 +12099,7 @@ export default function DailyPlanner() {
       )}
     </AnimatePresence>
 
-      {/* â”€â”€ Task popover â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      {/* ── Task popover ──────────────────────────────────────────────────
           A parallel to the event popover rather than a fork of it: that one is
           370 lines of event-specific fields. The recurrence editor is shared. */}
       <AnimatePresence>
@@ -12036,7 +12236,7 @@ export default function DailyPlanner() {
               />
               {menuTask.startTime && (
                 <>
-                  <span className="text-[11px]" style={{ color: menuSub }}>–</span>
+                  <span className="text-[11px]" style={{ color: menuSub }}>to</span>
                   <input
                     type="time"
                     value={menuTask.endTime ?? ''}
@@ -12100,7 +12300,7 @@ export default function DailyPlanner() {
                 return (
                   <NotifyEditor
                     spec={menuTask.notify}
-                    effective={resolveSpec(menuTask, 'task', categories, notificationSettings)}
+                    effective={resolveSpec(menuTask, 'task', categories, effectiveNotifications)}
                     onChange={next => editTask(taskMenuId!, { notify: next })}
                     inheritedFrom="the task default"
                     kind="task"
@@ -12112,7 +12312,7 @@ export default function DailyPlanner() {
               })() : (
                 <p className="text-[11px] leading-snug" style={{ color: menuSub }}>
                   {menuTask.weekKey
-                    ? `Included in the ${String(notificationSettings.taskCutoffHour).padStart(2, '0')}:00 summary of what is still open that day. Give it a time for its own reminder.`
+                    ? `Included in the ${String(effectiveNotifications.taskCutoffHour).padStart(2, '0')}:00 summary of what is still open that day. Give it a time for its own reminder.`
                     : 'A task with no date is never notified about. Give it a date to include it in the daily summary.'}
                 </p>
               )}
@@ -12175,7 +12375,7 @@ export default function DailyPlanner() {
       )}
       </AnimatePresence>
 
-      {/* â”€â”€ Context menu (portal-style fixed popover) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* ── Context menu (portal-style fixed popover) ────────────────────── */}
       <AnimatePresence>
       {/* On a phone the editor is a bottom sheet, not a floating popup: a 260px
           card anchored beside a 50px column would hang off the screen edge, and
@@ -12822,7 +13022,7 @@ export default function DailyPlanner() {
                   ?? format(addDays(parseDate(menuEvent.weekKey || weekKeyOf(currentDate, weekStartsOn)), menuEvent.dayIndex ?? 0), 'yyyy-MM-dd');
                 const [ay, am, ad] = dateStr.split('-').map(Number);
                 const anchor = new Date(ay, (am || 1) - 1, ad || 1);
-                if (menuEvent.allDay) anchor.setHours(notificationSettings.allDayHour, 0, 0, 0);
+                if (menuEvent.allDay) anchor.setHours(effectiveNotifications.allDayHour, 0, 0, 0);
                 else {
                   const [h, mi] = (menuEvent.startTime || '00:00').split(':').map(Number);
                   anchor.setHours(h || 0, mi || 0, 0, 0);
@@ -12831,7 +13031,7 @@ export default function DailyPlanner() {
                 return (
                   <NotifyEditor
                     spec={menuEvent.notify}
-                    effective={resolveSpec(menuEvent, kind, categories, notificationSettings)}
+                    effective={resolveSpec(menuEvent, kind, categories, effectiveNotifications)}
                     onChange={next => applyEdit(menuEvent.id, { notify: next })}
                     inheritedFrom={inheritedFrom}
                     kind={kind}
@@ -13439,7 +13639,7 @@ export default function DailyPlanner() {
                     { id: 'year', label: 'Year', hint: 'Twelve months of totals' },
                   ] as const)
                 : ([
-                    { id: 'day', label: 'Day', hint: 'One day, full width — best on a phone' },
+                    { id: 'day', label: 'Day', hint: 'One day, full width. Best on a phone' },
                     { id: 'week', label: 'Week', hint: 'Seven columns, swipe sideways' },
                     { id: 'month', label: 'Month', hint: 'The whole month as a grid' },
                     { id: 'year', label: 'Year', hint: 'Twelve months at once' },
@@ -13583,7 +13783,7 @@ export default function DailyPlanner() {
                   >
                     <span>Window</span>
                     <span className="font-bold tabular-nums">
-                      {format(dayAt(customFrom), 'EEE, MMM d')} – {format(dayAt(customTo - 1), 'EEE, MMM d')} ({colCount}d)
+                      {format(dayAt(customFrom), 'EEE, MMM d')} to {format(dayAt(customTo - 1), 'EEE, MMM d')} ({colCount}d)
                     </span>
                   </div>
 
@@ -13884,9 +14084,12 @@ export default function DailyPlanner() {
         </MobileSheet>
       ) : filterMenuOpen && filterMenuPos ? createPortal(
         <>
-          <div className="fixed inset-0 z-[150]" onClick={() => setFilterMenuOpen(false)} />
+          {/* z-[160]/[161], above the settings drawer's z-[150] rather than
+              tied with it. A tie is resolved by DOM order, which is not a
+              decision anybody made. */}
+          <div className="fixed inset-0 z-[160]" onClick={() => setFilterMenuOpen(false)} />
           <div
-            className="fixed z-[151] rounded-xl shadow-xl overflow-hidden"
+            className="fixed z-[161] rounded-xl shadow-xl overflow-hidden"
             style={{
               left: Math.min(filterMenuPos.x, Math.max(8, window.innerWidth - 300)),
               top: filterMenuPos.y,

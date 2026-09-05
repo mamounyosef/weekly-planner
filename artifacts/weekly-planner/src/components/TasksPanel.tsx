@@ -1916,7 +1916,7 @@ function ListPill({
         onContextMenu={onEdit ? e => { e.preventDefault(); onEdit(); } : undefined}
         className="flex items-center gap-1.5 pl-2.5 pr-2 py-1.5 text-[11px] font-semibold transition-smooth active:scale-95 max-w-[150px]"
         style={{ color: active || dropActive ? tone : theme.menuSub }}
-        title={editable ? `${label} — right-click to edit` : label}
+        title={editable ? `${label}. Right-click to edit` : label}
       >
         {icon ?? <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: tone }} />}
         <span className="truncate">{label}</span>
@@ -2053,7 +2053,7 @@ function ListEditor({ list, lists, taskCount, theme, onSave, onMove, onDelete, o
             style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}` }}
           >
             <span className="text-[11px] font-semibold" style={{ color: theme.menuText }}>
-              Delete “{list.name}”{taskCount > 0 ? ` — ${taskCount} open task${taskCount === 1 ? '' : 's'}` : ''}?
+              Delete “{list.name}”{taskCount > 0 ? ` with ${taskCount} open task${taskCount === 1 ? '' : 's'}` : ''}?
             </span>
             <button
               onClick={() => onDelete('keep')}

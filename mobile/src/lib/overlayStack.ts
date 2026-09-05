@@ -38,6 +38,7 @@ export const OVERLAY_ORDER = [
   'reminders',
   'prayers',
   'planner',
+  'viewFilter',
   'search',
   'notifications',
 ] as const;

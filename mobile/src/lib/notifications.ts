@@ -524,6 +524,13 @@ export function computeSchedule(input: ScheduleInput): ScheduledNotification[] {
       if (isDone(t as any, occDate, repeating)) continue;
 
       if (!t.startTime) {
+        // INHERITANCE APPLIES HERE TOO. This branch used to drop straight into
+        // the digest, gated only on the global default, so switching a single
+        // task's reminders off removed it from nothing: it still appeared by
+        // name in the 21:00 "still open today" notification. Every other path
+        // in this file resolves the spec first, and so does this one now.
+        const digestSpec = resolveSpec(t, 'task', categories, settings);
+        if (!digestSpec.enabled) continue;
         const cutoff = atTime(day, undefined, settings.taskCutoffHour).getTime();
         if (cutoff >= from && cutoff < to) {
           const list = digestByDate.get(occDate) || [];
@@ -767,3 +774,33 @@ export const notificationTag = (key: string): string => `planner:${key}`;
 
 export const snoozeUntil = (now: number, minutes: number): number =>
   addMinutes(new Date(now), minutes).getTime();
+
+/**
+ * Which reminder rules this device should actually use.
+ *
+ * TWO SETS OF RULES, ONE ANSWER. When sharing is on -- the default, and what
+ * every account starts with -- both machines read the same rules out of the
+ * shared settings and nothing here changes anything. When it is off, each
+ * device keeps its own copy and this is where that copy wins.
+ *
+ * `local` is deliberately allowed to be missing: a device that has never
+ * edited its own rules falls back to the shared ones, so switching sharing off
+ * does not empty anybody's reminders. It carries on with what it had and
+ * diverges only when something is actually changed.
+ */
+export function resolveNotificationSettings(input: {
+  shared: NotificationSettings | undefined;
+  local: NotificationSettings | undefined;
+  share: boolean;
+}): NotificationSettings {
+  const shared = coerceNotificationSettings(input.shared);
+  if (input.share) return shared;
+  return input.local ? coerceNotificationSettings(input.local) : shared;
+}
+
+/** Where an edit to this device's reminder rules has to be written. */
+export type NotificationWriteTarget = 'shared' | 'device';
+
+export function notificationWriteTarget(share: boolean): NotificationWriteTarget {
+  return share ? 'shared' : 'device';
+}

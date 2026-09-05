@@ -67,8 +67,8 @@ export function EventCardPreviewPair({
 }: { style: EventCardStyle; dark: boolean; pageBg: string }) {
   return (
     <div className="flex gap-1.5 w-full">
-      <EventCardPreview style={style} dark={dark} pageBg={pageBg} hex="#3b82f6" title="Deep work" time="9:00 – 10:30" />
-      <EventCardPreview style={style} dark={dark} pageBg={pageBg} hex="#f97316" title="Gym" time="6:00 – 7:00" />
+      <EventCardPreview style={style} dark={dark} pageBg={pageBg} hex="#3b82f6" title="Deep work" time="9:00 to 10:30" />
+      <EventCardPreview style={style} dark={dark} pageBg={pageBg} hex="#f97316" title="Gym" time="6:00 to 7:00" />
     </div>
   );
 }

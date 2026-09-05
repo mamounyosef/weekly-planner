@@ -123,7 +123,7 @@ export function Notifications(props: NotificationsProps) {
     <View style={{ flex: 1, backgroundColor: p.bg }}>
       {/* ── Header ── */}
       <View style={{
-        paddingTop: insets.top + space.md,
+        paddingTop: insets.top + space.sm,
         paddingHorizontal: space.xl,
         paddingBottom: space.md,
       }}>
@@ -315,9 +315,23 @@ function SwipeRow(props: RowProps) {
   const { entry } = props;
   const dx = useRef(new Animated.Value(0)).current;
   const [hint, setHint] = useState<'none' | 'dismiss' | 'snooze'>('none');
+  /**
+   * The hint as it last was, so a move frame can tell whether it moved.
+   *
+   * `setHint` was called on EVERY touch frame, queueing a React render at touch
+   * frequency, for a value with three possible states that changes at most
+   * twice in a whole swipe. The grid's drag already got this right by comparing
+   * the snapped result before setting state; this row did not.
+   */
+  const hintRef = useRef<'none' | 'dismiss' | 'snooze'>('none');
+  const showHint = (next: 'none' | 'dismiss' | 'snooze') => {
+    if (hintRef.current === next) return;
+    hintRef.current = next;
+    setHint(next);
+  };
 
   const settle = () => {
-    setHint('none');
+    showHint('none');
     Animated.spring(dx, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start();
   };
 
@@ -326,7 +340,7 @@ function SwipeRow(props: RowProps) {
       Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.6,
     onPanResponderMove: (_e, g) => {
       dx.setValue(g.dx);
-      setHint(g.dx < -SWIPE_THRESHOLD ? 'dismiss' : g.dx > SWIPE_THRESHOLD ? 'snooze' : 'none');
+      showHint(g.dx < -SWIPE_THRESHOLD ? 'dismiss' : g.dx > SWIPE_THRESHOLD ? 'snooze' : 'none');
     },
     onPanResponderRelease: (_e, g) => {
       if (g.dx < -SWIPE_THRESHOLD) {

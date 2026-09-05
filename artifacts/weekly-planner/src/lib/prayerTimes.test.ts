@@ -21,6 +21,7 @@ import {
   prayerDateKey,
   prayerMonthUrl,
   prayerOccId,
+  prayerMonthsFromCache,
   prayerQueryKey,
   prayerTimeToMinutes,
   timesFromAladhanTimings,
@@ -314,6 +315,95 @@ assert.deepEqual(neededMonths, ['2026-8', '2026-9']);
       }
     }
   }
+}
+
+// ─── The cache, reshaped for the scheduler ──────────────────────────────────
+//
+// WHY THIS FUNCTION EXISTS AT ALL. The Aladhan cache is ONE store keyed by
+// query (`city|country|method|school|yyyy-M`), each entry holding a `days` map.
+// `computeSchedule` wants `{ 'yyyy-MM': { 'yyyy-MM-dd': times } }`, and its
+// whole prayer branch is gated on being handed that. The server worked the
+// reshaping out privately, so the phone never did it: it called the scheduler
+// with no months at all, and therefore never once armed a prayer alarm, and
+// showed no prayers in its notification centre while the PC's showed them. With
+// the PC asleep, prayer reminders simply did not arrive.
+{
+  console.log('\n--- PRAYER CACHE -> SCHEDULER SHAPE ---');
+
+  const settings = coercePrayerSettings({
+    enabled: true, city: 'Amman', country: 'Jordan', method: 3, school: 0,
+  });
+  const other = coercePrayerSettings({
+    enabled: true, city: 'Cairo', country: 'Egypt', method: 5, school: 0,
+  });
+
+  const day = (fajr: string) => ({ Fajr: fajr, Dhuhr: '12:00', Asr: '15:00', Maghrib: '18:00', Isha: '19:30' });
+  const key = (p: typeof settings, ym: string) => `${prayerQueryKey(p)}|${ym}`;
+
+  const cache: Record<string, unknown> = {
+    [key(settings, '2026-01')]: { days: { '2026-01-30': day('05:10'), '2026-01-31': day('05:09') } },
+    [key(settings, '2026-02')]: { days: { '2026-02-01': day('05:08') } },
+    // A DIFFERENT CITY, in the same file. Letting this through would mean the
+    // reminders quietly followed a city the user no longer lives in.
+    [key(other, '2026-01')]: { days: { '2026-01-30': day('04:44') } },
+  };
+
+  const months = prayerMonthsFromCache(cache, settings);
+
+  assert.deepEqual(Object.keys(months).sort(), ['2026-01', '2026-02'],
+    'entries are regrouped by calendar month, not by the query they arrived under');
+  assert.deepEqual(Object.keys(months['2026-01']).sort(), ['2026-01-30', '2026-01-31'],
+    'and every day of a month lands in it');
+  assert.equal(months['2026-01']['2026-01-30'].Fajr, '05:10',
+    'the times are this city, not the other');
+  assert.equal(months['2026-02']['2026-02-01'].Fajr, '05:08', 'a month boundary is not a problem');
+
+  // The month key the scheduler slices out of a date really does match.
+  const dateStr = '2026-01-30';
+  assert.ok(months[dateStr.slice(0, 7)]?.[dateStr],
+    'a date the scheduler looks up resolves, which is the whole contract');
+
+  // ── The other city is not merely absent, it is unreachable ────────────────
+  const cairo = prayerMonthsFromCache(cache, other);
+  assert.equal(cairo['2026-01']['2026-01-30'].Fajr, '04:44', 'asking as Cairo gives Cairo');
+  assert.equal(Object.keys(cairo['2026-01']).length, 1, 'and only Cairo');
+
+  // Changing any part of the identity changes the answer, because each part is
+  // in the key: a method change must not silently keep the old times.
+  for (const patch of [{ city: 'Irbid' }, { country: 'Syria' }, { method: 4 }, { school: 1 }]) {
+    const shifted = coercePrayerSettings({ ...settings, ...patch } as any);
+    assert.deepEqual(prayerMonthsFromCache(cache, shifted), {},
+      `changing ${Object.keys(patch)[0]} stops the old city being used`);
+  }
+
+  // ── Nothing here may throw, whatever is in the file ───────────────────────
+  assert.deepEqual(prayerMonthsFromCache({}, settings), {}, 'an empty cache is an empty map');
+  assert.deepEqual(prayerMonthsFromCache(null, settings), {}, 'so is no cache at all');
+  assert.deepEqual(prayerMonthsFromCache(undefined, settings), {}, 'so is undefined');
+  assert.deepEqual(prayerMonthsFromCache({
+    [key(settings, '2026-03')]: null,
+    [key(settings, '2026-04')]: {},
+    [key(settings, '2026-05')]: { days: null },
+    [key(settings, '2026-06')]: { days: 'nonsense' },
+    [key(settings, '2026-07')]: { days: { '2026-07-01': null } },
+    [key(settings, '2026-08')]: { days: { '2026-08-01': 'nonsense' } },
+    'a-key-in-no-format-at-all': { days: { '2026-09-01': day('05:00') } },
+  } as Record<string, unknown>, settings), {}, 'every shape of damage is skipped, not thrown on');
+
+  // A partly damaged file still yields the good half, because losing every
+  // reminder over one bad row would be the worse failure.
+  const mixed = prayerMonthsFromCache({
+    [key(settings, '2026-01')]: { days: { '2026-01-30': day('05:10'), '2026-01-31': null } },
+  } as Record<string, unknown>, settings);
+  assert.deepEqual(Object.keys(mixed['2026-01']), ['2026-01-30'], 'the good day survives its bad neighbour');
+
+  // The key prefix must be a real prefix, or a query whose city merely STARTS
+  // with this one would be adopted.
+  const amm = coercePrayerSettings({ ...settings, city: 'Amm' } as any);
+  assert.deepEqual(prayerMonthsFromCache(cache, amm), {},
+    '"Amm" does not collect "Amman", because the separator is part of the prefix');
+
+  console.log('  The phone can now hand the scheduler what it asks for');
 }
 
 console.log('\nALL PASS (prayerTimes)');

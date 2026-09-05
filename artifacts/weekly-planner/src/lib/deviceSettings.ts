@@ -21,6 +21,7 @@
  * knows nothing about devices keeps working exactly as before.
  */
 import { coerceFocusRangeMode, type FocusRangeMode } from './focusPeriod';
+import { coerceNotificationSettings, type NotificationSettings } from './notifications';
 import {
   type AppSettings, type DarkPreset, type LightPreset, type IntervalMin,
   type EventCardStyle, type SidebarStyle,
@@ -137,6 +138,19 @@ export function getFilterViewKey(view: string | undefined | null): FilterViewKey
 }
 
 export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
+  /**
+   * This device's OWN reminder rules, used only while sharing is switched off.
+   *
+   * NOT named `notifications`. That key is shared, and a key that appears in
+   * two scopes at once has no defined behaviour -- putting it in both is what
+   * left the planner staring at a blank page once already. This is a separate
+   * field with a separate name, so the two can never be confused.
+   *
+   * Absent until this device actually edits its own rules, which is what lets
+   * switching sharing off carry on with the rules you already had rather than
+   * dropping you back to the defaults.
+   */
+  notificationsLocal?: NotificationSettings;
   /** App zoom (not browser zoom). Has no shared counterpart — always per device. */
   appZoom: number;
   /** Scale for inner app content on mobile (items, times, tasks, fonts). */
@@ -229,6 +243,11 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
 
   if (typeof r.calendarView === 'string' && ['day', 'week', 'month', 'year', 'custom'].includes(r.calendarView)) {
     s.calendarView = r.calendarView;
+  }
+  // Left ABSENT when the stored blob has none, which is what makes "this device
+  // has never chosen its own rules" a state the resolver can act on.
+  if (r.notificationsLocal != null) {
+    s.notificationsLocal = coerceNotificationSettings(r.notificationsLocal);
   }
   if (typeof r.customDaysBefore === 'number') s.customDaysBefore = clampNum(Math.round(r.customDaysBefore), -14, 14);
   if (typeof r.customDaysAfter === 'number') s.customDaysAfter = clampNum(Math.round(r.customDaysAfter), -14, 14);

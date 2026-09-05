@@ -398,7 +398,7 @@ export function currentOpenOccurrence(
 // still works.
 
 export const TIME_MARKER_RE =
-  /^[ \t]*⏰[ \t]*(\d{1,2}):(\d{2})[ \t]*(am|pm)?(?:[ \t]*[-–—][ \t]*(\d{1,2}):(\d{2})[ \t]*(am|pm)?)?[ \t]*$/i;
+  /^[ \t]*⏰[ \t]*(\d{1,2}):(\d{2})[ \t]*(am|pm)?(?:[ \t]*(?:to|[-–—])[ \t]*(\d{1,2}):(\d{2})[ \t]*(am|pm)?)?[ \t]*$/i;
 
 function to24h(h: number, m: number, suffix?: string): string | null {
   let hh = h;
@@ -447,7 +447,7 @@ export function composeTaskNotes(t: Pick<Task, 'startTime' | 'endTime' | 'notes'
   const body = (t.notes ?? '').trim();
   if (!t.startTime) return body;
   const marker = t.endTime && t.endTime !== t.startTime
-    ? `⏰ ${t.startTime}–${t.endTime}`
+    ? `⏰ ${t.startTime} to ${t.endTime}`
     : `⏰ ${t.startTime}`;
   return body ? `${marker}\n\n${body}` : marker;
 }

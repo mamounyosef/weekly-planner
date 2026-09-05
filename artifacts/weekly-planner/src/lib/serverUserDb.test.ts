@@ -9,6 +9,7 @@ import {
   getAuthUser,
   getUserDbPaths,
   isLocalAddress,
+  isLoopbackAddress,
   sanitizeUsername,
   verifySessionToken,
   type AppUser,
@@ -150,5 +151,88 @@ const reqProxied = {
   headers: { 'x-forwarded-for': '203.0.113.5' },
 };
 assert.equal(getAuthUser(reqProxied, users), null, 'Proxied requests are not treated as local loopback');
+
+// ─── The passwordless fallback is THIS MACHINE, not the network ─────────────
+//
+// Step 4 of `getAuthUser` resolves an unauthenticated request to the first
+// account, so that the hotkey helper and the toast agent -- which run on this
+// PC with no cookie -- can toggle the focus timer and read settings. It asked
+// `isLocalAddress`, which answers for the whole private range: 10.x, 192.168.x
+// and 172.16-31.x as well as loopback.
+//
+// So every phone, laptop and television on the same Wi-Fi was treated as a
+// signed-in user on two routes. One of them, /api/settings, accepts POST, which
+// is a full read and overwrite of that account categories, notification rules
+// and Google sync policy, with no password. The comment beside it said
+// "loopback" the whole time; the code did not.
+{
+  console.log('\n--- THE PASSWORDLESS FALLBACK IS LOOPBACK ONLY ---');
+
+  const req = (ip: string, url = '/api/settings', headers: Record<string, string> = {}) => ({
+    originalUrl: url,
+    headers,
+    socket: { remoteAddress: ip },
+  });
+
+  // ── The rest of the house does not ───────────────────────────────────────
+  const LAN = [
+    '10.0.0.1', '10.255.255.255', '192.168.1.1', '192.168.0.254',
+    '172.16.0.1', '172.31.255.255', '172.20.10.5',
+    '::ffff:192.168.1.50', '::ffff:10.0.0.9',
+  ];
+  for (const ip of LAN) {
+    assert.equal(getAuthUser(req(ip), users), null, `${ip} is on the network, not this machine`);
+    assert.equal(getAuthUser(req(ip, '/api/focus-timer/toggle'), users), null,
+      `${ip} cannot toggle the timer either`);
+  }
+
+  // ── This machine still works, or the hotkey helper stops working ─────────
+  for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '127.0.0.53']) {
+    assert.equal(getAuthUser(req(ip), users)?.username, 'alice', `${ip} is this machine`);
+    assert.equal(getAuthUser(req(ip, '/api/focus-timer/toggle'), users)?.username, 'alice',
+      `${ip} may still toggle the timer`);
+  }
+
+  // And the wider internet, which was never allowed and still is not.
+  for (const ip of ['8.8.8.8', '1.1.1.1', '203.0.113.7', '', 'not-an-ip']) {
+    assert.equal(getAuthUser(req(ip), users), null, `${JSON.stringify(ip)} is refused`);
+  }
+
+  // ── The two helpers are still separate questions ─────────────────────────
+  // `isLocalAddress` has other callers (the desk controller is genuinely a LAN
+  // device), so it must keep answering the question it answers.
+  assert.equal(isLocalAddress('192.168.1.1'), true, 'the LAN helper still means the LAN');
+  assert.equal(isLoopbackAddress('192.168.1.1'), false, 'and the loopback helper does not');
+  assert.equal(isLoopbackAddress('127.0.0.1'), true, 'loopback is loopback');
+  assert.equal(isLoopbackAddress('::1'), true, 'in both address families');
+  assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true, 'and through the v4-mapped form');
+  assert.equal(isLoopbackAddress(''), false, 'nothing is not loopback');
+  assert.equal(isLoopbackAddress('127.0.0.1.evil.com'), false,
+    'and a hostname that merely starts with it is not either');
+
+  // ── A tunnelled request is still refused, however it looks ───────────────
+  // The public link arrives through a proxy on loopback, so without this the
+  // narrowing above would have made things worse rather than better.
+  assert.equal(
+    getAuthUser(req('127.0.0.1', '/api/settings', { 'x-forwarded-for': '203.0.113.7' }), users),
+    null,
+    'a proxied request is refused even though it arrives from loopback');
+
+  // ── And only these two routes, on this machine ───────────────────────────
+  for (const url of ['/api/events', '/api/tasks', '/api/sync/pull', '/api/notifications', '/']) {
+    assert.equal(getAuthUser(req('127.0.0.1', url), users), null,
+      `${url} is not part of the fallback`);
+  }
+
+  // A real credential still works from anywhere, which is the whole point of
+  // narrowing this rather than blocking the network outright.
+  const creds = Buffer.from('bob:secret456').toString('base64');
+  assert.equal(
+    getAuthUser({ originalUrl: '/api/settings', headers: { authorization: `Basic ${creds}` }, socket: { remoteAddress: '192.168.1.1' } }, users)?.username,
+    'bob',
+    'a signed-in phone on the LAN is unaffected');
+
+  console.log('  Only this machine gets a free pass, and only on two routes');
+}
 
 console.log('\nALL PASS (server-user-db)');

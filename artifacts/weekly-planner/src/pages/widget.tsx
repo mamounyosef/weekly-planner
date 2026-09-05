@@ -61,6 +61,7 @@ import {
   type FocusCueSlot,
   claimFocusCompletion,
   autoSessionId,
+  focusSessionId,
   dedupeFocusSessions,
   FOCUS_HEARTBEAT_INTERVAL_MS,
   MIN_RECOVERED_SESSION_SECONDS,
@@ -168,7 +169,7 @@ function formatCompactRange(startMin: number, endMin: number, fmt: TimeFormat = 
     const eh = Math.floor(normE / 60), em = normE % 60;
     const sStr = sm === 0 ? String(sh).padStart(2, '0') : `${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}`;
     const eStr = em === 0 ? String(eh).padStart(2, '0') : `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')}`;
-    return `${sStr}–${eStr}`;
+    return `${sStr} to ${eStr}`;
   }
   const sh = Math.floor(normS / 60), sm = normS % 60;
   const eh = Math.floor(normE / 60), em = normE % 60;
@@ -178,8 +179,8 @@ function formatCompactRange(startMin: number, endMin: number, fmt: TimeFormat = 
   const eh12 = eh % 12 || 12;
   const sStr = sm === 0 ? `${sh12}` : `${sh12}:${String(sm).padStart(2, '0')}`;
   const eStr = em === 0 ? `${eh12}` : `${eh12}:${String(em).padStart(2, '0')}`;
-  if (sAmpm === eAmpm) return `${sStr}–${eStr}${eAmpm}`;
-  return `${sStr}${sAmpm}–${eStr}${eAmpm}`;
+  if (sAmpm === eAmpm) return `${sStr} to ${eStr}${eAmpm}`;
+  return `${sStr}${sAmpm} to ${eStr}${eAmpm}`;
 }
 
 function formatSlotLabel(slot: string, fmt: TimeFormat): string {
@@ -929,6 +930,17 @@ export default function Widget() {
     }
   };
 
+  /**
+   * The widget only ever ADDS a session, never removes one.
+   *
+   * Which is why it must keep sending a plain list: the server folds a plain
+   * list into what is on disk and keeps anything not mentioned, so a widget
+   * holding a slightly old copy cannot wipe anything. What it used to be able
+   * to do, without meaning to, was UNDO a deletion made in the main window --
+   * a corrected day total was reverted by the widget's next save. That is fixed
+   * on the other side now: the main window names what it removed, and a name is
+   * not something a stale list can accidentally un-say.
+   */
   const persistFocusSessions = useCallback((sessions: FocusSession[]) => {
     const json = JSON.stringify(sessions);
     // Our own write; recognise it when the server streams it back.
@@ -960,7 +972,13 @@ export default function Widget() {
     const session: FocusSession = {
       // Deterministic id for auto-completions so this window and the main window
       // (both counting down the same shared timer) log ONE session, not two.
-      id: opts?.id ?? (auto ? autoSessionId(focusTimer.sessionStartedAt, focusTimer.plannedSeconds) : uid()),
+      // ONE ID PER SESSION, however it ended.
+      //
+      // A hand stop used to take a random uid, so stopping on the PC an hour
+      // the phone had also stopped wrote two rows for one hour -- and the
+      // deduplication that was meant to catch that compares ids. The session's
+      // own start is the only thing both machines agree on.
+      id: opts?.id ?? focusSessionId(focusTimer.sessionStartedAt, endedAt.toISOString()),
       startedAt: startedAt.toISOString(),
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
@@ -2063,7 +2081,7 @@ export default function Widget() {
             const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
             const timeDisplayStr = isNoDur
               ? formatTimeLabel(fullStartMin, timeFormat)
-              : `${formatTimeLabel(fullStartMin, timeFormat)} – ${formatTimeLabel(fullEndMin, timeFormat)}`;
+              : `${formatTimeLabel(fullStartMin, timeFormat)} to ${formatTimeLabel(fullEndMin, timeFormat)}`;
             const durationLabel = durationMin < 60
               ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
               : durationMin % 60 === 0
@@ -2264,7 +2282,7 @@ export default function Widget() {
                             </div>
                             {height >= sh * 1.5 && (
                               <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1" style={{ color: textMuted }}>
-                                {formatTimeLabel(fullStartMin, timeFormat)} – {formatTimeLabel(fullEndMin, timeFormat)}
+                                {formatTimeLabel(fullStartMin, timeFormat)} to {formatTimeLabel(fullEndMin, timeFormat)}
                                 {isLive ? (
                                   <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                     <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />

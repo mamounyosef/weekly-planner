@@ -493,7 +493,18 @@ function newLocalId(): string {
 // mirrors to Google before the record is removed on the next sync).
 // Repeating: 'one' → exclude this date (EXDATE); 'following' → bound with UNTIL;
 // 'all' → drop the master (tombstone if synced).
-export function deleteScoped<T extends RecurFields>(raw: Record<string, T>, occId: string, mode: DeleteMode): Record<string, T> {
+export function deleteScoped<T extends RecurFields>(
+  raw: Record<string, T>,
+  occId: string,
+  mode: DeleteMode,
+  // THE SAME PHASE THE GRID DREW THE OCCURRENCE ON. Weekly expansion buckets
+  // dates by the start of their week, so for interval >= 2 the series depends
+  // on which day a week begins. Left at the default of Sunday while the grid
+  // used the real setting, "delete this and following" decided "is this the
+  // first occurrence, so collapse to delete-all?" against a series the user
+  // was not looking at.
+  weekStartsOn: WeekStartsOn = 0,
+): Record<string, T> {
   const { masterId, occDate } = parseOccId(occId);
   const master = raw[masterId];
   if (!master) return raw;
@@ -512,7 +523,7 @@ export function deleteScoped<T extends RecurFields>(raw: Record<string, T>, occI
     // Deleting from the anchor or first active occurrence onward removes everything → same as 'all'.
     const anchor = anchorOf(master);
     if (occDate <= ymd(anchor)) return dropOrTombstone();
-    const firstOccs = occurrenceStarts(master, anchor, addYears(anchor, 5));
+    const firstOccs = occurrenceStarts(master, anchor, addYears(anchor, 5), weekStartsOn);
     if (firstOccs.length === 0 || occDate <= ymd(firstOccs[0])) return dropOrTombstone();
     const until = ymd(addDays(parseDate(occDate), -1));
     const exdates = (master.exdates ?? []).filter(d => d < occDate);
@@ -535,7 +546,19 @@ const two = (n: number) => String(n).padStart(2, '0');
 const basicDate = (d: Date) => `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}`;
 const basicUTC = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 
-export function buildGoogleRecurrence(master: RecurFields, tz: string): string[] | undefined {
+export function buildGoogleRecurrence(
+  master: RecurFields,
+  tz: string,
+  // WKST, AND WHY IT HAS TO BE SENT. RFC 5545 expands a weekly rule by weeks,
+  // so once INTERVAL is 2 or more the dates depend on which day a week starts.
+  // Google defaults to Monday when the rule does not say. That happened to
+  // match this app while its own default was Monday too -- and the day someone
+  // set "Week starts on" to Sunday, every fortnightly repeat landed on
+  // different dates here than in Google Calendar, with nothing on screen to
+  // say so. The rule now carries the answer instead of relying on a
+  // coincidence.
+  weekStartsOn: WeekStartsOn = 1,
+): string[] | undefined {
   const r = master.recur;
   if (!r) return undefined;
   const [sh, sm] = (master.startTime ?? '00:00').split(':').map(Number);
@@ -544,6 +567,13 @@ export function buildGoogleRecurrence(master: RecurFields, tz: string): string[]
   let rule = `RRULE:FREQ=${r.freq.toUpperCase()};INTERVAL=${Math.max(1, Math.floor(r.interval || 1))}`;
   if (r.freq === 'weekly' && r.byWeekday && r.byWeekday.length) {
     rule += `;BYDAY=${[...r.byWeekday].sort((a, b) => a - b).map(w => WD_CODES[w]).join(',')}`;
+  }
+  // Only where it can change the answer. WKST on a daily or monthly rule is
+  // noise, and on a weekly rule with INTERVAL=1 every week start gives the same
+  // dates -- emitting it there would rewrite every existing rule in Google for
+  // no behavioural reason at all.
+  if (r.freq === 'weekly' && Math.max(1, Math.floor(r.interval || 1)) > 1) {
+    rule += `;WKST=${WD_CODES[weekStartsOn]}`;
   }
   if (r.end && 'count' in r.end) {
     rule += `;COUNT=${r.end.count}`;

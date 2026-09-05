@@ -36,8 +36,23 @@ function read(prev?: Viewport): Viewport {
     return prev;
   }
 
-  const isTouch =
-    ((window.matchMedia?.('(pointer: coarse)').matches ?? false) || (navigator.maxTouchPoints ?? 0) > 0);
+  /**
+   * A COARSE PRIMARY POINTER, not "has a touchscreen somewhere".
+   *
+   * `maxTouchPoints > 0` is true on most touchscreen Windows laptops and every
+   * 2-in-1, so a user sitting at a keyboard with a mouse was handed the phone
+   * build of three interactions: drag-and-drop on task chips was switched off
+   * in two places, and the editor stopped focusing its title field. They had
+   * never touched the screen.
+   *
+   * `(pointer: coarse)` asks about the pointer actually in use, which is the
+   * question. `maxTouchPoints` stays only as the fallback for a browser with
+   * no matchMedia at all.
+   */
+  const canAskPointer = typeof window.matchMedia === 'function';
+  const isTouch = canAskPointer
+    ? window.matchMedia('(pointer: coarse)').matches
+    : (navigator.maxTouchPoints ?? 0) > 0;
   // The visual viewport shrinks when the software keyboard opens.
   // Address bar / URL bar collapse can cause small jitter (< 32px), so we threshold.
   const vv = window.visualViewport;
@@ -69,9 +84,19 @@ const listeners = new Set<() => void>();
 let isListening = false;
 let rafId = 0;
 
+/**
+ * The snapshot the subscribers were last woken for.
+ *
+ * Kept apart from `currentViewport` on purpose. The thresholds below are
+ * measured against what the screen currently SHOWS, not against the last
+ * reading -- comparing against the last reading lets a width drift past the
+ * threshold eleven pixels at a time and never once re-render.
+ */
+let lastNotified: Viewport = currentViewport;
+
 function notifySubscribers() {
   const next = read(currentViewport);
-  const prev = currentViewport;
+  const prev = lastNotified;
 
   const flagsSame =
     prev.isPhone === next.isPhone &&
@@ -82,6 +107,15 @@ function notifySubscribers() {
 
   const keyboardSame = Math.abs(prev.keyboardInset - next.keyboardInset) < 16;
 
+  // THE SNAPSHOT IS ALWAYS COMMITTED; only the re-render is skipped.
+  //
+  // This used to `return` before the assignment, which is not the same thing.
+  // A phone address bar sliding away changes the height without touching the
+  // width, so the guard fired and `vp.height` stayed a whole address bar out of
+  // date for everything that read it. Anything that renders for another reason
+  // now sees the true size; nothing is woken up just for the jitter.
+  currentViewport = next;
+
   if (flagsSame && keyboardSame) {
     if (next.isPhone && Math.abs(prev.width - next.width) < 12) {
       return; // Skip re-render for address-bar micro jitter
@@ -91,7 +125,7 @@ function notifySubscribers() {
     }
   }
 
-  currentViewport = next;
+  lastNotified = next;
   for (const listener of listeners) {
     listener();
   }

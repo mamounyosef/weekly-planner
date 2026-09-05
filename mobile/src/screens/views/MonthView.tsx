@@ -41,6 +41,7 @@ import { PRESS_DELAY, radius, space } from '../../theme';
 import { monthGrid } from '../../lib/grid';
 import { countsForRange } from '../../lib/agenda';
 import type { EventCategory } from '../../lib/categories';
+import { inkOn } from '../../lib/gcalColor';
 import {
   dateAtPoint,
   describeSpan,
@@ -550,19 +551,6 @@ function Cell({ date, count, total, reserve, inMonth, isToday, onPress, onPressO
   );
 }
 
-/**
- * Black or white, whichever can be read on this fill.
- *
- * Category colours run from pale peach to deep indigo, and a fixed text colour
- * is illegible on roughly half of them. Rec. 709 luminance, with a safe fallback
- * for anything that is not a plain hex.
- */
-function inkOn(colour: string): string {
-  const hex = colour.trim().replace('#', '');
-  const full = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex;
-  if (full.length !== 6 || /[^0-9a-fA-F]/.test(full)) return '#FFFFFF';
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 150 ? '#15151E' : '#FFFFFF';
-}
+// `inkOn` now lives in `lib/gcalColor.ts`, imported above. It was written here
+// first and kept here, which is how the week view came to draw the same event
+// in unreadable white while this one drew it correctly. One copy, one answer.

@@ -84,9 +84,37 @@ export interface DragHandle {
 
 type Lock = (id: number, held: boolean) => void;
 
-const ScrollLock = React.createContext<Lock | null>(null);
+/**
+ * What a dragging list can ask of the scroller it sits in.
+ *
+ * `lock` stops the page moving under the finger. `edgeScroll` is the opposite
+ * request and is why it is here at all: with the page frozen, nothing scrolled
+ * while a row was held at the top or bottom of the screen, so on a list longer
+ * than one screenful a task simply COULD NOT be moved to the bottom. You had to
+ * drag, drop, scroll, and drag again. The web's own touch drag has done this
+ * properly for a long time; the phone, which needs it more, had nothing.
+ *
+ * `edgeScroll` is handed the finger's absolute Y on the screen, or null when
+ * the drag ends. It answers with how far it has scrolled since the drag began,
+ * because the list needs that number: the row has to stay under the finger
+ * while the content moves beneath it, and the slot it would land in has to be
+ * measured against the content, not against the screen.
+ */
+interface ScrollControl {
+  lock: Lock;
+  edgeScroll: (pageY: number | null) => void;
+  /** Pixels auto-scrolled since the current drag began. */
+  scrolledSinceDrag: () => number;
+}
+
+const ScrollLock = React.createContext<ScrollControl | null>(null);
 
 let nextListId = 1;
+
+/** How close to an edge the finger has to be before the page starts moving. */
+const EDGE_ZONE_PX = 84;
+/** The fastest the page moves, in pixels per frame, at the very edge. */
+const EDGE_SPEED_MAX = 14;
 
 /**
  * A ScrollView that stops scrolling while anything inside it is being dragged.
@@ -101,6 +129,62 @@ export function SortableScrollView({ children, ...props }: ScrollViewProps) {
   const held = useRef<readonly number[]>(NO_HOLDS);
   const [locked, setLocked] = useState(false);
   const allowed = props.scrollEnabled !== false;
+
+  // ── Auto-scroll while a row is held at an edge ───────────────────────────
+  // Everything here is refs: this runs on a timer during a gesture, and a
+  // render per frame is exactly what the drag cannot afford.
+  const viewTop = useRef(0);
+  const viewHeight = useRef(0);
+  const scrollY = useRef(0);
+  const contentHeight = useRef(0);
+  const edgeTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fingerY = useRef<number | null>(null);
+  const scrolledSinceDrag = useRef(0);
+
+  const stopEdgeScroll = () => {
+    if (edgeTimer.current) { clearInterval(edgeTimer.current); edgeTimer.current = null; }
+    fingerY.current = null;
+  };
+
+  const edgeScroll = useMemo(() => (pageY: number | null) => {
+    if (pageY === null) { stopEdgeScroll(); scrolledSinceDrag.current = 0; return; }
+    fingerY.current = pageY;
+    if (edgeTimer.current) return;
+
+    edgeTimer.current = setInterval(() => {
+      const y = fingerY.current;
+      const h = viewHeight.current;
+      if (y === null || h <= 0) return;
+
+      const fromTop = y - viewTop.current;
+      const fromBottom = viewTop.current + h - y;
+
+      // Proportional, so the page creeps near the edge of the zone and moves
+      // properly at the very edge. A single fixed speed either overshoots the
+      // row you were aiming for or takes too long to be worth using.
+      let step = 0;
+      if (fromTop < EDGE_ZONE_PX) {
+        step = -EDGE_SPEED_MAX * Math.min(1, (EDGE_ZONE_PX - fromTop) / EDGE_ZONE_PX);
+      } else if (fromBottom < EDGE_ZONE_PX) {
+        step = EDGE_SPEED_MAX * Math.min(1, (EDGE_ZONE_PX - fromBottom) / EDGE_ZONE_PX);
+      }
+      if (step === 0) return;
+
+      // Clamped to the real ends, or `scrolledSinceDrag` would go on counting
+      // movement that never happened and the row would drift off the finger.
+      const maxY = Math.max(0, contentHeight.current - h);
+      const next = Math.max(0, Math.min(maxY, scrollY.current + step));
+      const moved = next - scrollY.current;
+      if (moved === 0) return;
+
+      scrollY.current = next;
+      scrolledSinceDrag.current += moved;
+      // Not animated: this IS the animation, one small step per frame.
+      scroller.current?.scrollTo({ y: next, animated: false });
+    }, 16);
+  }, []);
+
+  useEffect(() => stopEdgeScroll, []);
 
   const lock = useMemo<Lock>(() => (id, on) => {
     const next = setHold(held.current, id, on);
@@ -130,9 +214,39 @@ export function SortableScrollView({ children, ...props }: ScrollViewProps) {
     setLocked(isHeld(next));
   }, [allowed]);
 
+  const control = useMemo<ScrollControl>(
+    () => ({ lock, edgeScroll, scrolledSinceDrag: () => scrolledSinceDrag.current }),
+    [lock, edgeScroll],
+  );
+
   return (
-    <ScrollLock.Provider value={lock}>
-      <ScrollView {...props} ref={scroller} scrollEnabled={allowed && !locked}>
+    <ScrollLock.Provider value={control}>
+      <ScrollView
+        {...props}
+        ref={scroller}
+        scrollEnabled={allowed && !locked}
+        // The three measurements the edge scroll needs, taken from the events
+        // that already fire rather than by measuring on demand mid-gesture.
+        onLayout={e => {
+          viewHeight.current = e.nativeEvent.layout.height;
+          // Where the scroller sits on the screen, so the finger's absolute Y
+          // can be compared with its edges. Measured rather than assumed: this
+          // view sits under a header whose height differs per screen.
+          (scroller.current as unknown as {
+            measureInWindow?: (cb: (x: number, y: number) => void) => void;
+          } | null)?.measureInWindow?.((_x, y) => { viewTop.current = y; });
+          props.onLayout?.(e);
+        }}
+        onScroll={e => {
+          scrollY.current = e.nativeEvent.contentOffset.y;
+          props.onScroll?.(e);
+        }}
+        onContentSizeChange={(w, h) => {
+          contentHeight.current = h;
+          props.onContentSizeChange?.(w, h);
+        }}
+        scrollEventThrottle={props.scrollEventThrottle ?? 16}
+      >
         {children}
       </ScrollView>
     </ScrollLock.Provider>
@@ -197,11 +311,15 @@ export function SortableList<T>({
   const reorderRef = useRef(onReorder);
   reorderRef.current = onReorder;
 
-  const lock = useContext(ScrollLock);
+  const control = useContext(ScrollLock);
+  // Through a ref, like `dataRef` above: the PanResponder is built once and
+  // would otherwise hold the first render's context value forever.
+  const controlRef = useRef(control);
+  controlRef.current = control;
   useEffect(() => {
-    lock?.(listId, active !== null);
-    return () => { lock?.(listId, false); };
-  }, [active, listId, lock]);
+    control?.lock(listId, active !== null);
+    return () => { control?.lock(listId, false); };
+  }, [active, listId, control]);
 
   // A stale measurement past the end of the list would let a drag "reach" a row
   // that is not there any more.
@@ -213,6 +331,9 @@ export function SortableList<T>({
   const finish = () => {
     activeRef.current = null;
     granted.current = false;
+    // Whatever ended the drag -- a drop, a cancel, the row unmounting -- the
+    // page must stop moving with it, or it would go on scrolling on its own.
+    controlRef.current?.edgeScroll(null);
     pan.setValue(0);
     setActive(null);
   };
@@ -221,6 +342,9 @@ export function SortableList<T>({
     if (!sortable) return;
     activeRef.current = index;
     granted.current = false;
+    // Zeroes the auto-scroll counter as well as stopping any leftover loop, so
+    // this drag starts measuring from nothing.
+    controlRef.current?.edgeScroll(null);
     pan.setValue(0);
     setActive(index);
     // A new drag ends any bridge the last one left behind. Its own drop is
@@ -247,7 +371,14 @@ export function SortableList<T>({
       granted.current = true;
       pan.setValue(0);
     },
-    onPanResponderMove: (_, g) => { pan.setValue(g.dy); },
+    onPanResponderMove: (_, g) => {
+      // Ask the page to move if the finger is at an edge, and take back how far
+      // it has moved so far. The row has to stay under the FINGER while the
+      // content slides beneath it, so its displacement within the content is
+      // the finger's travel plus everything the page has scrolled.
+      controlRef.current?.edgeScroll(g.moveY);
+      pan.setValue(g.dy + (controlRef.current?.scrolledSinceDrag() ?? 0));
+    },
     // Nobody gets to take a drag back once it has started, least of all the
     // scroller this list is sitting in.
     onPanResponderTerminationRequest: () => false,
@@ -256,8 +387,17 @@ export function SortableList<T>({
       const from = activeRef.current;
       if (from === null) { finish(); return; }
 
+      // The page stops moving the instant the finger lifts, but what it has
+      // already scrolled still counts towards where the row landed.
+      const scrolled = controlRef.current?.scrolledSinceDrag() ?? 0;
+      controlRef.current?.edgeScroll(null);
+
       const items = dataRef.current;
-      const to = dropIndexFor(boxes.current, from, g.dy, items.length);
+      // The SAME displacement the transform has been drawing all along, or the
+      // row would be dropped into a different slot from the one it was
+      // visibly sitting in.
+      const travel = g.dy + scrolled;
+      const to = dropIndexFor(boxes.current, from, travel, items.length);
 
       // Dropped where it was picked up: the settled picture is this one with no
       // transform, so clearing it now is already correct.
@@ -272,7 +412,7 @@ export function SortableList<T>({
       //    lists fall back to where the finger actually was, which is within
       //    half a row of right and never wrong enough to look broken.
       const offset = shiftThreshold(boxes.current, from, to);
-      pan.setValue(offset === null ? g.dy : offset);
+      pan.setValue(offset === null ? travel : offset);
 
       // 2. Tell the parent. Everything from here on may block for a long time
       //    -- the merge, the database, the start of a sync -- and none of it

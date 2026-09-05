@@ -176,10 +176,25 @@ assert(recNoBeat !== null, 'Abandoned session without heartbeat is recovered');
 assertEqual(recNoBeat?.endedAt, new Date(BASE_TIME + 1800_000).toISOString(), 'Ended at planned duration mark');
 assertEqual(recNoBeat?.durationSeconds, 1800, 'Duration is plannedSeconds');
 
-// Recovery ID and Completion ID stability
-assertEqual(recoveredSessionId('2026-08-17T10:00:00.000Z'), 'recovered-2026-08-17T10:00:00.000Z', 'recoveredSessionId');
-assertEqual(recoveredSessionId(null), 'recovered-unknown', 'recoveredSessionId fallback');
-assertEqual(autoSessionId('2026-08-17T10:00:00.000Z', 3600), 'auto-2026-08-17T10:00:00.000Z-3600', 'autoSessionId');
+// Recovery ID and Completion ID stability.
+//
+// THE ID IS THE SESSION, not the way it ended. This used to assert the three
+// separate spellings -- `recovered-<start>`, `auto-<start>-<planned>` and
+// `stop-<start>-<duration>` -- which is precisely the bug: an hour that ran out
+// on the PC and was stopped on the phone produced two records under two names,
+// and the deduplication that was meant to collapse them compares ids. Nine
+// sessions in the real database were logged twice that way. See
+// `focusIntegrity.test.ts` for the full account.
+assertEqual(recoveredSessionId('2026-08-17T10:00:00.000Z'), 'session-2026-08-17T10:00:00.000Z', 'recoveredSessionId');
+assertEqual(autoSessionId('2026-08-17T10:00:00.000Z', 3600), 'session-2026-08-17T10:00:00.000Z', 'autoSessionId');
+assertEqual(
+  recoveredSessionId('2026-08-17T10:00:00.000Z'),
+  autoSessionId('2026-08-17T10:00:00.000Z', 3600),
+  'the same session has the same id however it ended',
+);
+// A session with no recorded start still gets a distinct id rather than every
+// such session collapsing onto one row, which would delete work.
+assert(recoveredSessionId(null).startsWith('session-'), 'recoveredSessionId fallback');
 
 console.log('✓ Crash & sleep recovery tests passed');
 
@@ -439,8 +454,12 @@ console.log('\n--- LAYER D: EXHAUSTIVE SCENARIO MATRIX ---');
   ];
   const deduped = dedupeFocusSessions(sessions);
   assertEqual(deduped.length, 2, 'dedupeFocusSessions removes duplicate id');
-  assertEqual(autoSessionId('2026-08-17T10:00:00Z', 1500), 'auto-2026-08-17T10:00:00Z-1500', 'deterministic autoSessionId');
-  assertEqual(recoveredSessionId('2026-08-17T10:00:00Z'), 'recovered-2026-08-17T10:00:00Z', 'deterministic recoveredSessionId');
+  // Deterministic, and the SAME for one session however it ended. The planned
+  // length used to be part of the id, which meant the two machines disagreed
+  // about the name of a session whenever they disagreed about its length.
+  assertEqual(autoSessionId('2026-08-17T10:00:00Z', 1500), 'session-2026-08-17T10:00:00Z', 'deterministic autoSessionId');
+  assertEqual(autoSessionId('2026-08-17T10:00:00Z', 3600), 'session-2026-08-17T10:00:00Z', 'the planned length is not part of it');
+  assertEqual(recoveredSessionId('2026-08-17T10:00:00Z'), 'session-2026-08-17T10:00:00Z', 'deterministic recoveredSessionId');
 }
 
 // --- D.4: Day keys & configurable day-start hours ---

@@ -330,3 +330,38 @@ export function monthsForDates(dates: Date[]): string[] {
   for (const d of dates) seen.add(`${d.getFullYear()}-${d.getMonth() + 1}`);
   return [...seen];
 }
+
+/**
+ * The Aladhan cache, reshaped into the month map the scheduler wants.
+ *
+ * The cache is ONE store keyed by query (`city|country|method|school|yyyy-M`),
+ * each entry holding a `days` map. `computeSchedule` wants
+ * `{ 'yyyy-MM': { 'yyyy-MM-dd': times } }`, and only for the city and method
+ * this device is actually set to, or a stale entry from a previous city would
+ * quietly drive the reminders.
+ *
+ * WHY IT LIVES HERE. The server worked this out privately, so the phone never
+ * did it at all: it called `computeSchedule` with no `prayerMonths`, and the
+ * prayer branch is gated on that argument being present. The phone could draw
+ * prayer times with no signal and would never once buzz for one, and prayers
+ * were missing from its notification centre while the PC's showed them. That
+ * is the category most wanted away from the desk.
+ */
+export function prayerMonthsFromCache(
+  cache: Record<string, unknown> | null | undefined,
+  settings: PrayerSettings,
+): Record<string, PrayerMonth> {
+  const prefix = `${prayerQueryKey(settings)}|`;
+  const out: Record<string, PrayerMonth> = {};
+  for (const [key, value] of Object.entries(cache || {})) {
+    if (!key.startsWith(prefix)) continue;
+    const days = (value as { days?: Record<string, Record<string, string>> })?.days;
+    if (!days || typeof days !== 'object') continue;
+    for (const [dateStr, times] of Object.entries(days)) {
+      if (!times || typeof times !== 'object') continue;
+      const month = dateStr.slice(0, 7);
+      (out[month] ||= {})[dateStr] = times as PrayerMonth[string];
+    }
+  }
+  return out;
+}

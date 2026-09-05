@@ -15,6 +15,7 @@
 import assert from 'node:assert/strict';
 import {
   FULL_DAY,
+  clipSpan,
   describeRanges,
   drawnMinuteOf,
   hiddenHours,
@@ -522,7 +523,172 @@ function main() {
     }
   }
 
-  console.log('\nALL PASS (dayWindows: canonical ranges, the round trip, seams, nothing lost)');
+
+  // ─── WHERE THE DRAWN HOURS CUT A BLOCK ───────────────────────────────────────
+  //
+  // The case that prompted this: a night from 00:25 to 08:55 on a grid whose day
+  // ends at 2am. An hour and a half of it is drawn and seven hours are not, and
+  // the block said nothing at all about the missing seven.
+  console.log('\n--- CLIPPING: WHOLLY IN, WHOLLY OUT, AND CUT AT EITHER END ---');
+  {
+    const DAY = [{ from: 8, to: 18 }];
+
+    // Entirely inside the drawn hours: nothing to say.
+    assert.deepEqual(clipSpan(9 * 60, 10 * 60, DAY),
+      { hidden: false, clippedAbove: false, clippedBelow: false });
+    // Flush against both edges is still entirely inside. `endMin` is exclusive,
+    // so a block ending exactly at 18:00 is not cut by the hour starting there.
+    assert.deepEqual(clipSpan(8 * 60, 18 * 60, DAY),
+      { hidden: false, clippedAbove: false, clippedBelow: false },
+      'the exact span of the drawn hours is not clipped at either end');
+
+    // Entirely outside, on either side.
+    assert.deepEqual(clipSpan(2 * 60, 3 * 60, DAY),
+      { hidden: true, clippedAbove: false, clippedBelow: false }, 'before the first hour drawn');
+    assert.deepEqual(clipSpan(20 * 60, 21 * 60, DAY),
+      { hidden: true, clippedAbove: false, clippedBelow: false }, 'after the last');
+    // A hidden span reports no clipping. It is not "cut off at the top", it is
+    // simply not there, and it belongs in the list under the grid instead.
+    const out = clipSpan(20 * 60, 21 * 60, DAY);
+    assert.equal(out.clippedAbove, false);
+    assert.equal(out.clippedBelow, false);
+
+    // Cut at the top, at the bottom, and at both.
+    assert.deepEqual(clipSpan(6 * 60, 10 * 60, DAY),
+      { hidden: false, clippedAbove: true, clippedBelow: false }, 'starts before the grid opens');
+    assert.deepEqual(clipSpan(16 * 60, 20 * 60, DAY),
+      { hidden: false, clippedAbove: false, clippedBelow: true }, 'runs past where it closes');
+    assert.deepEqual(clipSpan(6 * 60, 20 * 60, DAY),
+      { hidden: false, clippedAbove: true, clippedBelow: true }, 'swallows the whole drawn day');
+
+    // One minute of overlap is still visible, at either edge.
+    assert.equal(clipSpan(7 * 60, 8 * 60 + 1, DAY).hidden, false, 'one minute at the top counts');
+    assert.equal(clipSpan(7 * 60, 8 * 60 + 1, DAY).clippedAbove, true);
+    assert.equal(clipSpan(17 * 60 + 59, 19 * 60, DAY).hidden, false, 'and one at the bottom');
+    assert.equal(clipSpan(17 * 60 + 59, 19 * 60, DAY).clippedBelow, true);
+    // Ending exactly where the grid opens is not an overlap at all.
+    assert.equal(clipSpan(6 * 60, 8 * 60, DAY).hidden, true, 'an end flush with the first hour is out');
+    assert.equal(clipSpan(18 * 60, 19 * 60, DAY).hidden, true, 'and a start flush with the last');
+  }
+
+  console.log('\n--- CLIPPING ACROSS A HOLE IN THE MIDDLE ---');
+  {
+    // Two stretches with the afternoon cut out of the middle.
+    const SPLIT = [{ from: 6, to: 12 }, { from: 16, to: 22 }];
+
+    // A block spanning the hole is drawn in both halves, and is NOT reported as
+    // clipped: the seam already says the hours are missing, and repeating it on
+    // every block that crosses it would be noise.
+    assert.deepEqual(clipSpan(10 * 60, 18 * 60, SPLIT),
+      { hidden: false, clippedAbove: false, clippedBelow: false },
+      'a block bridging the seam is whole at both of its own ends');
+
+    // A block living entirely inside the hole is hidden.
+    assert.deepEqual(clipSpan(13 * 60, 14 * 60, SPLIT),
+      { hidden: true, clippedAbove: false, clippedBelow: false });
+
+    // One that starts in the hole and comes out the far side is cut at the top.
+    assert.deepEqual(clipSpan(13 * 60, 18 * 60, SPLIT),
+      { hidden: false, clippedAbove: true, clippedBelow: false });
+    // And one that starts in view and ends in the hole is cut at the bottom.
+    assert.deepEqual(clipSpan(10 * 60, 14 * 60, SPLIT),
+      { hidden: false, clippedAbove: false, clippedBelow: true });
+
+    // Three stretches, so a block can bridge two holes at once.
+    const THREE = [{ from: 0, to: 2 }, { from: 6, to: 8 }, { from: 20, to: 22 }];
+    assert.deepEqual(clipSpan(60, 21 * 60, THREE),
+      { hidden: false, clippedAbove: false, clippedBelow: false }, 'bridging two holes');
+    assert.deepEqual(clipSpan(3 * 60, 21 * 60, THREE),
+      { hidden: false, clippedAbove: true, clippedBelow: false }, 'starting inside the first hole');
+    assert.deepEqual(clipSpan(60, 23 * 60, THREE),
+      { hidden: false, clippedAbove: false, clippedBelow: true }, 'ending past the last hour');
+  }
+
+  console.log('\n--- CLIPPING IN A WINDOW THAT RUNS PAST MIDNIGHT ---');
+  {
+    // The real setup from the report: the day runs 6am to 2am the next
+    // morning. That is a twenty hour window, so the four hours from 2am to 6am
+    // belong to no column at all -- and everything measured here is in the
+    // WINDOW's frame, where half past midnight is 24:30.
+    const NIGHT = windowRanges({ start: 6, end: 26 }, FULL_DAY);
+    assert.deepEqual(NIGHT, [r(6, 26)], 'six in the morning until two the next');
+    assert.equal(visibleMinutes(NIGHT), 20 * 60, 'twenty hours of it are drawn');
+
+    // Sleeping, 00:25 to 08:55. It opens after midnight, so it belongs to the
+    // PREVIOUS column, and `splitAcrossWindows` cuts it at the foot of that
+    // column. What is left is the piece from 24:25 to the cut.
+    const [tail, head] = splitAcrossWindows(
+      { startMin: 25, endMin: 535 }, { col: 1, columns: 3, dayStartHour: 6 },
+    );
+    assert.equal(tail.isTail, true, 'the first piece runs off the end of its column');
+    assert.equal(tail.startMin, 24 * 60 + 25, 'starting at half past midnight');
+    assert.equal(head.isHead, true, 'and the rest arrives at the top of the next one');
+
+    const sleep = clipSpan(tail.startMin, tail.endMin, NIGHT);
+    assert.equal(sleep.hidden, false, 'the first hour and a half of it is on screen');
+    assert.equal(sleep.clippedAbove, false, 'it starts where it appears to start');
+    assert.equal(sleep.clippedBelow, true,
+      'and everything after 2am is cut off, which the block has to say');
+
+    // THE CASE THAT PROMPTED ALL THIS. Dawn prayer at 04:19 falls in the four
+    // hours between the end of one column and the start of the next, so in this
+    // frame it is 28:19: past the end of the window entirely. It is not late in
+    // the column. It is not in the column.
+    const fajr = clipSpan(4 * 60 + 19 + 1440, 4 * 60 + 20 + 1440, NIGHT);
+    assert.equal(fajr.hidden, true,
+      'dawn prayer is outside the drawn hours, not squashed against the bottom of them');
+
+    // A day drawn round the clock has nowhere for it to fall out of.
+    const whole = windowRanges({ start: 6, end: 30 }, FULL_DAY);
+    assert.equal(clipSpan(4 * 60 + 19 + 1440, 4 * 60 + 20 + 1440, whole).hidden, false,
+      'the same prayer on a full twenty-four hour column is simply drawn');
+  }
+
+  console.log('\n--- CLIPPING SURVIVES NONSENSE ---');
+  {
+    const DAY = [{ from: 8, to: 18 }];
+    // A moment with no duration is one minute, so it still answers the question.
+    assert.equal(clipSpan(9 * 60, 9 * 60, DAY).hidden, false, 'a marker inside the hours is drawn');
+    assert.equal(clipSpan(3 * 60, 3 * 60, DAY).hidden, true, 'and one outside them is not');
+    assert.equal(clipSpan(9 * 60, 8 * 60, DAY).hidden, false, 'a backwards span is read as its start');
+
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      const r = clipSpan(bad, 10 * 60, DAY);
+      assert.equal(typeof r.hidden, 'boolean', `start ${bad} still answers`);
+      const r2 = clipSpan(9 * 60, bad, DAY);
+      assert.equal(typeof r2.hidden, 'boolean', `end ${bad} still answers`);
+    }
+    // No drawn hours at all: everything is hidden, and nothing throws.
+    assert.deepEqual(clipSpan(9 * 60, 10 * 60, []),
+      { hidden: true, clippedAbove: false, clippedBelow: false });
+
+    // AGREES WITH `isMinuteVisible`, which is what the rest of the grid measures
+    // by. Walked over every minute of the day against three different windows,
+    // because a disagreement here means a block drawn in one place and listed as
+    // missing in another.
+    for (const ranges of [[{ from: 8, to: 18 }], [{ from: 0, to: 24 }],
+                          [{ from: 6, to: 12 }, { from: 16, to: 22 }]]) {
+      for (let m = 0; m < 1440; m += 1) {
+        assert.equal(clipSpan(m, m + 1, ranges).hidden, !isMinuteVisible(m, ranges),
+          `minute ${m} is described the same way by both`);
+      }
+    }
+
+    // A span is hidden if and only if no minute in it is visible. Checked
+    // exhaustively over a day at five minute resolution rather than argued.
+    const RANGES = [{ from: 6, to: 12 }, { from: 16, to: 22 }];
+    for (let s = 0; s < 1440; s += 5) {
+      for (const len of [1, 30, 90, 480]) {
+        const e = s + len;
+        let anyVisible = false;
+        for (let m = s; m < e; m += 1) if (isMinuteVisible(m, RANGES)) { anyVisible = true; break; }
+        assert.equal(clipSpan(s, e, RANGES).hidden, !anyVisible,
+          `${s} for ${len} minutes`);
+      }
+    }
+  }
+
+  console.log('\nALL PASS (dayWindows: canonical ranges, the round trip, seams, nothing lost, clipping)');
 }
 
 main();

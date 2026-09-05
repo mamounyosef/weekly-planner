@@ -29,6 +29,7 @@ import { usePlanner } from '../state/planner';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
 import type { EventCategory } from '../lib/categories';
+import { canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE } from '../lib/categories';
 
 /**
  * The palette, keyed by its own hex.
@@ -90,6 +91,15 @@ export function Categories({ onClose }: { onClose?: () => void }) {
   };
 
   const confirmDelete = (cat: EventCategory) => {
+    // THE LAST ONE CANNOT GO. `coerceCategories` reads an empty array as
+    // corruption and hands back the two built-in defaults, so deleting the last
+    // category here wrote `[]` and got Personal and University Calendar back --
+    // which then synced to every device. The PC's settings page always refused
+    // this; the PC's filter menu and this screen silently did the opposite.
+    if (!canDeleteCategory(list, cat.id)) {
+      Alert.alert('Keep one category', LAST_CATEGORY_MESSAGE);
+      return;
+    }
     Alert.alert(
       `Delete "${cat.name || 'Untitled'}"?`,
       'Items in this category keep their name and their time, but they lose this colour and fall back to plain. Nothing else is removed, on this phone or on your PC.',
@@ -99,7 +109,7 @@ export function Categories({ onClose }: { onClose?: () => void }) {
           text: 'Delete',
           style: 'destructive',
           onPress: () => {
-            write(list.filter(c => c.id !== cat.id));
+            write(deleteCategory(list, cat.id));
             setEditingId(null);
             setCreating(false);
           },

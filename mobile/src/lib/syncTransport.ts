@@ -206,7 +206,7 @@ export function createTransport(opts: TransportOptions) {
     if (res.status === 401 || res.status === 403) {
       session = null;
       opts.onSession?.(null);
-      throw new TransportError('Signed out — please sign in again.', 'auth', res.status);
+      throw new TransportError('Signed out. Please sign in again.', 'auth', res.status);
     }
 
     const raw = await res.text().catch(() => '');
@@ -235,7 +235,7 @@ export function createTransport(opts: TransportOptions) {
       // Almost always a captive portal or a login page served in place of the
       // API. Saying so is far more useful than "Unexpected token < in JSON".
       throw new TransportError(
-        'The server sent something that is not planner data — check the address, or your Wi-Fi sign-in page.',
+        'The server sent something that is not planner data. Check the address, or your Wi-Fi sign-in page.',
         'protocol',
         res.status,
       );

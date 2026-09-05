@@ -52,7 +52,7 @@ import { Tick } from '../ui/Tick';
 import { applyGuesses, setPending } from '../lib/pendingDone';
 import { useNowMinute } from '../ui/useNow';
 import { ICONS } from '../ui/icons';
-import { HIT, PRESSED, PRESS_DELAY, radius, space } from '../theme';
+import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, radius, space } from '../theme';
 import { goToLiveOffset, nowLineOffscreen } from '../lib/liveMarker';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
@@ -66,6 +66,7 @@ import { ItemMenu, type ItemMenuTarget } from '../ui/ItemMenu';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
 import { anchorFor, describeRecur, draftFromRecord, toTimeString } from '../lib/draft';
 import type { OccurrenceScope } from '../lib/occurrence';
+import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
 import {
   addDays,
   currentItem,
@@ -77,6 +78,19 @@ import {
 } from '../lib/agenda';
 
 type ViewMode = 'agenda' | 'day' | 'custom' | 'week' | 'month' | 'year';
+
+/**
+ * The order the chips are offered in: shortest span first, longest last.
+ *
+ * List sits at the end rather than the start because it is the odd one out.
+ * The other five are calendars of increasing reach -- a day, a few days, a
+ * week, a month, a year -- and reading left to right along them is the whole
+ * point of the row. List is not a longer or shorter window onto the same
+ * thing; it is a different way of looking. Leading with it broke the run
+ * before it began, and put the least calendar-like option in the place the eye
+ * lands on first.
+ */
+const VIEW_ORDER: readonly ViewMode[] = ['day', 'custom', 'week', 'month', 'year', 'agenda'];
 
 /** Short enough to fit six chips across a phone without wrapping. */
 const VIEW_LABELS: Record<ViewMode, string> = {
@@ -95,13 +109,14 @@ const GUESS_TTL_MS = 4000;
 const SWATCHES = Object.entries(SWATCH_BASE_HEX).map(([key, hex]) => ({ key, hex }));
 
 export function Today({
-  onOpenConflicts, onOpenSearch, onOpenNotifications, onOpenQuickAdd,
+  onOpenConflicts, onOpenSearch, onOpenNotifications, onOpenQuickAdd, onOpenFilter,
   goToDate, goToItem, onWentToDate,
 }: {
   onOpenConflicts: () => void;
   onOpenSearch?: () => void;
   onOpenNotifications?: () => void;
   onOpenQuickAdd?: () => void;
+  onOpenFilter?: () => void;
   /** A day handed over from search or the bell. Shown, then acknowledged. */
   goToDate?: string;
   /**
@@ -124,7 +139,14 @@ export function Today({
     visibleHours, dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
     calendarView: view, setCalendarView,
     unreadNotifications, prayerAppearance,
+    hiddenCategoriesByView, setHiddenCategories,
   } = usePlanner();
+
+  const hiddenCategoryIds = useMemo(
+    () => hiddenCategoriesByView[view] || [],
+    [hiddenCategoriesByView, view]
+  );
+
 
   const [selected, setSelected] = useState(() => ymd(new Date()));
   const [refreshing, setRefreshing] = useState(false);
@@ -218,8 +240,11 @@ export function Today({
    */
   const agenda = useMemo(() => {
     const full = day(selected);
-    const allDay = full.allDay.filter(i => i.store === 'events');
-    const timed = full.timed.filter(i => i.store === 'events');
+    const hiddenSet = new Set(hiddenCategoryIds);
+    // Note: On mobile UNCATEGORISED isn't a constant so we handle null or undefined categories as not hidden
+    const isVisible = (i: AgendaItem) => !hiddenCategoryIds.length || !hiddenSet.has(i.categoryId || '__none__');
+    const allDay = full.allDay.filter(i => i.store === 'events' && isVisible(i));
+    const timed = full.timed.filter(i => i.store === 'events' && isVisible(i));
     const all = [...allDay, ...timed];
     return {
       ...full,
@@ -229,13 +254,15 @@ export function Today({
       all,
       counts: { total: all.length, done: all.filter(i => i.completed).length },
     };
-  }, [day, selected]);
+  }, [day, selected, hiddenCategoryIds]);
 
   /** Events only here too, so the strip's load bars match what the day shows. */
   const loadOf = React.useCallback((date: string) => {
-    const items = day(date).all.filter(i => i.store === 'events');
+    const hiddenSet = new Set(hiddenCategoryIds);
+    const isVisible = (i: AgendaItem) => !hiddenCategoryIds.length || !hiddenSet.has(i.categoryId || '__none__');
+    const items = day(date).all.filter(i => i.store === 'events' && isVisible(i));
     return { total: items.length, done: items.filter(i => i.completed).length };
-  }, [day]);
+  }, [day, hiddenCategoryIds]);
 
   // A week at a time, starting three days back, so today sits just left of
   // centre and the days you are most likely to want are all reachable.
@@ -268,10 +295,12 @@ export function Today({
   /** Events only, for the grid views. */
   const eventsOf = React.useCallback((date: string) => {
     const full = day(date);
-    const allDay = full.allDay.filter(i => i.store === 'events');
-    const timed = full.timed.filter(i => i.store === 'events');
+    const hiddenSet = new Set(hiddenCategoryIds);
+    const isVisible = (i: AgendaItem) => !hiddenCategoryIds.length || !hiddenSet.has(i.categoryId || '__none__');
+    const allDay = full.allDay.filter(i => i.store === 'events' && isVisible(i));
+    const timed = full.timed.filter(i => i.store === 'events' && isVisible(i));
     return { ...full, allDay, timed, tasks: [], all: [...allDay, ...timed] };
-  }, [day]);
+  }, [day, hiddenCategoryIds]);
 
   /**
    * The clock this screen draws itself against.
@@ -381,8 +410,11 @@ export function Today({
     },
   }), []);
 
-  const open = (item: AgendaItem) =>
+  // STABLE, because `ItemRow` is memoised and a fresh arrow every render
+  // would make that memo do nothing at all.
+  const open = useCallback((item: AgendaItem) => {
     setEditing({ store: item.store, id: item.masterId, date: item.date });
+  }, []);
 
   /**
    * Long-press anything: open the menu on it.
@@ -392,7 +424,7 @@ export function Today({
    * whether the series is locked) comes from the record the occurrence resolves
    * to, which is the same record the actions will be planned against.
    */
-  const hold = (item: AgendaItem) => {
+  const hold = useCallback((item: AgendaItem) => {
     menuItemRef.current = item;
     const store = item.store === 'events' ? events() : tasks();
     const master = (store as any)[item.masterId] ?? {};
@@ -406,12 +438,16 @@ export function Today({
       repeatLabel: item.repeating ? describeRecur(master.recur) : undefined,
       locked: master.locked === true,
       done: item.completed,
-      colour: typeof master.colour === 'string' ? master.colour : undefined,
+      // `master.color`, NOT `master.colour`. The stored field is `color` and
+      // holds a swatch name; nothing in this app has ever written or read a
+      // `colour` field on a record. Reading the wrong one meant no swatch was
+      // ever shown as chosen, even on an item that plainly had a colour.
+      colour: typeof master.color === 'string' ? master.color : undefined,
       categoryId: item.categoryId,
       accent: item.colour,
       kind: item.store === 'events' ? 'event' : 'task',
     });
-  };
+  }, [events, tasks, timeFormat]);
 
   /** The occurrence the menu is on, or nothing if it closed underneath us. */
   const heldItem = (): AgendaItem | null => menuItemRef.current;
@@ -474,7 +510,11 @@ export function Today({
   const menuColour = async (_id: string, colour: string | undefined) => {
     const item = heldItem();
     closeMenu();
-    if (item) await edit(item.store, item.masterId, { colour });
+    // WRITES `color`. This wrote a field called `colour`, which no reader in
+    // the app or on the PC looks at, so picking a swatch from the long-press
+    // menu did nothing at all -- no change, no error -- and then pushed the
+    // junk field to the PC through the sync log, where nothing read it either.
+    if (item) await edit(item.store, item.masterId, { color: colour });
   };
 
   const menuCategory = async (_id: string, categoryId: string | undefined) => {
@@ -550,7 +590,9 @@ export function Today({
 
   const doneKey = (i: AgendaItem) => `${i.store}:${i.masterId}:${i.date}`;
 
-  const tick = (item: AgendaItem) => {
+  // Stable, like `open` above: this is `ItemRow`'s `onTick`, and a fresh arrow
+  // on every render would defeat the memo it is handed to.
+  const tick = useCallback((item: AgendaItem) => {
     const key = doneKey(item);
     setGuessedDone(prev => ({ ...prev, [key]: !item.completed }));
     const existing = guessTimers.current[key];
@@ -566,7 +608,7 @@ export function Today({
       repeating: item.repeating,
       completed: item.completed,
     });
-  };
+  }, [toggleDone]);
 
   /** The list as the user believes it to be. Identical once the store agrees. */
   const applyGuess = (items: AgendaItem[]) => applyGuesses(items, doneKey, guessedDone);
@@ -581,6 +623,20 @@ export function Today({
     ? prayers.find(pr => pr.minutes > nowMin && !isPrayerDone(selected, pr.key))
     : undefined;
 
+  const filteredEvents = useMemo(() => {
+    if (!hiddenCategoryIds.length) return events();
+    const hiddenSet = new Set(hiddenCategoryIds);
+    const all = events();
+    const filtered: Record<string, Record<string, unknown>> = {};
+    for (const [id, ev] of Object.entries(all)) {
+      const catId = (ev.categoryId as string) || '__none__';
+      if (!hiddenSet.has(catId)) {
+        filtered[id] = ev;
+      }
+    }
+    return filtered;
+  }, [events, hiddenCategoryIds]);
+
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
 
@@ -592,24 +648,41 @@ export function Today({
         borderBottomWidth: 1,
         borderBottomColor: p.line,
       }}>
+        {/* THE SYNC LINE GETS THE WHOLE WIDTH, and the title row gets the rest.
+            Both used to be stacked inside one flexed column beside four 48pt
+            buttons, so each was laid out in about a third of the screen: "In
+            sync with PC" broke across two lines, and that second line pushed
+            the date down and squeezed it to "Tod...". Neither piece needs to be
+            next to the other -- the status is about the connection and the
+            title is about the day -- so separating them costs no height (the
+            status was two lines and is now one) and gives the date roughly
+            twice the room. */}
+        <Pressable
+          unstable_pressDelay={TAP_DELAY}
+          style={({ pressed }) => [{ paddingHorizontal: space.lg }, pressed ? PRESSED : null]}
+          onPress={refresh}
+          hitSlop={space.sm}
+        >
+          <Row gap={space.sm} style={{ alignItems: 'center' }}>
+            <StatusDot tone={statusTone as any} />
+            <Text variant="caption" tone={status.conflicts > 0 ? 'warn' : 'faint'} numberOfLines={1}>
+              {status.label}
+            </Text>
+          </Row>
+        </Pressable>
+
         <Row style={{
           justifyContent: 'space-between',
-          alignItems: 'flex-end',
-          paddingHorizontal: space.xl,
+          alignItems: 'center',
+          paddingHorizontal: space.lg,
         }}>
-          <View style={{ flex: 1 }}>
+          {/* `minWidth: 0` is what actually lets this shrink. A flex child in
+              React Native will not go below its content's own width without
+              it, so the title would push the buttons off the edge instead of
+              ellipsising, which is the wrong thing to sacrifice. */}
+          <View style={{ flex: 1, minWidth: 0 }}>
             <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-      style={({ pressed }) => (pressed ? PRESSED : null)} onPress={refresh} hitSlop={space.sm}>
-              <Row gap={space.sm} style={{ alignItems: 'center', marginBottom: 2 }}>
-                <StatusDot tone={statusTone as any} />
-                <Text variant="caption" tone={status.conflicts > 0 ? 'warn' : 'faint'}>
-                  {status.label}
-                </Text>
-              </Row>
-            </Pressable>
-            <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)}
               onPress={() => setSelected(today)}
               disabled={showingToday}
@@ -625,7 +698,7 @@ export function Today({
               is the obvious thing to press to get back. */}
           {!showingToday ? (
             <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
               onPress={() => setSelected(today)}
               accessibilityRole="button"
               accessibilityLabel="Back to today"
@@ -654,6 +727,11 @@ export function Today({
           {/* Search and the bell live in the header rather than on the tab bar:
               both are ways of reaching the calendar, not places beside it, and
               the bar is deliberately four wide so the tabs stay legible. */}
+          {hiddenCategoryIds.length > 0 ? (
+            <HeaderButton iconName="sliders-horizontal" onPress={onOpenFilter!} a11y="Filter" badge={hiddenCategoryIds.length} />
+          ) : (
+            <HeaderButton iconName="sliders-horizontal" onPress={onOpenFilter!} a11y="Filter" />
+          )}
           {onOpenQuickAdd ? (
             <HeaderButton iconName="plus" onPress={onOpenQuickAdd} a11y="Quick add" />
           ) : null}
@@ -677,11 +755,11 @@ export function Today({
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={{
             gap: space.xs,
-            paddingHorizontal: space.xl,
+            paddingHorizontal: space.lg,
             marginTop: space.sm,
           }}
         >
-          {(['agenda', 'day', 'custom', 'week', 'month', 'year'] as ViewMode[]).map(mode => {
+          {VIEW_ORDER.map(mode => {
             const on = mode === view;
             return (
               <Pressable
@@ -806,7 +884,7 @@ export function Today({
       ) : view === 'month' ? (
         <MonthView
           anchor={selected}
-          events={events()}
+          events={filteredEvents}
           categories={categories}
           today={today}
           weekStartsOn={weekStartsOn}
@@ -828,7 +906,7 @@ export function Today({
       ) : view === 'year' ? (
         <YearView
           anchor={selected}
-          events={events()}
+          events={filteredEvents}
           today={today}
           weekStartsOn={weekStartsOn}
           onOpenMonth={date => { setSelected(date); chooseView('month'); }}
@@ -845,19 +923,26 @@ export function Today({
           viewportRef.current = e.nativeEvent.layoutMeasurement.height;
           checkLive();
         }}
-        scrollEventThrottle={16}
+        // 16ms is ~60 callbacks a second into JS, all to decide whether one
+        // button should be visible. The button arriving a frame or two later is
+        // not noticeable; the frames handed back while scrolling are.
+        scrollEventThrottle={64}
         contentContainerStyle={{
           paddingHorizontal: space.xl,
           paddingTop: space.lg,
           // Clear of the floating button, which used to sit on top of the last
           // card and made it look broken.
-          paddingBottom: insets.bottom + 120,
+          paddingBottom: TAB_STACK_BOTTOM_INSET + 120,
         }}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={p.accent} />
         }
       >
-        {agenda.all.length === 0 ? (
+        {/* THE WHOLE DAY, not just the events on it.
+            The prayers group renders from its own condition further down, so on
+            any day with no events -- most days, for most people -- the screen
+            stated there was nothing on and then listed five things. */}
+        {agenda.all.length === 0 && prayers.length === 0 ? (
           <EmptyDay showingToday={showingToday} />
         ) : null}
 
@@ -928,13 +1013,13 @@ export function Today({
       {showGoToLive && (
         <View style={{
           position: 'absolute',
-          bottom: insets.bottom + space.xl,
+          bottom: TAB_STACK_BOTTOM_INSET + space.xl,
           left: 0,
           right: 0,
           alignItems: 'center',
         }} pointerEvents="box-none">
           <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
             onPress={handleGoToLive}
             accessibilityRole="button"
             accessibilityLabel="Go to Live"
@@ -964,7 +1049,7 @@ export function Today({
 
       {/* ── Add ────────────────────────────────────────────────────────── */}
       <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
         onPress={() => setEditing({ store: 'events', date: selected })}
         // The same button, held: typing one line is often faster than filling a
         // sheet, and the two belong on the same control rather than making the
@@ -977,7 +1062,7 @@ export function Today({
         style={({ pressed }) => ({
           position: 'absolute',
           right: space.xl,
-          bottom: insets.bottom + space.xl,
+          bottom: TAB_STACK_BOTTOM_INSET + space.xl,
           width: 60, height: 60, borderRadius: 30,
           alignItems: 'center', justifyContent: 'center',
           backgroundColor: p.accent,
@@ -1020,31 +1105,48 @@ export function Today({
  * at different weights and optical sizes beside each other, and the bell was a
  * quarter-filled circle because no bell existed to use.
  */
+/** Drawn width of one header icon. See the `hitSlop` note in `HeaderButton`. */
+const HEADER_BUTTON_WIDTH = 40;
+
 function HeaderButton({ iconName, onPress, a11y, badge }: {
   iconName: string; onPress: () => void; a11y: string; badge?: number;
 }) {
   const p = useTheme();
   return (
     <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={a11y}
       android_ripple={{ color: p.accentSoft, borderless: true }}
-      style={{ width: HIT, height: HIT, alignItems: 'center', justifyContent: 'center' }}
+      // NARROWER THAN IT IS TALL, and the slop makes up the difference. Five of
+      // these at a square 48 claim 240 of a 360dp screen, which leaves the date
+      // beside them less room than the word "Yesterday" needs. Trimming the
+      // horizontal padding is free: a thumb is wider than it is precise, and
+      // `hitSlop` means the pressable area is still the full 48 square that
+      // Android asks for -- only the drawn box got smaller.
+      hitSlop={{ left: (HIT - HEADER_BUTTON_WIDTH) / 2, right: (HIT - HEADER_BUTTON_WIDTH) / 2 }}
+      style={{ width: HEADER_BUTTON_WIDTH, height: HIT, alignItems: 'center', justifyContent: 'center' }}
     >
       <Image
         source={{ uri: ICONS[iconName] }}
-        style={{ width: 22, height: 22, tintColor: p.inkSoft }}
+        style={{ width: 21, height: 21, tintColor: p.inkSoft }}
       />
       {badge ? (
         <View style={{
-          position: 'absolute', top: 6, right: 6,
-          minWidth: 16, height: 16, borderRadius: 8, paddingHorizontal: 4,
+          position: 'absolute', top: 5, right: 2,
+          minWidth: 15, height: 15, borderRadius: 8, paddingHorizontal: 4,
           backgroundColor: p.warn, alignItems: 'center', justifyContent: 'center',
         }}>
-          <Text variant="caption" style={{ color: p.accentInk, fontSize: 10, lineHeight: 12 }}>
-            {badge}
+          {/* Pinned: the circle around it is a fixed 15pt, so letting the
+              system font setting grow the number would push it out of its own
+              badge. */}
+          <Text variant="caption" maxFontSizeMultiplier={1}
+            style={{ color: p.accentInk, fontSize: 10, lineHeight: 12 }}>
+            {/* Capped, the way the tab bar four files away already caps it. A
+                raw count in a 16pt circle is wider than the thing it sits on
+                the moment you come back to a busy morning. */}
+            {typeof badge === 'number' && badge > 9 ? '9+' : badge}
           </Text>
         </View>
       ) : null}
@@ -1059,7 +1161,8 @@ function HeaderButton({ iconName, onPress, a11y, badge }: {
  * which days are busy, so the strip was decoration; a short bar that grows with
  * the day's count means you can see the shape of your week without opening it.
  */
-function DayCell({ date, selected, isToday, load, onPress }: {
+/** Seven of these in the week strip, each with a bar to lay out. */
+const DayCell = React.memo(function DayCell({ date, selected, isToday, load, onPress }: {
   date: string;
   selected: boolean;
   isToday: boolean;
@@ -1073,7 +1176,7 @@ function DayCell({ date, selected, isToday, load, onPress }: {
 
   return (
     <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
       onPress={onPress}
       accessibilityRole="button"
       accessibilityState={{ selected }}
@@ -1117,7 +1220,7 @@ function DayCell({ date, selected, isToday, load, onPress }: {
       </View>
     </Pressable>
   );
-}
+});
 
 // ─── Day pieces ──────────────────────────────────────────────────────────────
 
@@ -1197,7 +1300,14 @@ function Pulse() {
  * it is also destructive-ish and easy to do by accident in a pocket, so it gets
  * its own target rather than the whole card.
  */
-function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
+/**
+ * MEMOISED. This is the row the agenda is made of, and every one of them
+ * re-rendered whenever anything above it did -- a sync landing, the minute
+ * ticking over, a swipe on an unrelated screen. Its props are plain values
+ * and stable callbacks, so the comparison is cheap and almost always says
+ * "nothing to do".
+ */
+const ItemRow = React.memo(function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
   item: AgendaItem;
   onTick: (item: AgendaItem) => void;
   onOpen: (item: AgendaItem) => void;
@@ -1296,7 +1406,7 @@ function ItemRow({ item, onTick, onOpen, onHold, rail, clock }: {
       </Pressable>
     </Row>
   );
-}
+});
 
 
 function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
@@ -1357,7 +1467,9 @@ function NowLine({ minutes, clock }: { minutes: number; clock?: string }) {
  * it prayed. The next one due carries the accent, so "what is next" is answered
  * before anything is read.
  */
-function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
+/** Memoised for the same reason as `ItemRow`: five of these on most days,
+ *  redrawn for reasons that have nothing to do with them. */
+const PrayerRow = React.memo(function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
   prayer: { key: string; label: string; secondary: string; minutes: number };
   clock?: string;
   done: boolean;
@@ -1419,7 +1531,7 @@ function PrayerRow({ prayer, clock, done, next, past, onToggle }: {
       </View>
     </Pressable>
   );
-}
+});
 
 /** "1h 20m", "8m". How long until something, said the short way. */
 function untilText(minutes: number): string {

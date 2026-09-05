@@ -31,7 +31,15 @@
 //
 // Tested in `focusTimer.test.ts`; copied to `mobile/src/lib/focusTimer.ts`.
 
-import { focusDayKey, type FocusSessionRecord } from './focusStats';
+import {
+  focusDayKey, focusSessionId, normaliseFocusSessionId, type FocusSessionRecord,
+} from './focusStats';
+
+// Re-exported so the many call sites that reach for an id through this module
+// keep working. Identity lives in `focusStats` because that is the module with
+// no imports of its own, and a cycle between the two would be a real hazard:
+// `focusStats` needs the identity to collapse duplicates while summing.
+export { focusSessionId, normaliseFocusSessionId };
 
 /** A minute is the shortest planned session worth having. */
 export const MIN_PLANNED_SECONDS = 60;
@@ -235,17 +243,17 @@ export function checkpointFocusTimer(state: FocusTimerState, now: number): Focus
 /**
  * The id an auto-completed session gets.
  *
- * Character-for-character the desktop's `autoSessionId`. Both machines can
- * notice the same session hitting zero, and the identical id is what collapses
- * their two records into one instead of double-counting the hour.
+ * Kept as a name because it reads better at the call site, but it is now the
+ * session's own id: an hour that ends by running out and an hour that ends by
+ * being stopped are the same hour.
  */
-export function autoSessionId(sessionStartedAt: string | null, plannedSeconds: number): string {
-  return `auto-${sessionStartedAt ?? 'unknown'}-${plannedSeconds}`;
+export function autoSessionId(sessionStartedAt: string | null, _plannedSeconds?: number): string {
+  return focusSessionId(sessionStartedAt);
 }
 
-/** The id a hand-stopped session gets. Deterministic for the same reason. */
-export function stoppedSessionId(sessionStartedAt: string | null, durationSeconds: number): string {
-  return `stop-${sessionStartedAt ?? 'unknown'}-${durationSeconds}`;
+/** The id a hand-stopped session gets. The same id, for the same reason. */
+export function stoppedSessionId(sessionStartedAt: string | null, _durationSeconds?: number): string {
+  return focusSessionId(sessionStartedAt);
 }
 
 /**
@@ -321,7 +329,23 @@ export type FocusTimerAction =
    * run past its planned length. Safe to call on every tick, on foreground and
    * on launch, which is exactly where it belongs.
    */
-  | { kind: 'settle' };
+  | { kind: 'settle' }
+  /**
+   * One button, doing whatever the timer needs next.
+   *
+   * WHAT THE KEYBOARD SHORTCUT AND THE DESK SENSOR PRESS. Both of those reach
+   * the timer with no window open, through a server route that used to do its
+   * own arithmetic: if the timer said running, it added `now - lastStartedAt`
+   * to the accumulated seconds and paused. With the PC hibernated overnight
+   * that difference is the whole night, so sitting down at the desk the next
+   * morning banked eight hours into a one hour session -- which then landed on
+   * the new day as invented work nobody had done.
+   *
+   * Routing it through the reducer is what fixes that: an overdue session is
+   * SETTLED at the moment it ran out, exactly as it would be if a window had
+   * been open to notice.
+   */
+  | { kind: 'toggle' };
 
 export interface FocusTimerOutcome {
   state: FocusTimerState;
@@ -397,6 +421,15 @@ export function reduceFocusTimer(
       // stop anything, so recording a moment as though it had would make two
       // identical pauses look like two different events.
       if (!state.isRunning) return unchanged(state);
+
+      // An overdue session is not pausable, it is over. Banking the overrun
+      // instead would carry however long the machine was away into the session,
+      // and `checkpointFocusTimer` is bounded only by a YEAR -- so a pause on
+      // the way back from an overnight hibernate could add eight hours to an
+      // hour-long session. `stop` has always routed this way; `pause` did not.
+      if (focusIsOverdue(state, now)) {
+        return reduceFocusTimer(state, { kind: 'settle' }, now, tag);
+      }
       const banked = checkpointFocusTimer(state, now);
       return {
         state: {
@@ -474,6 +507,17 @@ export function reduceFocusTimer(
       // ordering contest would overwrite a real start or stop made elsewhere
       // with our own stale view of the session.
       return { state: banked, session: null, changed: true };
+    }
+
+    case 'toggle': {
+      // Overdue first, and never a pause. A session that ran past its planned
+      // length while nothing was watching is FINISHED, and finished when it ran
+      // out -- not now, and not after the machine spent the night off.
+      if (focusIsOverdue(state, now)) {
+        return reduceFocusTimer(state, { kind: 'settle' }, now, tag);
+      }
+      if (state.isRunning) return reduceFocusTimer(state, { kind: 'pause' }, now, tag);
+      return reduceFocusTimer(state, { kind: 'start' }, now, tag);
     }
 
     case 'settle': {

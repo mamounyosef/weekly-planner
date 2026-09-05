@@ -486,7 +486,7 @@ function ActionRow({ glyph, glyphColour, label, hint, danger, expanded, onPress 
         {hint ? <Text variant="caption" tone="faint">{hint}</Text> : null}
       </View>
       {expanded !== undefined ? (
-        <Text variant="caption" tone="faint">{expanded ? '▴' : '▾'}</Text>
+        <Text variant="caption" tone="faint">{expanded ? '▾' : '▸'}</Text>
       ) : null}
     </Pressable>
   );

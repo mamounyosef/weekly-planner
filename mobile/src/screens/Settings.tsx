@@ -30,6 +30,7 @@ import {
   displayPatch,
   type DisplaySettings,
 } from '../lib/displaySettings';
+import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
 import {
   DAY_HOUR_MAX,
   DAY_HOUR_MIN,
@@ -191,7 +192,7 @@ export function Settings({
   const stamp = useMemo(() => updateStamp(Updates.createdAt) ?? '', []);
 
   const renderSectionList = () => (
-    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.md }}>
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: TAB_STACK_BOTTOM_INSET + space.xxl, gap: space.md }}>
       <Section title="Account & Data">
         <MenuRow label="User Account" hint="Server, sync, and sign out" iconName="user" onPress={() => setSection('account')} />
         <MenuRow label="App & Data" hint="Updates and local storage" iconName="hard-drive" onPress={() => setSection('data')} />
@@ -219,7 +220,7 @@ export function Settings({
   );
 
   const renderAccount = () => (
-    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: TAB_STACK_BOTTOM_INSET + space.xxl, gap: space.lg }}>
       <Section title="Your planner">
         <KeyValue label="Signed in as" value={username ?? 'Not signed in'} />
         <KeyValue label="Server" value={serverUrl ?? 'Not set'} />
@@ -234,7 +235,7 @@ export function Settings({
   );
 
   const renderData = () => (
-    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: TAB_STACK_BOTTOM_INSET + space.xxl, gap: space.lg }}>
       <Section title="App">
         <KeyValue label="Update" value={age ? age.when : 'Built into the app'} />
         <Text variant="caption" tone="faint" style={{ marginTop: 2, textAlign: 'right' }}>
@@ -262,7 +263,7 @@ export function Settings({
   );
 
   const renderAppearance = () => (
-    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: TAB_STACK_BOTTOM_INSET + space.xxl, gap: space.lg }}>
       <Section title="Appearance">
         <Text variant="body">Theme</Text>
         <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>The app follows your phone by default.</Text>
@@ -324,7 +325,7 @@ export function Settings({
   );
 
   const renderCalendar = () => (
-    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: insets.bottom + space.xxl, gap: space.lg }}>
+    <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: TAB_STACK_BOTTOM_INSET + space.xxl, gap: space.lg }}>
       <Section title="View">
         <Text variant="body">Visible Schedule Hours</Text>
         <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>{describeDayWindow(dayWindow, clock)}</Text>
@@ -379,7 +380,7 @@ export function Settings({
       </Section>
       <Section title="This device">
         <Text variant="body">Time slot snap interval</Text>
-        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>How far each tap moves a time. Kept on this phone — your PC has its own.</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>How far each tap moves a time. Kept on this phone. Your PC has its own.</Text>
         <Spacer size={space.sm} />
         <Row gap={space.xs}>
           {[5, 10, 15, 30, 60].map(mins => {
@@ -398,7 +399,7 @@ export function Settings({
 
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
-      <View style={{ paddingTop: insets.top + space.md, paddingHorizontal: space.xl, paddingBottom: space.md }}>
+      <View style={{ paddingTop: insets.top + space.sm, paddingHorizontal: space.xl, paddingBottom: space.md }}>
         <Row style={{ justifyContent: 'space-between' }}>
           <Row gap={space.sm} style={{ alignItems: 'center' }}>
             {section && (
@@ -409,10 +410,13 @@ export function Settings({
             )}
             <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : 'Settings'}</Text>
           </Row>
-          <Pressable
-        unstable_pressDelay={TAP_DELAY} onPress={onClose} accessibilityLabel="Close" style={({ pressed }) => [{ width: HIT, height: HIT, alignItems: 'flex-end', justifyContent: 'center' }, pressed ? PRESSED : null]}>
-            <Text variant="title" tone="soft">×</Text>
-          </Pressable>
+          {/* NO CLOSE BUTTON ON A TAB.
+              Settings has been a top-level tab for a while and kept the close
+              cross from when it was an overlay. Pressing it did not close
+              anything: it navigated to the calendar, which is not what a cross
+              means anywhere else in this app or on this platform. The space is
+              left so the title stays where it was. */}
+          <View style={{ width: HIT, height: HIT }} />
         </Row>
       </View>
       <Divider />

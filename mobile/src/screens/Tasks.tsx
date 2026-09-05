@@ -58,8 +58,10 @@ import { planAppendOrder, planReorder } from '../lib/dragSort';
 import { planTick, setPending, isPending as heldDone } from '../lib/pendingDone';
 import type { TaskFilter } from '../lib/tasks';
 
-import { formatClock } from '../lib/agenda';
+import { formatClock, ymd } from '../lib/agenda';
 import { fromTimeString } from '../lib/draft';
+import { useNowMinute } from '../ui/useNow';
+import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
 
 /** How long a ticked row stays where it is, so the tick can be seen. */
 const DONE_HOLD_MS = 300;
@@ -186,7 +188,18 @@ export function Tasks() {
   }, []);
 
 
-  const today = todayYmd();
+  /**
+   * A CLOCK, not a reading taken once.
+   *
+   * This was `todayYmd()` during render, with nothing to re-render it. Tabs are
+   * kept mounted, so a phone left on this screen overnight went on sorting
+   * against yesterday: nothing moved into Overdue, tomorrow's work stayed under
+   * "Tomorrow", and the count in the header was wrong until something unrelated
+   * happened to cause a render. The calendar solved exactly this and said so --
+   * reading the clock during render "is not a clock, it is a coincidence".
+   */
+  const now = useNowMinute();
+  const today = ymd(now);
 
   const lists = useMemo<TaskList[]>(() => (
     (taskLists as any[])
@@ -476,9 +489,19 @@ export function Tasks() {
               </Text>
             </Pressable>
           ))}
-          <View style={{ width: 1, backgroundColor: p.line, marginVertical: 4 }} />
+          {/* The divider carries the word too. The sort chips and the filter
+              chips share one horizontal scroller with no indicator, so on a
+              normal phone the filters begin past the right edge with nothing
+              visible to suggest there is anything there. A label at the seam is
+              what makes the row read as "and now, filters" instead of as a row
+              that happens to end. */}
+          <View style={{ width: 1, backgroundColor: p.line, marginVertical: 4, marginHorizontal: space.xs }} />
+          <Text variant="caption" tone="faint" style={{ alignSelf: 'center', marginRight: space.xs }}>Show</Text>
           {(['today', 'overdue', 'upcoming', 'general', 'completed'] as TaskFilter[]).map((f) => {
-            const labels = { today: 'Today', overdue: 'Overdue', upcoming: 'Upcoming', general: 'General', completed: 'Done' };
+            // "Anytime", matching the heading these tasks appear under. The
+            // chip said General and the heading said Anytime, both on screen at
+            // once, for the same bucket.
+            const labels = { today: 'Today', overdue: 'Overdue', upcoming: 'Upcoming', general: 'Anytime', completed: 'Done' };
             const active = filters.includes(f);
             return (
               <Pressable
@@ -507,7 +530,7 @@ export function Tasks() {
         contentContainerStyle={{
           paddingHorizontal: space.xl,
           paddingTop: space.lg,
-          paddingBottom: insets.bottom + 120,
+          paddingBottom: TAB_STACK_BOTTOM_INSET + 120,
         }}
         keyboardShouldPersistTaps="handled"
         refreshControl={
@@ -663,7 +686,7 @@ export function Tasks() {
         style={({ pressed }) => ({
           position: 'absolute',
           right: space.xl,
-          bottom: insets.bottom + space.xl,
+          bottom: TAB_STACK_BOTTOM_INSET + space.xl,
           width: 60, height: 60, borderRadius: 30,
           alignItems: 'center', justifyContent: 'center',
           backgroundColor: p.accent,

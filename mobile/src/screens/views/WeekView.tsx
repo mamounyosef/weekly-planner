@@ -56,20 +56,25 @@ import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react'
 import { Animated, PanResponder, Pressable, ScrollView, View } from 'react-native';
 
 import { Text, useTheme } from '../../ui/kit';
-import { PRESS_DELAY, radius, space } from '../../theme';
+import { PRESSED, PRESS_DELAY, TAP_DELAY, radius, space } from '../../theme';
 import {
   layoutDay, blockEnd, prayerChipMode,
   type Placeable, type Placed, type PrayerChipMode,
 } from '../../lib/grid';
 import type { PrayerDrawStyle } from '../../lib/viewPrefs';
 import {
-  FULL_DAY, hourMarksIn, isMinuteVisible, minuteAtY, normaliseRanges, seamsIn, slotsIn,
+  FULL_DAY, clipSpan, hourMarksIn, isMinuteVisible, minuteAtY, normaliseRanges, seamsIn,
+  slotsIn,
   splitAcrossWindows, visibleMinutes, windowRanges, yOfMinute, type HourRange,
 } from '../../lib/dayWindows';
 import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
 } from '../../lib/dragGrid';
-import { addDays, formatClock, type AgendaDay, type AgendaItem } from '../../lib/agenda';
+import {
+  addDays, blockDurationMinutes, blockLabelPlacement, blockTiming, formatClock,
+  minutesLeftAt, type AgendaDay, type AgendaItem, type BlockTiming,
+} from '../../lib/agenda';
+import { inkOn, inkOpacityOn } from '../../lib/gcalColor';
 
 const RAIL = 48;
 
@@ -82,38 +87,17 @@ const LIFTED_SLOP = 6;
 /** How close to the bottom edge counts as grabbing the resize grip. */
 const GRIP_ZONE = 18;
 
-/**
- * The band a squashed thing sits in.
+/*
+ * THINGS IN HOURS THIS DEVICE DOES NOT DRAW USED TO BE SQUASHED, and are now
+ * listed under the column instead (see `OutsideHours` at the foot of this
+ * file). Squashing meant pinning a 22 point stub to the nearest edge of the
+ * grid, which kept the item reachable but put it at a time it does not have:
+ * on a column running six in the morning to two the next, dawn prayer at 04:19
+ * was drawn against the bottom, where it read as a prayer at a quarter to two.
  *
- * An item in an hour this device does not draw still has to be reachable: the
- * whole point of squashing rather than hiding is that you can still see it is
- * there and still tap it. Pinned exactly at the seam it was clipped in half by
- * the edge of the grid, and a prayer landed on top of the block beside it.
- *
- * So a squashed thing is given a real height, held clear of the edge, and
- * prayers sit in a second lane inside the first. Twenty-two points is a thumb
- * without being a row.
+ * A wrong answer is better than a missing one only when it is legible as a
+ * wrong answer, and a chip sitting neatly on the 1:45 line is not.
  */
-const SQUASH_H = 22;
-/** Kept off the very edge, so a chip never reads as cut off. */
-const SQUASH_PAD = 2;
-/** The gap between the block lane and the prayer lane in the same band. */
-const SQUASH_GAP = 2;
-
-/**
- * Where a squashed thing is drawn, given where it WOULD have been.
- *
- * Three cases, and they are the three edges it can be pinned to: above the
- * first hour drawn, below the last, or at a seam cut out of the middle.
- */
-function squashedTop(y: number, gridH: number, lane: number): number {
-  const inset = SQUASH_PAD + lane * (SQUASH_H + SQUASH_GAP);
-  const floor = SQUASH_PAD;
-  const ceiling = Math.max(floor, gridH - SQUASH_H - SQUASH_PAD - lane * (SQUASH_H + SQUASH_GAP));
-  if (y <= 0) return Math.min(inset, ceiling);
-  if (y >= gridH) return ceiling;
-  return Math.max(floor, Math.min(ceiling, y - SQUASH_H / 2));
-}
 
 /**
  * How tall one slot is drawn, per snap interval.
@@ -132,6 +116,25 @@ const SLOT_PX: Record<number, number> = { 5: 14, 10: 16, 15: 19, 30: 29, 60: 48 
 
 function slotHeight(interval: number): number {
   return SLOT_PX[interval] ?? SLOT_PX[30];
+}
+
+/**
+ * One thing that falls in an hour this device does not draw.
+ *
+ * Blocks and prayers arrive here as the same shape on purpose. Under the grid
+ * they are the same kind of fact -- something at a time you cannot see -- and
+ * giving them one row design means they sort into one list rather than into two
+ * that happen to be next to each other.
+ */
+interface OutsideEntry {
+  key: string;
+  /** Minutes into the column's own window, which is what decides the order. */
+  at: number;
+  label: string;
+  detail: BlockTiming;
+  colour: string;
+  done: boolean;
+  onPress?: () => void;
 }
 
 /** What `layoutDay` is given for each block, with the item carried along. */
@@ -275,7 +278,7 @@ export function WeekView({
   // blocks by arithmetic and needs to see every day's placement at once. The
   // columns are handed the result so nothing is computed twice.
 
-  const placedByDate = useMemo(() => {
+  const laidOutByDate = useMemo(() => {
     const logicalCols: GridItem[][] = days.map(() => []);
     for (let c = 0; c < days.length; c++) {
       for (const item of days[c].timed) {
@@ -310,15 +313,107 @@ export function WeekView({
           const segEnd = blockEnd(pl.item);
           const isTail = pl.item.isTail === true;
           const isHead = pl.item.isHead === true;
-          const isHidden = !isMinuteVisible(segStart, shown);
+          // Three answers, not two. A block can be absent from the drawn
+          // hours entirely, or present but cut at one end, and the second case
+          // used to be silent: a night from half past midnight to nine, on a
+          // grid that stops at two, was drawn as an hour and a half of sleep
+          // with nothing to say the other seven existed.
+          //
+          // Hidden is judged on the WHOLE span now, not on the start alone.
+          // Something beginning in an hour that is not drawn and running into
+          // one that is used to become a stub, throwing away the part of it
+          // there was room for.
+          const clip = clipSpan(segStart, segEnd, shown);
 
           const at = yAt(segStart);
-          const top = isHidden ? squashedTop(at, gridHeight, 0) : at;
-          const height = isHidden ? SQUASH_H : Math.max(2, yAt(segEnd) - at);
-          return { ...pl, top, height, isHidden, isTail, isHead };
+          return {
+            ...pl,
+            top: at,
+            height: Math.max(2, yAt(segEnd) - at),
+            isHidden: clip.hidden,
+            // A head arrived from the column before and a tail leaves for the
+            // one after. Neither is clipped by the drawn hours as such, but
+            // both are continuations and read identically to one that is.
+            continuesAbove: clip.clippedAbove || isHead,
+            continuesBelow: clip.clippedBelow || isTail,
+            isTail,
+            isHead,
+          };
         });
     });
-  }, [days, pxPerHour, yAt, dayStartH, shown, gridHeight]);
+  }, [days, pxPerHour, yAt, dayStartH, shown]);
+
+  /** What the columns actually draw. Anything with no drawn minutes is not
+   *  among them: it is listed under the grid instead. */
+  const placedByDate = useMemo(
+    () => laidOutByDate.map(col => col.filter(pl => !pl.isHidden)),
+    [laidOutByDate],
+  );
+
+  /**
+   * Everything that falls in hours this device does not draw.
+   *
+   * IT USED TO BE SQUASHED AGAINST THE NEAREST EDGE, which is worse than
+   * hiding it. A column running six in the morning to two the next, with dawn
+   * prayer at 04:19, pinned Fajr to the foot of the column: it looked like a
+   * prayer at a quarter to two, which is a time it is not, on a day it is not.
+   * A wrong answer beats a missing one only when it is legible as a wrong
+   * answer, and this one was not.
+   *
+   * So it is listed below the column instead, in order, with the times it
+   * really has. Nothing is lost, nothing is tappable at the wrong hour, and the
+   * gap in the timeline is drawn as a gap.
+   */
+  const outsideByDate = useMemo(() => days.map((d, i) => {
+    const entries: OutsideEntry[] = [];
+
+    for (const pl of laidOutByDate[i] ?? []) {
+      if (!pl.isHidden) continue;
+      const item = pl.item.item;
+      // A night cut in two contributes at most one row: the piece that would
+      // have been drawn on THIS column. Naming the event twice under one day
+      // would read as two of them.
+      entries.push({
+        key: pl.item.id,
+        at: pl.item.startMin,
+        // The item's own clock times, not the segment's, so a night says when
+        // it really begins and ends.
+        label: item.title,
+        detail: blockTiming({
+          startMin: item.startMin ?? pl.item.startMin,
+          endMin: item.endMin,
+          timeFormat: clock,
+          minutesLeft: null,
+        }),
+        colour: item.colour ?? p.accent,
+        done: item.completed,
+        onPress: () => onOpenItem(item),
+      });
+    }
+
+    for (const pr of d.prayers) {
+      const at = pr.minutes < dayStartH * 60 ? pr.minutes + 1440 : pr.minutes;
+      if (isMinuteVisible(at, shown)) continue;
+      const done = isPrayerDone ? isPrayerDone(d.date, pr.key) : false;
+      entries.push({
+        key: `prayer:${d.date}:${pr.key}`,
+        at,
+        label: pr.label,
+        detail: { range: formatClock(pr.minutes, clock), detail: '', live: false },
+        colour: prayerColour ?? p.accent,
+        done,
+        onPress: onTogglePrayer ? () => onTogglePrayer(d.date, pr.key) : undefined,
+      });
+    }
+
+    // In time order, and stably: two things at the same minute must not swap
+    // places between renders.
+    entries.sort((a, b) => (a.at - b.at) || a.key.localeCompare(b.key));
+    return entries;
+  }), [days, laidOutByDate, shown, dayStartH, clock, p.accent, prayerColour,
+       isPrayerDone, onTogglePrayer, onOpenItem]);
+
+  const anyOutside = outsideByDate.some(list => list.length > 0);
 
   /**
    * Where the grid should be looking: the current hour, with a little of what
@@ -417,6 +512,19 @@ export function WeekView({
    * report checks, and places the grid itself if it has to.
    */
   const placedRef = useRef(false);
+
+  /**
+   * The pill also has to react to the CLOCK, not only to scrolling.
+   *
+   * `checkLive` was called from the scroll handler and nowhere else, so sitting
+   * still while the now-line drifted off the bottom of the screen left no offer
+   * to follow it -- until you happened to scroll, at which point the button
+   * appeared as if from nowhere. The agenda view already recomputes on the
+   * minute; this is the same thing said here.
+   */
+  useEffect(() => {
+    checkLive(scrollY.current);
+  }, [nowMin, checkLive]);
 
   /**
    * Put the grid back where it belongs when the SHAPE of it changes.
@@ -763,7 +871,7 @@ export function WeekView({
           const isTarget = drag !== null && drag.date === d.date;
           return (
             <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
               key={d.date}
               onPress={() => onOpenDay(d.date)}
               style={{
@@ -817,7 +925,7 @@ export function WeekView({
                 const done = isPrayerDone?.(d.date, pr.key) ?? false;
                 return (
                   <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
                     key={pr.key}
                     onPress={() => onTogglePrayer?.(d.date, pr.key)}
                     accessibilityRole="button"
@@ -879,7 +987,7 @@ export function WeekView({
             <View key={d.date} style={{ flex: 1, paddingHorizontal: 1, gap: 2 }}>
               {d.allDay.slice(0, 2).map(item => (
                 <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
                   key={item.id}
                   onPress={() => onOpenItem(item)}
                   style={{
@@ -908,7 +1016,10 @@ export function WeekView({
       <ScrollView
         ref={scroller}
         scrollEnabled={!dragging}
-        scrollEventThrottle={16}
+        // 16ms is ~60 callbacks a second into JS, all to decide whether one
+        // button should be visible. The button arriving a frame or two later is
+        // not noticeable; the frames handed back while scrolling are.
+        scrollEventThrottle={64}
         // The first frame is drawn here, not at the top and then moved.
         contentOffset={initialOffset}
         onContentSizeChange={() => {
@@ -1061,6 +1172,7 @@ export function WeekView({
               marks={marks}
               slots={slots}
               detailed={detailed}
+              columnWidth={colW}
               clock={clock}
               prayers={prayerStyle === 'row' ? [] : d.prayers}
               prayerColour={prayerColour}
@@ -1099,6 +1211,25 @@ export function WeekView({
             />
           ) : null}
         </View>
+
+        {/* AFTER the last row, not inside it. Everything above this line is on
+            the timeline and everything below it explicitly is not, which is the
+            whole point: a prayer at 4am on a grid that stops at 2am was being
+            pinned to the foot of the column, where it read as a prayer at a
+            quarter to two. It kept the same rail and the same columns so each
+            list still sits under the day it belongs to. */}
+        {anyOutside ? (
+          <View style={{ flexDirection: 'row' }}>
+            <View style={{ width: RAIL }} />
+            {days.map((d, i) => (
+              <OutsideHours
+                key={`outside-${d.date}`}
+                entries={outsideByDate[i] ?? []}
+                detailed={detailed}
+              />
+            ))}
+          </View>
+        ) : null}
       </ScrollView>
 
       {/*
@@ -1116,7 +1247,7 @@ export function WeekView({
           style={{ position: 'absolute', left: 0, right: 0, bottom: space.xl, alignItems: 'center' }}
         >
           <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+        unstable_pressDelay={TAP_DELAY}
             onPress={goToLive}
             accessibilityRole="button"
             accessibilityLabel="Scroll back to the current time"
@@ -1219,7 +1350,7 @@ function Ghost({
 
 function DayColumn({
   shown = FULL_DAY, dayWindow, placed, yAt, height, pxPerHour, marks, slots, detailed, clock, prayers, seams,
-  prayerColour, prayerLabels, chipMode, prayerStyle, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay,
+  prayerColour, prayerLabels, chipMode, prayerStyle, isPrayerDone, onTogglePrayer, isToday, nowMin, liftedId, draggingId, isDragTarget, onMenuItem, onOpenItem, onOpenDay, columnWidth,
 }: {
   /** The drawn stretches, already normalised by the grid above. */
   shown?: readonly HourRange[];
@@ -1231,6 +1362,8 @@ function DayColumn({
   marks: number[];
   slots: number[];
   detailed?: boolean;
+  /** Drawn width of one column, which decides whether a word fits on a block. */
+  columnWidth?: number;
   clock?: string;
   prayers: { key: string; label: string; minutes: number }[];
   seams: number[];
@@ -1304,10 +1437,145 @@ function DayColumn({
         const width = `${100 / pl.columns}%`;
         const isLifted = item.id === liftedId;
         const isBeingDragged = item.id === draggingId;
-        // Squashed away, because the hour it belongs to is one this device does
-        // not draw. It keeps its place and stays tappable, and says what it is
-        // by looking provisional rather than by disappearing.
-        const isSquashed = (pl as { isHidden?: boolean }).isHidden === true;
+        // The fill, and the one ink that can be read on it. Worked out once
+        // here so the title, the second line, both outlines and the resize grip
+        // cannot disagree with each other about which they are drawn on.
+        const fill = item.colour ?? p.accent;
+        const ink = inkOn(fill);
+
+        // WHAT THIS BLOCK SAYS ABOUT ITS OWN TIME.
+        //
+        // The times shown are the ITEM's, not the segment's: a night cut in
+        // two at the foot of one column and the head of the next is one
+        // meeting, and both halves should name the hour it really ends. Only
+        // the liveness arithmetic works in segment coordinates, because that is
+        // the space `nowMin` arrived in.
+        const segStart = pl.item.startMin;
+        // Everything in this lane is a timed item, so a null start is a record
+        // that should never have reached the grid. It is checked rather than
+        // asserted because a single bad row must not blank the whole day.
+        const startMin = item.startMin;
+        // A tail was clipped at the window's edge and carries on into the next
+        // column, so its real end is further along than the piece is drawn.
+        // Counting down to the clip would say a meeting ends at midnight when
+        // it ends at two.
+        const runEnd = pl.item.isTail === true && startMin !== null
+          ? segStart + blockDurationMinutes(startMin, item.endMin)
+          : blockEnd(pl.item);
+        const minutesLeft = isBeingDragged
+          ? null
+          : minutesLeftAt(segStart, runEnd, nowMin);
+        const timing = startMin === null
+          ? { range: '', detail: '', live: false }
+          : blockTiming({
+            startMin,
+            endMin: item.endMin,
+            timeFormat: clock,
+            minutesLeft,
+          });
+        const placement = blockLabelPlacement(pl.height);
+        const showTimes = placement !== 'none' && timing.range.length > 0;
+
+        // WHAT YOU ARE LOOKING AT IS NOT ALL OF IT.
+        //
+        // Two ways that happens and they are the same fact from either end: the
+        // block runs past the last hour this device draws, or it ran past the
+        // foot of yesterday's column and this is the remainder. Both used to be
+        // silent, so a night from half past midnight to nine on a grid that
+        // stops at two was simply an hour and a half of sleep.
+        const continuesAbove = (pl as { continuesAbove?: boolean }).continuesAbove === true;
+        const continuesBelow = (pl as { continuesBelow?: boolean }).continuesBelow === true;
+        // Under about twenty points there is no room for a marker that would
+        // not cover the block it is describing.
+        const canMark = pl.height >= 22;
+        // The word only when it fits. A seven column week gives each block
+        // about forty points, where "continued" would ellipsise into
+        // "contin..." and say less than the arrow on its own does.
+        const markWord = (columnWidth ?? 0) >= 96;
+        const mark = (dir: 'up' | 'down') => (
+          <View
+            key={`continued-${dir}`}
+            style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center' }}
+          >
+            <Text
+              numberOfLines={1}
+              style={{
+                color: ink,
+                opacity: inkOpacityOn(fill),
+                fontSize: markWord ? 8.5 : 7.5,
+                lineHeight: markWord ? 10 : 9,
+                fontWeight: '700',
+                letterSpacing: 0.2,
+              }}
+            >
+              {dir === 'up'
+                ? `\u25b2${markWord ? ' continued' : ''}`
+                : `${markWord ? 'continued ' : ''}\u25bc`}
+            </Text>
+          </View>
+        );
+
+        /**
+         * The time line. Drawn at the foot of anything with room for it, and at
+         * the head as well once the block is tall enough that its two edges are
+         * far apart -- which is when you are looking at one end and comparing
+         * it against whatever is next to THAT end.
+         *
+         * The range is muted and the detail is not. While the block is running,
+         * the detail is the countdown, and the countdown is the only thing on
+         * the face of it that is urgent. Emphasis rather than a fixed red does
+         * that job on all ten category colours: a red that reads on the green
+         * block in the screenshot disappears on a red one.
+         */
+        const timeFont = detailed ? 10 : 8;
+        const timeLeading = detailed ? 13 : 10;
+        const timeLine = (key: string) => (
+          // TWO SEPARATE TEXTS, not one with a span inside it. A nested `Text`
+          // here is the app's own, which applies a whole type style rather than
+          // just the bits named, so it reset to 15pt body copy and swamped the
+          // block. And `opacity` on a nested span is not honoured on Android
+          // anyway, so the muting had to be a real element to apply to.
+          <View
+            key={key}
+            style={{
+              flexDirection: detailed ? 'row' : 'column',
+              alignItems: detailed ? 'center' : 'flex-start',
+            }}
+          >
+            <Text
+              numberOfLines={detailed ? 1 : 2}
+              style={{
+                color: ink,
+                opacity: inkOpacityOn(fill),
+                fontSize: timeFont,
+                lineHeight: timeLeading,
+                fontWeight: '500',
+                flexShrink: 1,
+              }}
+            >
+              {timing.range}
+            </Text>
+            {timing.detail ? (
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: ink,
+                  fontSize: timeFont,
+                  lineHeight: timeLeading,
+                  // Full strength beside the muted range, and heavier still
+                  // while it is counting down: on a block filled with the
+                  // category's own colour, emphasis is the only highlight that
+                  // works on all ten of them.
+                  fontWeight: timing.live ? '800' : '500',
+                  marginLeft: detailed ? 4 : 0,
+                }}
+              >
+                {timing.detail}
+              </Text>
+            ) : null}
+          </View>
+        );
+
         return (
           <Pressable
         unstable_pressDelay={PRESS_DELAY}
@@ -1335,23 +1603,18 @@ function DayColumn({
           >
             <View style={{
               flex: 1,
-              backgroundColor: item.colour ?? p.accent,
+              backgroundColor: fill,
               borderRadius: 3,
               paddingHorizontal: detailed ? 6 : 3,
               paddingTop: 1,
               // Three states, in order of how loud they should be: carried
               // (faint, the ghost is doing the talking), lifted (raised and
               // outlined), normal.
-              opacity: isBeingDragged ? 0.2 : isSquashed ? 0.4 : item.completed ? 0.45 : 0.92,
+              opacity: isBeingDragged ? 0.2 : item.completed ? 0.45 : 0.92,
               overflow: 'hidden',
-              ...(isSquashed ? {
-                borderWidth: 1,
-                borderStyle: 'dashed' as const,
-                borderColor: '#fff',
-              } : null),
               ...(isLifted && !isBeingDragged ? {
                 borderWidth: 1.5,
-                borderColor: '#fff',
+                borderColor: ink,
                 shadowColor: p.shadow,
                 shadowOpacity: 0.45,
                 shadowRadius: 6,
@@ -1360,10 +1623,27 @@ function DayColumn({
                 opacity: 1,
               } : null),
             }}>
+              {/* INK CHOSEN FROM THE FILL, not fixed at white.
+                  The ten category swatches run from `#eab308` to `#6366f1`, and
+                  white on the brightest four sits at roughly 2:1, which is
+                  below every legibility floor there is. The month view already
+                  worked this out and kept the answer to itself, so the same
+                  event was readable there and not here. */}
+              {canMark && continuesAbove ? mark('up') : null}
+              {showTimes && placement === 'both' ? timeLine('top') : null}
+              {/* `flex: 1` on the TITLE is what decides who loses when a block
+                  is too short for everything in it. The title takes whatever
+                  room is left over, so it is the thing that shrinks, and the
+                  time lines are always drawn. That is the right way round: the
+                  title is also on the row you tapped from and in the editor,
+                  whereas the times are only here. It also pins the bottom label
+                  to the bottom EDGE, which is the end time it is naming, rather
+                  than leaving it floating under the title. */}
               <Text
-                numberOfLines={detailed ? 2 : 2}
+                numberOfLines={detailed || placement === 'both' ? 2 : 1}
                 style={{
-                  color: '#fff',
+                  flex: 1,
+                  color: ink,
                   fontSize: detailed ? 12 : 9,
                   lineHeight: detailed ? 15 : 11,
                   fontWeight: detailed ? '600' : '400',
@@ -1371,12 +1651,8 @@ function DayColumn({
               >
                 {item.title}
               </Text>
-              {detailed && pl.height > 30 ? (
-                <Text style={{ color: '#fff', fontSize: 10, lineHeight: 13, opacity: 0.85 }}>
-                  {formatClock(item.startMin, clock)}
-                  {item.endMin !== null ? ` to ${formatClock(item.endMin, clock)}` : ''}
-                </Text>
-              ) : null}
+              {showTimes ? timeLine('bottom') : null}
+              {canMark && continuesBelow ? mark('down') : null}
             </View>
 
             {/* The grip. It only exists once the block has been picked up, so
@@ -1397,7 +1673,11 @@ function DayColumn({
                   width: Math.max(16, Math.min(28, pl.height)),
                   height: 4,
                   borderRadius: 2,
-                  backgroundColor: '#fff',
+                  // The grip is drawn on the block, so it takes the block's ink
+                  // for the same reason the title does: a white grip on a pale
+                  // fill is invisible, and an invisible grip reads as a missing
+                  // feature rather than a light one.
+                  backgroundColor: ink,
                   opacity: 0.95,
                 }} />
               </View>
@@ -1438,16 +1718,16 @@ function DayColumn({
         // A prayer before the window opens belongs to the far end of the same
         // window, not to the top of it.
         const normM = pr.minutes < (dayWindow?.start ?? 0) * 60 ? pr.minutes + 1440 : pr.minutes;
-        const isHidden = !isMinuteVisible(normM, shown);
-        // Lane one, so a squashed prayer sits beside the squashed block rather
-        // than on top of it. Fajr and a night's sleep are pinned to the same
-        // edge by definition, so they collided every time.
-        const at = yAt(normM);
-        const top = isHidden ? squashedTop(at, height, 1) : at;
+        // Not drawn here at all any more. It is listed under the column with
+        // its real time instead of being pinned to whichever edge it fell off,
+        // which is the one place it could sit without claiming an hour it does
+        // not have.
+        if (!isMinuteVisible(normM, shown)) return null;
+        const top = yAt(normM);
         const named = chipMode !== 'dot' && prayerLabels !== false;
 
         const glyph = (
-          <Text style={{ color: colour, fontSize: 9, lineHeight: 10, opacity: isHidden ? 0.5 : 1 }}>
+          <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
             {done ? '◉' : '○'}
           </Text>
         );
@@ -1455,7 +1735,7 @@ function DayColumn({
           <Text
             numberOfLines={1}
             style={{
-              color: colour, fontSize: 9, lineHeight: 11, fontWeight: '700', opacity: isHidden ? 0.5 : 1,
+              color: colour, fontSize: 9, lineHeight: 11, fontWeight: '700',
               textDecorationLine: done ? 'line-through' : 'none',
             }}
           >
@@ -1479,7 +1759,7 @@ function DayColumn({
               hitSlop={6}
               style={{
                 position: 'absolute',
-                top, left: 2, right: 2, height: isHidden ? SQUASH_H : 16,
+                top, left: 2, right: 2, height: 16,
                 flexDirection: 'row', alignItems: 'center', gap: 3,
                 paddingHorizontal: 4,
                 borderRadius: radius.sm,
@@ -1511,8 +1791,8 @@ function DayColumn({
             pointerEvents="box-none"
             style={{
               position: 'absolute',
-              top: isHidden ? top : top - 8,
-              left: 0, right: 0, height: isHidden ? SQUASH_H : 16,
+              top: top - 8,
+              left: 0, right: 0, height: 16,
               flexDirection: 'row', alignItems: 'center',
               zIndex: 3,
               opacity: done ? 0.55 : 1,
@@ -1527,10 +1807,10 @@ function DayColumn({
               accessibilityLabel={`${pr.label}, ${formatClock(pr.minutes, clock)}${done ? ', prayed' : ''}`}
               style={{
                 flexDirection: 'row', alignItems: 'center', gap: 3,
-                height: isHidden ? SQUASH_H - 2 : 15,
+                height: 15,
                 marginHorizontal: 3,
                 paddingLeft: chipMode === 'dot' ? 3 : 5,
-                opacity: isHidden ? 0.5 : 1,
+                opacity: 1,
                 paddingRight: chipMode === 'dot' ? 3 : 6,
                 borderRadius: 999,
                 borderWidth: 1,
@@ -1611,6 +1891,113 @@ function NowMarker({ top }: { top: number }) {
         width: 10, height: 10, borderRadius: 5,
         backgroundColor: p.danger,
       }} />
+    </View>
+  );
+}
+
+/**
+ * The hours you chose not to draw, and what is in them.
+ *
+ * Sits directly under the last row of the grid, which is the only honest place
+ * for it: the column ends, the timeline is broken, and what follows is
+ * explicitly no longer on it. The dots are the join. They are drawn rather than
+ * written because the same mark has to work under a column forty points wide
+ * and under one three hundred wide, and because a row of dots reads as "the
+ * story continues" in a way no wording of it does.
+ *
+ * Every row is still live: a prayer ticks off, an item opens. Being outside the
+ * drawn hours is a display choice, and a display choice must not take anything
+ * away from you.
+ */
+function OutsideHours({ entries, detailed }: {
+  entries: readonly OutsideEntry[];
+  detailed?: boolean;
+}) {
+  const p = useTheme();
+  if (entries.length === 0) return <View style={{ flex: 1 }} />;
+
+  return (
+    <View style={{ flex: 1, paddingHorizontal: 2 }}>
+      {/* The join. Three dots down the middle, in the line colour, so it reads
+          as the timeline being interrupted rather than as a control. */}
+      <View style={{ alignItems: 'center', paddingVertical: 5, gap: 3 }}>
+        {[0, 1, 2].map(i => (
+          <View
+            key={i}
+            style={{
+              width: 3, height: 3, borderRadius: 1.5,
+              backgroundColor: p.inkFaint,
+              // Fading downward, so the eye travels from the grid into the list
+              // rather than stopping at a row of three equal marks.
+              opacity: 0.9 - i * 0.22,
+            }}
+          />
+        ))}
+      </View>
+
+      <View style={{
+        borderRadius: radius.sm,
+        borderWidth: 1,
+        borderColor: p.line,
+        borderStyle: 'dashed',
+        paddingVertical: 3,
+        paddingHorizontal: 3,
+        gap: 2,
+      }}>
+        {entries.map(entry => (
+          <Pressable
+            unstable_pressDelay={PRESS_DELAY}
+            key={entry.key}
+            onPress={entry.onPress}
+            disabled={!entry.onPress}
+            accessibilityRole={entry.onPress ? 'button' : undefined}
+            accessibilityLabel={`${entry.label}, ${entry.detail.range}, outside the hours shown`}
+            style={({ pressed }) => [{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 4,
+              opacity: entry.done ? 0.45 : 1,
+            }, pressed ? PRESSED : null]}
+          >
+            {/* The item's own colour, as a bar rather than a dot: it is the
+                same left edge the block on the grid would have had, so the row
+                is recognisably the same thing seen from below. */}
+            <View style={{
+              width: 3,
+              alignSelf: 'stretch',
+              minHeight: detailed ? 22 : 18,
+              borderRadius: 2,
+              backgroundColor: entry.colour,
+            }} />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: p.ink,
+                  fontSize: detailed ? 11 : 9,
+                  lineHeight: detailed ? 14 : 11,
+                  fontWeight: '600',
+                  textDecorationLine: entry.done ? 'line-through' : 'none',
+                }}
+              >
+                {entry.label}
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={{
+                  color: p.inkFaint,
+                  fontSize: detailed ? 10 : 8,
+                  lineHeight: detailed ? 13 : 10,
+                }}
+              >
+                {entry.detail.detail
+                  ? `${entry.detail.range} ${entry.detail.detail}`
+                  : entry.detail.range}
+              </Text>
+            </View>
+          </Pressable>
+        ))}
+      </View>
     </View>
   );
 }

@@ -64,13 +64,18 @@ const MAX_RULES = 5;
 export function Reminders({ onClose }: { onClose?: () => void }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { shared, edit, timeFormat } = usePlanner();
+  const {
+    shared, timeFormat,
+    effectiveNotifications, shareNotifications, setShareNotifications, patchNotifications,
+  } = usePlanner();
 
-  const raw = (shared.notifications ?? {}) as Record<string, unknown>;
-  const s = useMemo(() => coerceNotificationSettings(raw), [raw]);
+  // What this PHONE alerts by. The same object as the PC's while sharing is on,
+  // which is the default; this phone's own copy once it is switched off.
+  const raw = (shareNotifications ? (shared.notifications ?? {}) : effectiveNotifications) as Record<string, unknown>;
+  const s = useMemo(() => coerceNotificationSettings(effectiveNotifications), [effectiveNotifications]);
 
   /**
-   * Write the settings back.
+   * Write the settings back, into whichever copy is in force.
    *
    * `raw` first so anything this build does not model survives, then the
    * coerced view so a half-written record from an older device is completed
@@ -78,9 +83,13 @@ export function Reminders({ onClose }: { onClose?: () => void }) {
    * the change itself. Nothing is mutated: the object in the context is the
    * same one the next diff is compared against, so editing it in place would
    * make the change look like no change at all and drop it.
+   *
+   * WHERE it lands is `patchNotifications`' business, not this screen's: the
+   * editor asks for a change and does not need to know whether the two machines
+   * are currently sharing one set of rules.
    */
   const write = (patch: Partial<NotificationSettings>) => {
-    void edit('settings', SETTINGS_ENTITY, { notifications: { ...raw, ...s, ...patch } });
+    patchNotifications({ ...raw, ...s, ...patch } as NotificationSettings);
   };
 
   const clock = (hour: number) => formatClock(hour * 60, timeFormat);
@@ -121,9 +130,20 @@ export function Reminders({ onClose }: { onClose?: () => void }) {
             label="Reminders"
             hint={s.enabled
               ? 'Everything below decides when.'
-              : 'Nothing alerts, on this phone or on your PC.'}
+              : 'Nothing alerts on this phone.'}
             value={s.enabled}
             onChange={v => write({ enabled: v })}
+          />
+        </Card>
+
+        <Card>
+          <Toggle
+            label="Share these rules with your PC"
+            hint={shareNotifications
+              ? 'On. Everything below is the same here and on your PC, and changing it in either place changes both.'
+              : 'Off. The rules below belong to this phone. Your PC keeps its own.'}
+            value={shareNotifications}
+            onChange={setShareNotifications}
           />
         </Card>
 
@@ -367,7 +387,7 @@ function SpecCard({ title, subject, spec, offsets, onChange, anchor, anchorNote 
             {sentence(spec, subject)}
           </Text>
         </View>
-        <Text variant="title" tone="faint">{open ? '⌄' : '›'}</Text>
+        <Text variant="title" tone="faint">{open ? '▾' : '▸'}</Text>
       </Pressable>
 
       {open ? (

@@ -104,6 +104,7 @@ import {
   DEFAULT_NOTIFICATION_SETTINGS,
   offsetChip,
   offsetLabel,
+  resolveNotificationSettings,
   resolveSpec,
   type NotificationSettings,
   type NotifySpec,
@@ -142,6 +143,8 @@ import {
 import {
   DEFAULT_CATEGORIES,
   PRESET_CATEGORY_COLORS,
+  canDeleteCategory,
+  LAST_CATEGORY_MESSAGE,
   type EventCategory,
 } from '@/lib/categories';
 import {
@@ -222,7 +225,7 @@ function RedirectUriHelp({ textPrimary, textSecondary, cardBdr, darkMode, onCopi
       </div>
       <p className="text-[10px] leading-snug" style={{ color: textSecondary }}>
         Also check <b>OAuth consent screen → Publishing status</b>. While an app is in
-        <b> Testing</b>, Google expires its refresh tokens after 7 days — sync then dies
+        <b> Testing</b>, Google expires its refresh tokens after 7 days, so sync then dies
         every week until you press Publish.
       </p>
     </div>
@@ -262,7 +265,7 @@ function FilterReadout({ f, textPrimary, textSecondary, cardBdr }: {
 
   // Phrased as what it means for the desk, not as what the code calls it.
   const HOLD_TEXT: Record<string, string> = {
-    'near-reading': 'something is still reading close — you are demonstrably here',
+    'near-reading': 'something is still reading close, so you are demonstrably here',
     'unstable': 'the readings disagree too much to be one object',
     'no-consensus': 'no group of readings is big enough to speak for the window',
     'ramp-masked': 'the readings are mid-jump; waiting for them to settle',
@@ -290,7 +293,7 @@ function FilterReadout({ f, textPrimary, textSecondary, cardBdr }: {
 
       {f.masked === true && (
         <p className="text-[10px]" style={{ color: '#f59e0b' }}>
-          Ignoring the current readings — they are jumping in strides no body makes, which is a beam losing its
+          Ignoring the current readings: they are jumping in strides no body makes, which is a beam losing its
           reflector rather than someone leaving.
         </p>
       )}
@@ -366,12 +369,12 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
 
   const apply = (seatedCm: number, emptyCm: number) => {
     if (seatedCm >= emptyCm) {
-      setNote('Seated reads no closer than empty — the sensor is aimed at something fixed (a chair back or armrest). Re-aim it and capture again.');
+      setNote('Seated reads no closer than empty. The sensor is aimed at something fixed (a chair back or armrest). Re-aim it and capture again.');
       return;
     }
     const gap = emptyCm - seatedCm;
     if (gap < 10) {
-      setNote(`Only ${gap.toFixed(0)} cm between the two states. That is too narrow to be reliable — re-aim for a clearer gap.`);
+      setNote(`Only ${gap.toFixed(0)} cm between the two states. That is too narrow to be reliable. Re-aim for a clearer gap.`);
       return;
     }
     // Thresholds placed inside the gap rather than at its centre: the band
@@ -382,7 +385,7 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
       exitCm: Math.round(seatedCm + gap * 0.65),
       calibrating: false,
     });
-    setNote(`Done — ${gap.toFixed(0)} cm of separation. Thresholds set and calibration turned off.`);
+    setNote(`Done. ${gap.toFixed(0)} cm of separation. Thresholds set and calibration turned off.`);
   };
 
   return (
@@ -438,7 +441,7 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
         <p className="text-[10px] -mt-1" style={{ color: textSecondary }}>
           Counts as at the desk below {hardware.enterCm}cm, as away above {hardware.exitCm}cm; in between it holds
           whatever it already decided. The believed number is the middle of the largest group of readings that agree
-          with each other — not the raw ping, which is what makes a blocked sensor survivable.
+          with each other, not the raw ping, which is what makes a blocked sensor survivable.
         </p>
       )}
 
@@ -471,7 +474,7 @@ function HardwareCalibration({ hardware, patchHardware, cardBg, cardBdr, textPri
           </div>
 
           <p className="text-[10px]" style={{ color: textSecondary }}>
-            Sit normally and capture seated. Then get up, step away, and capture empty — leave the chair where it
+            Sit normally and capture seated. Then get up, step away, and capture empty, leaving the chair where it
             normally sits, since it stays in the beam when you go.
           </p>
 
@@ -662,7 +665,7 @@ function PrayerTodayPreview({ prayer, textPrimary, textSecondary, cardBdr, darkM
           Today in {prayer.city}
         </span>
         {state.stale && (
-          <span className="text-[10px] font-semibold" style={{ color: '#f59e0b' }}>cached — API unreachable</span>
+          <span className="text-[10px] font-semibold" style={{ color: '#f59e0b' }}>cached, API unreachable</span>
         )}
       </div>
       {state.status === 'loading' && (
@@ -670,7 +673,7 @@ function PrayerTodayPreview({ prayer, textPrimary, textSecondary, cardBdr, darkM
       )}
       {state.status === 'error' && (
         <span className="text-xs" style={{ color: '#ef4444' }}>
-          Couldn't load times for “{prayer.city}, {prayer.country}” — check the spelling. ({state.message})
+          Couldn't load times for “{prayer.city}, {prayer.country}” . Check the spelling. ({state.message})
         </span>
       )}
       {state.status === 'ok' && (
@@ -1094,7 +1097,7 @@ function TaskListRow({
           style={{ background: 'rgba(239,68,68,0.08)', borderColor: 'rgba(239,68,68,0.35)' }}
         >
           <span className="text-[11px] font-medium" style={{ color: textPrimary }}>
-            Delete “{list.name}”? Its tasks aren't deleted — they move back to General.
+            Delete “{list.name}”? Its tasks aren't deleted. They move back to General.
           </span>
           <div className="flex items-center gap-2 flex-shrink-0">
             <button
@@ -1288,9 +1291,39 @@ export default function SettingsPage() {
   const [prayer, setPrayer] = useState<PrayerSettings>(initialSettings.prayer);
   const [notifications, setNotifications] = useState<NotificationSettings>(initialSettings.notifications);
   /** Patch one slice without disturbing the rest, exactly like patchPrayer. */
+  const [shareNotificationSettings, setShareNotificationSettings] = useState<boolean>(
+    initialSettings.shareNotificationSettings !== false,
+  );
+  /**
+   * This device's own reminder rules, used only while sharing is off.
+   *
+   * Undefined until this device has actually changed something of its own,
+   * which is what lets switching sharing off carry on with the rules you
+   * already had instead of dropping you back to the defaults.
+   */
+  const [notificationsLocal, setNotificationsLocal] = useState<NotificationSettings | undefined>(undefined);
+
+  /** What this device actually alerts by, whichever way the switch is set. */
+  const effectiveNotifications = useMemo(() => resolveNotificationSettings({
+    shared: notifications,
+    local: notificationsLocal,
+    share: shareNotificationSettings,
+  }), [notifications, notificationsLocal, shareNotificationSettings]);
+
+  /**
+   * Edit the rules, into whichever copy is in force.
+   *
+   * The editor above does not know or care which one that is -- it hands over a
+   * patch, and this decides where it lands. Writing to the wrong one is how you
+   * would get a change that appears to work and is gone on the next reload.
+   */
   const patchNotifications = useCallback((patch: Partial<NotificationSettings>) => {
-    setNotifications(prev => ({ ...prev, ...patch }));
-  }, []);
+    if (shareNotificationSettings) {
+      setNotifications(prev => ({ ...prev, ...patch }));
+      return;
+    }
+    setNotificationsLocal(prev => ({ ...(prev ?? notifications), ...patch }));
+  }, [shareNotificationSettings, notifications]);
   // Used here only for this device's push state, the test buttons and the
   // health panel. The settings page never shows the banner itself.
   const notify = useNotifications({ soundEnabled: false, inAppEnabled: false });
@@ -1495,8 +1528,9 @@ export default function SettingsPage() {
   };
 
   const handleDeleteCategory = (id: string) => {
-    if (categories.length <= 1) {
-      showToast('You must keep at least one category.', 'error');
+    // The same rule the main window now uses, from the same place.
+    if (!canDeleteCategory(categories, id)) {
+      showToast(LAST_CATEGORY_MESSAGE, 'error');
       setDeleteConfirmCatId(null);
       return;
     }
@@ -1536,7 +1570,7 @@ export default function SettingsPage() {
     const list = taskLists.find(l => l.id === id);
     setTaskLists(prev => prev.filter(l => l.id !== id));
     setDeleteConfirmListId(null);
-    showToast(`List “${list?.name || 'Untitled'}” deleted — its tasks moved to General.`, 'info');
+    showToast(`List “${list?.name || 'Untitled'}” deleted. Its tasks moved to General.`, 'info');
   };
 
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
@@ -1619,6 +1653,7 @@ export default function SettingsPage() {
     setMobileContentZoom(d.mobileContentZoom ?? 1);
     setMobileUiZoom(d.mobileUiZoom ?? 1);
     setPrayerLanguage(d.prayerLanguage ?? 'english');
+    setNotificationsLocal(d.notificationsLocal);
     setTasksPanelOpen(d.tasksPanelOpen);
     setTasksPanelWidth(d.tasksPanelWidth);
     setShowTaskRow(d.showTaskRow);
@@ -1680,12 +1715,16 @@ export default function SettingsPage() {
       mobileContentZoom,
       mobileUiZoom,
       prayerLanguage,
+      // Only meaningful while sharing is off, and harmless when it is on: the
+      // resolver ignores it. Kept either way so switching the toggle back and
+      // forth does not lose what this device had chosen.
+      notificationsLocal,
       ...deviceExtrasRef.current,
     });
   }, [calendarView, customDaysBefore, customDaysAfter, customAnchor, interval, mobileSwipeViewSwitch, tasksPanelOpen,
       tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
       darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
-      mobileContentZoom, mobileUiZoom, prayerLanguage]);
+      mobileContentZoom, mobileUiZoom, prayerLanguage, notificationsLocal]);
 
   // Apply dark mode CSS class whenever darkMode changes
   useEffect(() => {
@@ -1731,6 +1770,7 @@ export default function SettingsPage() {
       if (typeof s.gcalMirrorGoogleDeletions === 'boolean') setGcalMirrorGoogleDeletions(s.gcalMirrorGoogleDeletions);
       setPrayer(s.prayer);
       setNotifications(s.notifications);
+      setShareNotificationSettings(s.shareNotificationSettings !== false);
       setHardware(s.hardware);
       if (s.categories) setCategories(s.categories);
       if (s.taskLists) setTaskLists(coerceTaskLists(s.taskLists));
@@ -1829,6 +1869,11 @@ export default function SettingsPage() {
       timeFormat,
       weekStartsOn,
       focusDayStartHour,
+      // The same omission as `notifications`, on two more shared keys. Absent
+      // from a broadcast means "cleared" to the receiver, so changing anything
+      // on this page wiped the daily focus goal and every excused day.
+      focusDailyGoalSeconds,
+      focusExcludedDates,
       focusChime,
       focusCues,
       shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,
@@ -1851,7 +1896,18 @@ export default function SettingsPage() {
       gcalMirrorLocalDeletions,
       gcalMirrorGoogleDeletions,
       prayer,
+      // MUST BE HERE. It was in this effect's dependency list but not in the
+      // snapshot, so changing any reminder setting re-ran the effect and then
+      // broadcast `notifications: undefined`. Every listener does
+      // `setNotifications(s.notifications)`, that coerced back to the defaults,
+      // and the default prayer spec is OFF -- which is exactly why turning
+      // prayer reminders on and refreshing found them off again, on the PC and
+      // (through the shared settings store) on the phone too.
+      //
+      // A partial broadcast is never a partial update here: whatever is absent
+      // is read as "cleared".
       notifications,
+      shareNotificationSettings,
       hardware,
       categories,
       taskLists,
@@ -1867,7 +1923,7 @@ export default function SettingsPage() {
       pendingBroadcastRef.current = undefined;
       broadcastSettingsChange(snapshot);
     }, 150);
-  }, [hardware, prayer, notifications, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
+  }, [hardware, prayer, notifications, shareNotificationSettings, focusDailyGoalSeconds, focusExcludedDates, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
       taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   useEffect(() => {
@@ -1892,7 +1948,7 @@ export default function SettingsPage() {
         const combo = eventToCombo(e);
         if (!combo) return;
         if (isReservedCombo(combo)) {
-          showToast(`${formatCombo(combo)} is reserved by OS — pick another key.`, 'error');
+          showToast(`${formatCombo(combo)} is reserved by OS. Pick another key.`, 'error');
           setRecordingAction(null);
           return;
         }
@@ -1932,6 +1988,7 @@ export default function SettingsPage() {
   }, [showToast]);
 
   const currentSettingsSnapshot = (): AppSettings => ({
+    shareNotificationSettings,
     interval,
     darkMode,
     darkPreset,
@@ -2163,7 +2220,7 @@ export default function SettingsPage() {
         if (!cal.success) { showToast(cal.error || 'Google sync failed.', 'error'); return; }
         const events = Object.keys(cal.events || {}).length;
         const taskCount = Object.keys(tsk.tasks || {}).length;
-        showToast(`Google synced — ${events} event${events === 1 ? '' : 's'}, ${taskCount} task${taskCount === 1 ? '' : 's'}.`, 'success');
+        showToast(`Google synced. ${events} event${events === 1 ? '' : 's'}, ${taskCount} task${taskCount === 1 ? '' : 's'}.`, 'success');
       })
       .catch(() => showToast('Failed to reach the sync server.', 'error'))
       .finally(() => setGCalSyncing(false));
@@ -2230,7 +2287,7 @@ export default function SettingsPage() {
     { id: 'categories', label: 'Categories', icon: <Tag size={17} />, badge: `${categories.length}` },
     { id: 'tasks', label: 'Tasks', icon: <CheckSquare size={17} />, badge: `${taskLists.length}` },
     { id: 'notifications', label: 'Notifications', icon: <Bell size={17} />,
-      badge: notifications.enabled ? undefined : 'Off' },
+      badge: effectiveNotifications.enabled ? undefined : 'Off' },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
@@ -2738,7 +2795,7 @@ export default function SettingsPage() {
                       Event Card Style (Applies to All Items & Google Calendar)
                     </span>
                     <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                      How every item on the grid is painted. The samples below are live — drawn
+                      How every item on the grid is painted. The samples below are live, drawn
                       exactly the way the planner draws your events, in your current theme.
                     </span>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2784,14 +2841,14 @@ export default function SettingsPage() {
                     </span>
                     <span className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
                       The atmosphere behind the planner: a blue glow from the top-left, a green one
-                      from the right, and a faint dot texture. It never touches your events — only
+                      from the right, and a faint dot texture. It never touches your events, only
                       the empty space around the grid. Thumbnails are live, and boosted slightly so
                       the difference is visible at this size.
                     </span>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {[
                         { id: 'subtle-glow',       label: 'Subtle Ambient Glow',   desc: 'Soft corner glows plus the dot texture. Default.' },
-                        { id: 'accent-aura',       label: 'Vivid Luminous Aura',   desc: 'The same two glows at roughly double strength — clearly coloured corners.' },
+                        { id: 'accent-aura',       label: 'Vivid Luminous Aura',   desc: 'The same two glows at roughly double strength, with clearly coloured corners.' },
                         { id: 'minimal-flat',      label: 'Minimal Flat Canvas',   desc: 'Glows off, dots off. A completely flat, single-colour background.' },
                         { id: 'glass-translucent', label: 'Frosted Glass Surface', desc: 'Dimmed glows under a diagonal frost sheen, with a finer dot grain.' },
                       ].map(style => {
@@ -2931,7 +2988,7 @@ export default function SettingsPage() {
                   <div className="flex flex-col gap-3">
                     <span className="text-xs font-semibold" style={{ color: textPrimary }}>Task colour on the calendar</span>
                     <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                      Every task drawn on the grid uses this one colour — that uniformity is what makes a task read as a task at a glance.
+                      Every task drawn on the grid uses this one colour. That uniformity is what makes a task read as a task at a glance.
                     </p>
                     <div className="flex items-center gap-2 flex-wrap">
                       {['#7dd3fc', '#67e8f9', '#a5b4fc', '#c4b5fd', '#86efac', '#fcd34d', '#fda4af', '#94a3b8'].map(hex => (
@@ -3161,7 +3218,7 @@ export default function SettingsPage() {
                           return dh < 12 ? `${dh}:00 AM` : `${dh - 12}:00 PM`;
                         };
                         const span = Math.max(1, dayEndH - dayStartH);
-                        return `Timeline: ${formatH(dayStartH)} – ${formatH(dayEndH)} (${span} hour${span === 1 ? '' : 's'} visible per day)`;
+                        return `Timeline: ${formatH(dayStartH)} to ${formatH(dayEndH)} (${span} hour${span === 1 ? '' : 's'} visible per day)`;
                       })()}
                     </p>
                   </div>
@@ -3673,7 +3730,7 @@ export default function SettingsPage() {
                           <CategoryNotifyBlock
                             label="Items with a time"
                             spec={categoryForm.notifyTimed}
-                            fallback={notifications.defaultTimed}
+                            fallback={effectiveNotifications.defaultTimed}
                             kind="timed"
                             onChange={next => setCategoryForm(prev => ({ ...prev, notifyTimed: next }))}
                             theme={notifyTheme}
@@ -3684,14 +3741,14 @@ export default function SettingsPage() {
                           <CategoryNotifyBlock
                             label="All-day items"
                             spec={categoryForm.notifyAllDay}
-                            fallback={notifications.defaultAllDay}
+                            fallback={effectiveNotifications.defaultAllDay}
                             kind="allDay"
                             onChange={next => setCategoryForm(prev => ({ ...prev, notifyAllDay: next }))}
                             theme={notifyTheme}
                             cardBdr={cardBdr}
                             textPrimary={textPrimary}
                             textSecondary={textSecondary}
-                            hint={`Counted from ${String(notifications.allDayHour).padStart(2, '0')}:00 on the day, so "1 day before" lands at ${String(notifications.allDayHour).padStart(2, '0')}:00 the morning before.`}
+                            hint={`Counted from ${String(effectiveNotifications.allDayHour).padStart(2, '0')}:00 on the day, so "1 day before" lands at ${String(effectiveNotifications.allDayHour).padStart(2, '0')}:00 the morning before.`}
                           />
                         </div>
 
@@ -3745,7 +3802,7 @@ export default function SettingsPage() {
                         </span>
                       </div>
                       <p className="text-xs mt-1" style={{ color: textSecondary }}>
-                        Separate boards inside the tasks panel — Work, Study, Errands. Not the same thing as
+                        Separate boards inside the tasks panel: Work, Study, Errands. Not the same thing as
                         categories: a category colours a calendar item, a list decides which board a task sits on.
                         You can also manage these straight from the tasks panel on the main window.
                       </p>
@@ -3861,18 +3918,52 @@ export default function SettingsPage() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => patchNotifications({ enabled: !notifications.enabled })}
+                      onClick={() => patchNotifications({ enabled: !effectiveNotifications.enabled })}
                       className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
-                      style={{ background: notifications.enabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
-                      aria-pressed={notifications.enabled}
+                      style={{ background: effectiveNotifications.enabled ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                      aria-pressed={effectiveNotifications.enabled}
                     >
-                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: notifications.enabled ? 22 : 2 }} />
+                      <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: effectiveNotifications.enabled ? 22 : 2 }} />
                     </button>
                   </div>
                 </div>
 
-                {notifications.enabled && (
+                {effectiveNotifications.enabled && (
                   <>
+                    {/* ── One set of rules, or one each ────────────────────── */}
+                    <div className="p-4 sm:p-6 rounded-3xl border shadow-sm" style={{ background: cardBg, borderColor: cardBdr }}>
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <h3 className="text-sm font-bold tracking-tight flex items-center gap-2" style={{ color: textPrimary }}>
+                            <MonitorSmartphone size={15} /> Share these rules with your phone
+                          </h3>
+                          <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                            {shareNotificationSettings
+                              ? 'On. Everything below is the same on this PC and on your phone, and changing it in either place changes both.'
+                              : 'Off. The rules below belong to this PC only. Your phone keeps its own, and neither one follows the other.'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShareNotificationSettings(v => {
+                            const next = !v;
+                            // Turning sharing OFF starts this device from the rules
+                            // it is already using, so nothing changes at the moment
+                            // you flip it. Without this the device would fall back
+                            // to the defaults and silently lose every rule.
+                            if (!next) setNotificationsLocal(prev => prev ?? effectiveNotifications);
+                            return next;
+                          })}
+                          className="touch-target relative w-11 h-6 rounded-full transition-colors flex-shrink-0 mt-0.5"
+                          style={{ background: shareNotificationSettings ? accentColor : (darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)') }}
+                          aria-pressed={shareNotificationSettings}
+                          aria-label="Share reminder rules with your phone"
+                        >
+                          <span className="absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-smooth" style={{ left: shareNotificationSettings ? 22 : 2 }} />
+                        </button>
+                      </div>
+                    </div>
+
                     {/* ── This device ──────────────────────────────────────── */}
                     <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-4" style={{ background: cardBg, borderColor: cardBdr }}>
                       <div>
@@ -4014,7 +4105,7 @@ export default function SettingsPage() {
                             <HealthRow
                               label="Next reminder"
                               ok
-                              detail={`${notify.health.scheduledNext.title} — ${new Date(notify.health.scheduledNext.fireAt).toLocaleString()}`}
+                              detail={`${notify.health.scheduledNext.title} at ${new Date(notify.health.scheduledNext.fireAt).toLocaleString()}`}
                               textPrimary={textPrimary}
                               textSecondary={textSecondary}
                               cardBdr={cardBdr}
@@ -4071,7 +4162,7 @@ export default function SettingsPage() {
                         title="Items with a time"
                         hint="Counted from the item's start time."
                         theme={notifyTheme}
-                        spec={notifications.defaultTimed}
+                        spec={effectiveNotifications.defaultTimed}
                         kind="timed"
                         onChange={next => patchNotifications({ defaultTimed: next })}
                         cardBdr={cardBdr}
@@ -4081,9 +4172,9 @@ export default function SettingsPage() {
 
                       <DefaultBlock
                         title="All-day items"
-                        hint={`An all-day item is treated as starting at ${String(notifications.allDayHour).padStart(2, '0')}:00, so "1 day before" means ${String(notifications.allDayHour).padStart(2, '0')}:00 the previous morning.`}
+                        hint={`An all-day item is treated as starting at ${String(effectiveNotifications.allDayHour).padStart(2, '0')}:00, so "1 day before" means ${String(effectiveNotifications.allDayHour).padStart(2, '0')}:00 the previous morning.`}
                         theme={notifyTheme}
-                        spec={notifications.defaultAllDay}
+                        spec={effectiveNotifications.defaultAllDay}
                         kind="allDay"
                         onChange={next => patchNotifications({ defaultAllDay: next })}
                         cardBdr={cardBdr}
@@ -4093,7 +4184,7 @@ export default function SettingsPage() {
                           <label className="flex items-center gap-2 text-[11.5px]" style={{ color: textSecondary }}>
                             All-day items count from
                             <select
-                              value={notifications.allDayHour}
+                              value={effectiveNotifications.allDayHour}
                               onChange={e => patchNotifications({ allDayHour: Number(e.target.value) })}
                               className="rounded-lg px-2 py-1 text-[12px] outline-none"
                               style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
@@ -4110,7 +4201,7 @@ export default function SettingsPage() {
                         title="Tasks"
                         hint="A task with a time is reminded like an event. A task with only a date is not reminded on its own: whatever is still open that day arrives as one summary at the cutoff."
                         theme={notifyTheme}
-                        spec={notifications.defaultTask}
+                        spec={effectiveNotifications.defaultTask}
                         kind="task"
                         onChange={next => patchNotifications({ defaultTask: next })}
                         cardBdr={cardBdr}
@@ -4120,7 +4211,7 @@ export default function SettingsPage() {
                           <label className="flex items-center gap-2 text-[11.5px]" style={{ color: textSecondary }}>
                             Daily summary of what is still open at
                             <select
-                              value={notifications.taskCutoffHour}
+                              value={effectiveNotifications.taskCutoffHour}
                               onChange={e => patchNotifications({ taskCutoffHour: Number(e.target.value) })}
                               className="rounded-lg px-2 py-1 text-[12px] outline-none"
                               style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
@@ -4137,7 +4228,7 @@ export default function SettingsPage() {
                         title="Prayer times"
                         hint="Off by default. A prayer already marked done is never reminded about."
                         theme={notifyTheme}
-                        spec={notifications.prayer}
+                        spec={effectiveNotifications.prayer}
                         kind="timed"
                         onChange={next => patchNotifications({ prayer: next })}
                         cardBdr={cardBdr}
@@ -4156,7 +4247,7 @@ export default function SettingsPage() {
                       <ToggleRow
                         label="Windows notifications"
                         hint="A real Windows notification from the planner server, with working buttons, even with every window closed."
-                        value={notifications.windowsToast}
+                        value={effectiveNotifications.windowsToast}
                         onChange={v => patchNotifications({ windowsToast: v })}
                         accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
                         textPrimary={textPrimary} textSecondary={textSecondary}
@@ -4164,7 +4255,7 @@ export default function SettingsPage() {
                       <ToggleRow
                         label="Phone and browser push"
                         hint="Sent to every signed-up device over its own always-on channel."
-                        value={notifications.webPush}
+                        value={effectiveNotifications.webPush}
                         onChange={v => patchNotifications({ webPush: v })}
                         accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
                         textPrimary={textPrimary} textSecondary={textSecondary}
@@ -4172,7 +4263,7 @@ export default function SettingsPage() {
                       <ToggleRow
                         label="Also push to this PC's browsers"
                         hint="Off keeps one reminder per screen here: the Windows notification only. Turn on if the Windows ones ever stop arriving."
-                        value={notifications.desktopPush}
+                        value={effectiveNotifications.desktopPush}
                         onChange={v => patchNotifications({ desktopPush: v })}
                         accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
                         textPrimary={textPrimary} textSecondary={textSecondary}
@@ -4180,7 +4271,7 @@ export default function SettingsPage() {
                       <ToggleRow
                         label="Banner inside the planner"
                         hint="What you see when you already have the planner open."
-                        value={notifications.inApp}
+                        value={effectiveNotifications.inApp}
                         onChange={v => patchNotifications({ inApp: v })}
                         accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
                         textPrimary={textPrimary} textSecondary={textSecondary}
@@ -4188,7 +4279,7 @@ export default function SettingsPage() {
                       <ToggleRow
                         label="Sound"
                         hint="Plays in open planner windows. A critical reminder always sounds, whatever this says."
-                        value={notifications.sound}
+                        value={effectiveNotifications.sound}
                         onChange={v => patchNotifications({ sound: v })}
                         accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
                         textPrimary={textPrimary} textSecondary={textSecondary}
@@ -4208,14 +4299,14 @@ export default function SettingsPage() {
                         </p>
                         <div className="flex flex-wrap gap-1.5 pt-0.5">
                           {[5, 10, 15, 20, 30, 45, 60, 120].map(m => {
-                            const on = notifications.snoozeOptions.includes(m);
+                            const on = effectiveNotifications.snoozeOptions.includes(m);
                             return (
                               <button
                                 key={m}
                                 type="button"
                                 onClick={() => {
                                   const next = on
-                                    ? notifications.snoozeOptions.filter(v => v !== m)
+                                    ? effectiveNotifications.snoozeOptions.filter(v => v !== m)
                                     : [...notifications.snoozeOptions, m].sort((a, b) => a - b).slice(0, 5);
                                   if (!next.length) return; // there must always be one
                                   patchNotifications({ snoozeOptions: next });
@@ -4244,7 +4335,7 @@ export default function SettingsPage() {
                         <div className="flex flex-wrap items-center gap-2 pt-0.5 text-[11.5px]" style={{ color: textSecondary }}>
                           Repeat every
                           <NumberField
-                            value={notifications.escalateEveryMin}
+                            value={effectiveNotifications.escalateEveryMin}
                             onCommit={n => patchNotifications({ escalateEveryMin: n })}
                             min={1} max={60}
                             className="w-16 rounded-lg px-2 py-1 text-[12px] outline-none"
@@ -4253,7 +4344,7 @@ export default function SettingsPage() {
                           />
                           minutes, up to
                           <NumberField
-                            value={notifications.escalateTimes}
+                            value={effectiveNotifications.escalateTimes}
                             onCommit={n => patchNotifications({ escalateTimes: n })}
                             min={0} max={60}
                             className="w-16 rounded-lg px-2 py-1 text-[12px] outline-none"
@@ -4276,7 +4367,7 @@ export default function SettingsPage() {
                         <div className="flex items-center gap-2 pt-0.5 text-[11.5px]" style={{ color: textSecondary }}>
                           Deliver anything missed in the last
                           <NumberField
-                            value={notifications.catchUpHours}
+                            value={effectiveNotifications.catchUpHours}
                             onCommit={n => patchNotifications({ catchUpHours: n })}
                             min={0} max={72}
                             className="w-16 rounded-lg px-2 py-1 text-[12px] outline-none"
@@ -4291,17 +4382,17 @@ export default function SettingsPage() {
                         <ToggleRow
                           label="Quiet hours"
                           hint="Ordinary reminders are held back and released when the window ends. Critical ones ignore it completely."
-                          value={notifications.quietHoursEnabled}
+                          value={effectiveNotifications.quietHoursEnabled}
                           onChange={v => patchNotifications({ quietHoursEnabled: v })}
                           accentColor={accentColor} darkMode={darkMode} cardBdr={cardBdr}
                           textPrimary={textPrimary} textSecondary={textSecondary}
                           noBorder
                         />
-                        {notifications.quietHoursEnabled && (
+                        {effectiveNotifications.quietHoursEnabled && (
                           <div className="flex items-center gap-2 text-[11.5px]" style={{ color: textSecondary }}>
                             From
                             <select
-                              value={notifications.quietFromH}
+                              value={effectiveNotifications.quietFromH}
                               onChange={e => patchNotifications({ quietFromH: Number(e.target.value) })}
                               className="rounded-lg px-2 py-1 text-[12px] outline-none"
                               style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
@@ -4310,7 +4401,7 @@ export default function SettingsPage() {
                             </select>
                             to
                             <select
-                              value={notifications.quietToH}
+                              value={effectiveNotifications.quietToH}
                               onChange={e => patchNotifications({ quietToH: Number(e.target.value) })}
                               className="rounded-lg px-2 py-1 text-[12px] outline-none"
                               style={{ background: activeTheme.surfaceBg, border: `1px solid ${cardBdr}`, color: textPrimary }}
@@ -4324,7 +4415,7 @@ export default function SettingsPage() {
                       <div className="flex items-center gap-2 pt-2 text-[11.5px]" style={{ borderTop: `1px solid ${cardBdr}`, color: textSecondary }}>
                         Keep the last
                         <NumberField
-                          value={notifications.historyLimit}
+                          value={effectiveNotifications.historyLimit}
                           onCommit={n => patchNotifications({ historyLimit: n })}
                           min={20} max={2000}
                           className="w-20 rounded-lg px-2 py-1 text-[12px] outline-none"
@@ -4356,7 +4447,7 @@ export default function SettingsPage() {
                       <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Prayer Times</h2>
                       <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
                         Fetched from the Aladhan API for your city and kept up to date daily. A prayer has a start
-                        time and no duration, so it never takes up space on the grid — tick it off like a task.
+                        time and no duration, so it never takes up space on the grid. Tick it off like a task.
                       </p>
                     </div>
                     <button
@@ -4379,7 +4470,7 @@ export default function SettingsPage() {
                       <div className="flex flex-col gap-3">
                         <span className="text-xs font-semibold" style={{ color: textPrimary }}>Location</span>
                         <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                          City and country are geocoded by the API. Spelling matters — "Amman" / "Jordan".
+                          City and country are geocoded by the API. Spelling matters: "Amman" / "Jordan".
                         </p>
                         <div className="flex items-center gap-2">
                           <input
@@ -4408,7 +4499,7 @@ export default function SettingsPage() {
                         <span className="text-xs font-semibold" style={{ color: textPrimary }}>Calculation method</span>
                         <p className="text-[11px] -mt-1" style={{ color: textSecondary }}>
                           The authority whose angles are used. This is the biggest single factor in matching your
-                          local mosque — the same city can differ by ~20 minutes between methods.
+                          local mosque, and the same city can differ by ~20 minutes between methods.
                         </p>
                         <select
                           value={prayer.method}
@@ -4427,7 +4518,7 @@ export default function SettingsPage() {
                         <span className="flex flex-col">
                           <span className="text-xs font-semibold" style={{ color: textPrimary }}>Asr madhab</span>
                           <span className="text-[11px]" style={{ color: textSecondary }}>
-                            Hanafi puts Asr roughly 30–60 minutes later than the standard shadow ratio.
+                            Hanafi puts Asr roughly 30 to 60 minutes later than the standard shadow ratio.
                           </span>
                         </span>
                         <div className="flex items-center gap-1.5 p-1 rounded-xl border flex-shrink-0" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)', borderColor: cardBdr }}>
@@ -4452,7 +4543,7 @@ export default function SettingsPage() {
                       <div className="flex flex-col gap-3">
                         <span className="text-xs font-semibold" style={{ color: textPrimary }}>Which ones to show</span>
                         <p className="text-[11px] -mt-1.5" style={{ color: textSecondary }}>
-                          Sunrise isn't a prayer — it's off unless you switch it on here.
+                          Sunrise isn't a prayer, so it's off unless you switch it on here.
                         </p>
                         <div className="flex items-center gap-2 flex-wrap">
                           {PRAYER_KEYS.map(k => {
@@ -4686,7 +4777,7 @@ export default function SettingsPage() {
                       <div>
                         <span className="text-xs font-semibold" style={{ color: textPrimary }}>Session-Complete Sound Chime</span>
                         <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
-                          Procedurally synthesized WebAudio soundscapes — zero lag, zero files to download.
+                          Procedurally synthesized WebAudio soundscapes. Zero lag, zero files to download.
                         </p>
                       </div>
 
@@ -4948,7 +5039,7 @@ export default function SettingsPage() {
                       className="text-[11px] leading-snug p-3 rounded-xl border"
                       style={{ color: textSecondary, borderColor: cardBdr, background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}
                     >
-                      These are shown for reference only on a touch device — rebinding needs a physical
+                      These are shown for reference only on a touch device, since rebinding needs a physical
                       keyboard. Open Settings on the PC to change them; the bindings are shared.
                     </p>
                   )}
@@ -5159,7 +5250,7 @@ export default function SettingsPage() {
                         <div className="flex-1">
                           <span className="text-xs font-semibold" style={{ color: textPrimary }}>Physical buttons</span>
                           <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
-                            Button A starts, pauses and resumes. Button B terminates the session — exactly as if you
+                            Button A starts, pauses and resumes. Button B terminates the session, exactly as if you
                             had clicked the matching control in the app.
                           </p>
                         </div>
@@ -5221,7 +5312,7 @@ export default function SettingsPage() {
                             <div className="flex-1">
                               <span className="text-xs font-semibold" style={{ color: textPrimary }}>Pause when I leave the desk</span>
                               <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
-                                Briefly leaning out of the sensor's view will not trigger this — leaving has to be
+                                Briefly leaning out of the sensor's view will not trigger this. Leaving has to be
                                 sustained for several seconds before it counts.
                               </p>
                             </div>
@@ -5265,7 +5356,7 @@ export default function SettingsPage() {
                                 <p className="text-[11px] mt-0.5" style={{ color: textSecondary }}>
                                   When a session finishes and you are still sitting there, the next one begins automatically.
                                   Staying put produces no sensor reading to react to, so without this the day stops after the
-                                  first session. Stopping one yourself with the terminate button does not restart it — leaving
+                                  first session. Stopping one yourself with the terminate button does not restart it. Only leaving
                                   and returning does.
                                 </p>
                               </div>
@@ -5329,7 +5420,7 @@ export default function SettingsPage() {
                               <span className="text-xs font-semibold" style={{ color: textPrimary }}>Terminate the session after being away for</span>
                               <p className="text-[11px] -mt-1" style={{ color: textSecondary }}>
                                 Come back sooner and the paused session simply resumes. Stay away longer and it is
-                                terminated exactly as pressing stop would — sitting down afterwards begins a new one.
+                                terminated exactly as pressing stop would. Sitting down afterwards begins a new one.
                               </p>
                               <div className="flex items-center gap-2">
                                 <NumberField
@@ -5414,7 +5505,7 @@ export default function SettingsPage() {
                             />
                             <span className="text-[10px]" style={{ color: textSecondary }}>
                               Every decision is made on the readings from the last{' '}
-                              {(hardware.clusterWindowMs / 1000).toFixed(1)}s — roughly{' '}
+                              {(hardware.clusterWindowMs / 1000).toFixed(1)}s, roughly{' '}
                               {Math.max(1, Math.round(hardware.clusterWindowMs / hardware.sampleIntervalMs))} of them.
                               The believed distance is the middle of the <span style={{ color: textPrimary }}>largest
                               group that agree with each other</span>, not the average and not the middle value: a
@@ -5498,8 +5589,8 @@ export default function SettingsPage() {
                           </label>
                         </div>
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
-                          A state has to hold this long before it is believed. Arriving is trusted quickly — a sensor
-                          with nothing in front of it cannot invent a close reading — while leaving is only ever a
+                          A state has to hold this long before it is believed. Arriving is trusted quickly, because a sensor
+                          with nothing in front of it cannot invent a close reading. Leaving is only ever a
                           theory that has to survive the longer fuse, and any close reading at all resets it.
                         </p>
 
@@ -5531,7 +5622,7 @@ export default function SettingsPage() {
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
                           This is what stops a partly blocked sensor from evicting you. Rest a foot against half the
                           transducer and the echo path lengthens instead of vanishing, so a seated 30cm walks up
-                          through 80 and 120 before finally timing out — and every one of those numbers looks like an
+                          through 80 and 120 before finally timing out, and every one of those numbers looks like an
                           ordinary empty chair. {hardware.rampMinSteps} jumps of {hardware.rampStepCm}cm or more in a
                           row is a target receding at metres per second, which nothing sitting at a desk can do, so
                           the readings spanning the jump are <span style={{ color: textPrimary }}>thrown out
@@ -5590,8 +5681,8 @@ export default function SettingsPage() {
                           )}
                         </div>
                         <p className="text-[11px] -mt-2" style={{ color: textSecondary }}>
-                          Leaving is proved in two tiers. Landing on a distance this desk can actually produce — the
-                          empty chair, anything up to {hardware.maxValidCm}cm — counts after the{' '}
+                          Leaving is proved in two tiers. Landing on a distance this desk can actually produce, meaning the
+                          empty chair or anything up to {hardware.maxValidCm}cm, counts after the{' '}
                           {(hardware.absentConfirmMs / 1000).toFixed(0)}s above. Going past {hardware.maxValidCm}cm is
                           the module&rsquo;s known failure mode rather than a real distance, so{' '}
                           {hardware.glitchIgnoreAlways ? (
@@ -6127,7 +6218,7 @@ export default function SettingsPage() {
                       <div>
                         <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>Google Tasks Integration</h2>
                         <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
-                          Two-way sync with your <strong>Daily Tasks</strong> list — create, edit, complete or delete from either side.
+                          Two-way sync with your <strong>Daily Tasks</strong> list. Create, edit, complete or delete from either side.
                         </p>
                       </div>
 
@@ -6144,7 +6235,7 @@ export default function SettingsPage() {
                               </span>
                               <span className="text-[11px] block mt-0.5" style={{ color: textSecondary }}>
                                 Your Google connection was authorised for Calendar only, so tasks sync is paused.
-                                Reconnecting grants both — nothing else changes and your events are untouched.
+                                Reconnecting grants both. Nothing else changes and your events are untouched.
                               </span>
                             </div>
                             <button
@@ -6254,7 +6345,7 @@ export default function SettingsPage() {
                   <div className="p-4 rounded-2xl border flex flex-col gap-2" style={{ background: darkMode ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.015)', borderColor: cardBdr }}>
                     <span className="text-xs font-bold" style={{ color: textPrimary }}>Adding or Managing Users</span>
                     <p className="text-xs leading-relaxed" style={{ color: textSecondary }}>
-                      Usernames and passwords are stored securely in <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5" style={{ color: textPrimary }}>database/users.json</code> on the host PC. To add a friend or update a password, edit that file on your PC — new users take effect immediately without restarting.
+                      Usernames and passwords are stored securely in <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5" style={{ color: textPrimary }}>database/users.json</code> on the host PC. To add a friend or update a password, edit that file on your PC. New users take effect immediately without restarting.
                     </p>
                   </div>
 

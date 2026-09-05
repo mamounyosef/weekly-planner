@@ -44,7 +44,7 @@ export function Conflicts({ onClose }: { onClose: () => void }) {
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
       <View style={{
-        paddingTop: insets.top + space.md,
+        paddingTop: insets.top + space.sm,
         paddingHorizontal: space.xl,
         paddingBottom: space.md,
       }}>

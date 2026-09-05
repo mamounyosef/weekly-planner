@@ -20,6 +20,22 @@ import { Text, useTheme } from './kit';
 import { space } from '../theme';
 import { ICONS } from './icons';
 
+/**
+ * THE GESTURE BAR IS THE TAB BAR'S JOB, AND ONLY THE TAB BAR'S.
+ *
+ * `TabBar` sits ON the system bottom inset and absorbs it (`paddingBottom:
+ * max(insets.bottom, 6)`), so a screen inside the tab stack ends at the TOP of
+ * the tab bar, which is already clear of the gesture area. Every tab screen was
+ * nevertheless adding `insets.bottom` again to its floating button and its
+ * scroll padding, so on any phone with a gesture bar the add button hovered
+ * about a centimetre higher than intended, with that much dead space under the
+ * last card.
+ *
+ * Screens that cover the tab bar -- the full-screen overlays -- still pad
+ * themselves by the real inset, because for them nothing else does.
+ */
+export const TAB_STACK_BOTTOM_INSET = 0;
+
 export type TabId = 'calendar' | 'tasks' | 'focus' | 'settings';
 
 export interface TabDef {
@@ -103,7 +119,7 @@ export function TabBar({ active, onChange, badges }: {
                   alignItems: 'center',
                   justifyContent: 'center',
                 }}>
-                  <Text style={{
+                  <Text maxFontSizeMultiplier={1} style={{
                     color: p.accentInk, fontSize: 9, lineHeight: 11, fontWeight: '800',
                   }}>
                     {badge > 9 ? '9+' : badge}
@@ -113,10 +129,20 @@ export function TabBar({ active, onChange, badges }: {
             </View>
 
             <Text
+              numberOfLines={1}
+              // Four labels share the width of the screen and the bar's height
+              // is fixed, so this one is held nearly still: a system font at
+              // 1.3 turned "Calendar" into "Calen..." and pushed the label off
+              // the bottom edge of the bar.
+              maxFontSizeMultiplier={1.1}
               style={{
                 fontSize: 10,
                 lineHeight: 13,
-                fontWeight: on ? '700' : '500',
+                // ONE WEIGHT. Going from 500 to 700 on selection is also a
+                // change in text WIDTH, so every tab change shifted the glyphs
+                // under the thumb that had just pressed them. The colour change
+                // beside it already carries the state on its own.
+                fontWeight: '600',
                 color: on ? p.accent : p.inkFaint,
               }}
             >

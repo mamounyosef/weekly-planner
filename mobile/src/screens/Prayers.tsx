@@ -72,6 +72,7 @@ import {
   withPrayerVisible,
   writablePrayerRecord,
 } from '../lib/prayerSettings';
+import { useNowMinute } from '../ui/useNow';
 import {
   PRAYER_ARABIC,
   PRAYER_HORIZON_MAX,
@@ -117,9 +118,16 @@ export function Prayers({ onClose }: { onClose?: () => void }) {
     [data],
   );
 
-  // The day, and the month it belongs to. Recomputed on every render rather than
-  // held, so a screen left open overnight rolls onto the new day by itself.
-  const now = new Date();
+  // The day, and the month it belongs to.
+  //
+  // This carried a comment promising it "rolls onto the new day by itself"
+  // because it reads the time on every render -- which is true only if
+  // something causes renders, and nothing did. The highlighted next prayer and
+  // its countdown were frozen at whatever they said when the screen opened;
+  // leave it up for twenty minutes and it was twenty minutes wrong. The clock
+  // the calendar already uses ticks it on the minute and re-reads the time when
+  // the app is foregrounded, which is the other half of the same problem.
+  const now = useNowMinute();
   const today = ymd(now);
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
@@ -581,7 +589,7 @@ function PrayerRow({
         >
           {known ? formatClock(minutes, timeFormat) : '· ·'}
         </Text>
-        <Text variant="body" tone="faint">{open ? '⌃' : '⌄'}</Text>
+        <Text variant="body" tone="faint">{open ? '▾' : '▸'}</Text>
       </Pressable>
 
       {open ? (

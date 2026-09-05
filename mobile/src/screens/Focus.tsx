@@ -77,6 +77,7 @@ import {
 } from '../lib/focusPeriod';
 import { YearChart } from '../components/YearChart';
 import { Stepper } from '../ui/Fields';
+import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
 
 type Range = 'week' | 'month' | 'year';
 
@@ -105,7 +106,7 @@ interface FocusTimerBridge {
 /** Which confirmation, if any, is being asked for. */
 type Pending = null | 'finish' | 'discard';
 
-export function Focus() {
+export function Focus({ visible = true }: { visible?: boolean }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
@@ -165,13 +166,25 @@ export function Focus() {
    * second, on the screen a running timer keeps you looking at.
    */
   const todayKey = useMemo(() => dateKey(new Date(now)), [now]);
+
   const phase = focusPhase(timer);
 
+  /**
+   * The one-second clock, ONLY WHILE THIS SCREEN IS ON SCREEN.
+   *
+   * Tabs are kept mounted on purpose, so starting a session and switching to
+   * the calendar used to leave this entire screen -- timer, history, year chart
+   * -- rebuilding every second behind a screen nobody was looking at, for as
+   * long as the session ran. The timer itself is state in the planner, not
+   * here, so nothing is lost by not counting: coming back re-reads the clock on
+   * the same tick that makes the tab visible.
+   */
   useEffect(() => {
-    if (phase !== 'running') return;
+    if (phase !== 'running' || !visible) return;
+    setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [phase]);
+  }, [phase, visible]);
 
   // Coming back from the background is the case that matters: the clock may have
   // moved by hours, and the session may have finished long ago.
@@ -211,6 +224,16 @@ export function Focus() {
   const dayStartHour = typeof (shared as any).focusDayStartHour === 'number'
     ? (shared as any).focusDayStartHour
     : 0;
+
+  /**
+   * Which focus day it is. Changes once a day, not once a second.
+   *
+   * `dayStartHour` moves the boundary, so this is NOT the calendar day above
+   * and the two must not be used interchangeably. Everything below that only
+   * cares WHICH day it is keys on this instead of on `now`, which is the
+   * difference between walking 438 sessions once a day and once a second.
+   */
+  const focusToday = useMemo(() => focusDayKey(new Date(now), dayStartHour), [now, dayStartHour]);
 
   const period = useMemo(
     () => focusPeriodRange({
@@ -257,20 +280,31 @@ export function Focus() {
   }, [focusSessions, dayStartHour, shared, rangeMode, todayKey]);
 
   /**
+   * What is already logged for today. Recomputed when the DAY changes.
+   *
+   * This scan used to sit inside the per-second memo below, so every tick of a
+   * running timer walked the whole history to work out a number that cannot
+   * change while the timer runs.
+   */
+  const loggedTodaySeconds = useMemo(() => summariseFocus(
+    focusSessions as FocusSessionRecord[],
+    { from: focusToday, to: focusToday, dayStartHour },
+  ).totalSeconds, [focusSessions, focusToday, dayStartHour]);
+
+  /**
    * Today's total, including the session still running.
    *
    * The live part is the UNCREDITED elapsed time, never the raw elapsed: editing
    * a day's figure on the PC while a session runs banks what has been run so far
    * into the day directly, and counting it here as well would show the same
    * minutes twice and then log them twice when the session ends.
+   *
+   * One addition per tick now, rather than a full history scan per tick.
    */
-  const todaySeconds = useMemo(() => {
-    const key = focusDayKey(new Date(now), dayStartHour);
-    const logged = summariseFocus(focusSessions as FocusSessionRecord[], {
-      from: key, to: key, dayStartHour,
-    }).totalSeconds;
-    return logged + (phase === 'running' ? focusUncreditedSeconds(timer, now) : 0);
-  }, [focusSessions, dayStartHour, now, phase, timer]);
+  const todaySeconds = useMemo(
+    () => loggedTodaySeconds + (phase === 'running' ? focusUncreditedSeconds(timer, now) : 0),
+    [loggedTodaySeconds, now, phase, timer],
+  );
 
   const goalStats = useMemo(() => {
     return computeGoalStats(focusSessions as FocusSessionRecord[], {
@@ -286,13 +320,22 @@ export function Focus() {
     });
   }, [focusSessions, now, focusDailyGoalSeconds, dayStartHour, phase, timer, shared]);
 
+  /**
+   * Keyed on the DAY, not on the clock.
+   *
+   * `computeAllTimeStreaks` walks the entire history from the beginning, and it
+   * answers a question about days -- so recomputing it on every tick of a
+   * running timer was 438 sessions re-walked once a second to produce the same
+   * number 86,399 times out of 86,400.
+   */
   const allTimeStreaks = useMemo(() => {
     return computeAllTimeStreaks(focusSessions as FocusSessionRecord[], {
-      anchorDate: new Date(now),
+      anchorDate: new Date(),
       dayStartHour,
       excludedDates: (shared as any).focusExcludedDates || [],
     });
-  }, [focusSessions, now, dayStartHour, shared]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSessions, focusToday, dayStartHour, shared]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -348,7 +391,7 @@ export function Focus() {
         contentContainerStyle={{
           paddingHorizontal: space.xl,
           paddingTop: space.lg,
-          paddingBottom: insets.bottom + space.xxl,
+          paddingBottom: TAB_STACK_BOTTOM_INSET + space.xxl,
         }}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={p.accent} />

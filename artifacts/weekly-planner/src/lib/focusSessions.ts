@@ -1,3 +1,9 @@
+import { applyTypedDayTotals, dedupeFocusHistory, focusSessionId } from './focusStats';
+
+// Re-exported so the two pages take a session's identity from the module they
+// already use for everything else about a session.
+export { focusSessionId, applyTypedDayTotals };
+
 export interface FocusSession {
   id: string;
   startedAt: string;
@@ -158,7 +164,22 @@ export function focusSessionTruth(
   beat: FocusHeartbeat | null,
   now = Date.now(),
 ): FocusTruth {
-  const liveSeconds = getFocusTimerElapsedSeconds(timer, now);
+  // NEVER MORE THAN THE SESSION WAS PLANNED TO RUN.
+  //
+  // The branches below answer "is anybody watching?" and reach for the wall
+  // clock when they cannot tell -- and the wall clock keeps running while the
+  // machine is off. A session is finished the moment it reaches its planned
+  // length (`settle` is what writes it down), so the clock cannot be worth more
+  // than that whatever the witnesses say.
+  //
+  // Without this cap a timer file carrying no `updatedAt` -- which the old
+  // hotkey route produced on every single press, because it rebuilt the timer
+  // field by field and dropped it -- had no witness at all, took the "nothing
+  // better than the clock" branch, and reported the whole night as live seconds
+  // on the day you next looked. That is the hour that appeared out of nowhere.
+  const planned = Math.max(0, timer.plannedSeconds);
+  const raw = getFocusTimerElapsedSeconds(timer, now);
+  const liveSeconds = Math.min(raw, planned);
   if (!timer.isRunning || !timer.sessionStartedAt) {
     return { seconds: liveSeconds, endedAt: new Date(now).toISOString(), ghost: false };
   }
@@ -246,9 +267,16 @@ export function focusRecoveryFor(
   };
 }
 
-/** Deterministic, so two windows recovering the same session log it once. */
+/**
+ * Deterministic, so two windows recovering the same session log it once.
+ *
+ * Now the SESSION's id rather than a `recovered-` variant of it: an hour ended
+ * by the PC noticing it had run out, by the phone stopping it, and by a rebuild
+ * after the machine was switched off are all the same hour, and giving them
+ * three names is what let them be counted three times.
+ */
 export function recoveredSessionId(sessionStartedAt: string | null): string {
-  return `recovered-${sessionStartedAt ?? 'unknown'}`;
+  return focusSessionId(sessionStartedAt);
 }
 
 export function isCompletedFocusSession(session: FocusSession): boolean {
@@ -278,7 +306,7 @@ export function claimFocusCompletion(withinMs = 6000): boolean {
 
 // Stable id for an auto-completed session so two windows can't log it twice.
 export function autoSessionId(sessionStartedAt: string | null, plannedSeconds: number): string {
-  return `auto-${sessionStartedAt ?? 'unknown'}-${plannedSeconds}`;
+  return focusSessionId(sessionStartedAt);
 }
 
 export function dedupeFocusSessions(sessions: FocusSession[]): FocusSession[] {
@@ -1257,9 +1285,21 @@ export function uid(): string {
   });
 }
 
+/**
+ * Read a history off the wire or off disk, and collapse it.
+ *
+ * EVERY reader of the focus history goes through this one door -- the initial
+ * load, the live stream, an import, the widget -- so collapsing here is what
+ * makes a database that already contains duplicates report the truth
+ * immediately, without waiting for anything to be repaired and without the two
+ * windows having to agree first.
+ *
+ * Two kinds of duplicate, both explained in `dedupeFocusHistory`: one session
+ * written twice under two different id spellings, and one day typed in twice.
+ */
 export function safeFocusSessions(value: unknown): FocusSession[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((s): s is FocusSession => {
+  const clean = value.filter((s): s is FocusSession => {
     if (!s || typeof s !== 'object') return false;
     const item = s as Partial<FocusSession>;
     return (
@@ -1270,6 +1310,7 @@ export function safeFocusSessions(value: unknown): FocusSession[] {
       item.durationSeconds > 0
     );
   });
+  return dedupeFocusHistory(clean) as FocusSession[];
 }
 
 export function loadLocalFocusSessions(): FocusSession[] {
@@ -1557,10 +1598,24 @@ export function formatDetailedDuration(seconds: number): string {
   }
 }
 
+/** A day is twenty-four hours. A typed total larger than that is a typo. */
+export const MAX_MANUAL_DAY_SECONDS = 24 * 60 * 60 - 60;
+
 /**
- * Creates a FocusSession record for a manual day edit.
- * Ensures the generated session's endedAt timestamp falls cleanly on the specified focus day
- * under any focusDayStartHour (0-23) and in any timezone.
+ * The record a typed day total becomes.
+ *
+ * BOTH ENDPOINTS HAVE TO LAND ON THE DAY IT IS FOR. This used to anchor the END
+ * six hours into the focus day and count BACKWARDS, so a nine-hour total began
+ * three hours before the day did: `endedAt` said Tuesday and `startedAt` said
+ * Monday. Totalling reads `endedAt`, so the figure came out right, but every
+ * other reading of the same row disagreed -- the sync layer sorts the history by
+ * `startedAt`, and a row that claims to have started on the previous day is
+ * simply not true. It is the kind of disagreement that stays harmless right up
+ * until something new reads the other field.
+ *
+ * So it runs FORWARD from the start of the focus day instead, which puts both
+ * ends inside it for any total a day can hold, and the total is capped at a day
+ * so it cannot be made to spill however it is typed.
  */
 export function createManualFocusSession(dateKeyVal: string, newSeconds: number, focusDayStartHour = 0): FocusSession {
   const parts = dateKeyVal.split('-').map(Number);
@@ -1568,18 +1623,27 @@ export function createManualFocusSession(dateKeyVal: string, newSeconds: number,
   const m = (parts[1] || 1) - 1;
   const d = parts[2] || 1;
 
-  // Local target hour safely within the focus day window
-  const targetHour = Math.min(23, Math.max(0, focusDayStartHour + 6));
-  const endDate = new Date(y, m, d, targetHour, 0, 0, 0);
-  const endIso = endDate.toISOString();
-  const startIso = new Date(endDate.getTime() - newSeconds * 1000).toISOString();
+  // `Math.max(0, NaN)` is NaN, and NaN seconds makes an Invalid Date whose
+  // `toISOString` throws -- so the guard has to be explicit rather than relying
+  // on the clamp to also filter.
+  const asked = Math.floor(Number(newSeconds));
+  const seconds = Number.isFinite(asked)
+    ? Math.max(0, Math.min(MAX_MANUAL_DAY_SECONDS, asked))
+    : 0;
+  const hour = Math.min(23, Math.max(0, Math.floor(focusDayStartHour)));
+
+  // The first instant of the focus day, in local time. `new Date(y, m, d, h)`
+  // is a local-calendar construction, so it survives a daylight-saving change
+  // the way a fixed millisecond offset would not.
+  const startDate = new Date(y, m, d, hour, 0, 0, 0);
+  const endDate = new Date(startDate.getTime() + seconds * 1000);
 
   return {
-    id: `manual-${dateKeyVal}-${Date.now()}-${newSeconds}`,
-    startedAt: startIso,
-    endedAt: endIso,
-    durationSeconds: newSeconds,
-    plannedSeconds: newSeconds,
+    id: `manual-${dateKeyVal}-${Date.now()}-${seconds}`,
+    startedAt: startDate.toISOString(),
+    endedAt: endDate.toISOString(),
+    durationSeconds: seconds,
+    plannedSeconds: seconds,
   };
 }
 

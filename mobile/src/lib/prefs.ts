@@ -42,6 +42,7 @@ import { makeDeviceId } from './syncStorage';
 import { createPrefsStore, type PrefsSql, type PrefsStore } from './prefsStore';
 import { createExpoRunner, openPlannerDatabase } from './sqlite';
 import { FULL_DAY, normaliseRanges, type HourRange } from './dayWindows';
+import { coerceNotificationSettings, type NotificationSettings } from './notifications';
 import { isThemeMode, type ThemeMode } from '../theme';
 import { coerceFocusRangeMode, type FocusRangeMode } from './focusPeriod';
 import { coerceSortMode, type SortMode } from './taskBoard';
@@ -83,6 +84,16 @@ const KEY_DAY_END = 'planner.dayEndH';
 const KEY_SWIPE_VIEWS = 'planner.swipeViewSwitch';
 const KEY_FOCUS_RANGE_MODE = 'planner.focusRangeMode';
 const KEY_TASK_SORT = 'planner.taskSort';
+const KEY_HIDDEN_CATEGORIES = 'planner.hiddenCategoriesByView';
+/**
+ * This phone's OWN reminder rules, used only while sharing is switched off.
+ *
+ * Kept here rather than in the synced settings for the obvious reason: the
+ * whole point is that it does not travel. Absent until the phone actually
+ * changes something of its own, which is what lets switching sharing off carry
+ * on with the rules you already had instead of dropping back to the defaults.
+ */
+const KEY_NOTIFICATIONS_LOCAL = 'planner.notificationsLocal';
 
 /**
  * Exactly what the fast store owns.
@@ -106,6 +117,8 @@ export const PREF_KEYS = [
   KEY_SWIPE_VIEWS,
   KEY_FOCUS_RANGE_MODE,
   KEY_TASK_SORT,
+  KEY_HIDDEN_CATEGORIES,
+  KEY_NOTIFICATIONS_LOCAL,
 ] as const;
 
 async function secureRead(key: string): Promise<string | null> {
@@ -461,4 +474,28 @@ export const prefs = {
     // almost always signing back into the same planner on the same phone.
     // So do the view preferences: they describe this screen, not this account.
   },
+
+  async getHiddenCategoriesByView(): Promise<Record<string, string[]>> {
+    const raw = await read(KEY_HIDDEN_CATEGORIES);
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw) as Record<string, string[]>;
+    } catch {
+      return {};
+    }
+  },
+  setHiddenCategoriesByView: (val: Record<string, string[]>) => write(KEY_HIDDEN_CATEGORIES, JSON.stringify(val)),
+
+  /** Undefined, not a default: "this phone has never chosen its own rules". */
+  async getNotificationsLocal(): Promise<NotificationSettings | undefined> {
+    const raw = await read(KEY_NOTIFICATIONS_LOCAL);
+    if (!raw) return undefined;
+    try {
+      return coerceNotificationSettings(JSON.parse(raw));
+    } catch {
+      return undefined;
+    }
+  },
+  setNotificationsLocal: (val: NotificationSettings | undefined) =>
+    write(KEY_NOTIFICATIONS_LOCAL, val ? JSON.stringify(val) : null),
 };

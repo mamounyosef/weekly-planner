@@ -15,7 +15,7 @@
  * passed through untouched — intercepting an SSE stream would break the live
  * sync between the phone, the desktop window and the widget.
  */
-const VERSION = 'planner-v7';
+const VERSION = 'planner-v8';
 const SHELL_CACHE = `${VERSION}-shell`;
 const ASSET_CACHE = `${VERSION}-assets`;
 const SHELL_URL = '/index.html';
@@ -591,9 +591,13 @@ if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') 
     event.waitUntil((async () => {
       await flushActionQueue();
       await reportLocallyFired();
-      const refreshed = await refreshPlan();
-      if (!refreshed) await runCachedPlan();
-      else await runCachedPlan();
+      // The cached plan runs either way. A refresh that succeeded gives it
+      // fresher reminders to work from; one that failed leaves the last plan we
+      // managed to fetch, which is the whole point of caching it. This used to
+      // be an if/else with two identical branches, which read as an unfinished
+      // thought in the one path that fires reminders with the PC switched off.
+      await refreshPlan();
+      await runCachedPlan();
     })());
   });
 

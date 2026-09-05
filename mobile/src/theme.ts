@@ -92,7 +92,7 @@ export const radius = {
 /** Type scale. Sizes are in points; line heights are set alongside, never left
  *  to the platform default, which differs between Android versions. */
 export const type = {
-  display: { fontSize: 30, lineHeight: 34, fontWeight: '700' as const, letterSpacing: -0.6 },
+  display: { fontSize: 26, lineHeight: 31, fontWeight: '700' as const, letterSpacing: -0.5 },
   title: { fontSize: 20, lineHeight: 25, fontWeight: '700' as const, letterSpacing: -0.3 },
   heading: { fontSize: 16, lineHeight: 21, fontWeight: '600' as const, letterSpacing: -0.1 },
   body: { fontSize: 15, lineHeight: 21, fontWeight: '400' as const },
@@ -100,6 +100,36 @@ export const type = {
   caption: { fontSize: 13, lineHeight: 17, fontWeight: '400' as const },
   label: { fontSize: 11, lineHeight: 14, fontWeight: '600' as const, letterSpacing: 1.1 },
   clock: { fontSize: 13, lineHeight: 16, fontWeight: '600' as const, letterSpacing: 0.2 },
+} as const;
+
+/**
+ * How far Android's own font-size slider may enlarge each variant.
+ *
+ * The system setting goes to 1.3, and Samsung's goes further still. Applied to
+ * a 30pt screen title beside four 48pt buttons, that is the difference between
+ * a heading and "Tod...", and once a title truncates the header stops telling
+ * you which day you are looking at.
+ *
+ * So the caps are graded by what the text is for rather than uniform. Body
+ * copy and captions are what somebody enlarging their font actually wants to
+ * read, and they sit in flowing layouts that can absorb the extra height, so
+ * they keep nearly the whole range. Display and title sit in fixed rows beside
+ * fixed-size controls and are already the largest thing on screen, so they are
+ * held close to their drawn size: making a 26pt heading 34pt helps nobody and
+ * costs the line that follows it.
+ *
+ * A cap is NOT a refusal to scale. Every variant still grows with the setting;
+ * it simply stops before it breaks the row it lives in.
+ */
+export const MAX_FONT_SCALE = {
+  display: 1.15,
+  title: 1.2,
+  heading: 1.25,
+  body: 1.35,
+  bodyStrong: 1.35,
+  caption: 1.3,
+  label: 1.25,
+  clock: 1.2,
 } as const;
 
 /**

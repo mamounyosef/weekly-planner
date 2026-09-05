@@ -42,7 +42,7 @@ export const DEFAULT_CATEGORIES: EventCategory[] = [
   },
   {
     id: 'university-calendar',
-    name: 'University Calender',
+    name: 'University Calendar',
     color: '#f97316', // Vivid orange
     defaultDurationMin: 60,
     defaultNoDuration: false,
@@ -155,4 +155,35 @@ export function resolveEventColor(
   if (c && c.startsWith('#')) return c;
   if (ev.gCalHex) return ev.gCalHex;
   return (c && SWATCH_BASE_HEX[c]) || FALLBACK_EVENT_HEX;
+}
+
+// ─── Deleting one, without emptying the list ─────────────────────────────────
+// `coerceCategories` treats an empty array as CORRUPT and hands back the two
+// built-in categories. That is right for a damaged file and catastrophic for a
+// deliberate delete: removing the last category wrote `[]`, the next settings
+// snapshot coerced it straight back into Personal and University Calendar, and
+// those then broadcast to every device. Two screens offered the same operation
+// and only one of them refused. The rule lives here now so all of them share it.
+
+/** What the user is told when the last category is what they tried to remove. */
+export const LAST_CATEGORY_MESSAGE = 'You must keep at least one category.';
+
+/** False when `id` is the only category left, or is not in the list at all. */
+export function canDeleteCategory(list: readonly EventCategory[], id: string): boolean {
+  return list.length > 1 && list.some(c => c.id === id);
+}
+
+/**
+ * The list without `id`, or the SAME list when that is not allowed.
+ *
+ * Returning the input unchanged (by reference) rather than throwing lets a
+ * caller decide between "nothing happened" and "say why" without a try/catch
+ * around a state setter.
+ */
+export function deleteCategory(
+  list: readonly EventCategory[],
+  id: string,
+): EventCategory[] {
+  if (!canDeleteCategory(list, id)) return list as EventCategory[];
+  return list.filter(c => c.id !== id);
 }

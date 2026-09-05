@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  DELETED_FIELD, emptyState, isTombstoned, makeOps, readStore,
+  DELETED_FIELD, emptyState, isTombstoned, makeOps, readEntity, readStore,
   type SyncConflict, type SyncOp,
 } from './sync';
 import { applyLocalChange, emptyClientData, type ClientData } from './syncClient';
@@ -47,6 +47,36 @@ function flakyRunner(db: DatabaseSync, failOnWrite: number): SqlRunner {
       writes += 1;
       if (writes === failOnWrite) throw new Error('disk full');
       return base.run(sql, params);
+    },
+  };
+}
+
+/**
+ * A real SQLite runner that also RECORDS every statement.
+ *
+ * Counting statements is the only way to test a skipped write: the point is not
+ * that the database ends up right (a version that writes everything every time
+ * also ends up right), it is that the expensive statements were not issued.
+ * Wrapped around the real runner so the database still ends up right too, which
+ * the same tests then check by reloading.
+ */
+function trackingRunner(db: DatabaseSync) {
+  const base = nodeRunner(db);
+  let log: Array<{ sql: string; params: unknown[] }> = [];
+  const runner: SqlRunner = {
+    ...base,
+    async exec(sql) { log.push({ sql, params: [] }); return base.exec(sql); },
+    async run(sql, params = []) { log.push({ sql, params: params as unknown[] }); return base.run(sql, params); },
+    async transaction(fn) { log.push({ sql: 'BEGIN', params: [] }); return base.transaction(fn); },
+  };
+  return {
+    runner,
+    reset() { log = []; },
+    /** How many statements contain this fragment. */
+    count(fragment: string) { return log.filter(e => e.sql.includes(fragment)).length; },
+    /** How many times this meta key was written. */
+    writes(key: string) {
+      return log.filter(e => e.sql.includes('INTO meta') && e.params[0] === key).length;
     },
   };
 }
@@ -626,7 +656,113 @@ async function main() {
     assert.equal(reloaded.outbox.length, 1, 'the unreadable row was dropped, the good one kept');
   }
 
-  console.log('\nALL PASS (phone local database: durability, corruption, backlog)');
+  // ─── A save that would store what is already stored ─────────────────────────
+//
+// `saveSynced` ran unconditionally after every sync cycle: a near-megabyte
+// `JSON.stringify` of the whole planner, then a delete-and-reinsert of every
+// outbox row and every conflict row, inside a transaction, on the JS thread --
+// several times a minute on an idle phone, writing exactly what was there
+// already. It landed as a hitch while scrolling.
+//
+// The three heavy parts are now written only when they have actually changed.
+// These tests are about WHAT REACHES SQL, so they count statements rather than
+// inspect results: the danger of a skip is not that it is slow, it is that a
+// change silently never lands.
+{
+  console.log('\n--- AN IDLE SAVE WRITES NOTHING HEAVY ---');
+
+  const sql = trackingRunner(new DatabaseSync(':memory:'));
+  const storage = createStorage(sql.runner);
+  await storage.init();
+  sql.reset();
+
+  const base = emptyClientData('phone-1');
+  const withClock = (d: ClientData, at: number): ClientData => ({ ...d, lastSyncedAt: at });
+
+  // ── The first save after launch always writes ────────────────────────────
+  // Whatever was loaded from disk went through `sanitizeState` and the outbox
+  // replay on the way in, so it is not necessarily byte-identical to what is
+  // stored. Assuming it was would leave a repaired state unpersisted.
+  await storage.saveSynced(withClock(base, 1));
+  assert.ok(sql.writes('state') >= 1, 'the first save persists the state');
+
+  // ── The same objects again: only the clock moves ─────────────────────────
+  sql.reset();
+  await storage.saveSynced(withClock(base, 2));
+  assert.equal(sql.writes('state'), 0, 'the state is not re-encoded');
+  assert.equal(sql.count('DELETE FROM outbox'), 0, 'the outbox table is not rebuilt');
+  assert.equal(sql.count('DELETE FROM conflicts'), 0, 'nor the conflicts table');
+  assert.equal(sql.count('BEGIN'), 0, 'and no transaction is opened at all');
+  assert.equal(sql.writes('last_synced_at'), 1, 'only the clock is written');
+
+  // Repeatedly, because this is the case that happens four times a minute.
+  sql.reset();
+  for (let i = 3; i < 20; i += 1) await storage.saveSynced(withClock(base, i));
+  assert.equal(sql.writes('state'), 0, 'seventeen idle cycles encode the planner zero times');
+  assert.equal(sql.writes('last_synced_at'), 17, 'and write seventeen small rows');
+
+  // ── A real change must still get through, every time ─────────────────────
+  const edited = applyLocalChange(base, {
+    store: 'events', entityId: 'e1', changes: { title: 'Dentist' }, at: 1_000,
+  });
+  sql.reset();
+  await storage.saveSynced(withClock(edited, 21));
+  assert.ok(sql.writes('state') >= 1, 'a changed state is written');
+  assert.ok(sql.count('DELETE FROM outbox') >= 1, 'and its ops reach the outbox table');
+
+  // Reloading must see it. This is the assertion that would catch a skip that
+  // went too far, because it reads the database rather than counting calls.
+  const reloaded = await storage.load('phone-1');
+  assert.ok(readEntity(reloaded.state, 'events', 'e1'), 'and it is there on the next launch');
+
+  // ── The cursor never advances without its state ──────────────────────────
+  // A cursor that moves alone skips those ops forever, which is the one way
+  // this optimisation could lose data rather than merely repeat work.
+  sql.reset();
+  await storage.saveSynced({ ...edited, cursor: 99, lastSyncedAt: 22 });
+  assert.ok(sql.writes('cursor') >= 1, 'a moved cursor is written');
+  assert.ok(sql.writes('state') >= 1, 'and its state goes with it, in the same pass');
+  const afterCursor = await storage.load('phone-1');
+  assert.equal(afterCursor.cursor, 99, 'and both survive a reload');
+  assert.ok(readEntity(afterCursor.state, 'events', 'e1'), 'together');
+
+  // ── Conflicts, appearing and disappearing ────────────────────────────────
+  const card = {
+    id: 'c1', kind: 'field', store: 'events', entityId: 'e1', field: 'title',
+    winner: { value: 'A', device: 'phone-1', at: 2, lamport: 2 },
+    loser: { value: 'B', device: 'pc', at: 3, lamport: 3 },
+    detectedAt: 3,
+  } as SyncConflict;
+  const withCard: ClientData = { ...edited, cursor: 99, conflicts: [card], lastSyncedAt: 23 };
+  sql.reset();
+  await storage.saveSynced(withCard);
+  assert.ok(sql.count('DELETE FROM conflicts') >= 1, 'a new card rebuilds the conflicts table');
+  assert.equal((await storage.load('phone-1')).conflicts.length, 1, 'and is there on reload');
+
+  sql.reset();
+  await storage.saveSynced({ ...withCard, lastSyncedAt: 24 });
+  assert.equal(sql.count('DELETE FROM conflicts'), 0, 'the same card again writes nothing');
+
+  const answered: ClientData = { ...withCard, conflicts: [], lastSyncedAt: 25 };
+  sql.reset();
+  await storage.saveSynced(answered);
+  assert.ok(sql.count('DELETE FROM conflicts') >= 1, 'answering the card rebuilds the table');
+  assert.equal((await storage.load('phone-1')).conflicts.length, 0, 'and it is gone on reload');
+
+  // ── Reset forgets what was written ───────────────────────────────────────
+  // Otherwise "Reset local data" followed by a save of the same objects would
+  // skip the write and leave the tables empty.
+  await storage.reset();
+  sql.reset();
+  await storage.saveSynced(answered);
+  assert.ok(sql.writes('state') >= 1, 'after a reset the next save writes in full');
+  const afterReset = await storage.load('phone-1');
+  assert.ok(readEntity(afterReset.state, 'events', 'e1'), 'so nothing is lost to the reset');
+
+  console.log('  Idle saves are one small row; real changes always land');
+}
+
+console.log('\nALL PASS (phone local database: durability, corruption, backlog)');
 }
 
 main().catch(err => {

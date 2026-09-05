@@ -74,11 +74,12 @@ import {
   inferWeekStartsOn,
   type DraftInput,
 } from '../lib/draft';
-import { DELETED_FIELD, peekEntity } from '../lib/sync';
+import { DELETED_FIELD, peekEntity, readStore } from '../lib/sync';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
   buildPrayerDay,
   coercePrayerSettings,
+  prayerMonthsFromCache,
   prayerQueryKey,
   prayerOccId,
   type PrayerOccurrence,
@@ -110,7 +111,10 @@ export interface SharedSettings {
   focusChime?: string;
   focusCues?: unknown;
 }
-import { DEFAULT_NOTIFICATION_SETTINGS, computeSchedule } from '../lib/notifications';
+import {
+  DEFAULT_NOTIFICATION_SETTINGS, computeSchedule, resolveNotificationSettings,
+  type NotificationSettings,
+} from '../lib/notifications';
 import { DEFAULT_CATEGORIES } from '../lib/categories';
 import { collectMissed, prepareNotifications, syncAlarms } from '../lib/notify';
 import { applyUpdateIfAny } from '../lib/updates';
@@ -320,6 +324,15 @@ interface PlannerContextValue {
   /** Whether a sideways swipe changes the view as well as the date. */
   swipeViewSwitch: boolean;
   setSwipeViewSwitch(on: boolean): void;
+  hiddenCategoriesByView: Record<string, string[]>;
+  setHiddenCategories(view: string, hiddenIds: string[]): void;
+  /** The reminder rules THIS phone alerts by, shared or its own. */
+  effectiveNotifications: NotificationSettings;
+  /** True while both machines run one set of rules. Shared, on by default. */
+  shareNotifications: boolean;
+  setShareNotifications(share: boolean): void;
+  /** Write reminder rules into whichever copy is currently in force. */
+  patchNotifications(next: NotificationSettings): void;
   /** How this phone draws prayers. Its own, never the desk's. */
   prayerAppearance: PrayerAppearance;
   setPrayerAppearance(look: PrayerAppearance): void;
@@ -413,6 +426,18 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const [swipeViewSwitch, setSwipeState] = useState(DEFAULT_SWIPE_VIEW_SWITCH);
   const [prayerAppearance, setPrayerLook] = useState<PrayerAppearance>(DEFAULT_PRAYER_APPEARANCE);
   const [visibleHours, setVisibleHoursState] = useState<HourRange[]>(FULL_DAY);
+  const [hiddenCategoriesByView, setHiddenCategoriesByViewRaw] = useState<Record<string, string[]>>({});
+  /**
+   * This phone's OWN reminder rules, used only while sharing is switched off.
+   * Undefined until it has actually chosen any, so turning sharing off carries
+   * on with whatever was already in force rather than reverting to defaults.
+   */
+  const [notificationsLocal, setNotificationsLocalState] = useState<NotificationSettings | undefined>(undefined);
+  // Read at PLAN time, not closed over: `replanAlarmsNow` is created once and
+  // must see whatever this phone's rules are when it actually runs.
+  const notificationsLocalRef = useRef<NotificationSettings | undefined>(undefined);
+  notificationsLocalRef.current = notificationsLocal;
+
 
   const storageRef = useRef<SyncStorage | null>(null);
   const transportRef = useRef<PlannerTransport | null>(null);
@@ -469,12 +494,14 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
           deviceId, url, session, user,
           savedInterval, savedWindow, savedDayWindow, savedSwipe, savedCalendarView,
           savedPrayerLook, savedVisibleHours, storedTimerRaw, storedCentreRaw,
+          savedHiddenCategoriesByView, savedNotificationsLocal,
         ] = await Promise.all([
           prefs.getDeviceId(), prefs.getServerUrl(), prefs.getSession(), prefs.getUsername(),
           prefs.getInterval(), prefs.getCustomWindow(), prefs.getDayWindow(),
           prefs.getSwipeViewSwitch(), prefs.getCalendarView(),
           prefs.getPrayerAppearance(), prefs.getVisibleHours(),
           prefs.getFocusTimer(), prefs.getNotifyCentre(),
+          prefs.getHiddenCategoriesByView(), prefs.getNotificationsLocal(),
         ]);
         if (cancelled) return;
 
@@ -491,6 +518,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         if (savedCalendarView && ['agenda', 'day', 'custom', 'week', 'month', 'year'].includes(savedCalendarView)) {
           setCalendarViewState(savedCalendarView as any);
         }
+        setHiddenCategoriesByViewRaw(savedHiddenCategoriesByView);
+        setNotificationsLocalState(savedNotificationsLocal);
 
         // SETTLE FIRST, before anything is drawn. A session that ran out while
         // the app was closed is completed at the instant it actually ran out,
@@ -563,6 +592,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       // this runs straight after a sync, when `shared` is still a render behind.
       const currentShared = ((readClientStore(current, 'settings') as any)?.[SETTINGS_ENTITY]
         ?? {}) as Partial<SharedSettings>;
+      // Read from the same snapshot for the same reason the rest is.
+      const currentPrayerSettings = coercePrayerSettings((currentShared as any).prayer);
       const told = (currentShared as any).weekStartsOn;
       const currentWeekStart = (typeof told === 'number' && told >= 0 && told <= 6)
         ? (told as 0 | 1 | 2 | 3 | 4 | 5 | 6)
@@ -578,9 +609,27 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         events: events as any,
         tasks: tasks as any,
         categories: (currentShared.categories as any) ?? DEFAULT_CATEGORIES,
-        settings: (currentShared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
+        // THIS PHONE'S rules, which are the shared ones unless sharing is off.
+        settings: resolveNotificationSettings({
+          shared: (currentShared as any).notifications,
+          local: notificationsLocalRef.current,
+          share: (currentShared as any).shareNotificationSettings !== false,
+        }),
         weekStartsOn: currentWeekStart,
-        prayerDone: {},
+        // PRAYERS ARE REMINDERS TOO.
+        //
+        // These three were not passed at all, and the prayer branch of
+        // `computeSchedule` is gated on `prayerMonths` being present. So this
+        // phone drew prayer times with no signal at all and would never once
+        // buzz for one, and prayers were missing from its notification centre
+        // while the PC's showed them -- with the PC asleep, they simply did not
+        // arrive. Everything needed was already synced and already on disk.
+        prayerSettings: currentPrayerSettings,
+        prayerMonths: prayerMonthsFromCache(
+          readClientStore(current, 'prayerTimes') as Record<string, unknown>,
+          currentPrayerSettings,
+        ),
+        prayerDone: readClientStore(current, 'prayerDone') as Record<string, any>,
         from: now,
         to: now + 48 * 60 * 60 * 1000,
       });
@@ -594,7 +643,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       const plan = await syncAlarms(
         desiredAlarms(schedule as any, marks, {
           now,
-          settings: (currentShared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
+          // THIS PHONE'S rules, which are the shared ones unless sharing is off.
+        settings: resolveNotificationSettings({
+          shared: (currentShared as any).notifications,
+          local: notificationsLocalRef.current,
+          share: (currentShared as any).shareNotificationSettings !== false,
+        }),
         }),
         { now, handledKeys: handledKeys(marks, now) },
       );
@@ -734,7 +788,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
         transportRef.current = null;
         setUsername(null);
         setPhase('error');
-        setLastError('Signed out — please sign in again.');
+        setLastError('Signed out. Please sign in again.');
       } else {
         setPhase('offline');
         setLastError(err instanceof Error ? err.message : String(err));
@@ -938,9 +992,22 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
    * rules. How this device draws the planner is its own business and is not in
    * here by construction, so nothing on the desk can reshape the phone.
    */
+  /**
+   * THE STORES WATCH `data.state`, NOT `data`.
+   *
+   * `data` also carries the outbox, the cursor and `lastSyncedAt`, none of
+   * which say anything about what is on screen -- and `lastSyncedAt` moves on
+   * every single cycle, including the four a minute that change nothing. Keying
+   * the memos on the whole object meant each of those rebuilt 209 events, 29
+   * tasks and 438 focus sessions from CRDT metadata, threw away the day cache,
+   * and re-rendered every mounted screen. `state` is the half that decides what
+   * a screen shows, and it keeps its identity when a cycle is a no-op.
+   */
+  const state = data.state;
+
   const shared = useMemo<Partial<SharedSettings>>(
-    () => ((readClientStore(data, 'settings') as any)?.[SETTINGS_ENTITY] ?? {}),
-    [data],
+    () => ((readStore(state, 'settings') as any)?.[SETTINGS_ENTITY] ?? {}),
+    [state],
   );
 
   /**
@@ -960,10 +1027,10 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const told = (shared as any).weekStartsOn;
     if (typeof told === 'number' && told >= 0 && told <= 6) return told as 0 | 1 | 2 | 3 | 4 | 5 | 6;
     return inferWeekStartsOn(
-      readClientStore(data, 'events') as any,
-      readClientStore(data, 'tasks') as any,
+      readStore(state, 'events') as any,
+      readStore(state, 'tasks') as any,
     );
-  }, [shared, data]);
+  }, [shared, state]);
 
   /**
    * The focus history, as a list.
@@ -972,11 +1039,11 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
    * wants a list, and sorting by start makes it the same list the PC shows.
    */
   const focusSessions = useMemo(() => {
-    const byId = readClientStore(data, 'focusSessions') as Record<string, any>;
+    const byId = readStore(state, 'focusSessions') as Record<string, any>;
     return Object.values(byId ?? {})
       .filter(s => s && typeof s === 'object')
       .sort((a, b) => String(a.startedAt ?? '').localeCompare(String(b.startedAt ?? '')));
-  }, [data]);
+  }, [state]);
 
   /**
    * Prayer times for a day, computed from the month cache the PC keeps.
@@ -991,8 +1058,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   );
 
   const prayerMonths = useMemo(
-    () => readClientStore(data, 'prayerTimes') as Record<string, any>,
-    [data],
+    () => readStore(state, 'prayerTimes') as Record<string, any>,
+    [state],
   );
 
   /** What this phone holds, so the prayer screen can say so plainly. */
@@ -1019,8 +1086,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   }, [prayerSettings, prayerMonths, prayerAppearance.language]);
 
   const prayerDone = useMemo(
-    () => readClientStore(data, 'prayerDone') as Record<string, any>,
-    [data],
+    () => readStore(state, 'prayerDone') as Record<string, any>,
+    [state],
   );
 
   const isPrayerDone = useCallback((date: string, key: string): boolean => {
@@ -1333,8 +1400,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
    * proportional to how often the data changes, which is what it should have
    * been proportional to all along.
    */
-  const eventsMap = useMemo(() => readClientStore(data, 'events'), [data]);
-  const tasksMap = useMemo(() => readClientStore(data, 'tasks'), [data]);
+  const eventsMap = useMemo(() => readStore(state, 'events'), [state]);
+  const tasksMap = useMemo(() => readStore(state, 'tasks'), [state]);
 
   const events = useCallback(() => eventsMap, [eventsMap]);
   const tasks = useCallback(() => tasksMap, [tasksMap]);
@@ -1413,12 +1480,25 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(id);
   }, []);
 
+  /**
+   * The reminder rules this PHONE alerts by.
+   *
+   * Shared by default, which is what every account starts with and what the
+   * flag says unless somebody turned it off. When it is off this phone runs its
+   * own copy, and the PC runs its own, and neither follows the other.
+   */
+  const effectiveNotifications = useMemo(() => resolveNotificationSettings({
+    shared: (shared as any).notifications,
+    local: notificationsLocal,
+    share: (shared as any).shareNotificationSettings !== false,
+  }), [shared, notificationsLocal]);
+
   const notifyCentre = useMemo(() => buildCentre({
     schedule: scheduleRef.current as any,
     state: notifyState,
     now: notifyClock,
-    settings: (shared.notifications as any) ?? DEFAULT_NOTIFICATION_SETTINGS,
-  }), [notifyState, notifyClock, shared.notifications, alarmSummary]);
+    settings: effectiveNotifications,
+  }), [notifyState, notifyClock, effectiveNotifications, alarmSummary]);
 
   /**
    * The centre, reachable from a callback without being a dependency of one.
@@ -1431,11 +1511,11 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   notifyCentreRef.current = notifyCentre;
 
   const snoozeOptions = useMemo(() => {
-    const raw = (shared.notifications as any)?.snoozeOptions;
+    const raw = (effectiveNotifications as any)?.snoozeOptions;
     return Array.isArray(raw) && raw.length
       ? raw.filter((n: unknown) => typeof n === 'number' && n > 0)
       : [5, 10, 30, 60];
-  }, [shared.notifications]);
+  }, [effectiveNotifications]);
 
   // ── Actions, all stable ──
   // Written as callbacks rather than inline arrows so that the context value
@@ -1468,10 +1548,22 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       const entry = notifyCentreRef.current.entries.find(e => e.key === key);
       if (!entry || !entry.refId) continue;
       if (entry.kind !== 'task' && entry.kind !== 'event') continue;
-      void toggleDone(entry.kind === 'task' ? 'tasks' : 'events', {
+      // `repeating` COMES FROM THE RECORD, not from the notification.
+      //
+      // This asked `Boolean(entry.occDate)`, and `occDate` is a required field
+      // that every scheduled notification carries -- it is the date the
+      // reminder is FOR. So `repeating` was always true, `toggleDone` took the
+      // repeating branch, and a one-off task got only `completedDates` written
+      // while `isTaskDone` reads its `completed` flag and nothing else. The
+      // reminder vanished and the task stayed open, on the phone and on the PC.
+      // Today.tsx and the server's toast path both get this right by asking the
+      // item; this was the one call site that did not.
+      const store: SyncStore = entry.kind === 'task' ? 'tasks' : 'events';
+      const record = (readClientStore(dataRef.current, store) as any)[entry.refId];
+      void toggleDone(store, {
         masterId: entry.refId,
         date: entry.occDate ?? ymd(new Date()),
-        repeating: Boolean(entry.occDate),
+        repeating: Boolean(record?.recur),
         completed: false,
       });
     }
@@ -1518,6 +1610,45 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     setDayWindowState(current => {
       const next = withDayEnd(current, hour);
       void prefs.setDayWindow(next);
+      return next;
+    });
+  }, []);
+
+  /** Change this phone's rules, into whichever copy is in force. */
+  const patchNotifications = useCallback((next: NotificationSettings) => {
+    if ((shared as any).shareNotificationSettings !== false) {
+      void edit('settings', SETTINGS_ENTITY, { notifications: next });
+      return;
+    }
+    setNotificationsLocalState(next);
+    void prefs.setNotificationsLocal(next);
+  }, [edit, shared]);
+
+  /**
+   * Turn sharing on or off for the whole account.
+   *
+   * The FLAG is shared -- switching it off on this phone has to mean the PC
+   * stops pushing its rules here, and that is only true if the PC hears about
+   * it. Turning it off seeds this phone from what it is already using, so
+   * nothing changes at the moment you flip it.
+   */
+  const setShareNotifications = useCallback((share: boolean) => {
+    if (!share && !notificationsLocal) {
+      const seed = resolveNotificationSettings({
+        shared: (shared as any).notifications,
+        local: undefined,
+        share: true,
+      });
+      setNotificationsLocalState(seed);
+      void prefs.setNotificationsLocal(seed);
+    }
+    void edit('settings', SETTINGS_ENTITY, { shareNotificationSettings: share });
+  }, [edit, notificationsLocal, shared]);
+
+  const setHiddenCategories = useCallback((view: string, hiddenIds: string[]) => {
+    setHiddenCategoriesByViewRaw(prev => {
+      const next = { ...prev, [view]: hiddenIds };
+      void prefs.setHiddenCategoriesByView(next);
       return next;
     });
   }, []);
@@ -1608,6 +1739,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     dayWindow,
     setDayStart,
     setDayEnd,
+    hiddenCategoriesByView,
+    effectiveNotifications,
+    shareNotifications: (shared as any).shareNotificationSettings !== false,
+    setShareNotifications,
+    patchNotifications,
+    setHiddenCategories,
     swipeViewSwitch,
     setSwipeViewSwitch,
     visibleHours,
@@ -1625,10 +1762,11 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     taskLists, focusSessions, focusTimer, runFocusTimer,
     unreadNotifications, snoozeOptions,
     notifyRead, notifyUnread, notifyDismiss, notifySnooze, notifyClear,
-    notifyMarkAllRead, notifyComplete,
-    prayersOn, isPrayerDone, togglePrayer,
+    notifyMarkAllRead, notifyComplete, prayersOn, isPrayerDone, togglePrayer,
     interval, setSnapInterval, calendarView, setCalendarView,
     customWindow, setCustomWindow, dayWindow, setDayStart, setDayEnd,
+    hiddenCategoriesByView, setHiddenCategories,
+    effectiveNotifications, setShareNotifications, patchNotifications,
     swipeViewSwitch, setSwipeViewSwitch, visibleHours, setVisibleHours,
     prayerAppearance, setPrayerAppearance, prayerCacheSummary,
     answerConflict, resetLocal, lastError, peek,

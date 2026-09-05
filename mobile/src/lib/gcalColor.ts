@@ -171,3 +171,80 @@ export function gcalChipColors(
     textMuted: toHex(mix(rgb, WHITE, 0.1)),
   };
 }
+
+/**
+ * Black or white, whichever can actually be read on this fill.
+ *
+ * WHY THIS IS NOT A DETAIL. The ten swatches run from `#eab308` (sand) to
+ * `#6366f1` (lavender), and a fixed white sits at roughly 2:1 on the brightest
+ * four -- below every legibility floor there is. The month view worked this out
+ * for itself and kept the answer local, so the same event was readable in Month
+ * and not in Week, which reads as a rendering fault rather than a choice.
+ *
+ * Rec. 709 luminance, with a threshold at 150/255. Anything that is not a plain
+ * hex falls back to white, because a dark ink on an unknown fill is the worse
+ * of the two guesses: most fills in this app are saturated.
+ */
+/** WCAG's floor for large text, which is what a block title on a fill is. */
+export const MIN_TEXT_CONTRAST = 3;
+
+export const INK_LIGHT = '#FFFFFF';
+export const INK_DARK = '#15151E';
+
+/** WCAG relative luminance, 0 to 1. Not the same curve as a plain 0.2126 R + G
+ *  + B average: the channels are gamma-expanded first, which is what makes it
+ *  agree with what an eye actually reads. */
+function relativeLuminance({ r, g, b }: RGB): number {
+  const chan = (v: number) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b);
+}
+
+/** WCAG contrast ratio between two parsed colours, 1 to 21. */
+function contrastRatio(a: RGB, b: RGB): number {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  const hi = Math.max(la, lb);
+  const lo = Math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+export function inkOn(fill: string | undefined): string {
+  const rgb = parseHex((fill ?? '').trim());
+  if (!rgb) return INK_LIGHT;
+
+  // WHITE UNTIL WHITE IS ILLEGIBLE, then dark. Not "whichever scores higher".
+  //
+  // Two different rules were considered here and the difference matters. Simply
+  // taking the higher contrast ratio flips blue, coral and rose to dark ink as
+  // well -- they measure slightly better that way -- which is a large, uninvited
+  // change to how the whole calendar looks, to fix nothing. The defect was
+  // specifically that four of the ten swatches were BELOW the floor, so the rule
+  // is the floor: keep the app's existing white wherever it still reads, and
+  // switch only where it does not.
+  //
+  // 3:1 is WCAG's minimum for large text, which is what a block title is. When
+  // white fails it, the fill is light by definition, so dark is guaranteed to
+  // pass -- there is no third case to handle.
+  //
+  // The month view's old rule was a plain luminance cut at 150/255, which is an
+  // approximation of this question rather than the question: peach (#f97316)
+  // sits at 137 there, so it was handed white at 2.8:1 when dark gives 6.5:1.
+  return contrastRatio(parseHex(INK_LIGHT)!, rgb) >= MIN_TEXT_CONTRAST
+    ? INK_LIGHT
+    : INK_DARK;
+}
+
+/**
+ * The same decision, softened, for a second line of text on a fill.
+ *
+ * A block draws its title and, when there is room, its time underneath. The
+ * time is meant to be quieter, and the way to do that on a coloured fill is
+ * opacity, not a different colour -- a third hue on a saturated block reads as
+ * a third piece of information.
+ */
+export function inkOpacityOn(fill: string | undefined): number {
+  return inkOn(fill) === INK_LIGHT ? 0.85 : 0.72;
+}

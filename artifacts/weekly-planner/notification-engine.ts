@@ -53,7 +53,7 @@ import {
   type ScheduledNotification,
 } from './src/lib/notifications';
 import { coerceCategories, type EventCategory } from './src/lib/categories';
-import { coercePrayerSettings, type PrayerMonth, type PrayerSettings } from './src/lib/prayerTimes';
+import { coercePrayerSettings, prayerMonthsFromCache, type PrayerMonth, type PrayerSettings } from './src/lib/prayerTimes';
 import {
   loadOrCreateVapid,
   sendPush,
@@ -72,11 +72,40 @@ export interface UserPathsLike {
   pushSubsPath: string;
 }
 
+/**
+ * Whether a Windows toast for this kind may show a Done button.
+ *
+ * NOT the digest. `applyCompletions` handles 'task' and 'event' only, and
+ * deliberately so: one button press ticking off several tasks at once is not
+ * something the user can undo, and the comment above that function says as
+ * much. The button was drawn for digests anyway, so pressing it marked the
+ * reminder read and silently changed no task -- an offer that does nothing,
+ * which is worse than no offer.
+ *
+ * Exported so the button and the handler are the same decision rather than two
+ * lists that agreed once.
+ */
+export function canCompleteFromToast(kind: string): boolean {
+  return kind === 'task' || kind === 'event';
+}
+
 export interface EngineOptions {
   rootDir: string;
   /** Usernames the engine should service, re-read every tick so a new user is picked up. */
   listUsers: () => Promise<string[]>;
   ensureUser: (username: string) => Promise<UserPathsLike>;
+  /**
+   * A store this engine has just written straight to disk.
+   *
+   * `applyCompletions` is the only writer of database.json and tasks.json that
+   * does not go through `/api/events` or the per-user sync queue: it reads both
+   * files, applies the tick, and writes them back whole. The window is
+   * milliseconds and nothing is lost permanently, but a "Done" pressed on a
+   * toast at the same moment the sync service rebuilds a file reverts that
+   * rebuild and generates revert ops for it. Handing the result to the same
+   * choke point every other save uses closes that.
+   */
+  onStoreWritten?: (username: string, store: 'events' | 'tasks', snapshot: Record<string, unknown>) => void;
   /** How often the engine looks at the clock. */
   tickMs?: number;
   log?: (msg: string, ...rest: unknown[]) => void;
@@ -257,18 +286,11 @@ export function createNotificationEngine(opts: EngineOptions) {
    * matching this user's city/method are considered, otherwise a stale entry
    * from a previous city would quietly drive the reminders.
    */
-  function prayerMonthsFor(cache: Record<string, { days?: Record<string, Record<string, string>> }>, p: PrayerSettings) {
-    const prefix = `${p.city}|${p.country}|${p.method}|${p.school === 1 ? 1 : 0}|`;
-    const out: Record<string, PrayerMonth> = {};
-    for (const [key, value] of Object.entries(cache || {})) {
-      if (!key.startsWith(prefix) || !value?.days) continue;
-      for (const [dateStr, times] of Object.entries(value.days)) {
-        const month = dateStr.slice(0, 7);
-        (out[month] ||= {})[dateStr] = times as PrayerMonth[string];
-      }
-    }
-    return out;
-  }
+  // Moved into `src/lib/prayerTimes.ts` as `prayerMonthsFromCache`, because
+  // this being private here is exactly why the phone never armed a single
+  // prayer alarm: it had the same cache and no idea what shape the scheduler
+  // wanted it in.
+  const prayerMonthsFor = prayerMonthsFromCache;
 
   async function loadWorld(username: string): Promise<UserWorld> {
     const paths = await opts.ensureUser(username);
@@ -345,7 +367,7 @@ export function createNotificationEngine(opts: EngineOptions) {
       '-Priority', rec.priority,
     ];
     if (rec.priority === 'critical') args.push('-Critical');
-    if (rec.kind === 'task' || rec.kind === 'task-digest' || rec.kind === 'event') args.push('-CanComplete');
+    if (canCompleteFromToast(rec.kind)) args.push('-CanComplete');
 
     try {
       const child = spawn('powershell.exe', args, { windowsHide: true, stdio: 'ignore', detached: false });
@@ -672,7 +694,7 @@ export function createNotificationEngine(opts: EngineOptions) {
 
     store.updatedAt = now;
     await writeJsonAtomic(world.paths.notificationsPath, pruneStore(store, settings.historyLimit));
-    if (completed.length) await applyCompletions(world, completed);
+    if (completed.length) await applyCompletions(username, world, completed);
 
     for (const key of dismissed) removeWindowsToast(key);
     if (dismissed.length) {
@@ -691,7 +713,7 @@ export function createNotificationEngine(opts: EngineOptions) {
    * ticking all of them off from one button press is not something a person can
    * undo from a toast.
    */
-  async function applyCompletions(world: UserWorld, completed: Array<{ kind: string; refId: string; occDate: string }>) {
+  async function applyCompletions(username: string, world: UserWorld, completed: Array<{ kind: string; refId: string; occDate: string }>) {
     let eventsDirty = false;
     let tasksDirty = false;
 
@@ -721,8 +743,14 @@ export function createNotificationEngine(opts: EngineOptions) {
       }
     }
 
-    if (eventsDirty) await writeJsonAtomic(world.paths.dbPath, world.events);
-    if (tasksDirty) await writeJsonAtomic(world.paths.tasksPath, world.tasks);
+    if (eventsDirty) {
+      await writeJsonAtomic(world.paths.dbPath, world.events);
+      opts.onStoreWritten?.(username, 'events', world.events as Record<string, unknown>);
+    }
+    if (tasksDirty) {
+      await writeJsonAtomic(world.paths.tasksPath, world.tasks);
+      opts.onStoreWritten?.(username, 'tasks', world.tasks as Record<string, unknown>);
+    }
   }
 
   /** What the phone caches so it can still alert with the PC switched off. */

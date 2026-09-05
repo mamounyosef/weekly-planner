@@ -202,6 +202,22 @@ export function verifySessionToken(tokenStr: string, users: AppUser[]): AppUser 
   return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected)) ? found : null;
 }
 
+/**
+ * This machine only. NOT the local network.
+ *
+ * Kept separate from `isLocalAddress` because the two answer different
+ * questions and one of them grants a signed-in identity with no password.
+ */
+export function isLoopbackAddress(raw: string): boolean {
+  const ip = (raw || '').replace(/^::ffff:/, '');
+  // A full match on 127.0.0.0/8, not a `startsWith('127.')` prefix. A socket
+  // address is always numeric so a hostname cannot really arrive here, but this
+  // function decides whether to hand out an account with no password, and that
+  // is not a place to rely on the caller.
+  return ip === '::1' || /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip);
+}
+
+/** Anywhere on the home network, including this machine. */
 export function isLocalAddress(raw: string): boolean {
   const ip = (raw || '').replace(/^::ffff:/, '');
   return (
@@ -240,12 +256,22 @@ export function getAuthUser(req: any, users: AppUser[]): AppUser | null {
     if (u) return u;
   }
 
-  // 4. Local loopback hotkey helper fallback
+  // 4. LOOPBACK hotkey helper fallback -- this machine, and nothing else.
+  //
+  // This used to ask `isLocalAddress`, which answers for the whole private
+  // range: 10.x, 192.168.x and 172.16-31.x as well as 127.0.0.1. So every
+  // phone, laptop and television on the same Wi-Fi was resolved to the first
+  // account without a password, on two routes -- and one of them, /api/settings,
+  // accepts POST, which is a full overwrite of that account's categories,
+  // notification rules and Google sync policy.
+  //
+  // The helpers this exists for (the hotkey script and the toast agent) all run
+  // on this PC, so loopback is the whole of what it ever needed.
   const rawUrl = req.originalUrl || req.url || '';
   const urlPath = rawUrl.split('?')[0].replace(/\/+$/, '') || '/';
   const remote = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
   const proxied = Boolean(req.headers?.['x-forwarded-for']);
-  if (!proxied && isLocalAddress(remote) && (urlPath === '/api/focus-timer/toggle' || urlPath === '/api/settings')) {
+  if (!proxied && isLoopbackAddress(remote) && (urlPath === '/api/focus-timer/toggle' || urlPath === '/api/settings')) {
     if (users.length > 0) return users[0];
   }
 

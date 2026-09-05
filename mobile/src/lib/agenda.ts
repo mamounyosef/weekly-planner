@@ -431,3 +431,148 @@ export function dayLabel(date: string, now: Date): string {
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()];
   return `${weekday} ${d.getDate()} ${month}`;
 }
+
+// ─── What a block on the grid says about its own time ────────────────────────
+//
+// The PC writes the start, the end, how long it runs, and -- while it is
+// actually running -- how much of it is left, on the face of every block. The
+// phone drew a title and, in the one-column views only, "10:00 to 11:00". So
+// the same event answered different questions on the two machines, and the one
+// you look at while the meeting is happening answered the fewest.
+//
+// The wording lives here rather than in the view for the usual reason: it is
+// the part that can be wrong in a way nobody notices, and a grid cannot be
+// asserted about.
+
+/**
+ * Like `formatClock`, without a ":00" that says nothing.
+ *
+ * Only in 12-hour mode. "10am" and "10:30am" read as the same kind of thing,
+ * and on a block a few characters wide the two saved characters are the
+ * difference between the end time fitting and being cut off. In 24-hour mode
+ * the minutes are not optional -- "10" is not a time -- so nothing is dropped.
+ */
+export function formatClockShort(min: number | null, timeFormat: string | undefined): string {
+  if (min === null) return '';
+  if (timeFormat !== '12h') return formatClock(min, timeFormat);
+  return min % 60 === 0
+    ? formatClock(min, timeFormat).replace(':00', '')
+    : formatClock(min, timeFormat);
+}
+
+/**
+ * How many minutes an item runs for.
+ *
+ * An end BEFORE the start is a night: half past eleven to half past midnight is
+ * an hour, not minus twenty-three of them. An end EQUAL to the start is a
+ * moment with no duration -- a deadline at six -- and is zero, not a full day.
+ */
+export function blockDurationMinutes(startMin: number, endMin: number | null): number {
+  if (endMin === null || !Number.isFinite(endMin) || !Number.isFinite(startMin)) return 0;
+  const span = endMin - startMin;
+  return span < 0 ? span + 1440 : span;
+}
+
+/** "45 minutes", "1 hour", "2 hours", "1h 30m". */
+export function durationLabel(minutes: number): string {
+  const m = Math.max(0, Math.round(minutes));
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'}`;
+  if (m % 60 === 0) {
+    const h = m / 60;
+    return `${h} hour${h === 1 ? '' : 's'}`;
+  }
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** "14m left", "1h left", "1h 20m left". Never negative. */
+export function timeLeftLabel(minutes: number): string {
+  const m = Math.round(minutes);
+  if (m <= 0) return '0m left';
+  if (m < 60) return `${m}m left`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest === 0 ? `${h}h left` : `${h}h ${rest}m left`;
+}
+
+/**
+ * Minutes still to run, or null if this is not happening right now.
+ *
+ * EVERY ARGUMENT MUST BE IN THE SAME COORDINATE SPACE, and on the grid that
+ * space is the column's own window rather than the clock: a day that opens at
+ * six draws two in the morning as 26:00, and comparing that against a raw
+ * `nowMin` of 120 would call a block live twelve hours before it starts. The
+ * caller does the shifting, because only the caller knows which window the
+ * block was drawn in.
+ *
+ * Half-open, deliberately: an item is live from its start until its end, and
+ * NOT at the instant it ends, or the eleven o'clock and the noon meeting are
+ * both live at noon.
+ */
+export function minutesLeftAt(
+  startMin: number,
+  endMin: number | null,
+  nowMin: number | null,
+): number | null {
+  if (nowMin === null || endMin === null) return null;
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || !Number.isFinite(nowMin)) return null;
+  if (endMin <= startMin) return null; // a moment with no duration is never "running"
+  if (nowMin < startMin || nowMin >= endMin) return null;
+  return endMin - nowMin;
+}
+
+/** The two pieces of text a block puts on its face. */
+export interface BlockTiming {
+  /** "10am to 11am", or just "10am" for something with no duration. */
+  range: string;
+  /** "(1 hour)" normally, "14m left" while it is running, "" when neither fits. */
+  detail: string;
+  /** Whether `detail` is the countdown, which is drawn in the live colour. */
+  live: boolean;
+}
+
+export function blockTiming(input: {
+  startMin: number;
+  endMin: number | null;
+  timeFormat: string | undefined;
+  /** From `minutesLeftAt`. Null means this block is not running now. */
+  minutesLeft: number | null;
+}): BlockTiming {
+  const { startMin, endMin, timeFormat } = input;
+  const start = formatClockShort(startMin, timeFormat);
+  const duration = blockDurationMinutes(startMin, endMin);
+
+  // No duration: a marker at a time. There is no end to name and no length to
+  // report, so it says the one thing it knows.
+  if (endMin === null || duration === 0) {
+    return { range: start, detail: '', live: false };
+  }
+
+  const range = `${start} to ${formatClockShort(endMin, timeFormat)}`;
+  if (input.minutesLeft !== null) {
+    return { range, detail: timeLeftLabel(input.minutesLeft), live: true };
+  }
+  return { range, detail: `(${durationLabel(duration)})`, live: false };
+}
+
+/**
+ * Where a block of this height can afford to write its times.
+ *
+ * Repeating the line at the top and the bottom is not decoration: a block tall
+ * enough to need it is tall enough that its two edges are far apart, and the
+ * edge you are looking at is whichever one is next to the thing you are
+ * comparing it against. The PC has always done this. It only helps while there
+ * is room for both AND a title between them, which is why it is a height rule
+ * rather than a duration one: an hour is a tall block at a five minute grid
+ * and a short one at an hourly grid, and what matters is the pixels.
+ */
+export type BlockLabelPlacement = 'none' | 'bottom' | 'both';
+
+/** Below this, a block has room for its title and nothing else. */
+export const BLOCK_LABEL_MIN_PX = 30;
+/** At or above this, there is room for a line above the title and below it. */
+export const BLOCK_LABEL_BOTH_PX = 56;
+
+export function blockLabelPlacement(heightPx: number): BlockLabelPlacement {
+  if (!Number.isFinite(heightPx) || heightPx < BLOCK_LABEL_MIN_PX) return 'none';
+  return heightPx >= BLOCK_LABEL_BOTH_PX ? 'both' : 'bottom';
+}

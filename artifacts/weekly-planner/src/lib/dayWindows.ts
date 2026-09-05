@@ -219,6 +219,66 @@ export function seamsIn(ranges: readonly HourRange[]): number[] {
 }
 
 /**
+ * How a span meets the hours the grid actually draws.
+ *
+ * A block is not simply in view or out of it. Hiding hours cuts three different
+ * ways, and each needs saying differently on the face of the block:
+ *
+ *   - nothing of it is drawn, so it belongs in the list under the grid;
+ *   - it starts before the first hour drawn, so what you see begins mid-event;
+ *   - it runs past the last hour drawn, so what you see stops early.
+ *
+ * The last two are the ones that used to lie. A night from half past midnight
+ * to nine, on a grid that stops at two, was drawn as an hour and a half of
+ * sleep with nothing to say the rest existed.
+ *
+ * Only the ENDS are reported. A hidden stretch in the middle is already marked
+ * by the seam drawn across every column, and saying it twice on each block that
+ * happens to span it would be noise.
+ */
+export interface SpanClipping {
+  /** No minute of this span is drawn at all. */
+  hidden: boolean;
+  /** It began before the first minute of it that is drawn. */
+  clippedAbove: boolean;
+  /** It goes on after the last minute of it that is drawn. */
+  clippedBelow: boolean;
+}
+
+/**
+ * `endMin` is exclusive, and must already be in the same frame as `ranges` --
+ * the window's frame on a grid whose day starts at six, where two in the
+ * morning is 26:00. An end at or before the start is treated as a single
+ * minute, so a marker with no duration still reports whether it is drawn.
+ */
+export function clipSpan(
+  startMin: number,
+  endMin: number,
+  ranges: readonly HourRange[],
+): SpanClipping {
+  const start = Number.isFinite(startMin) ? startMin : 0;
+  const end = Number.isFinite(endMin) && endMin > start ? endMin : start + 1;
+
+  let first: number | null = null;
+  let last: number | null = null;
+  for (const r of ranges) {
+    const from = r.from * 60;
+    const to = r.to * 60;
+    const a = Math.max(start, from);
+    const b = Math.min(end, to);
+    if (a < b) {
+      if (first === null) first = a;
+      last = b;
+    }
+  }
+
+  if (first === null || last === null) {
+    return { hidden: true, clippedAbove: false, clippedBelow: false };
+  }
+  return { hidden: false, clippedAbove: first > start, clippedBelow: last < end };
+}
+
+/**
  * How many things fall in hours that are not drawn.
  *
  * The whole safety net. Hiding hours is a display choice, and a display choice

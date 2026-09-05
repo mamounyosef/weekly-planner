@@ -42,6 +42,7 @@ import { Search } from './src/screens/Search';
 import { Notifications } from './src/screens/Notifications';
 import { QuickAdd } from './src/screens/QuickAdd';
 import { Diagnostics } from './src/screens/Diagnostics';
+import { ViewFilter } from './src/screens/ViewFilter';
 import { space } from './src/theme';
 
 export default function App() {
@@ -136,6 +137,7 @@ function Shell() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showViewFilter, setShowViewFilter] = useState(false);
   /** A result tapped in search, handed to the calendar to open. */
   /**
    * Something to show on the calendar: a day, or a day AND the item on it.
@@ -167,11 +169,12 @@ function Shell() {
     reminders: showReminders,
     prayers: showPrayers,
     planner: showPlanner,
+    viewFilter: showViewFilter,
     search: showSearch,
     notifications: showNotifications,
   }), [
     showDiagnostics, showConflicts, showCategories, showTaskSettings,
-    showReminders, showPrayers, showPlanner, showSearch, showNotifications,
+    showReminders, showPrayers, showPlanner, showViewFilter, showSearch, showNotifications,
   ]);
 
   /** How to shut each one, by the same name the order uses. */
@@ -183,6 +186,7 @@ function Shell() {
     reminders: () => setShowReminders(false),
     prayers: () => setShowPrayers(false),
     planner: () => setShowPlanner(false),
+    viewFilter: () => setShowViewFilter(false),
     search: () => setShowSearch(false),
     notifications: () => setShowNotifications(false),
   }), []);
@@ -265,6 +269,7 @@ function Shell() {
                     onOpenSearch={() => setShowSearch(true)}
                     onOpenNotifications={() => setShowNotifications(true)}
                     onOpenQuickAdd={() => setShowQuickAdd(true)}
+                    onOpenFilter={() => setShowViewFilter(true)}
                     goToDate={pendingOpen?.date}
                     goToItem={pendingOpen?.item}
                     onWentToDate={() => setPendingOpen(null)}
@@ -280,7 +285,12 @@ function Shell() {
 
               <KeepAlive visible={tab === 'focus'}>
                 <ErrorBoundary resetKey="focus" where="the focus screen">
-                  <Focus />
+                  {/* `visible` so a running session does not rebuild this whole
+                      screen once a second from behind the calendar. KeepAlive
+                      keeps it mounted, which is the right call and is exactly
+                      why it also has to be told when it is not being looked
+                      at. */}
+                  <Focus visible={tab === 'focus' && overlay === null} />
                 </ErrorBoundary>
               </KeepAlive>
 
@@ -327,6 +337,8 @@ function Shell() {
             <Prayers onClose={() => setShowPrayers(false)} />
           ) : overlay === 'planner' ? (
             <Planner onClose={() => setShowPlanner(false)} />
+          ) : overlay === 'viewFilter' ? (
+            <ViewFilter onClose={() => setShowViewFilter(false)} />
           ) : overlay === 'search' ? (
             <Search
               onClose={() => setShowSearch(false)}

@@ -221,6 +221,21 @@ export interface AppSettings {
   prayer: PrayerSettings;
   // ── Notifications ──────────────────────────────────────────────────────────
   notifications: NotificationSettings;
+  /**
+   * Do this account's devices share one set of reminder rules?
+   *
+   * ON by default, and on is the honest default: for most people "remind me
+   * thirty minutes before" is a fact about the plan, not about which screen
+   * happens to be nearest. But the two machines are genuinely different -- a
+   * Windows toast lands on a desk you are sometimes not sitting at, and a phone
+   * rings in your pocket -- so wanting them to differ is a real preference
+   * rather than a mistake.
+   *
+   * The FLAG ITSELF is shared, because it describes the pair rather than either
+   * one of them: switching it off on the PC has to mean the phone stops
+   * following the PC, and that is only true if the phone hears about it.
+   */
+  shareNotificationSettings: boolean;
   // ── ESP32 desk controller ──────────────────────────────────────────────────
   hardware: HardwareSettings;
   shortcutDefaultsVersion?: number;
@@ -278,6 +293,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gcalMirrorGoogleDeletions: false,
   prayer: DEFAULT_PRAYER_SETTINGS,
   notifications: DEFAULT_NOTIFICATION_SETTINGS,
+  shareNotificationSettings: true,
   hardware: DEFAULT_HARDWARE_SETTINGS,
   categories: DEFAULT_CATEGORIES,
   taskLists: DEFAULT_TASK_LISTS,
@@ -397,6 +413,11 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.gcalMirrorGoogleDeletions === 'boolean') s.gcalMirrorGoogleDeletions = r.gcalMirrorGoogleDeletions;
   if (r.prayer != null) s.prayer = coercePrayerSettings(r.prayer);
   if (r.notifications != null) s.notifications = coerceNotificationSettings(r.notifications);
+  // Anything that is not an explicit `false` means shared, so an older settings
+  // file (which has no such key) keeps behaving exactly as it always did.
+  if (typeof r.shareNotificationSettings === 'boolean') {
+    s.shareNotificationSettings = r.shareNotificationSettings;
+  }
   if (r.hardware != null) s.hardware = coerceHardwareSettings(r.hardware);
   if (r.categories != null) s.categories = coerceCategories(r.categories);
   if (r.taskLists != null) s.taskLists = coerceTaskLists(r.taskLists);

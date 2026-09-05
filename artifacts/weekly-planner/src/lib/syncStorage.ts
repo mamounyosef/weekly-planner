@@ -90,6 +90,21 @@ export function createStorage(sql: SqlRunner) {
     );
   }
 
+  /**
+   * What `saveSynced` last actually committed, by reference.
+   *
+   * Deliberately starts empty, so the FIRST save after launch always writes:
+   * anything loaded from disk went through `sanitizeState` and the outbox
+   * replay on the way in, so it is not necessarily byte-identical to what is
+   * stored, and assuming it was would leave a repaired state unpersisted.
+   */
+  const lastWritten: {
+    state: unknown;
+    outbox: unknown;
+    conflicts: unknown;
+    cursor: number | null;
+  } = { state: null, outbox: null, conflicts: null, cursor: null };
+
   return {
     /** Create tables and run migrations. Safe to call on every launch. */
     async init(): Promise<void> {
@@ -213,31 +228,77 @@ export function createStorage(sql: SqlRunner) {
       });
     },
 
-    /** Persist the result of a sync cycle: state, cursor, outbox and cards. */
+    /**
+     * Persist the result of a sync cycle: state, cursor, outbox and cards.
+     *
+     * WHAT IT SKIPS, AND WHY THAT IS SAFE. This ran unconditionally after every
+     * cycle: a near-megabyte `JSON.stringify` of the whole planner, then a
+     * delete-and-reinsert of every outbox row and every conflict row, inside a
+     * transaction, on the JS thread -- several times a minute on an idle phone,
+     * to store exactly what was already stored. It landed as a hitch while
+     * scrolling.
+     *
+     * The three heavy parts are now written only when their value has actually
+     * changed since the last write, tracked by REFERENCE. Every function that
+     * produces them returns its input unchanged when it changes nothing, which
+     * is the invariant this leans on and which the sync tests pin.
+     *
+     * `cursor` is deliberately NOT skipped independently: it goes into the same
+     * transaction as the state, because a cursor that advances without its
+     * state skips those ops forever.
+     */
     async saveSynced(data: ClientData): Promise<void> {
+      const stateSame = data.state === lastWritten.state;
+      const outboxSame = data.outbox === lastWritten.outbox;
+      const conflictsSame = data.conflicts === lastWritten.conflicts;
+      const cursorSame = data.cursor === lastWritten.cursor;
+
+      if (stateSame && outboxSame && conflictsSame && cursorSame) {
+        // Nothing but the clock moved. That is one small meta row, not a
+        // transaction over the whole planner.
+        if (data.lastSyncedAt !== null) {
+          await setMeta('last_synced_at', String(data.lastSyncedAt));
+        }
+        return;
+      }
+
       await sql.transaction(async () => {
-        await setMeta('state', JSON.stringify(data.state));
-        await setMeta('cursor', String(data.cursor));
+        if (!stateSame || !cursorSame) {
+          await setMeta('state', JSON.stringify(data.state));
+          await setMeta('cursor', String(data.cursor));
+        }
         if (data.lastSyncedAt !== null) {
           await setMeta('last_synced_at', String(data.lastSyncedAt));
         }
 
-        // Replace the outbox with exactly what is still unsent. Deleting only the
-        // confirmed ids would leave anything the cycle added unaccounted for.
-        await sql.run('DELETE FROM outbox');
-        for (const op of data.outbox) {
-          await sql.run(
-            'INSERT OR IGNORE INTO outbox (op_id, seq, json) VALUES (?, ?, ?)',
-            [op.opId, op.lamport, JSON.stringify(op)],
-          );
+        if (!outboxSame) {
+          // Replace the outbox with exactly what is still unsent. Deleting only the
+          // confirmed ids would leave anything the cycle added unaccounted for.
+          await sql.run('DELETE FROM outbox');
+          for (const op of data.outbox) {
+            await sql.run(
+              'INSERT OR IGNORE INTO outbox (op_id, seq, json) VALUES (?, ?, ?)',
+              [op.opId, op.lamport, JSON.stringify(op)],
+            );
+          }
         }
 
-        await sql.run('DELETE FROM conflicts');
-        for (const c of data.conflicts) {
-          await sql.run('INSERT OR IGNORE INTO conflicts (id, json) VALUES (?, ?)',
-            [c.id, JSON.stringify(c)]);
+        if (!conflictsSame) {
+          await sql.run('DELETE FROM conflicts');
+          for (const c of data.conflicts) {
+            await sql.run('INSERT OR IGNORE INTO conflicts (id, json) VALUES (?, ?)',
+              [c.id, JSON.stringify(c)]);
+          }
         }
       });
+
+      // Only after the transaction has committed. Recording it earlier would
+      // mean a failed write was never retried, which is the one way this could
+      // lose data rather than merely repeat work.
+      lastWritten.state = data.state;
+      lastWritten.outbox = data.outbox;
+      lastWritten.conflicts = data.conflicts;
+      lastWritten.cursor = data.cursor;
     },
 
     /** Ops still waiting to be sent, oldest first. */
@@ -253,6 +314,14 @@ export function createStorage(sql: SqlRunner) {
         await sql.run('DELETE FROM conflicts');
         await sql.run("DELETE FROM meta WHERE key IN ('state', 'cursor', 'last_synced_at')");
       });
+      // Forget what was written, or "Reset local data" followed by a sync that
+      // happened to produce the same objects would skip the write and leave
+      // the tables empty. This is the one path that changes the database
+      // without going through `saveSynced`.
+      lastWritten.state = null;
+      lastWritten.outbox = null;
+      lastWritten.conflicts = null;
+      lastWritten.cursor = null;
     },
 
     /** Diagnostics for the settings screen. */

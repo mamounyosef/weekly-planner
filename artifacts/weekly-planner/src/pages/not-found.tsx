@@ -24,7 +24,7 @@ export default function NotFound() {
             <Calendar className="w-7 h-7 text-emerald-400" />
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">404 — Page Not Found</h1>
+            <h1 className="text-xl font-bold tracking-tight text-white">Page not found</h1>
             <p className="text-xs text-zinc-400 mt-1 font-medium">The requested page could not be found.</p>
           </div>
         </div>

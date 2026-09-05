@@ -1,4 +1,4 @@
-import { focusDayKey, isCountable, type FocusSessionRecord } from './focusStats';
+import { focusDayKey, isCountable, type FocusSessionRecord, applyTypedDayTotals, dedupeFocusHistory } from './focusStats';
 
 export interface FocusMonthSummary {
   month: Date;
@@ -82,7 +82,9 @@ export function summariseFocusMonths(
   const byDaySeconds = new Map<string, number>();
   const byDaySessions = new Map<string, number>();
   
-  for (const s of sessions) {
+  // The same two rules the week totals apply. A chart that disagrees with the
+  // number beside it is worse than either being wrong on its own.
+  for (const s of applyTypedDayTotals(dedupeFocusHistory(sessions ?? []), dayStartHour)) {
     if (!isCountable(s)) continue;
     const key = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
     if (!key) continue;

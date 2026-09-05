@@ -8,6 +8,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {
+  canCompleteFromToast,
   createNotificationEngine,
   isDesktopSubscription,
   type UserPathsLike,
@@ -178,6 +179,59 @@ const clearRes = await engine.applyAction('alice', {
 });
 assert.equal(clearRes.store.items[testRec.key], undefined);
 assert.equal(clearRes.store.items[taskNotifKey], undefined);
+
+console.log('--- N. A TOAST NEVER OFFERS A BUTTON THAT DOES NOTHING ---');
+
+// The toast builder passed `-CanComplete` for 'task-digest' alongside 'task'
+// and 'event', so Windows drew a Done button on the evening digest. But
+// `applyCompletions` handles only 'task' and 'event', deliberately: ticking off
+// several tasks from one button press is not undoable, and the comment above it
+// says so. The reasoning was right and the button was drawn anyway, so pressing
+// it marked the reminder read and silently changed no task.
+assert.equal(canCompleteFromToast('task'), true, 'a task can be ticked from a toast');
+assert.equal(canCompleteFromToast('event'), true, 'so can an event');
+assert.equal(canCompleteFromToast('task-digest'), false,
+  'a digest cannot, because nothing would happen if it were pressed');
+assert.equal(canCompleteFromToast('prayer'), false, 'nor a prayer');
+assert.equal(canCompleteFromToast(''), false, 'nor anything unrecognised');
+assert.equal(canCompleteFromToast('TASK'), false, 'and the kinds are exact, not case-folded');
+
+// And the behaviour that predicate is protecting: a `done` on a digest still
+// marks the notification dealt with -- the user did ask for it to go away --
+// but must not silently claim to have completed anything.
+const digestKey = `task-digest:${todayYmd}`;
+const digestStore = await engine.getStore('alice');
+digestStore.items[digestKey] = {
+  key: digestKey,
+  kind: 'task-digest',
+  refId: '',
+  occDate: todayYmd,
+  fireAt: now,
+  anchorAt: now,
+  offsetMin: 0,
+  title: 'Still open today',
+  body: 'Server Maintenance',
+  priority: 'normal',
+  firedAt: now,
+  lastAlertAt: now,
+  alerts: 1,
+} as any;
+await fsp.writeFile(alicePaths.notificationsPath, JSON.stringify(digestStore));
+
+const tasksBefore = await fsp.readFile(alicePaths.tasksPath, 'utf-8');
+const digestDone = await engine.applyAction('alice', { action: 'done', keys: [digestKey] });
+assert.equal(digestDone.store.items[digestKey].completed, true,
+  'the notification itself is marked dealt with');
+// The entry is reported back -- the caller wants to know what was acted on --
+// but its KIND is the digest, and `applyCompletions` writes for 'task' and
+// 'event' only. That is the whole distinction, so it is stated rather than
+// inferred from a count.
+assert.ok(digestDone.completed.every(c => c.kind === 'task-digest'),
+  'the only thing reported is the digest itself, not any task inside it');
+assert.equal(digestDone.completed.filter(c => c.kind === 'task' || c.kind === 'event').length, 0,
+  'and nothing that would actually be written');
+assert.equal(await fsp.readFile(alicePaths.tasksPath, 'utf-8'), tasksBefore,
+  'and the task file is untouched, byte for byte');
 
 console.log('--- 4. RECORD LOCALLY FIRED NOTIFICATIONS ---');
 // Offline phone fired a reminder -> records into store

@@ -26,6 +26,16 @@ import {
   occursOn,
   summariseDay,
   ymd,
+  BLOCK_LABEL_BOTH_PX,
+  BLOCK_LABEL_MIN_PX,
+  blockDurationMinutes,
+  blockLabelPlacement,
+  blockTiming,
+  durationLabel,
+  formatClock,
+  formatClockShort,
+  minutesLeftAt,
+  timeLeftLabel,
   type AgendaItem,
 } from './agenda';
 import type { RecurFields } from './recurrence';
@@ -627,4 +637,210 @@ console.log('--- 18. COLOURS ARE SWATCH NAMES, NOT HEX ---');
     assert.equal(Object.keys(counts).length, 1, 'and nothing else appeared');
   }
 
-console.log('\nALL PASS (agenda: occurrence, ordering, edges)');
+// ─── WHAT A BLOCK SAYS ABOUT ITS OWN TIME ────────────────────────────────────
+//
+// Start, end, how long, and how much is left. Four facts, and the last one is
+// the only thing on the screen that is wrong the moment it stops being redrawn,
+// so it is the one worth pinning hardest.
+console.log('\n--- A BLOCK IS SHORTER IN 12-HOUR MODE, AND EXACT IN 24 ---');
+{
+  // A round hour loses a ":00" that carries no information. Nothing else does.
+  assert.equal(formatClockShort(600, '12h'), '10am');
+  assert.equal(formatClockShort(630, '12h'), '10:30am');
+  assert.equal(formatClockShort(0, '12h'), '12am', 'midnight is twelve, not zero');
+  assert.equal(formatClockShort(720, '12h'), '12pm', 'and so is midday');
+  assert.equal(formatClockShort(1439, '12h'), '11:59pm');
+
+  // 24-hour mode is untouched: "10" is not a time.
+  assert.equal(formatClockShort(600, '24h'), '10:00');
+  assert.equal(formatClockShort(600, undefined), '10:00', 'and an absent setting means 24h');
+  for (const min of [0, 1, 59, 60, 599, 600, 601, 719, 720, 1380, 1439]) {
+    assert.equal(formatClockShort(min, '24h'), formatClock(min, '24h'),
+      `24h is left exactly as it was at ${min}`);
+  }
+  assert.equal(formatClockShort(null, '12h'), '', 'nothing to show for no time');
+
+  // The shortening is a display rule, not a parsing one: it may only ever
+  // remove the minutes of a whole hour, never mangle a time that has some.
+  for (let min = 0; min < 1440; min += 1) {
+    const short = formatClockShort(min, '12h');
+    const full = formatClock(min, '12h');
+    if (min % 60 === 0) assert.equal(short, full.replace(':00', ''), `hour ${min}`);
+    else assert.equal(short, full, `${min} keeps its minutes`);
+    assert.ok(short.length > 0, `${min} always says something`);
+  }
+}
+
+console.log('\n--- HOW LONG IT RUNS, INCLUDING OVER MIDNIGHT ---');
+{
+  assert.equal(blockDurationMinutes(600, 660), 60);
+  assert.equal(blockDurationMinutes(600, 645), 45);
+  // A night. Twenty past eleven to five past midnight is 45 minutes, and the
+  // arithmetic that forgets it is a night gets minus 1395.
+  assert.equal(blockDurationMinutes(1400, 5), 45, 'an end before the start is the next day');
+  assert.equal(blockDurationMinutes(1380, 120), 180, '11pm to 2am is three hours');
+  // Equal is a moment, not twenty-four hours.
+  assert.equal(blockDurationMinutes(600, 600), 0, 'a deadline has no length');
+  assert.equal(blockDurationMinutes(600, null), 0, 'and neither has an item with no end');
+  // Nothing here may return NaN, which would render as the literal word.
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    assert.equal(blockDurationMinutes(600, bad), 0, `end ${bad}`);
+    assert.equal(blockDurationMinutes(bad, 660), 0, `start ${bad}`);
+  }
+
+  assert.equal(durationLabel(1), '1 minute', 'singular');
+  assert.equal(durationLabel(2), '2 minutes');
+  assert.equal(durationLabel(45), '45 minutes');
+  assert.equal(durationLabel(59), '59 minutes');
+  assert.equal(durationLabel(60), '1 hour', 'and singular again at the hour');
+  assert.equal(durationLabel(90), '1h 30m', 'a part hour goes short, or the label runs the block over');
+  assert.equal(durationLabel(120), '2 hours');
+  assert.equal(durationLabel(1439), '23h 59m');
+  assert.equal(durationLabel(1440), '24 hours');
+  assert.equal(durationLabel(0), '0 minutes');
+  assert.equal(durationLabel(-5), '0 minutes', 'never negative');
+  assert.equal(durationLabel(59.6), '1 hour', 'rounded once, not floored twice');
+}
+
+console.log('\n--- WHAT IS LEFT, AND ONLY WHILE IT IS RUNNING ---');
+{
+  // Half open at both ends, which is the whole point: at eleven exactly, the
+  // ten o'clock is over and the eleven has started, and if the rule were
+  // inclusive both would claim to be live.
+  assert.equal(minutesLeftAt(600, 660, 600), 60, 'live from its first minute');
+  assert.equal(minutesLeftAt(600, 660, 646), 14);
+  assert.equal(minutesLeftAt(600, 660, 659), 1, 'and right up to its last');
+  assert.equal(minutesLeftAt(600, 660, 660), null, 'but not at the instant it ends');
+  assert.equal(minutesLeftAt(600, 660, 599), null, 'nor a minute before it starts');
+  assert.equal(minutesLeftAt(600, 660, null), null, 'and not at all on another day');
+
+  // Never live, whatever the clock says.
+  assert.equal(minutesLeftAt(600, 600, 600), null, 'a moment with no duration cannot be running');
+  assert.equal(minutesLeftAt(600, null, 600), null, 'and neither can an item with no end');
+  assert.equal(minutesLeftAt(660, 600, 630), null, 'a backwards span is not live either');
+  for (const bad of [NaN, Infinity]) {
+    assert.equal(minutesLeftAt(bad, 660, 620), null);
+    assert.equal(minutesLeftAt(600, bad, 620), null);
+    assert.equal(minutesLeftAt(600, 660, bad), null);
+  }
+
+  // THE COUNTDOWN ONLY EVER FALLS. Walked minute by minute through a two hour
+  // block, because a countdown that ticks upward anywhere is worse than none.
+  let previous = Infinity;
+  for (let now = 600; now < 720; now += 1) {
+    const left = minutesLeftAt(600, 720, now);
+    assert.ok(left !== null, `still live at ${now}`);
+    assert.ok((left as number) < previous, `and strictly smaller than the minute before at ${now}`);
+    assert.ok((left as number) > 0, 'and never reaches zero while it is still running');
+    previous = left as number;
+  }
+  assert.equal(previous, 1, 'ending on one minute left');
+
+  // Window coordinates. A column that opens at 6am draws 2am as 26:00, and the
+  // caller hands in both sides already shifted. This is the case that decides
+  // whether a night block claims to be live twelve hours early.
+  assert.equal(minutesLeftAt(1560, 1620, 1580), 40, '2am to 3am on a 6am column, live at 2:20am');
+  assert.equal(minutesLeftAt(1560, 1620, 140), null,
+    'the same block against an unshifted clock is simply not live');
+
+  assert.equal(timeLeftLabel(14), '14m left');
+  assert.equal(timeLeftLabel(1), '1m left');
+  assert.equal(timeLeftLabel(59), '59m left');
+  assert.equal(timeLeftLabel(60), '1h left', 'a round hour drops the minutes');
+  assert.equal(timeLeftLabel(80), '1h 20m left');
+  assert.equal(timeLeftLabel(120), '2h left');
+  assert.equal(timeLeftLabel(0), '0m left');
+  assert.equal(timeLeftLabel(-9), '0m left', 'never counts below zero');
+  // Every minute of a full day produces something short and sane.
+  for (let m = 0; m <= 1440; m += 1) {
+    const label = timeLeftLabel(m);
+    assert.ok(label.endsWith(' left'), `${m} reads as a remainder`);
+    assert.ok(label.length <= 13, `${m} stays short enough for a block: ${label}`);
+    assert.ok(!label.includes('NaN') && !label.includes('-'), `${m} is clean`);
+  }
+}
+
+console.log('\n--- THE LINE ON THE FACE OF THE BLOCK ---');
+{
+  const T = (startMin: number, endMin: number | null, minutesLeft: number | null = null) =>
+    blockTiming({ startMin, endMin, timeFormat: '12h', minutesLeft });
+
+  // The ordinary case, and the one in the screenshot.
+  assert.deepEqual(T(600, 660), { range: '10am to 11am', detail: '(1 hour)', live: false });
+  assert.deepEqual(T(600, 645), { range: '10am to 10:45am', detail: '(45 minutes)', live: false });
+
+  // Running. The remainder REPLACES the duration rather than joining it: the
+  // block is already showing when it ends, so "1 hour" beside "14m left" is a
+  // sum the reader is being asked to do for no reason.
+  const live = T(1420, 5, 14);
+  assert.deepEqual(live, { range: '11:40pm to 12:05am', detail: '14m left', live: true });
+  assert.ok(!live.detail.includes('('), 'and it is not dressed as a duration');
+
+  // No duration: one time, and nothing that implies a span.
+  assert.deepEqual(T(1080, null), { range: '6pm', detail: '', live: false });
+  assert.deepEqual(T(1080, 1080), { range: '6pm', detail: '', live: false });
+  assert.equal(T(1080, null, 30).live, false,
+    'a moment cannot be live even if the caller insists');
+
+  // 24-hour mode says the same things in its own notation.
+  assert.deepEqual(
+    blockTiming({ startMin: 600, endMin: 660, timeFormat: '24h', minutesLeft: null }),
+    { range: '10:00 to 11:00', detail: '(1 hour)', live: false });
+
+  // A night, which is where an end "before" a start has to read correctly.
+  assert.deepEqual(T(1380, 120), { range: '11pm to 2am', detail: '(3 hours)', live: false });
+
+  // THE PROJECT'S OWN RULE: ranges are joined with the word, never a dash.
+  for (const [s, e] of [[600, 660], [1380, 120], [0, 1], [1439, 1440]] as const) {
+    const { range } = T(s, e);
+    assert.ok(range.includes(' to '), `${range} joins with the word`);
+    assert.ok(!/[–—]/.test(range), `${range} carries no en or em dash`);
+  }
+  // And nothing anywhere in the output does either.
+  for (let m = 0; m < 1440; m += 7) {
+    for (const left of [null, 0, 1, 45, 200]) {
+      const out = T(m, (m + 90) % 1440, left);
+      const all = `${out.range} ${out.detail}`;
+      assert.ok(!/[–—]/.test(all), `no dash at ${m}/${left}: ${all}`);
+      assert.ok(!all.includes('NaN') && !all.includes('undefined'), `clean at ${m}/${left}`);
+    }
+  }
+}
+
+console.log('\n--- A TALL BLOCK LABELS BOTH ENDS, A SHORT ONE JUST THE FOOT ---');
+{
+  // Nothing at all when there is only room for the title.
+  assert.equal(blockLabelPlacement(0), 'none');
+  assert.equal(blockLabelPlacement(2), 'none', 'a two point sliver says nothing');
+  assert.equal(blockLabelPlacement(BLOCK_LABEL_MIN_PX - 1), 'none');
+
+  // The foot only, through the middle band.
+  assert.equal(blockLabelPlacement(BLOCK_LABEL_MIN_PX), 'bottom', 'the threshold is inclusive');
+  assert.equal(blockLabelPlacement(40), 'bottom');
+  assert.equal(blockLabelPlacement(BLOCK_LABEL_BOTH_PX - 1), 'bottom');
+
+  // Both ends once there is room for two lines and a title between them.
+  assert.equal(blockLabelPlacement(BLOCK_LABEL_BOTH_PX), 'both');
+  assert.equal(blockLabelPlacement(58), 'both', 'an hour on the default 30 minute grid');
+  assert.equal(blockLabelPlacement(600), 'both');
+
+  assert.ok(BLOCK_LABEL_MIN_PX < BLOCK_LABEL_BOTH_PX, 'the bands are in order');
+
+  // MONOTONIC. A block that grows may gain a label and must never lose one,
+  // or resizing something makes text flicker in and out at no fixed point.
+  const rank = { none: 0, bottom: 1, both: 2 } as const;
+  let seen = -1;
+  for (let h = 0; h <= 400; h += 1) {
+    const r = rank[blockLabelPlacement(h)];
+    assert.ok(r >= seen, `height ${h} never drops a label a shorter block had`);
+    seen = r;
+  }
+
+  // Rubbish is silence rather than a crash: a block whose height has not been
+  // measured yet passes through here on the first frame.
+  for (const bad of [NaN, -1, -Infinity, Infinity]) {
+    assert.equal(blockLabelPlacement(bad), 'none', `${bad}`);
+  }
+}
+
+console.log('\nALL PASS (agenda: occurrence, ordering, edges, block timing)');

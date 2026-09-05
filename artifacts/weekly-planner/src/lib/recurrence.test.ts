@@ -440,6 +440,168 @@ function testBuildGoogleRecurrenceAndLabels() {
   console.log('✓ buildGoogleRecurrence and formatRecurrenceLabel tests passed');
 }
 
+
+// ─── WKST, and the week phase a scoped delete is decided on ─────────────────
+//
+// Weekly expansion buckets occurrences by the start of THEIR WEEK, so once the
+// interval is two or more the dates depend on which day a week begins. Two
+// separate places got that wrong in the same way, and both were silent.
+function testWeekPhaseIsCarriedEverywhere() {
+  console.log('\n--- WEEK PHASE: WKST AND SCOPED DELETE ---');
+
+  // A fortnightly "Sunday and Wednesday" anchored on a Sunday. The two week
+  // starts genuinely disagree; that is the premise everything below rests on.
+  const master: RecurFields = {
+    weekKey: '2026-01-04',
+    dayIndex: 0,
+    startTime: '09:00',
+    recur: { freq: 'weekly', interval: 2, byWeekday: [0, 3] as Weekday[] },
+  };
+  const from = parseDate('2026-01-01');
+  const to = parseDate('2026-03-01');
+  assert.notDeepEqual(
+    occurrenceStarts(master, from, to, 0).map(d => d.toDateString()),
+    occurrenceStarts(master, from, to, 1).map(d => d.toDateString()),
+    'the premise: a fortnightly rule really does land differently on each week start',
+  );
+
+  // ── 1. The rule sent to Google now says which day weeks start on ──────────
+  const monRule = buildGoogleRecurrence(master, 'UTC', 1)![0];
+  const sunRule = buildGoogleRecurrence(master, 'UTC', 0)![0];
+  assert.ok(monRule.includes(';WKST=MO'), 'a fortnightly rule states WKST');
+  assert.ok(sunRule.includes(';WKST=SU'), 'and states the real setting, not a default');
+  assert.notEqual(monRule, sunRule, 'the two settings produce different rules');
+
+  // Every weekday code is reachable, so no setting silently emits the wrong one.
+  const CODES = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+  for (let w = 0; w < 7; w += 1) {
+    const rule = buildGoogleRecurrence(master, 'UTC', w as WeekStartsOn)![0];
+    assert.ok(rule.includes(';WKST=' + CODES[w]), 'week start ' + w + ' emits ' + CODES[w]);
+  }
+
+  // ── 2. WKST is emitted ONLY where it can change the answer ────────────────
+  // Rewriting every existing rule in Google for no behavioural reason is its own
+  // kind of damage, so a rule whose dates cannot depend on the week start does
+  // not carry it.
+  const everyWeek: RecurFields = {
+    ...master, recur: { freq: 'weekly', interval: 1, byWeekday: [0, 3] as Weekday[] },
+  };
+  assert.ok(!buildGoogleRecurrence(everyWeek, 'UTC', 1)![0].includes('WKST'),
+    'INTERVAL=1 gives the same dates on every week start, so it says nothing');
+  const daily: RecurFields = { ...master, recur: { freq: 'daily', interval: 3 } };
+  assert.ok(!buildGoogleRecurrence(daily, 'UTC', 1)![0].includes('WKST'),
+    'a daily rule is not bucketed by week');
+  const monthly: RecurFields = { ...master, recur: { freq: 'monthly', interval: 2 } };
+  assert.ok(!buildGoogleRecurrence(monthly, 'UTC', 1)![0].includes('WKST'), 'nor is a monthly one');
+  const yearly: RecurFields = { ...master, recur: { freq: 'yearly', interval: 2 } };
+  assert.ok(!buildGoogleRecurrence(yearly, 'UTC', 1)![0].includes('WKST'), 'nor a yearly one');
+
+  // The default is Monday, which is what RFC 5545 assumes when a rule is silent,
+  // so an omitted argument cannot change the meaning of an existing rule.
+  assert.equal(buildGoogleRecurrence(master, 'UTC')![0], monRule,
+    'the default matches the RFC default, so nothing shifts when it is not passed');
+
+  // Everything else about the rule survives.
+  const withUntil: RecurFields = {
+    ...master,
+    recur: {
+      freq: 'weekly', interval: 2, byWeekday: [0, 3] as Weekday[], end: { until: '2026-06-01' },
+    },
+  };
+  const untilRule = buildGoogleRecurrence(withUntil, 'UTC', 1)![0];
+  assert.ok(untilRule.includes('UNTIL='), 'UNTIL is still there');
+  assert.ok(untilRule.includes('BYDAY=SU,WE'), 'and BYDAY');
+  assert.ok(untilRule.includes('WKST=MO'), 'alongside WKST');
+
+  // ── 3. `deleteScoped` decides on the phase the GRID drew ──────────────────
+  //
+  // "Delete this and following" first asks "is this the FIRST occurrence, in
+  // which case there is nothing before it and this is really delete-all?". It
+  // expanded the series against Sunday while the grid the user clicked in used
+  // their real setting, so on a fortnightly rule the question was answered
+  // about a series nobody could see.
+  //
+  // The case below is not a near miss. A fortnightly Sunday anchored on
+  // Thursday 1 January: on Monday-weeks the anchor sits in the week of 29 Dec,
+  // so the first occurrence is 4 January and 11 January is a later one; on
+  // Sunday-weeks the first occurrence is 11 January itself. Ask to remove "this
+  // and the rest" from 11 January and the two answers are TRIM THE SERIES and
+  // DELETE THE WHOLE THING. That is the difference between losing one tail and
+  // losing a repeat the user has kept for years.
+  const ymdOf = (d: Date) => (
+    d.getFullYear()
+    + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    + '-' + String(d.getDate()).padStart(2, '0')
+  );
+
+  const fortnightlySunday: RecurFields = {
+    weekKey: '2026-01-01',
+    dayIndex: 0,
+    startTime: '09:00',
+    recur: { freq: 'weekly', interval: 2, byWeekday: [0] as Weekday[] },
+  };
+  const raw: Record<string, RecurFields> = { m: fortnightlySunday };
+
+  const firstOnMonday = occurrenceStarts(
+    fortnightlySunday, parseDate('2026-01-01'), parseDate('2026-04-01'), 1,
+  )[0];
+  const firstOnSunday = occurrenceStarts(
+    fortnightlySunday, parseDate('2026-01-01'), parseDate('2026-04-01'), 0,
+  )[0];
+  assert.notEqual(ymdOf(firstOnMonday), ymdOf(firstOnSunday),
+    'the premise: the two phases disagree about which occurrence is the first');
+  assert.equal(ymdOf(firstOnMonday), '2026-01-04', 'Monday weeks start the series on the 4th');
+  assert.equal(ymdOf(firstOnSunday), '2026-01-11', 'Sunday weeks start it on the 11th');
+
+  const target = makeOccId('m', '2026-01-11');
+  const trimmed = deleteScoped(raw, target, 'following', 1);
+  assert.ok(trimmed.m, 'told the real week start, the series survives');
+  assert.ok(trimmed.m.recur?.end && 'until' in trimmed.m.recur.end,
+    'and is trimmed with an UNTIL, which is what "and following" means');
+  assert.equal((trimmed.m.recur!.end as { until: string }).until, '2026-01-10',
+    'ending the day before the occurrence that was removed');
+
+  // The old behaviour, said out loud, so the cost of getting this wrong is on
+  // the record: the same request, expanded on the wrong phase, removes the lot.
+  const wiped = deleteScoped(raw, target, 'following', 0);
+  assert.equal(wiped.m, undefined,
+    'on the wrong phase the same request deletes the entire series instead');
+
+  // Deleting from the genuine first occurrence still collapses to delete-all,
+  // which is the behaviour the phase argument must not break.
+  const firstGone = deleteScoped(raw, makeOccId('m', '2026-01-04'), 'following', 1);
+  assert.equal(firstGone.m, undefined, 'removing from the first occurrence removes the series');
+
+  // 'one' and 'all' do not consult the phase at all, and must keep working.
+  const oneGone = deleteScoped(raw, target, 'one', 1);
+  assert.deepEqual(oneGone.m.exdates, ['2026-01-11'], 'one occurrence becomes an EXDATE');
+  assert.equal(deleteScoped(raw, target, 'all', 1).m, undefined, 'all removes the master');
+
+  // Every week start is accepted and none of them throws.
+  for (const w of [0, 1, 2, 3, 4, 5, 6] as WeekStartsOn[]) {
+    const out = deleteScoped(raw, target, 'following', w);
+    assert.ok(out.m === undefined || out.m.recur, `week start ${w} gives a coherent answer`);
+  }
+
+  // A non-repeating item ignores the phase entirely.
+  const plain: Record<string, RecurFields> = {
+    p: { weekKey: '2026-01-04', dayIndex: 0, startTime: '09:00' },
+  };
+  for (const w of [0, 1, 2, 3, 4, 5, 6] as WeekStartsOn[]) {
+    assert.equal(deleteScoped(plain, makeOccId('p', '2026-01-04'), 'following', w).p, undefined,
+      'a one-off is removed whatever the week start (' + w + ')');
+  }
+
+  // The default stays 0, so nothing that does not pass it changes behaviour.
+  assert.deepEqual(
+    deleteScoped(raw, target, 'following'),
+    deleteScoped(raw, target, 'following', 0),
+    'the omitted argument is the old default',
+  );
+
+  console.log('  Week phase reaches Google and the delete scope');
+}
+
 function runAllTests() {
   console.log('--- RUNNING COMPLETE RECURRENCE ENGINE TEST SUITE ---');
   testRfc5545TimezoneParsing();
@@ -453,6 +615,7 @@ function runAllTests() {
   testNormalizeAnchorAndStamping();
   testResolveWeekSpillInAndDeduping();
   testBuildGoogleRecurrenceAndLabels();
+  testWeekPhaseIsCarriedEverywhere();
   console.log('====================================================');
   console.log('ALL RECURRENCE TESTS PASSED SUCCESSFULLY!');
 }

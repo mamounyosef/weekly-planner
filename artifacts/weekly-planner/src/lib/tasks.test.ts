@@ -177,11 +177,30 @@ assert.equal(plainNotes.startTime, null);
 assert.equal(plainNotes.endTime, null);
 assert.equal(plainNotes.body, 'Just normal notes');
 
-// Composing notes
+// Composing notes. The range is joined with the word rather than a dash, which
+// is the project's rule for every range it shows anyone, and this string is
+// shown to people: it travels to Google Tasks and is read on whatever device
+// opens it there.
 assert.equal(
   composeTaskNotes({ startTime: '14:30', endTime: '15:30', notes: 'Agenda' }),
-  '⏰ 14:30–15:30\n\nAgenda',
+  '⏰ 14:30 to 15:30\n\nAgenda',
 );
+// BUT THE READER STILL TAKES EVERY OLD FORM. Notes written by earlier builds
+// are sitting in Google right now, and reading one back must not lose the end
+// time and silently turn a meeting into a moment.
+for (const sep of ['–', '—', '-', 'to', ' to ']) {
+  const parsed = parseTaskNotes(`⏰ 14:30${sep}15:30\n\nAgenda`);
+  assert.equal(parsed.startTime, '14:30', `start survives "${sep}"`);
+  assert.equal(parsed.endTime, '15:30', `and so does the end with "${sep}"`);
+  assert.equal(parsed.body, 'Agenda', `and the body is untouched by "${sep}"`);
+}
+// And what it writes, it reads back.
+const roundTripped = parseTaskNotes(
+  composeTaskNotes({ startTime: '14:30', endTime: '15:30', notes: 'Agenda' }),
+);
+assert.equal(roundTripped.startTime, '14:30');
+assert.equal(roundTripped.endTime, '15:30');
+assert.equal(roundTripped.body, 'Agenda');
 assert.equal(
   composeTaskNotes({ startTime: '09:00', endTime: undefined, notes: '' }),
   '⏰ 09:00',

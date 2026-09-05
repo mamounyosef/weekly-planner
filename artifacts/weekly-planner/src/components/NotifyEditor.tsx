@@ -161,7 +161,7 @@ export function NotifyEditor({
                   key={rule.id}
                   className="group inline-flex items-center gap-1 rounded-full pl-2.5 pr-1 py-[3px] text-[12px]"
                   style={chipStyle(true)}
-                  title={preview ? `${offsetLabel(rule.offsetMin)} — notifies at ${preview}` : offsetLabel(rule.offsetMin)}
+                  title={preview ? `${offsetLabel(rule.offsetMin)}, notifies at ${preview}` : offsetLabel(rule.offsetMin)}
                 >
                   {compact ? offsetChip(rule.offsetMin) : offsetLabel(rule.offsetMin)}
                   {preview && !compact && (

@@ -5,6 +5,7 @@
 //
 // Run with:  npx tsx src/lib/notifications.test.ts
 
+import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { createRequire } from 'module';
 import {
@@ -1010,6 +1011,116 @@ console.log(`all-day anchor ${DEFAULT_NOTIFICATION_SETTINGS.allDayHour}:00, task
 // ═══════════════════════════════════════════════════════════════════════════
 // Summary
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ─── A task with reminders switched off is off everywhere ───────────────────
+//
+// Timed tasks go through `resolveSpec` and are skipped when the resolved spec
+// is disabled. The dated-WITHOUT-a-time branch never called it: it dropped
+// straight into the evening digest, which was gated only on the global default.
+// So setting one task to "no reminders" removed it from nothing. It still
+// appeared by name in the 21:00 "still open today" notification, which
+// contradicts the inheritance model the whole file is built on.
+{
+  console.log('\n--- A TASK SWITCHED OFF STAYS OUT OF THE DIGEST ---');
+
+  const DAY = '2026-03-04';
+  const settings = coerceNotificationSettings({
+    defaultTask: { enabled: true, rules: [{ offsetMin: 0 }] },
+    taskCutoffHour: 21,
+  });
+
+  // The whole of that day, so the 21:00 cutoff is inside the window whichever
+  // way the machine is set up.
+  const from = new Date(`${DAY}T00:00:00`).getTime();
+  const to = new Date(`${DAY}T23:59:59`).getTime();
+
+  const dated = (id: string, title: string, notify?: unknown) => ({
+    [id]: { id, title, weekKey: DAY, dayIndex: 0, ...(notify === undefined ? {} : { notify }) },
+  });
+
+  const digestOf = (tasks: Record<string, unknown>) => {
+    const out = computeSchedule({
+      events: {}, tasks: tasks as any, categories: [], settings,
+      weekStartsOn: 1, from, to,
+    });
+    return out.filter(n => n.kind === 'task-digest');
+  };
+
+  // The premise: a dated task with no time DOES normally reach the digest.
+  const on = digestOf(dated('t1', 'Return the book'));
+  assert.equal(on.length, 1, 'a dated task with no time raises one digest');
+  assert.ok(on[0].body.includes('Return the book'), 'and is named in it');
+
+  // Switched off on the item itself. An explicit `{ enabled: false }` is the
+  // only thing that means "off"; an ABSENT spec means "inherit", which is why
+  // the two cannot be collapsed.
+  const off = digestOf(dated('t1', 'Return the book', { enabled: false }));
+  assert.equal(off.length, 0, 'a task with reminders off raises no digest at all');
+
+  // Off for one, on for another: the digest must lose one name and keep the
+  // other, not disappear or list both.
+  const mixed = digestOf({
+    ...dated('t1', 'Return the book', { enabled: false }),
+    ...dated('t2', 'Buy milk'),
+  });
+  assert.equal(mixed.length, 1, 'the digest still happens for the task that wants it');
+  assert.ok(mixed[0].body.includes('Buy milk'), 'and names it');
+  assert.ok(!mixed[0].body.includes('Return the book'),
+    'and does not name the one that was switched off');
+
+  // A TASK DOES NOT INHERIT FROM ITS CATEGORY, and that is deliberate:
+  // `resolveSpec` skips the category lookup entirely for `kind === 'task'`
+  // (`if (kind !== 'task' && item?.categoryId)`), so a task goes item -> global
+  // default with nothing in between. Pinned here because the new gate calls
+  // `resolveSpec` on a path that never called it, and the easy mistake would
+  // have been to quietly give tasks a category step they never had.
+  const cats = [{
+    id: 'c1', name: 'Errands', color: '#22c55e',
+    notifyTimed: { enabled: false }, notifyAllDay: { enabled: false },
+  }];
+  const viaCategory = computeSchedule({
+    events: {},
+    tasks: { t1: { id: 't1', title: 'Return the book', weekKey: DAY, dayIndex: 0, categoryId: 'c1' } } as any,
+    categories: cats as any, settings, weekStartsOn: 1, from, to,
+  }).filter(n => n.kind === 'task-digest');
+  assert.equal(viaCategory.length, 1,
+    'a category with reminders off does NOT silence a task, because a task never asks its category');
+  assert.equal(
+    resolveSpec({ categoryId: 'c1' }, 'task', cats as any, settings),
+    settings.defaultTask,
+    'and the spec it resolves to is the global default, said directly');
+
+  // An item that says OFF still wins over that global default, which is the
+  // direction the new gate actually depends on.
+  const itemOff = computeSchedule({
+    events: {},
+    tasks: {
+      t1: {
+        id: 't1', title: 'Return the book', weekKey: DAY, dayIndex: 0, categoryId: 'c1',
+        notify: { enabled: false },
+      },
+    } as any,
+    categories: cats as any, settings, weekStartsOn: 1, from, to,
+  }).filter(n => n.kind === 'task-digest');
+  assert.equal(itemOff.length, 0, 'an item that says off beats the global default that says on');
+
+  // The global switch still wins over everything, as it always did.
+  const globallyOff = computeSchedule({
+    events: {}, tasks: dated('t1', 'Return the book') as any, categories: [],
+    settings: coerceNotificationSettings({ defaultTask: { enabled: false }, taskCutoffHour: 21 }),
+    weekStartsOn: 1, from, to,
+  }).filter(n => n.kind === 'task-digest');
+  assert.equal(globallyOff.length, 0, 'the global default off still silences everything');
+
+  // A task that is already DONE was never in the digest and still is not, so
+  // the new gate has not changed which of the two rules fires first.
+  const done = digestOf({
+    t1: { id: 't1', title: 'Return the book', weekKey: DAY, dayIndex: 0, completed: true },
+  });
+  assert.equal(done.length, 0, 'a completed task is still left out');
+
+  console.log('  Off on the item means off in the digest');
+}
 
 console.log(`\nTotal checks: ${passed + failures} | Passed: ${passed} | Failures: ${failures}`);
 console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);

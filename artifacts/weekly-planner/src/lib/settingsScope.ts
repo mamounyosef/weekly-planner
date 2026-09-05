@@ -35,6 +35,9 @@ export const SHARED_SETTING_KEYS = [
   'taskLists',
   'prayer',
   'notifications',
+  // The POLICY is shared even when the rules it governs are not: switching
+  // sharing off has to reach the other device, or it only half happens.
+  'shareNotificationSettings',
   'taskColor',
   'taskCheckboxShape',
   'taskFilters',
