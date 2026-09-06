@@ -8826,26 +8826,51 @@ export default function DailyPlanner() {
                         }
                       }
                     }
-                    const colEvents = renderItems;
+                    const visibleGridEvents: typeof renderItems = [];
+                    const visibleGridTasks: any[] = [];
+                    const topOutsideItems: any[] = [];
+                    const bottomOutsideItems: any[] = [];
 
-                  // Timed tasks share this column's sub-column layout with events, so
-                  // a task overlapping a meeting sits beside it instead of on top.
-                  // `layoutParallel` is structurally typed, so they can just join the
-                  // same input list.
-                  const colTimedTasks = (showTaskBand ? timedTasksByCol.get(colIdx) : undefined) ?? [];
-                  const timedTaskItems = colTimedTasks.map(t => {
-                    const s = normalizeMin(timeToMin(t.startTime!), dayStartH);
-                    let e = normalizeMin(timeToMin(t.endTime || t.startTime!), dayStartH);
-                    if (e <= s) e = s + (t.endTime ? 30 : 10);
-                    return { task: t, key: `task:${t.id}`, startMin: s, endMin: e };
-                  });
+                    renderItems.forEach(item => {
+                      if (colIdx === 0 && item.startMin < dayStartMin) return;
+                      if (item.endMin <= dayStartMin) {
+                        topOutsideItems.push({ ...item, isTask: false });
+                      } else if (item.startMin >= dayEndMin) {
+                        bottomOutsideItems.push({ ...item, isTask: false });
+                      } else {
+                        visibleGridEvents.push(item);
+                      }
+                    });
 
-                  // Compute parallel layout for this column, excluding placeholders to prevent shrinking
-                  const layoutInput = colEvents
-                    .filter(item => !(item.ev as any).isPlaceholder)
-                    .map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }))
-                    .concat(timedTaskItems.map(t => ({ id: t.key, startMin: t.startMin, endMin: t.endMin })));
-                  const layout = layoutParallel(layoutInput);
+                    const colTimedTasks = (showTaskBand ? timedTasksByCol.get(colIdx) : undefined) ?? [];
+                    const timedTaskItems = colTimedTasks.map(t => {
+                      const s = normalizeMin(timeToMin(t.startTime!), dayStartH);
+                      let e = normalizeMin(timeToMin(t.endTime || t.startTime!), dayStartH);
+                      if (e <= s) e = s + (t.endTime ? 30 : 10);
+                      return { task: t, key: `task:${t.id}`, startMin: s, endMin: e };
+                    });
+
+                    timedTaskItems.forEach(item => {
+                      if (colIdx === 0 && item.startMin < dayStartMin) return;
+                      if (item.endMin <= dayStartMin) {
+                        topOutsideItems.push({ ...item, isTask: true });
+                      } else if (item.startMin >= dayEndMin) {
+                        bottomOutsideItems.push({ ...item, isTask: true });
+                      } else {
+                        visibleGridTasks.push(item);
+                      }
+                    });
+
+                    topOutsideItems.sort((a, b) => a.startMin - b.startMin);
+                    bottomOutsideItems.sort((a, b) => a.startMin - b.startMin);
+
+                    const colEvents = visibleGridEvents;
+
+                    const layoutInput = visibleGridEvents
+                      .filter(item => !(item.ev as any).isPlaceholder)
+                      .map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }))
+                      .concat(visibleGridTasks.map(t => ({ id: t.key, startMin: t.startMin, endMin: t.endMin })));
+                    const layout = layoutParallel(layoutInput);
 
                   return (
                     <div key={colIdx} data-col-index={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0 relative"
@@ -9171,6 +9196,46 @@ export default function DailyPlanner() {
                           duration of a drag/resize, because containment creates a
                           stacking context and the drag time tooltip is allowed to
                           spill over the neighbouring column. */}
+                      {/* Top outside-hours band */}
+                      {topOutsideItems.length > 0 && (
+                        <div className="flex-shrink-0 border-b border-border/50 bg-background/30 flex flex-col items-stretch px-1 py-1 gap-[2px]">
+                          {topOutsideItems.map(item => {
+                            const isTask = item.isTask;
+                            if (isTask) {
+                              const t = item.task;
+                              const occ = t.occDate ?? null;
+                              const done = isTaskDone(t, occ);
+                              const c = taskChipColors(t.color || undefined);
+                              return (
+                                <button key={item.key} data-task="1" onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}>
+                                  <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
+                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            } else {
+                              const ev = item.ev;
+                              const c = chipColors(ev);
+                              const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
+                              const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                              const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+                              return (
+                                <button key={item.key} data-event="1" onPointerDown={(e) => { e.stopPropagation(); handleEventMouseDown(e as unknown as React.MouseEvent, ev); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: isCompleted ? 0.5 : 1 }}>
+                                  
+                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}>{ev.content || 'Untitled'}</span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            }
+                          })}
+                          <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
+                            <div className="w-[3px] h-[3px] rounded-full bg-border" />
+                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
+                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
+                          </div>
+                        </div>
+                      )}
+
                       <div
                         className="relative"
                         style={{
@@ -9837,7 +9902,7 @@ export default function DailyPlanner() {
                             top when they overlap, and marked `data-task` (never
                             `data-event`) so the drag/resize/marquee machinery, which
                             is all PlannerData-typed, leaves them alone. */}
-                        {timedTaskItems.map(({ task: t, key, startMin, endMin }) => {
+                        {visibleGridTasks.map(({ task: t, key, startMin, endMin }) => {
                           const occ = t.occDate ?? null;
                           const done = isTaskDone(t, occ);
                           const c = taskChipColors(t.color || undefined);
@@ -9907,6 +9972,44 @@ export default function DailyPlanner() {
                           );
                         })}
                       </div>
+                      {/* Bottom outside-hours band */}
+                      {bottomOutsideItems.length > 0 && (
+                        <div className="flex-shrink-0 border-t border-border/50 bg-background/30 flex flex-col items-stretch px-1 py-1 gap-[2px] relative z-20">
+                          <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
+                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
+                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
+                            <div className="w-[3px] h-[3px] rounded-full bg-border" />
+                          </div>
+                          {bottomOutsideItems.map(item => {
+                            const isTask = item.isTask;
+                            if (isTask) {
+                              const t = item.task;
+                              const occ = t.occDate ?? null;
+                              const done = isTaskDone(t, occ);
+                              const c = taskChipColors(t.color || undefined);
+                              return (
+                                <button key={item.key} data-task="1" onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}>
+                                  <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
+                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            } else {
+                              const ev = item.ev;
+                              const c = chipColors(ev);
+                              const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
+                              const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                              const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+                              return (
+                                <button key={item.key} data-event="1" onPointerDown={(e) => { e.stopPropagation(); handleEventMouseDown(e as unknown as React.MouseEvent, ev); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: isCompleted ? 0.5 : 1 }}>
+                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}>{ev.content || 'Untitled'}</span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            }
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -14870,3 +14973,5 @@ function PrayerNextBadge({ minutes, color }: { minutes: number; color: string })
     </span>
   );
 }
+
+
