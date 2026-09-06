@@ -8843,11 +8843,24 @@ export default function DailyPlanner() {
                     });
 
                     const colTimedTasks = (showTaskBand ? timedTasksByCol.get(colIdx) : undefined) ?? [];
-                    const timedTaskItems = colTimedTasks.map(t => {
-                      const s = normalizeMin(timeToMin(t.startTime!), dayStartH);
-                      let e = normalizeMin(timeToMin(t.endTime || t.startTime!), dayStartH);
-                      if (e <= s) e = s + (t.endTime ? 30 : 10);
-                      return { task: t, key: `task:${t.id}`, startMin: s, endMin: e };
+                    const timedTaskItems: any[] = [];
+                    const allColTimedTasks = (showTaskBand ? [
+                      ...(timedTasksByCol.get(colIdx) || []),
+                      ...(timedTasksByCol.get(colIdx + 1) || [])
+                    ] : []);
+                    allColTimedTasks.forEach(t => {
+                      const rawS = timeToMin(t.startTime!);
+                      let rawE = timeToMin(t.endTime || t.startTime!);
+                      if (rawE <= rawS) rawE = rawS + (t.endTime ? 30 : 10);
+                      const tDayIndex = t.dayIndex ?? 0;
+                      
+                      if (tDayIndex === colIdx) {
+                        timedTaskItems.push({ task: t, key: `task:${t.id}`, startMin: rawS, endMin: rawE });
+                      }
+                      
+                      if (tDayIndex - 1 === colIdx && rawS < dayStartMin) {
+                        timedTaskItems.push({ task: t, key: `task:${t.id}__prev`, startMin: rawS + 1440, endMin: rawE + 1440 });
+                      }
                     });
 
                     timedTaskItems.forEach(item => {
@@ -9262,7 +9275,7 @@ export default function DailyPlanner() {
                       <div
                         className="relative"
                         style={{
-                          height: totalH,
+                          height: totalH, overflow: 'hidden',
                           contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style',
                           cursor: isDraggingAnything ? 'grabbing' : 'crosshair',
                           ...columnGridBackground,
@@ -15011,6 +15024,9 @@ function PrayerNextBadge({ minutes, color }: { minutes: number; color: string })
     </span>
   );
 }
+
+
+
 
 
 
