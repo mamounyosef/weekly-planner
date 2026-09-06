@@ -215,6 +215,72 @@ export function focusSessionTruth(
   };
 }
 
+/** What an auto-completing session should actually be written down as. */
+export interface FocusCompletion {
+  /** Seconds to log. The planned length only when it really ran that long. */
+  durationSeconds: number;
+  /** When it finished, ISO. */
+  endedAt: string;
+  /** True when nobody was watching and this is reconstructed after the fact. */
+  ghost: boolean;
+}
+
+/**
+ * THE HOUR THAT APPEARS WHEN YOU TURN THE PC ON.
+ *
+ * A session reaching zero used to be logged as `plannedSeconds`, ending `now`.
+ * Both halves of that are wrong the moment the machine stops watching:
+ *
+ *   the LENGTH, because a session interrupted by sleep never ran its full
+ *     hour -- one that had done forty-two minutes when the PC went down was
+ *     written as sixty;
+ *   the END, because the countdown does not resume where it left off. It
+ *     reaches zero the instant the machine wakes, so the whole session lands on
+ *     whatever day you next switched the computer on, hours after the fact.
+ *
+ * A real morning: asleep at 05:00:33 with 2519 seconds run, awake at 10:59:40,
+ * and the history gained a 3600 second session ending 10:59:56. That is the two
+ * hours that were sitting on a freshly booted machine before anyone had done
+ * anything at all.
+ *
+ * The evidence to answer both halves already existed -- `focusSessionTruth`
+ * knows the last moment any window saw the session alive -- it was simply never
+ * consulted here. Now it is:
+ *
+ *   a GHOST is worth what it had run when it was last seen, and ended then;
+ *   a LIVE session is worth its planned length, and ended at the instant it
+ *     reached that length, which is not necessarily now. A window throttled in
+ *     the background notices late, and "late" must not become part of the
+ *     record.
+ */
+export function focusCompletionFor(
+  timer: FocusTimerState,
+  beat: FocusHeartbeat | null,
+  now = Date.now(),
+): FocusCompletion {
+  const truth = focusSessionTruth(timer, beat, now);
+  if (truth.ghost) {
+    return { durationSeconds: truth.seconds, endedAt: truth.endedAt, ghost: true };
+  }
+
+  // The instant the clock ran out: the anchor plus whatever was still owed on
+  // it. Clamped to `now`, because nothing can have finished in the future, and
+  // floored at the anchor so a backwards clock cannot end a session before it
+  // began.
+  const planned = Math.max(0, timer.plannedSeconds);
+  const anchor = timer.lastStartedAt ? Date.parse(timer.lastStartedAt) : NaN;
+  if (!Number.isFinite(anchor)) {
+    return { durationSeconds: planned, endedAt: new Date(now).toISOString(), ghost: false };
+  }
+  const stillOwed = Math.max(0, planned - Math.max(0, timer.accumulatedSeconds));
+  const endedMs = Math.min(now, anchor + stillOwed * 1000);
+  return {
+    durationSeconds: planned,
+    endedAt: new Date(Math.max(anchor, endedMs)).toISOString(),
+    ghost: false,
+  };
+}
+
 /**
  * Decide whether the "running" timer is actually the ghost of a session that
  * died with the machine, and if so where it really ended. Returns null for a

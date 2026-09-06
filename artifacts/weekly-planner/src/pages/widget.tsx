@@ -33,6 +33,7 @@ import {
   getFocusTimerElapsedSeconds,
   getFocusTimerUncreditedSeconds,
   focusSessionTruth,
+  focusCompletionFor,
   loggableSessionSeconds,
   checkpointFocusTimer,
   pauseFocusTimer,
@@ -1121,7 +1122,21 @@ export default function Widget() {
         { playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000 },
       );
       focusAutoEndedRef.current = true;
-      completeFocusSession(focusTimer.plannedSeconds, true);
+      // NOT `plannedSeconds` ending now. A session the machine slept through
+      // never ran its full length, and it did not end at the moment the PC woke
+      // up -- writing it that way is what put a whole hour on a day before
+      // anyone had done anything. `focusCompletionFor` answers both halves from
+      // the heartbeat, and takes the id the shutdown recovery would use so that
+      // whichever of the two gets there first, the session is logged once.
+      const done = focusCompletionFor(focusTimerRef.current, lastBeatRef.current, Date.now());
+      if (done.durationSeconds <= 0) {
+        setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
+      } else {
+        completeFocusSession(done.durationSeconds, true, {
+          endedAt: new Date(done.endedAt),
+          id: recoveredSessionId(focusTimer.sessionStartedAt),
+        });
+      }
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }

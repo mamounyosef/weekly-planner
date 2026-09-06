@@ -58,7 +58,6 @@ const HOLD_MS = 280;
 /** How far the finger may drift during the hold before it counts as a scroll. */
 const HOLD_SLOP = 10;
 
-const ROWS = 6;
 const COLS = 7;
 
 /** One lane of bands, and the band drawn inside it. */
@@ -68,13 +67,14 @@ const BAND_H = 12;
 const BAND_TOP = 21;
 
 export function MonthView({
-  anchor, events, today, weekStartsOn, onOpenDay, onCreateSpan, categories,
+  anchor, events, today, weekStartsOn, onOpenDay, onLongPressDay, onCreateSpan, categories,
 }: {
   anchor: string;
   events: Record<string, Record<string, unknown>>;
   today: string;
   weekStartsOn: number;
   onOpenDay: (date: string) => void;
+  onLongPressDay?: (date: string) => void;
   /** Called when the user sweeps a range of cells. Absent means no dragging at
    *  all, and the view behaves exactly as it did before. */
   onCreateSpan?: (span: { startDate: string; endDate: string }) => void;
@@ -97,12 +97,12 @@ export function MonthView({
    * cell and never per row.
    */
   const counts = useMemo(
-    () => countsForRange(events, weeks[0][0], weeks[5][6], weekStartsOn as any),
+    () => countsForRange(events, weeks[0][0], weeks[weeks.length - 1][6], weekStartsOn as any),
     [events, weeks, weekStartsOn],
   );
 
   const { spans, covered } = useMemo(
-    () => spansForRange(events, weeks[0][0], weeks[5][6], weekStartsOn as any, categories),
+    () => spansForRange(events, weeks[0][0], weeks[weeks.length - 1][6], weekStartsOn as any, categories),
     [events, weeks, weekStartsOn, categories],
   );
 
@@ -179,7 +179,7 @@ export function MonthView({
     const o = originRef.current;
     if (o.width <= 0 || o.height <= 0) return null;
     return dateAtPoint(pageX - o.x, pageY - o.y, weeksRef.current, {
-      width: o.width, height: o.height, rows: ROWS, cols: COLS,
+      width: o.width, height: o.height, rows: weeksRef.current.length, cols: COLS,
     });
   };
 
@@ -265,10 +265,17 @@ export function MonthView({
     setTimeout(() => {
       if (activeRef.current) return;
       const create = onCreateRef.current;
+      const longPress = onLongPressDay;
       reset();
-      // Held in place and let go: that is a one day block, which is the fastest
-      // way to mark off a single day and costs nothing to offer.
-      if (wasArmed && span && create) create({ startDate: span.startDate, endDate: span.endDate });
+      
+      // Held in place and let go without moving.
+      if (wasArmed && span) {
+        if (longPress) {
+          longPress(span.startDate);
+        } else if (create) {
+          create({ startDate: span.startDate, endDate: span.endDate });
+        }
+      }
     }, 0);
   };
 
@@ -289,7 +296,7 @@ export function MonthView({
 
       <ScrollView
         scrollEnabled={!dragging}
-        contentContainerStyle={{ paddingBottom: space.xl }}
+        contentContainerStyle={{ paddingBottom: space.xl + 120 }}
       >
         <View ref={gridRef} collapsable={false} {...pan.panHandlers}>
           {weeks.map((week, wi) => {
@@ -513,31 +520,44 @@ function Cell({ date, count, total, reserve, inMonth, isToday, onPress, onPressO
         padding: 4,
         borderWidth: 0.5,
         borderColor: p.line,
-        backgroundColor: isToday ? p.accentSoft : 'transparent',
+        backgroundColor: 'transparent',
         opacity: inMonth ? 1 : 0.35,
       }}
     >
-      <Text
-        variant="caption"
-        tone={isToday ? 'accent' : 'ink'}
-        style={{ fontSize: 12, fontWeight: isToday ? '800' : '500' }}
-      >
-        {day}
-      </Text>
+      <View style={{
+        width: 24,
+        height: 24,
+        borderRadius: 12,
+        backgroundColor: isToday ? p.accent : 'transparent',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        <Text
+          variant="caption"
+          style={{
+            fontSize: 12,
+            fontWeight: isToday ? '800' : '500',
+            color: isToday ? '#FFFFFF' : p.ink
+          }}
+        >
+          {day}
+        </Text>
+      </View>
 
       {/* Kept clear for the bands, which are drawn over the whole row rather
           than inside any one cell. */}
       <View style={{ height: reserve }} />
 
-      <View style={{ gap: 2, marginTop: 3 }}>
+      <View style={{ flexDirection: 'row', gap: 3, marginTop: 3, flexWrap: 'wrap', paddingHorizontal: 2 }}>
         {Array.from({ length: marks }, (_, i) => (
           <View
             key={i}
             style={{
+              width: 4,
               height: 4,
               borderRadius: 2,
               backgroundColor: p.accent,
-              opacity: 1 - i * 0.22,
+              opacity: 0.8 - i * 0.15,
             }}
           />
         ))}

@@ -364,8 +364,8 @@ export function Settings({
           setVisibleHours(rangesFromHidden(off));
         }} />
         <Spacer size={space.xs} />
-        <Text variant="body">Span view</Text>
-        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>How many days the Span view shows either side of the one you are on.</Text>
+        <Text variant="body">Custom</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>How many days the Custom view shows either side of the one you are on.</Text>
         <Spacer size={space.sm} />
         <Row gap={space.sm}>
           <Text variant="caption" tone="soft" style={{ width: 40, textAlign: 'right' }}>Before</Text>

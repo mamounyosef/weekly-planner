@@ -564,7 +564,7 @@ export function Tasks() {
         unstable_pressDelay={PRESS_DELAY}
                 onPress={collapsible ? () => setShowDone(v => !v) : undefined}
                 disabled={!collapsible}
-                style={({ pressed }) => [{ paddingVertical: space.xs }, pressed ? PRESSED : null]}
+                style={({ pressed }) => [{ paddingVertical: space.md }, pressed ? PRESSED : null]}
               >
                 <Row style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
                   <Text
@@ -579,51 +579,15 @@ export function Tasks() {
                     {section.title.toUpperCase()}
                   </Text>
                   <Row gap={space.md} style={{ alignItems: 'center' }}>
-                    {collapsible && nodes.length > 0 && (
-                      <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-      style={({ pressed }) => (pressed ? PRESSED : null)} 
-                        onPress={(e) => { 
-                          e.stopPropagation();
-// A REPEATING task is never cleared here. Its row carries the
-                          // master's id, so deleting it would take the whole
-                          // series with it: one tap on "Clear" and every future
-                          // Tuesday is gone. Ticking one occurrence of a repeat
-                          // is not something there is anything to clean up from,
-                          // so those rows are simply left alone.
-                          const clearable = nodes.filter(n => !n.row.task.recur);
-                          if (clearable.length === 0) {
-                            Alert.alert(
-                              'Nothing to clear',
-                              'These are all repeating tasks, so there is nothing here to delete.',
-                            );
-                            return;
-                          }
-                          const kept = nodes.length - clearable.length;
-                          Alert.alert(
-                            'Clear completed?',
-                            kept > 0
-                              ? `This deletes ${clearable.length} finished ${clearable.length === 1 ? 'task' : 'tasks'}. ${kept} repeating ${kept === 1 ? 'one stays' : 'ones stay'}.`
-                              : `This deletes ${clearable.length} finished ${clearable.length === 1 ? 'task' : 'tasks'} for good.`,
-                            [
-                              { text: 'Cancel', style: 'cancel' },
-                              { text: 'Clear', style: 'destructive', onPress: () => {
-                                // A tombstone through `removeItem`, not a local
-                                // field: dropping the record here would leave the
-                                // PC holding it and the next sync would hand it
-                                // straight back.
-                                clearable.forEach(n => { void removeItem('tasks', n.row.task.id); });
-                              }},
-                            ],
-                          );
-                        }}
-                        hitSlop={space.sm}
-                      >
-                        <Text variant="caption" tone="accent">Clear</Text>
-                      </Pressable>
+                    {collapsible && (
+                      <View style={{ paddingHorizontal: space.sm, paddingVertical: space.xs, backgroundColor: p.surfaceAlt, borderRadius: 16 }}>
+                        <Text variant="bodyStrong" tone="accent" style={{ fontSize: 16 }}>
+                          {showDone ? '▴' : '▾'}
+                        </Text>
+                      </View>
                     )}
                     <Text variant="caption" tone="faint">
-                      {collapsible ? `${nodes.length} ${showDone ? '▾' : '▸'}` : nodes.length}
+                      {nodes.length}
                     </Text>
                   </Row>
                 </Row>

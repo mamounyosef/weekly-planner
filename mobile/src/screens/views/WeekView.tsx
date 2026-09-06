@@ -134,6 +134,7 @@ interface OutsideEntry {
   detail: BlockTiming;
   colour: string;
   done: boolean;
+  isPrayer?: boolean;
   onPress?: () => void;
 }
 
@@ -151,7 +152,7 @@ type Drag =
   | { mode: 'move' | 'resize'; date: string; startMin: number; endMin: number | null; item: AgendaItem };
 
 export function WeekView({
-  dates, dayOf, today, nowMin, clock, interval = 30, detailed,
+  dates, dayOf, today, selectedDay, nowMin, clock, interval = 30, detailed,
   prayersOn, visibleHours, dayWindow, onMenuItem,
   prayerColour, prayerLabels = true, prayerStyle = 'marker',
   isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
@@ -159,6 +160,7 @@ export function WeekView({
   dates: string[];
   dayOf: (date: string) => AgendaDay;
   today: string;
+  selectedDay?: string;
   nowMin: number | null;
   clock?: string;
   /** Snap interval in minutes. Decides the grid's resolution and its height. */
@@ -278,10 +280,29 @@ export function WeekView({
   // blocks by arithmetic and needs to see every day's placement at once. The
   // columns are handed the result so nothing is computed twice.
 
+  const allDays = useMemo(() => {
+    const arr = [...days];
+    if (days.length > 0) {
+      const lastDate = days[days.length - 1].date;
+      const d = new Date(`${lastDate}T00:00:00`);
+      d.setDate(d.getDate() + 1);
+      const nextDateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const nextAgenda = dayOf(nextDateStr);
+      arr.push({
+        date: nextDateStr,
+        allDay: [],
+        timed: nextAgenda.timed.filter(i => i.store === 'events' && i.startMin !== null),
+        prayers: prayersOn ? prayersOn(nextDateStr) : [],
+      });
+    }
+    return arr;
+  }, [days, dayOf, prayersOn]);
+
   const laidOutByDate = useMemo(() => {
-    const logicalCols: GridItem[][] = days.map(() => []);
-    for (let c = 0; c < days.length; c++) {
-      for (const item of days[c].timed) {
+    const logicalCols: GridItem[][] = allDays.map(() => []);
+
+    for (let c = 0; c < allDays.length; c++) {
+      for (const item of allDays[c].timed) {
         // Where this actually gets drawn, once a night that runs over the end
         // of its column is cut in two. Tested in `dayWindows.test.ts`, because
         // the arithmetic is fiddly and getting it wrong is invisible until a
@@ -341,7 +362,7 @@ export function WeekView({
           };
         });
     });
-  }, [days, pxPerHour, yAt, dayStartH, shown]);
+  }, [allDays, dayStartH, pxPerHour, shown, yAt, days.length]);
 
   /** What the columns actually draw. Anything with no drawn minutes is not
    *  among them: it is listed under the grid instead. */
@@ -364,56 +385,116 @@ export function WeekView({
    * really has. Nothing is lost, nothing is tappable at the wrong hour, and the
    * gap in the timeline is drawn as a gap.
    */
-  const outsideByDate = useMemo(() => days.map((d, i) => {
-    const entries: OutsideEntry[] = [];
+  const { topOutsideByDate, bottomOutsideByDate } = useMemo(() => {
+    const topByDate: OutsideEntry[][] = [];
+    const bottomByDate: OutsideEntry[][] = [];
 
-    for (const pl of laidOutByDate[i] ?? []) {
-      if (!pl.isHidden) continue;
-      const item = pl.item.item;
-      // A night cut in two contributes at most one row: the piece that would
-      // have been drawn on THIS column. Naming the event twice under one day
-      // would read as two of them.
-      entries.push({
-        key: pl.item.id,
-        at: pl.item.startMin,
-        // The item's own clock times, not the segment's, so a night says when
-        // it really begins and ends.
-        label: item.title,
-        detail: blockTiming({
-          startMin: item.startMin ?? pl.item.startMin,
-          endMin: item.endMin,
-          timeFormat: clock,
-          minutesLeft: null,
-        }),
-        colour: item.colour ?? p.accent,
-        done: item.completed,
-        onPress: () => onOpenItem(item),
-      });
-    }
+    allDays.forEach((d, i) => {
+      const top: OutsideEntry[] = [];
+      const bottom: OutsideEntry[] = [];
 
-    for (const pr of d.prayers) {
-      const at = pr.minutes < dayStartH * 60 ? pr.minutes + 1440 : pr.minutes;
-      if (isMinuteVisible(at, shown)) continue;
-      const done = isPrayerDone ? isPrayerDone(d.date, pr.key) : false;
-      entries.push({
-        key: `prayer:${d.date}:${pr.key}`,
-        at,
-        label: pr.label,
-        detail: { range: formatClock(pr.minutes, clock), detail: '', live: false },
-        colour: prayerColour ?? p.accent,
-        done,
-        onPress: onTogglePrayer ? () => onTogglePrayer(d.date, pr.key) : undefined,
-      });
-    }
+      for (const pl of laidOutByDate[i] ?? []) {
+        if (!pl.isHidden) continue;
+        const item = pl.item.item;
+        
+        const entry: OutsideEntry = {
+          key: pl.item.id,
+          at: pl.item.startMin,
+          label: item.title,
+          detail: blockTiming({
+            startMin: item.startMin ?? pl.item.startMin,
+            endMin: item.endMin,
+            timeFormat: clock,
+            minutesLeft: null,
+          }),
+          colour: item.colour ?? p.accent,
+          done: item.completed,
+          onPress: () => onOpenItem(item),
+        };
 
-    // In time order, and stably: two things at the same minute must not swap
-    // places between renders.
-    entries.sort((a, b) => (a.at - b.at) || a.key.localeCompare(b.key));
-    return entries;
-  }), [days, laidOutByDate, shown, dayStartH, clock, p.accent, prayerColour,
+        if (pl.item.startMin < dayStartH * 60) top.push(entry);
+        else bottom.push(entry);
+      }
+
+      for (const pr of d.prayers) {
+        // We no longer add 1440 to early morning prayers because we want them
+        // to legitimately appear BEFORE the day starts (at the top).
+        const at = pr.minutes;
+        
+        // However, if we evaluate `isMinuteVisible`, we should check `at`.
+        // Wait, `isMinuteVisible` checks against `shown` which expects `dayStartH` to `dayStartH + shown.hours`.
+        // If `at < dayStartH * 60`, `isMinuteVisible` will be false, which is correct.
+        // What if the prayer is actually from the PREVIOUS night but falls at e.g. 25:00 (1am next day)?
+        // Prayers are strictly 0-1440. If a prayer is 1am (60 mins), and dayStartH is 6am (360),
+        // it goes to `top`. It's the 1am prayer of THIS day (i.e. Fajr or Tahajjud).
+        // What if the day ends at 2am (26 hours)? The Isha prayer of THIS day is around 20:00 (1200 mins).
+        // It's inside the grid.
+        // What if Isha is at 2am next day? (1560 mins). `d.prayers` only gives 0-1439.
+        // So a prayer at 1am (60) is ALWAYS treated as the morning of the current day!
+        // That is correct for Islamic prayers.
+        if (isMinuteVisible(at, shown)) continue;
+        // Wait! What if the prayer is at 1am (60 mins), but the grid is from 6am to 2am next day?
+        // The 1am prayer of the NEXT day should be at the bottom?
+        // But `d.prayers` contains the prayers of THIS day! So the 1am prayer is from THIS day's morning!
+        // So it belongs at the top!
+        
+        const done = isPrayerDone ? isPrayerDone(d.date, pr.key) : false;
+        const entry: OutsideEntry = {
+          key: `prayer:${d.date}:${pr.key}`,
+          at,
+          label: pr.label,
+          detail: { range: formatClock(pr.minutes, clock), detail: '', live: false },
+          colour: prayerColour ?? p.accent,
+          done,
+          isPrayer: true,
+          onPress: onTogglePrayer ? () => onTogglePrayer(d.date, pr.key) : undefined,
+        };
+
+        if (at < dayStartH * 60) {
+          top.push(entry);
+          // Also place it at the bottom of the previous day, since it represents
+          // the late night of that previous day!
+          if (i > 0) {
+            bottomByDate[i - 1].push({
+              ...entry,
+              key: entry.key + '_prev',
+              at: at + 1440,
+            });
+          }
+        } else {
+          bottom.push(entry);
+        }
+      }
+
+      // Top is in reverse chronological order: things closest to the grid are at the bottom of the top stack.
+      // E.g., 5am is below 4am. Wait, the visual order should be:
+      // - 4am
+      // - 5am
+      // - (Grid starts at 6am)
+      // This is normal chronological order! 
+      // But the user said: "But obviously they should be in reverse order because they will be in reverse order when they are displayed at the top."
+      // Let's think: if the dots are at the bottom, and the events are above them.
+      // - 5am (closest to grid)
+      // - 4am
+      // - 3am
+      // This means Time flows backwards as you go up!
+      // This is reverse chronological order. `b.at - a.at`.
+      top.sort((a, b) => (b.at - a.at) || a.key.localeCompare(b.key));
+      
+      // Bottom is normal chronological order.
+      bottom.sort((a, b) => (a.at - b.at) || a.key.localeCompare(b.key));
+
+      topByDate.push(top);
+      bottomByDate.push(bottom);
+    });
+
+    return { topOutsideByDate: topByDate, bottomOutsideByDate: bottomByDate };
+  }, [days, laidOutByDate, shown, dayStartH, clock, p.accent, prayerColour,
        isPrayerDone, onTogglePrayer, onOpenItem]);
 
-  const anyOutside = outsideByDate.some(list => list.length > 0);
+  const anyTopOutside = topOutsideByDate.some(list => list.length > 0);
+  const anyBottomOutside = bottomOutsideByDate.some(list => list.length > 0);
+
 
   /**
    * Where the grid should be looking: the current hour, with a little of what
@@ -884,12 +965,12 @@ export function WeekView({
                 backgroundColor: isTarget ? p.accentSoft : 'transparent',
               }}
             >
-              <Text variant="caption" tone={isToday || isTarget ? 'accent' : 'faint'} style={{ fontSize: 10 }}>
+              <Text variant="caption" tone={isToday || isTarget || d.date === selectedDay ? 'accent' : 'faint'} style={{ fontSize: 10 }}>
                 {date.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase()}
               </Text>
               <Text
                 variant="bodyStrong"
-                tone={isToday || isTarget ? 'accent' : 'ink'}
+                tone={isToday || isTarget || d.date === selectedDay ? 'accent' : 'ink'}
                 style={{ fontSize: 15 }}
               >
                 {date.getDate()}
@@ -1043,8 +1124,22 @@ export function WeekView({
         }}
         // A little air at the top, so the first hour is not flush against
         // whatever sits above the grid.
-        contentContainerStyle={{ paddingTop: space.sm, paddingBottom: space.xxl }}
+        contentContainerStyle={{ paddingTop: space.sm, paddingBottom: space.xxl + 120 }}
       >
+        {anyTopOutside ? (
+          <View style={{ flexDirection: 'row' }}>
+            <View style={{ width: RAIL }} />
+            {days.map((d, i) => (
+              <OutsideHours
+                key={`top-outside-${d.date}`}
+                entries={topOutsideByDate[i] ?? []}
+                detailed={detailed}
+                top
+              />
+            ))}
+          </View>
+        ) : null}
+
         <View
           ref={gridRef}
           onLayout={() => {
@@ -1218,13 +1313,13 @@ export function WeekView({
             pinned to the foot of the column, where it read as a prayer at a
             quarter to two. It kept the same rail and the same columns so each
             list still sits under the day it belongs to. */}
-        {anyOutside ? (
+        {anyBottomOutside ? (
           <View style={{ flexDirection: 'row' }}>
             <View style={{ width: RAIL }} />
             {days.map((d, i) => (
               <OutsideHours
-                key={`outside-${d.date}`}
-                entries={outsideByDate[i] ?? []}
+                key={`bottom-outside-${d.date}`}
+                entries={bottomOutsideByDate[i] ?? []}
                 detailed={detailed}
               />
             ))}
@@ -1473,7 +1568,12 @@ function DayColumn({
             timeFormat: clock,
             minutesLeft,
           });
-        const placement = blockLabelPlacement(pl.height);
+        let placement = blockLabelPlacement(pl.height);
+        const duration = blockDurationMinutes(startMin ?? 0, item.endMin);
+        if (placement !== 'none') {
+          if (duration < 60) placement = 'none';
+          else if (duration < 120) placement = 'bottom';
+        }
         const showTimes = placement !== 'none' && timing.range.length > 0;
 
         // WHAT YOU ARE LOOKING AT IS NOT ALL OF IT.
@@ -1604,7 +1704,7 @@ function DayColumn({
             <View style={{
               flex: 1,
               backgroundColor: fill,
-              borderRadius: 3,
+              borderRadius: radius.sm,
               paddingHorizontal: detailed ? 6 : 3,
               paddingTop: 1,
               // Three states, in order of how loud they should be: carried
@@ -1909,32 +2009,35 @@ function NowMarker({ top }: { top: number }) {
  * drawn hours is a display choice, and a display choice must not take anything
  * away from you.
  */
-function OutsideHours({ entries, detailed }: {
+function OutsideHours({ entries, detailed, top }: {
   entries: readonly OutsideEntry[];
   detailed?: boolean;
+  top?: boolean;
 }) {
   const p = useTheme();
   if (entries.length === 0) return <View style={{ flex: 1 }} />;
 
+  const dots = (
+    <View style={{ alignItems: 'center', paddingVertical: 5, gap: 3 }}>
+      {[0, 1, 2].map(i => (
+        <View
+          key={i}
+          style={{
+            width: 3, height: 3, borderRadius: 1.5,
+            backgroundColor: p.inkFaint,
+            // Darkest dot is always closest to the grid. 
+            // If top, grid is below, so bottom dot (i=2) is darkest (0.9), top dot (i=0) is lightest (0.46)
+            // If bottom, grid is above, so top dot (i=0) is darkest (0.9), bottom dot (i=2) is lightest (0.46)
+            opacity: top ? 0.46 + i * 0.22 : 0.9 - i * 0.22,
+          }}
+        />
+      ))}
+    </View>
+  );
+
   return (
     <View style={{ flex: 1, paddingHorizontal: 2 }}>
-      {/* The join. Three dots down the middle, in the line colour, so it reads
-          as the timeline being interrupted rather than as a control. */}
-      <View style={{ alignItems: 'center', paddingVertical: 5, gap: 3 }}>
-        {[0, 1, 2].map(i => (
-          <View
-            key={i}
-            style={{
-              width: 3, height: 3, borderRadius: 1.5,
-              backgroundColor: p.inkFaint,
-              // Fading downward, so the eye travels from the grid into the list
-              // rather than stopping at a row of three equal marks.
-              opacity: 0.9 - i * 0.22,
-            }}
-          />
-        ))}
-      </View>
-
+      {!top && dots}
       <View style={{
         borderRadius: radius.sm,
         borderWidth: 1,
@@ -1944,60 +2047,108 @@ function OutsideHours({ entries, detailed }: {
         paddingHorizontal: 3,
         gap: 2,
       }}>
-        {entries.map(entry => (
-          <Pressable
-            unstable_pressDelay={PRESS_DELAY}
-            key={entry.key}
-            onPress={entry.onPress}
-            disabled={!entry.onPress}
-            accessibilityRole={entry.onPress ? 'button' : undefined}
-            accessibilityLabel={`${entry.label}, ${entry.detail.range}, outside the hours shown`}
-            style={({ pressed }) => [{
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 4,
-              opacity: entry.done ? 0.45 : 1,
-            }, pressed ? PRESSED : null]}
-          >
-            {/* The item's own colour, as a bar rather than a dot: it is the
-                same left edge the block on the grid would have had, so the row
-                is recognisably the same thing seen from below. */}
-            <View style={{
-              width: 3,
-              alignSelf: 'stretch',
-              minHeight: detailed ? 22 : 18,
-              borderRadius: 2,
-              backgroundColor: entry.colour,
-            }} />
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text
-                numberOfLines={1}
-                style={{
-                  color: p.ink,
-                  fontSize: detailed ? 11 : 9,
-                  lineHeight: detailed ? 14 : 11,
-                  fontWeight: '600',
-                  textDecorationLine: entry.done ? 'line-through' : 'none',
-                }}
+        {entries.map(entry => {
+          if (entry.isPrayer) {
+            return (
+              <Pressable
+                unstable_pressDelay={PRESS_DELAY}
+                key={entry.key}
+                onPress={entry.onPress}
+                disabled={!entry.onPress}
+                accessibilityRole={entry.onPress ? 'button' : undefined}
+                accessibilityLabel={`${entry.label}, ${entry.detail.range}, outside the hours shown`}
+                style={({ pressed }) => [{
+                  height: detailed ? 20 : 16,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 3,
+                  paddingHorizontal: 4,
+                  borderRadius: radius.sm,
+                  borderWidth: 1,
+                  borderColor: entry.colour,
+                  backgroundColor: `${entry.colour}26`,
+                  opacity: entry.done ? 0.45 : 1,
+                }, pressed ? PRESSED : null]}
               >
-                {entry.label}
-              </Text>
-              <Text
-                numberOfLines={1}
-                style={{
-                  color: p.inkFaint,
-                  fontSize: detailed ? 10 : 8,
-                  lineHeight: detailed ? 13 : 10,
-                }}
-              >
-                {entry.detail.detail
-                  ? `${entry.detail.range} ${entry.detail.detail}`
-                  : entry.detail.range}
-              </Text>
-            </View>
-          </Pressable>
-        ))}
+                <Text style={{ color: entry.colour, fontSize: 9, lineHeight: 10 }}>
+                  {entry.done ? '◉' : '○'}
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    color: entry.colour, fontSize: 9, lineHeight: 11, fontWeight: '700',
+                    textDecorationLine: entry.done ? 'line-through' : 'none',
+                  }}
+                >
+                  {entry.label}
+                </Text>
+                {detailed ? (
+                  <View style={{ marginLeft: 'auto' }}>
+                    <Text style={{ color: entry.colour, fontSize: 8.5, lineHeight: 11, opacity: 0.8 }}>
+                      {entry.detail.range}
+                    </Text>
+                  </View>
+                ) : null}
+              </Pressable>
+            );
+          }
+
+          return (
+            <Pressable
+              unstable_pressDelay={PRESS_DELAY}
+              key={entry.key}
+              onPress={entry.onPress}
+              disabled={!entry.onPress}
+              accessibilityRole={entry.onPress ? 'button' : undefined}
+              accessibilityLabel={`${entry.label}, ${entry.detail.range}, outside the hours shown`}
+              style={({ pressed }) => [{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 4,
+                opacity: entry.done ? 0.45 : 1,
+              }, pressed ? PRESSED : null]}
+            >
+              {/* The item's own colour, as a bar rather than a dot: it is the
+                  same left edge the block on the grid would have had, so the row
+                  is recognisably the same thing seen from below. */}
+              <View style={{
+                width: 3,
+                alignSelf: 'stretch',
+                minHeight: detailed ? 22 : 18,
+                borderRadius: 2,
+                backgroundColor: entry.colour,
+              }} />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    color: p.ink,
+                    fontSize: detailed ? 11 : 9,
+                    lineHeight: detailed ? 14 : 11,
+                    fontWeight: '600',
+                    textDecorationLine: entry.done ? 'line-through' : 'none',
+                  }}
+                >
+                  {entry.label}
+                </Text>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    color: p.inkFaint,
+                    fontSize: detailed ? 10 : 8,
+                    lineHeight: detailed ? 13 : 10,
+                  }}
+                >
+                  {entry.detail.detail
+                    ? `${entry.detail.range} ${entry.detail.detail}`
+                    : entry.detail.range}
+                </Text>
+              </View>
+            </Pressable>
+          );
+        })}
       </View>
+      {top && dots}
     </View>
   );
 }

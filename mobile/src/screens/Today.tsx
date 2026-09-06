@@ -44,6 +44,8 @@ import {
   ScrollView,
   View,
   Animated,
+  Modal,
+  StyleSheet,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -637,8 +639,60 @@ export function Today({
     return filtered;
   }, [events, hiddenCategoryIds]);
 
+  const [zoomedDay, setZoomedDay] = useState<string | null>(null);
+
   return (
-    <View style={{ flex: 1, backgroundColor: p.bg }}>
+    <View style={StyleSheet.absoluteFill}>
+      {zoomedDay && (
+        <Modal transparent visible animationType="fade" onRequestClose={() => setZoomedDay(null)}>
+          <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'center', padding: space.xl }}>
+            <View style={{ backgroundColor: p.surface, borderRadius: radius.lg, padding: space.lg, maxHeight: '80%' }}>
+              <Row style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: space.lg }}>
+                <Text variant="title">{dayLabel(zoomedDay, now)}</Text>
+                <Pressable onPress={() => setZoomedDay(null)} hitSlop={HIT}>
+                  <Text variant="heading" tone="faint">×</Text>
+                </Pressable>
+              </Row>
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {(() => {
+                  const agenda = eventsOf(zoomedDay);
+                  const items = [...agenda.allDay, ...agenda.timed];
+                  if (items.length === 0) {
+                    return <Text variant="body" tone="soft" style={{ textAlign: 'center', marginVertical: space.xl }}>Nothing planned.</Text>;
+                  }
+                  return items.map(item => (
+                    <View key={item.id} style={{ marginBottom: space.sm }}>
+                      <ItemRow
+                        item={item}
+                        onTick={() => tick(item)}
+                        onOpen={() => {
+                          setZoomedDay(null);
+                          open(item);
+                        }}
+                        onHold={() => {
+                          setZoomedDay(null);
+                          hold(item);
+                        }}
+                      />
+                    </View>
+                  ));
+                })()}
+              </ScrollView>
+              <Pressable
+                style={{ marginTop: space.lg, backgroundColor: p.accentSoft, borderRadius: radius.pill, padding: space.md, alignItems: 'center' }}
+                onPress={() => {
+                  setZoomedDay(null);
+                  setSelected(zoomedDay);
+                  chooseView('day');
+                }}
+              >
+                <Text variant="bodyStrong" tone="accent">Go to Day</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+      )}
+      <View style={{ flex: 1, backgroundColor: p.surface }}>
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <View style={{
@@ -815,6 +869,7 @@ export function Today({
           dates={weekDates}
           dayOf={eventsOf}
           today={today}
+          selectedDay={selected}
           nowMin={weekDates.includes(today) ? nowMin : null}
           clock={timeFormat}
           interval={interval}
@@ -863,6 +918,7 @@ export function Today({
           dates={customDates}
           dayOf={eventsOf}
           today={today}
+          selectedDay={selected}
           nowMin={customDates.includes(today) ? nowMin : null}
           clock={timeFormat}
           interval={interval}
@@ -889,6 +945,7 @@ export function Today({
           today={today}
           weekStartsOn={weekStartsOn}
           onOpenDay={date => { setSelected(date); chooseView('day'); }}
+          onLongPressDay={setZoomedDay}
           onCreateSpan={({ startDate, endDate }) => setEditing({
             store: 'events',
             date: startDate,
@@ -1091,6 +1148,7 @@ export function Today({
         categories={categories as any}
         swatches={SWATCHES}
       />
+    </View>
     </View>
   );
 }

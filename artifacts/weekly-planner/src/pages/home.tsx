@@ -46,6 +46,7 @@ import {
   getFocusTimerElapsedSeconds,
   getFocusTimerUncreditedSeconds,
   focusSessionTruth,
+  focusCompletionFor,
   loggableSessionSeconds,
   checkpointFocusTimer,
   pauseFocusTimer,
@@ -2730,7 +2731,7 @@ export default function DailyPlanner() {
     if (!prayer.enabled) return [];
     const out: Array<PrayerOccurrence & { norm: number }> = [];
     for (const p of prayersFor(day)) {
-      if (p.minutes < dayStartMin) continue;       // the previous column owns it
+      // Early morning prayers naturally belong to this calendar day, so they appear at the top.
       out.push({ ...p, norm: p.minutes });
     }
     for (const p of prayersFor(addDays(day, 1))) {
@@ -4713,7 +4714,21 @@ export default function DailyPlanner() {
         { playIfUnreachable: Date.now() - lastLocalPushAtRef.current < 3000 },
       );
       focusAutoEndedRef.current = true;
-      completeFocusSession(focusTimer.plannedSeconds, true);
+      // NOT `plannedSeconds` ending now. A session the machine slept through
+      // never ran its full length, and it did not end at the moment the PC woke
+      // up -- writing it that way is what put a whole hour on a day before
+      // anyone had done anything. `focusCompletionFor` answers both halves from
+      // the heartbeat, and takes the id the shutdown recovery would use so that
+      // whichever of the two gets there first, the session is logged once.
+      const done = focusCompletionFor(focusTimerRef.current, lastBeatRef.current, Date.now());
+      if (done.durationSeconds <= 0) {
+        setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
+      } else {
+        completeFocusSession(done.durationSeconds, true, {
+          endedAt: new Date(done.endedAt),
+          id: recoveredSessionId(focusTimer.sessionStartedAt),
+        });
+      }
     } else if (!focusTimer.isRunning || focusRemainingSeconds > 0) {
       focusCompleteRef.current = false;
     }
@@ -8780,6 +8795,13 @@ export default function DailyPlanner() {
                             renderItems.push({ ev, key: `${ev.id}__resize`, startMin: targetS, endMin: targetE, segKind: 'normal' });
                           }
                         }
+
+                        // Also duplicate early morning events to the bottom of the previous day
+                        if (targetS < dayStartMin && targetE <= dayStartMin) {
+                          if (targetDayIndex - 1 === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__resize_prev`, startMin: targetS + 1440, endMin: targetE + 1440, segKind: 'normal' });
+                          }
+                        }
                       } else {
                         // Stationary static event
                         const isSpanning = origS < dayStartMin + 1440 && origE > dayStartMin + 1440;
@@ -8793,6 +8815,13 @@ export default function DailyPlanner() {
                         } else {
                           if (ev.dayIndex === colIdx) {
                             renderItems.push({ ev, key: ev.id, startMin: origS, endMin: origE, segKind: 'normal' });
+                          }
+                        }
+                        
+                        // Also duplicate early morning events to the bottom of the previous day
+                        if (origS < dayStartMin && origE <= dayStartMin) {
+                          if (ev.dayIndex - 1 === colIdx) {
+                            renderItems.push({ ev, key: `${ev.id}__prev`, startMin: origS + 1440, endMin: origE + 1440, segKind: 'normal' });
                           }
                         }
                       }

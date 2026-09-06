@@ -150,9 +150,11 @@ export function monthGrid(
   cursor.setDate(cursor.getDate() - lead);
 
   const weeks: string[][] = [];
-  // Six rows always, so the grid does not change height between months and the
-  // cells stop shifting under the thumb as you page through.
   for (let w = 0; w < 6; w += 1) {
+    // Stop if we have at least 4 weeks and the new week starts in the next month.
+    if (w >= 4 && cursor.getMonth() !== month && cursor.getTime() > first.getTime()) {
+      break;
+    }
     const row: string[] = [];
     for (let d = 0; d < 7; d += 1) {
       row.push(

@@ -51,7 +51,7 @@ import { SWATCH_BASE_HEX } from '../lib/gcalColor';
 // The engine's own wording and presets, never a second copy: a duplicate had
 // the sign backwards, so a reminder labelled "before" fired after.
 import { offsetLabel, OFFSET_PRESETS_TIMED } from '../lib/notifications';
-import { addDays, ymd } from '../lib/agenda';
+import { addDays, ymd, formatClock } from '../lib/agenda';
 import { GENERAL_LIST_ID, resolveListId, type TaskList } from '../lib/taskLists';
 import { ListChips } from '../ui/ListChips';
 import type { Recurrence, RecurFreq, Weekday } from '../lib/recurrence';
@@ -129,7 +129,7 @@ function Sheet({ target, onClose, closeSafelyRef }: {
   const p = useTheme();
   const insets = useSafeAreaInsets();
   const {
-    events, tasks, saveDraft, removeItem, applyScoped, edit, categories, interval, taskLists,
+    events, tasks, saveDraft, removeItem, applyScoped, edit, categories, interval, taskLists, timeFormat,
   } = usePlanner();
 
   const existing = useMemo(() => {
@@ -476,6 +476,7 @@ function Sheet({ target, onClose, closeSafelyRef }: {
                   <TimeRow
                     label="Starts"
                     step={interval}
+                    timeFormat={timeFormat}
                     minutes={draft.startMin}
                     onChange={m => set({
                       startMin: m,
@@ -487,6 +488,7 @@ function Sheet({ target, onClose, closeSafelyRef }: {
                     <TimeRow
                       label="Ends"
                       step={interval}
+                      timeFormat={timeFormat}
                       minutes={draft.endMin}
                       onChange={m => set({ endMin: m })}
                       clearable
@@ -963,82 +965,291 @@ function OffsetPicker({ value, onChange }: {
 
 // ─── Time and date ───────────────────────────────────────────────────────────
 
-function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
+function TimeRow({ label, minutes, onChange, clearable, step = 15, timeFormat }: {
   label: string;
   minutes: number | null;
   onChange: (next: number | null) => void;
   clearable?: boolean;
   /** The snap interval, from this device's settings. */
   step?: number;
+  timeFormat: string | undefined;
 }) {
   const p = useTheme();
+  const [pickerMode, setPickerMode] = useState<'closed' | 'hour' | 'minute'>('closed');
+  const [stepPickerOpen, setStepPickerOpen] = useState(false);
+  const [localStep, setLocalStep] = useState(5);
+
+  const STEP_OPTIONS = [1, 5, 10, 15, 20, 30, 60];
+
+  const is12h = timeFormat === '12h';
+  const isPM = minutes !== null && minutes >= 12 * 60;
+
+  const toggleAMPM = () => {
+    if (minutes === null) {
+      onChange(12 * 60); // Default to 12:00 PM
+      return;
+    }
+    if (isPM) {
+      onChange((minutes - 12 * 60 + 1440) % 1440);
+    } else {
+      onChange((minutes + 12 * 60) % 1440);
+    }
+  };
 
   const nudge = (delta: number) => {
     const base = minutes ?? 9 * 60;
-    // Snapped to the interval, not merely moved by it: a time of 09:07 nudged by
-    // fifteen should land on 09:15, not 09:22. Otherwise a single off-grid value
-    // keeps every later step off-grid too.
     const raw = base + delta;
     const snapped = delta > 0
-      ? Math.ceil(raw / step) * step
-      : Math.floor(raw / step) * step;
+      ? Math.ceil(raw / localStep) * localStep
+      : Math.floor(raw / localStep) * localStep;
     onChange(((snapped % 1440) + 1440) % 1440);
   };
 
+  const timeText = minutes === null ? 'None' : formatClock(minutes, timeFormat);
+  const displayTime = is12h && minutes !== null ? timeText.replace(/[ apm]/ig, '') : timeText;
+
   return (
-    <Row style={{ alignItems: 'center', justifyContent: 'space-between' }}>
-      <Text variant="body" tone="soft" style={{ width: 58 }}>{label}</Text>
+    <>
+      <Row style={{ alignItems: 'center', justifyContent: 'flex-start' }}>
+        <Text variant="body" tone="soft" style={{ width: 44 }}>{label}</Text>
 
-      <Row gap={space.xs} style={{ alignItems: 'center' }}>
-        {/*
-          THE SLOT IS RESERVED ON BOTH ROWS, empty on the one that cannot be
-          cleared. That is the whole trick: "Ends" carries a Clear and "Starts"
-          does not, and while that button sat on the RIGHT it made the Ends row
-          wider, pushing its minus, its time and its plus left of the ones
-          directly above them. Two controls that do the same thing, a centimetre
-          apart, on consecutive lines.
+        <Row gap={2} style={{ alignItems: 'center' }}>
+          <View style={{ width: CLEAR_SLOT, alignItems: 'flex-end' }}>
+            {clearable ? (
+              <Pressable
+                unstable_pressDelay={PRESS_DELAY}
+                onPress={() => onChange(minutes === null ? 10 * 60 : null)}
+                hitSlop={space.sm}
+                accessibilityRole="button"
+                style={({ pressed }) => [
+                  { paddingHorizontal: space.xs, height: HIT, justifyContent: 'center' },
+                  pressed ? PRESSED : null,
+                ]}
+              >
+                <Text variant="caption" tone="accent">{minutes === null ? 'Set' : 'Clear'}</Text>
+              </Pressable>
+            ) : null}
+          </View>
 
-          Reserving the space on the left instead lines the two steppers up
-          exactly, and puts Clear on the outside where it is furthest from the
-          buttons you actually press.
-        */}
-        <View style={{ width: CLEAR_SLOT, alignItems: 'flex-end' }}>
-          {clearable ? (
+          <Pressable
+            unstable_pressDelay={PRESS_DELAY}
+            onPress={() => setStepPickerOpen(true)}
+            accessibilityRole="button"
+            style={({ pressed }) => [{
+              width: 32, height: HIT,
+              borderRadius: radius.md,
+              borderWidth: 1, borderColor: stepPickerOpen ? p.accent : p.line,
+              backgroundColor: stepPickerOpen ? p.accentSoft : p.surfaceAlt,
+              alignItems: 'center', justifyContent: 'center',
+            }, pressed ? PRESSED : null]}
+          >
+            <Text variant="caption" tone={stepPickerOpen ? 'accent' : 'ink'}>±{localStep === 60 ? '1h' : localStep}</Text>
+          </Pressable>
+
+          <Step label="−" onPress={() => nudge(-localStep)} onLongPress={() => nudge(-60)} />
+          
+          <Pressable
+            unstable_pressDelay={PRESS_DELAY}
+            onPress={() => {
+              if (minutes === null) onChange(9 * 60);
+              setPickerMode('hour');
+            }}
+            style={({ pressed }) => [{
+              minWidth: 58, height: HIT,
+              paddingHorizontal: space.xs,
+              borderRadius: radius.md,
+              borderWidth: 1, borderColor: pickerMode !== 'closed' ? p.accent : p.line,
+              backgroundColor: pickerMode !== 'closed' ? p.accentSoft : p.surfaceAlt,
+              alignItems: 'center', justifyContent: 'center',
+            }, pressed ? PRESSED : null]}
+          >
+            <Text variant="bodyStrong" tone={minutes === null ? 'faint' : (pickerMode !== 'closed' ? 'accent' : 'ink')}>
+              {displayTime}
+            </Text>
+          </Pressable>
+          
+          <Step label="+" onPress={() => nudge(localStep)} onLongPress={() => nudge(60)} />
+
+          {is12h ? (
             <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-              onPress={() => onChange(minutes === null ? 10 * 60 : null)}
-              hitSlop={space.sm}
-              accessibilityRole="button"
-              style={({ pressed }) => [
-                { paddingHorizontal: space.xs, height: HIT, justifyContent: 'center' },
-                pressed ? PRESSED : null,
-              ]}
+              unstable_pressDelay={PRESS_DELAY}
+              onPress={toggleAMPM}
+              style={({ pressed }) => [{
+                minWidth: 36, height: HIT,
+                borderRadius: radius.md,
+                borderWidth: 1, borderColor: p.line,
+                backgroundColor: p.surfaceAlt,
+                alignItems: 'center', justifyContent: 'center',
+              }, pressed ? PRESSED : null]}
             >
-              <Text variant="caption" tone="accent">{minutes === null ? 'Set' : 'Clear'}</Text>
+              <Text variant="bodyStrong" tone={minutes === null ? 'faint' : 'ink'}>
+                {minutes === null ? '--' : isPM ? 'PM' : 'AM'}
+              </Text>
             </Pressable>
           ) : null}
-        </View>
-
-        <Step label="−" onPress={() => nudge(-step)} onLongPress={() => nudge(-60)} />
-        <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-          onPress={() => (minutes === null ? onChange(9 * 60) : undefined)}
-          style={({ pressed }) => [{
-            minWidth: 88, height: HIT,
-            paddingHorizontal: space.md,
-            borderRadius: radius.md,
-            borderWidth: 1, borderColor: p.line,
-            backgroundColor: p.surfaceAlt,
-            alignItems: 'center', justifyContent: 'center',
-          }, pressed ? PRESSED : null]}
-        >
-          <Text variant="bodyStrong" tone={minutes === null ? 'faint' : 'ink'}>
-            {minutes === null ? 'None' : toTimeString(minutes)}
-          </Text>
-        </Pressable>
-        <Step label="+" onPress={() => nudge(step)} onLongPress={() => nudge(60)} />
+        </Row>
       </Row>
-    </Row>
+
+      {/* Step Picker Modal */}
+      <Modal
+        visible={stepPickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setStepPickerOpen(false)}
+      >
+        <Pressable 
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: space.xl }}
+          onPress={() => setStepPickerOpen(false)}
+        >
+          <Pressable 
+            style={{ 
+              width: '100%', 
+              maxWidth: 300, 
+              backgroundColor: p.surface, 
+              borderRadius: radius.lg, 
+              padding: space.xl,
+              borderWidth: 1, borderColor: p.line,
+            }}
+            onPress={e => e.stopPropagation()}
+          >
+            <Text variant="title" style={{ textAlign: 'center', marginBottom: space.lg }}>
+              Step precision
+            </Text>
+            
+            <View style={{ gap: space.sm }}>
+              {STEP_OPTIONS.map(opt => (
+                <Pressable
+                  key={opt}
+                  onPress={() => {
+                    setLocalStep(opt);
+                    setStepPickerOpen(false);
+                  }}
+                  style={({ pressed }) => [{
+                    height: 48,
+                    alignItems: 'center', justifyContent: 'center',
+                    borderRadius: radius.md,
+                    backgroundColor: localStep === opt ? p.accent : p.surfaceAlt,
+                    borderWidth: 1, borderColor: localStep === opt ? p.accent : p.line,
+                  }, pressed ? PRESSED : null]}
+                >
+                  <Text style={{ fontSize: 16, color: localStep === opt ? '#fff' : p.ink, fontWeight: '500' }}>
+                    {opt === 60 ? '1 hour' : `${opt} minute${opt > 1 ? 's' : ''}`}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Time Picker Modal */}
+      <Modal
+        visible={pickerMode !== 'closed'}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerMode('closed')}
+      >
+        <Pressable 
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: space.xl }}
+          onPress={() => setPickerMode('closed')}
+        >
+          <Pressable 
+            style={{ 
+              width: '100%', 
+              maxWidth: 320, 
+              backgroundColor: p.surface, 
+              borderRadius: radius.lg, 
+              padding: space.xl,
+              borderWidth: 1, borderColor: p.line,
+            }}
+            onPress={e => e.stopPropagation()}
+          >
+            <Text variant="title" style={{ textAlign: 'center', marginBottom: space.lg }}>
+              {pickerMode === 'hour' ? 'Pick Hour' : 'Pick Minute'}
+            </Text>
+            
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: space.sm }}>
+              {pickerMode === 'hour' ? (
+                is12h ? (
+                  Array.from({ length: 12 }, (_, i) => i === 0 ? 12 : i).map((h, i) => {
+                    const hValue = h === 12 ? 0 : h;
+                    const isSelected = minutes !== null && (Math.floor(minutes / 60) % 12 === hValue);
+                    return (
+                      <Pressable
+                        key={h}
+                        onPress={() => {
+                          const baseMin = minutes ?? 9 * 60;
+                          const ampmOffset = isPM ? 12 * 60 : 0;
+                          onChange(hValue * 60 + (baseMin % 60) + ampmOffset);
+                          setPickerMode('minute');
+                        }}
+                        style={({ pressed }) => [{
+                          width: '30%', height: 48,
+                          alignItems: 'center', justifyContent: 'center',
+                          borderRadius: radius.md,
+                          backgroundColor: isSelected ? p.accent : p.surfaceAlt,
+                          borderWidth: 1, borderColor: isSelected ? p.accent : p.line,
+                        }, pressed ? PRESSED : null]}
+                      >
+                        <Text style={{ fontSize: 18, color: isSelected ? '#fff' : p.ink, fontWeight: '500' }}>{h}</Text>
+                      </Pressable>
+                    );
+                  })
+                ) : (
+                  Array.from({ length: 24 }, (_, i) => i).map((h) => {
+                    const isSelected = minutes !== null && Math.floor(minutes / 60) === h;
+                    return (
+                      <Pressable
+                        key={h}
+                        onPress={() => {
+                          const baseMin = minutes ?? 9 * 60;
+                          onChange(h * 60 + (baseMin % 60));
+                          setPickerMode('minute');
+                        }}
+                        style={({ pressed }) => [{
+                          width: '22%', height: 44,
+                          alignItems: 'center', justifyContent: 'center',
+                          borderRadius: radius.md,
+                          backgroundColor: isSelected ? p.accent : p.surfaceAlt,
+                          borderWidth: 1, borderColor: isSelected ? p.accent : p.line,
+                        }, pressed ? PRESSED : null]}
+                      >
+                        <Text style={{ fontSize: 16, color: isSelected ? '#fff' : p.ink, fontWeight: '500' }}>{h}</Text>
+                      </Pressable>
+                    );
+                  })
+                )
+              ) : (
+                [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => {
+                  const isSelected = minutes !== null && (minutes % 60) === m;
+                  return (
+                    <Pressable
+                      key={m}
+                      onPress={() => {
+                        const baseMin = minutes ?? 9 * 60;
+                        onChange(Math.floor(baseMin / 60) * 60 + m);
+                        setPickerMode('closed');
+                      }}
+                      style={({ pressed }) => [{
+                        width: '30%', height: 48,
+                        alignItems: 'center', justifyContent: 'center',
+                        borderRadius: radius.md,
+                        backgroundColor: isSelected ? p.accent : p.surfaceAlt,
+                        borderWidth: 1, borderColor: isSelected ? p.accent : p.line,
+                      }, pressed ? PRESSED : null]}
+                    >
+                      <Text style={{ fontSize: 18, color: isSelected ? '#fff' : p.ink, fontWeight: '500' }}>
+                        {String(m).padStart(2, '0')}
+                      </Text>
+                    </Pressable>
+                  );
+                })
+              )}
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 
@@ -1048,7 +1259,7 @@ function TimeRow({ label, minutes, onChange, clearable, step = 15 }: {
  * Wide enough for "Clear" at caption size with a little air, and identical on
  * the row that has no button, because being identical is the entire point.
  */
-const CLEAR_SLOT = 52;
+const CLEAR_SLOT = 40;
 
 function Step({ label, onPress, onLongPress }: {
   label: string; onPress: () => void; onLongPress: () => void;

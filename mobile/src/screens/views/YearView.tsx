@@ -50,7 +50,7 @@ export function YearView({
   );
 
   return (
-    <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: space.xxl }}>
+    <ScrollView contentContainerStyle={{ padding: space.md, paddingBottom: space.xxl + 120 }}>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
         {months.map(first => (
           <MiniMonth

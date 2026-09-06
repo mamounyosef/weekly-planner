@@ -390,6 +390,12 @@ export function splitAcrossWindows(
   const out: DaySpan[] = [];
   const inRange = (c: number) => c >= 0 && c < opts.columns;
 
+  if (start < dayStartMin && end <= dayStartMin && inRange(opts.col)) {
+    // The event is entirely before the day starts. We want it to ALSO appear
+    // in the top OutsideHours of this column.
+    out.push({ col: opts.col, startMin: start, endMin: end, isTail: false, isHead: false });
+  }
+
   if (to <= windowEnd) {
     if (inRange(col)) out.push({ col, startMin: from, endMin: to, isTail: false, isHead: false });
     return out;
@@ -399,10 +405,16 @@ export function splitAcrossWindows(
     out.push({ col, startMin: from, endMin: windowEnd, isTail: true, isHead: false });
   }
   if (inRange(col + 1)) {
-    // Clamped, so something longer than a whole day cannot draw past the foot
-    // of the column it opens.
-    const headEnd = Math.min(dayStartMin + (to - windowEnd), windowEnd);
-    out.push({ col: col + 1, startMin: dayStartMin, endMin: headEnd, isTail: false, isHead: true });
+    // The event spills over to the next day.
+    const actualEnd = to - 1440;
+    if (actualEnd > dayStartMin) {
+      // It enters the visible window on the next day.
+      const headEnd = Math.min(actualEnd, windowEnd);
+      out.push({ col: col + 1, startMin: dayStartMin, endMin: headEnd, isTail: false, isHead: true });
+    }
+    // If actualEnd <= dayStartMin, it ends before the visible window opens.
+    // We already pushed a top duplicate for it at the start of this function,
+    // so we don't need to do anything else here.
   }
   return out;
 }

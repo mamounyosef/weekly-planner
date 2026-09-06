@@ -329,6 +329,7 @@ export function buildTaskRecord(
   }
   if (input.notes !== undefined) record.notes = input.notes.trim() || undefined;
   if (input.colour !== undefined) record.color = input.colour;
+  if (input.categoryId !== undefined) record.categoryId = input.categoryId || undefined;
   // A repeat is a rule about which DAYS something falls on, so it cannot mean
   // anything without one. Dropped rather than stored and quietly ignored, which
   // is the version that has somebody wondering why their weekly task never
@@ -359,7 +360,7 @@ export function draftFromRecord(
   return {
     title: title ?? '',
     date: anchor,
-    allDay: record.allDay === true || (store === 'events' && startTime === undefined),
+    allDay: record.allDay === true || startTime === undefined,
     startMin: startTime ? fromTimeString(startTime) : null,
     endMin: endTime ? fromTimeString(endTime) : null,
     notes: str(record.notes) ?? '',

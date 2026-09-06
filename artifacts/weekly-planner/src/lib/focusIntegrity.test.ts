@@ -50,6 +50,9 @@ import {
 } from './focusTimer';
 import {
   focusSessionTruth,
+  focusCompletionFor,
+  type FocusHeartbeat,
+  type FocusTimerState as StoredTimerState,
   createManualFocusSession,
   safeFocusSessions,
   MAX_MANUAL_DAY_SECONDS,
@@ -687,6 +690,224 @@ const rec = (
   assert.ok(paused.seconds <= 3600, 'a corrupt accumulated figure cannot exceed the session either');
 
   console.log('  Eight hours of wall clock reads as one planned hour, never more');
+}
+
+// -----------------------------------------------------------------------------
+// THE HOUR THAT IS WAITING FOR YOU WHEN YOU TURN THE PC ON.
+//
+// Reconstructed from the real database, 5 September 2026. A session began at
+// 04:18:34. Windows put the machine to sleep at 05:00:33 (Kernel-Power 42) and
+// resumed it at 10:59:40. The history gained a session of a full 3600 seconds
+// ending 10:59:56, and the focus day -- which starts at 04:00 -- opened on
+// exactly two hours nobody had worked.
+//
+// Both halves of that record were invented: the length, because it had run 42
+// minutes and not 60, and the end, because a countdown does not resume where it
+// left off. It reaches zero the instant the machine wakes.
+{
+  console.log('\n--- A SESSION THE MACHINE SLEPT THROUGH ---');
+
+  const START = Date.parse('2026-09-05T01:18:34.858Z'); // 04:18:34 local
+  const SLEEP = Date.parse('2026-09-05T02:00:33.000Z'); // 05:00:33 local
+  const WAKE = Date.parse('2026-09-05T07:59:56.000Z');  // 10:59:56 local
+  const RAN = Math.floor((SLEEP - START) / 1000);       // 2518
+
+  const timer: StoredTimerState = {
+    plannedSeconds: 3600,
+    accumulatedSeconds: 0,
+    isRunning: true,
+    lastStartedAt: iso(START),
+    sessionStartedAt: iso(START),
+    lastPausedAt: null,
+    creditedSeconds: 0,
+    updatedAt: START,
+  };
+  // The last heartbeat any window managed to write before the machine went down.
+  const beat: FocusHeartbeat = {
+    at: iso(SLEEP),
+    sessionStartedAt: iso(START),
+    elapsedSeconds: RAN,
+  };
+
+  const done = focusCompletionFor(timer, beat, WAKE);
+
+  assert.equal(done.ghost, true, 'a session nobody watched for six hours is a ghost');
+  assert.equal(
+    done.durationSeconds, RAN,
+    'the session is worth the 42 minutes it ran, not the 60 it planned',
+  );
+  assert.equal(
+    done.endedAt, iso(SLEEP),
+    'it ended when the PC went to sleep, not when it woke up',
+  );
+
+  // This particular night the machine slept at 05:00, just past the 04:00 focus
+  // boundary, so both the true end and the wake-up fall on the same day and only
+  // the LENGTH was wrong. Asserted rather than assumed, because it is the reason
+  // the fix is worth 18 minutes here and a whole hour on the night below.
+  assert.equal(
+    focusDayKey(iso(WAKE), 4), focusDayKey(iso(SLEEP), 4),
+    'this sleep began after the boundary, so the day is not in dispute',
+  );
+  assert.equal(
+    focusDayKey(done.endedAt, 4), focusDayKey(iso(SLEEP), 4),
+    'it counts toward the day it really ended on',
+  );
+
+  assert.ok(
+    done.durationSeconds < 3600,
+    'the record shrinks; a sleeping PC cannot earn focus time',
+  );
+  assert.equal(3600 - done.durationSeconds, 1082, 'the invented remainder, to the second');
+  console.log('  42 minutes on the day it ran, not 60 on the day the PC woke');
+}
+
+// THE SAME BUG, ON THE NIGHT IT COSTS A WHOLE DAY.
+//
+// Above, the machine happened to go to sleep after the focus day had already
+// rolled over. Shut the PC down at half past eleven instead and the session's
+// invented end lands on the far side of the boundary: the hour is not merely
+// too long, it is filed under a day on which nothing whatsoever happened. This
+// is the shape the complaint always takes -- "I turn the PC on and the new day
+// already has hours on it".
+{
+  console.log('\n--- AND THE NIGHT IT LANDS ON THE WRONG DAY ---');
+
+  const START = Date.parse('2026-09-04T20:10:00.000Z'); // 23:10 local
+  const SLEEP = Date.parse('2026-09-04T20:31:00.000Z'); // 23:31 local
+  const WAKE = Date.parse('2026-09-05T06:05:00.000Z');  // 09:05 local, next day
+  const RAN = 1260;
+
+  const timer: StoredTimerState = {
+    plannedSeconds: 3600,
+    accumulatedSeconds: 0,
+    isRunning: true,
+    lastStartedAt: iso(START),
+    sessionStartedAt: iso(START),
+    lastPausedAt: null,
+    creditedSeconds: 0,
+    updatedAt: START,
+  };
+  const beat: FocusHeartbeat = {
+    at: iso(SLEEP), sessionStartedAt: iso(START), elapsedSeconds: RAN,
+  };
+
+  const done = focusCompletionFor(timer, beat, WAKE);
+  assert.equal(done.durationSeconds, RAN, 'twenty-one minutes, which is what it ran');
+
+  const wrongDay = focusDayKey(iso(WAKE), 4);
+  const rightDay = focusDayKey(done.endedAt, 4);
+  assert.notEqual(wrongDay, rightDay, 'the wake-up is on the far side of the boundary');
+  assert.equal(rightDay, focusDayKey(iso(SLEEP), 4), 'the work belongs to the night it was done');
+  assert.equal(wrongDay, '2026-09-05', 'and the day it used to land on is the morning after');
+  console.log('  Last night keeps its work; this morning starts empty');
+}
+
+{
+  console.log('\n--- A SESSION THAT REALLY DID RUN OUT ---');
+
+  const START = Date.parse('2026-09-05T09:00:00.000Z');
+  const timer: StoredTimerState = {
+    plannedSeconds: 3600,
+    accumulatedSeconds: 0,
+    isRunning: true,
+    lastStartedAt: iso(START),
+    sessionStartedAt: iso(START),
+    lastPausedAt: null,
+    creditedSeconds: 0,
+    updatedAt: START + 3595000,
+  };
+  const beat: FocusHeartbeat = {
+    at: iso(START + 3595000),
+    sessionStartedAt: iso(START),
+    elapsedSeconds: 3595,
+  };
+
+  // Noticed a second late, as a one-second tick always is.
+  const done = focusCompletionFor(timer, beat, START + 3601000);
+  assert.equal(done.ghost, false, 'a session seen five seconds ago is alive');
+  assert.equal(done.durationSeconds, 3600, 'a full hour is worth a full hour');
+  assert.equal(
+    done.endedAt, iso(START + 3600000),
+    'it ended when the clock ran out, not when the tick noticed',
+  );
+
+  // A BACKGROUND WINDOW notices much later: a hidden tab is throttled to about
+  // one timer a minute. That lateness must not reach the record either.
+  const late = focusCompletionFor(
+    timer,
+    { ...beat, at: iso(START + 3640000), elapsedSeconds: 3640 },
+    START + 3650000,
+  );
+  assert.equal(late.ghost, false, 'fifty seconds is well inside the stale window');
+  assert.equal(
+    late.endedAt, iso(START + 3600000),
+    'still ended on the hour, however late the tick was',
+  );
+  console.log('  Ends when the clock ran out, not when anything noticed');
+}
+
+{
+  console.log('\n--- THE AWKWARD ONES ---');
+
+  const START = Date.parse('2026-09-05T09:00:00.000Z');
+  const base: StoredTimerState = {
+    plannedSeconds: 3600,
+    accumulatedSeconds: 0,
+    isRunning: true,
+    lastStartedAt: iso(START),
+    sessionStartedAt: iso(START),
+    lastPausedAt: null,
+    creditedSeconds: 0,
+    updatedAt: START,
+  };
+
+  // A session RESUMED after a pause. The anchor is the resume, and only the
+  // time still owed decides when it finishes. Reading the planned length off
+  // the anchor instead would end a resumed session a full hour after it was
+  // picked back up.
+  const resumed = focusCompletionFor(
+    { ...base, accumulatedSeconds: 3000, updatedAt: START + 590000 },
+    { at: iso(START + 590000), sessionStartedAt: iso(START), elapsedSeconds: 3590 },
+    START + 601000,
+  );
+  assert.equal(
+    resumed.endedAt, iso(START + 600000),
+    'a resumed session finishes when the REMAINING time runs out',
+  );
+  assert.equal(resumed.durationSeconds, 3600, 'and is still worth its planned length');
+
+  // NO WITNESS AT ALL. An old timer file with no heartbeat and no updatedAt has
+  // nothing to prove anyone watched it, so the clock is all there is -- but the
+  // completion instant still caps where the record lands.
+  const witless = focusCompletionFor(
+    { ...base, updatedAt: undefined },
+    null,
+    START + 40000000,
+  );
+  assert.equal(witless.durationSeconds, 3600, 'never more than the planned length');
+  assert.equal(
+    witless.endedAt, iso(START + 3600000),
+    'and never stamped eleven hours after it could possibly have finished',
+  );
+
+  // A CLOCK THAT WENT BACKWARDS must not produce a session ending before it began.
+  const rewound = focusCompletionFor(base, null, START - 5000);
+  assert.ok(
+    Date.parse(rewound.endedAt) >= START,
+    'a session cannot end before it started',
+  );
+
+  // A ghost worth nothing. The caller has to be able to see that and skip the
+  // row, rather than write a zero-second session into the history.
+  const stillborn = focusCompletionFor(
+    base,
+    { at: iso(START), sessionStartedAt: iso(START), elapsedSeconds: 0 },
+    START + 10000000,
+  );
+  assert.equal(stillborn.ghost, true, 'seen once, at the start, and never again');
+  assert.equal(stillborn.durationSeconds, 0, 'and worth nothing at all');
+  console.log('  Resumed, witnessless, rewound and stillborn all behave');
 }
 
 console.log('\nALL PASS (focus integrity: one session one row, one day one total)');
