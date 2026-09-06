@@ -8861,6 +8861,14 @@ export default function DailyPlanner() {
                       }
                     });
 
+                    if (prayer.style !== 'row') {
+                      columnPrayers(day).forEach(p => {
+                        const norm = p.norm;
+                        if (norm < dayStartMin) topOutsideItems.push({ ...p, isPrayer: true, startMin: norm });
+                        else if (norm >= dayEndMin) bottomOutsideItems.push({ ...p, isPrayer: true, startMin: norm });
+                      });
+                    }
+
                     topOutsideItems.sort((a, b) => a.startMin - b.startMin);
                     bottomOutsideItems.sort((a, b) => a.startMin - b.startMin);
 
@@ -9211,6 +9219,21 @@ export default function DailyPlanner() {
                                   <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
                                   <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
                                   <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            } else if (item.isPrayer) {
+                              const done = isPrayerDone(item.dateStr, item.key);
+                              return (
+                                <button key={item.id} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
+                                  <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                    {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                  </span>
+                                  <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
+                                    {item.label}
+                                  </span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                    {formatTimeLabel(item.minutes, timeFormat)}
+                                  </span>
                                 </button>
                               );
                             } else {
@@ -9992,6 +10015,21 @@ export default function DailyPlanner() {
                                   <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
                                   <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
                                   <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            } else if (item.isPrayer) {
+                              const done = isPrayerDone(item.dateStr, item.key);
+                              return (
+                                <button key={item.id} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
+                                  <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                    {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                  </span>
+                                  <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
+                                    {item.label}
+                                  </span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                    {formatTimeLabel(item.minutes, timeFormat)}
+                                  </span>
                                 </button>
                               );
                             } else {
@@ -14973,5 +15011,8 @@ function PrayerNextBadge({ minutes, color }: { minutes: number; color: string })
     </span>
   );
 }
+
+
+
 
 
