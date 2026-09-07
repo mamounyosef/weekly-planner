@@ -9217,9 +9217,58 @@ export default function DailyPlanner() {
                           duration of a drag/resize, because containment creates a
                           stacking context and the drag time tooltip is allowed to
                           spill over the neighbouring column. */}
-                      {/* Top outside-hours band */}
+                      
+
+                      <div
+                        className="relative"
+                        style={{
+                          height: totalH, overflow: 'hidden',
+                          contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style',
+                          cursor: isDraggingAnything ? 'grabbing' : 'crosshair',
+                          ...columnGridBackground,
+                        }}
+                        onClick={(e) => handleColClick(e, colIdx)}
+                        onPointerDown={(e) => {
+                          if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
+                          if (e.button !== 0) return;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const y = (e.clientY - rect.top) / gridScale();
+                          // Touch: a tap on empty grid must stay a tap (the day
+                          // has to be scrollable and nothing should appear by
+                          // accident). Holding still for a moment is what asks
+                          // for a new block, and dragging from there sets its
+                          // length — the same drag-to-create the mouse has.
+                          if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+                            const colY = y;
+                            armTouchHold(e, 'create', () => {
+                              setSelectedIds(new Set());
+                              createDragRef.current = { col: colIdx, startY: colY, moved: false };
+                              const s = clamp(yToMin(Math.max(0, colY), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
+                              setCreateDisp({ startMin: s, endMin: Math.min(s + DEFAULT_EVENT_MIN, dayEndMin) });
+                            });
+                            return;
+                          }
+                          if (!e.ctrlKey && !e.metaKey) {
+                            setSelectedIds(new Set());
+                          }
+                          if (e.ctrlKey || e.metaKey) {
+                            const gr = daysGridRef.current?.getBoundingClientRect();
+                            if (gr) {
+                              const k = gridScale();
+                              const sx = (e.clientX - gr.left) / k;
+                              const sy = (e.clientY - gr.top) / k - topBandsHeight;
+                              selDragRef.current = { startX: sx, startY: sy };
+                              setSelRect({ left: sx, top: sy, width: 0, height: 0 });
+                            }
+                          } else {
+                            // Plain left-drag on empty space → create a new event spanning the drag
+                            createDragRef.current = { col: colIdx, startY: y, moved: false };
+                          }
+                        }}
+                      >
+{/* Top outside-hours band */}
                       {topOutsideItems.length > 0 && (
-                        <div className="flex-shrink-0 border-b border-border/50 bg-background/30 flex flex-col items-stretch px-1 py-1 gap-[2px]">
+                        <div className="absolute top-0 left-0 right-0 z-[60] border-b border-border/50 bg-background/95 backdrop-blur flex flex-col items-stretch px-1 py-1 gap-[2px]">
                           {topOutsideItems.map(item => {
                             const isTask = item.isTask;
                             if (isTask) {
@@ -9271,54 +9320,59 @@ export default function DailyPlanner() {
                           </div>
                         </div>
                       )}
-
-                      <div
-                        className="relative"
-                        style={{
-                          height: totalH, overflow: 'hidden',
-                          contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style',
-                          cursor: isDraggingAnything ? 'grabbing' : 'crosshair',
-                          ...columnGridBackground,
-                        }}
-                        onClick={(e) => handleColClick(e, colIdx)}
-                        onPointerDown={(e) => {
-                          if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
-                          if (e.button !== 0) return;
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          const y = (e.clientY - rect.top) / gridScale();
-                          // Touch: a tap on empty grid must stay a tap (the day
-                          // has to be scrollable and nothing should appear by
-                          // accident). Holding still for a moment is what asks
-                          // for a new block, and dragging from there sets its
-                          // length — the same drag-to-create the mouse has.
-                          if (e.pointerType === 'touch' || e.pointerType === 'pen') {
-                            const colY = y;
-                            armTouchHold(e, 'create', () => {
-                              setSelectedIds(new Set());
-                              createDragRef.current = { col: colIdx, startY: colY, moved: false };
-                              const s = clamp(yToMin(Math.max(0, colY), interval, dayStartH), dayStartMin, dayEndMin - DEFAULT_EVENT_MIN);
-                              setCreateDisp({ startMin: s, endMin: Math.min(s + DEFAULT_EVENT_MIN, dayEndMin) });
-                            });
-                            return;
-                          }
-                          if (!e.ctrlKey && !e.metaKey) {
-                            setSelectedIds(new Set());
-                          }
-                          if (e.ctrlKey || e.metaKey) {
-                            const gr = daysGridRef.current?.getBoundingClientRect();
-                            if (gr) {
-                              const k = gridScale();
-                              const sx = (e.clientX - gr.left) / k;
-                              const sy = (e.clientY - gr.top) / k - topBandsHeight;
-                              selDragRef.current = { startX: sx, startY: sy };
-                              setSelRect({ left: sx, top: sy, width: 0, height: 0 });
+{/* Bottom outside-hours band */}
+                      {bottomOutsideItems.length > 0 && (
+                        <div className="absolute bottom-0 left-0 right-0 z-[60] border-t border-border/50 bg-background/95 backdrop-blur flex flex-col items-stretch px-1 py-1 gap-[2px] relative z-20">
+                          <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
+                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
+                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
+                            <div className="w-[3px] h-[3px] rounded-full bg-border" />
+                          </div>
+                          {bottomOutsideItems.map(item => {
+                            const isTask = item.isTask;
+                            if (isTask) {
+                              const t = item.task;
+                              const occ = t.occDate ?? null;
+                              const done = isTaskDone(t, occ);
+                              const c = taskChipColors(t.color || undefined);
+                              return (
+                                <button key={item.key} data-task="1" onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}>
+                                  <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
+                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
+                            } else if (item.isPrayer) {
+                              const done = isPrayerDone(item.dateStr, item.key);
+                              return (
+                                <button key={item.id} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
+                                  <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                    {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                  </span>
+                                  <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
+                                    {item.label}
+                                  </span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                    {formatTimeLabel(item.minutes, timeFormat)}
+                                  </span>
+                                </button>
+                              );
+                            } else {
+                              const ev = item.ev;
+                              const c = chipColors(ev);
+                              const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
+                              const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                              const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+                              return (
+                                <button key={item.key} data-event="1" onPointerDown={(e) => { e.stopPropagation(); handleEventMouseDown(e as unknown as React.MouseEvent, ev); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: isCompleted ? 0.5 : 1 }}>
+                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}>{ev.content || 'Untitled'}</span>
+                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
+                                </button>
+                              );
                             }
-                          } else {
-                            // Plain left-drag on empty space → create a new event spanning the drag
-                            createDragRef.current = { col: colIdx, startY: y, moved: false };
-                          }
-                        }}
-                      >
+                          })}
+                        </div>
+                      )}
                         {/* Live time indicator */}
                         {isNowCol && nowInView && (() => {
                           const lineTop = minToY(nowMin, interval, dayStartH);
@@ -10008,59 +10062,7 @@ export default function DailyPlanner() {
                           );
                         })}
                       </div>
-                      {/* Bottom outside-hours band */}
-                      {bottomOutsideItems.length > 0 && (
-                        <div className="flex-shrink-0 border-t border-border/50 bg-background/30 flex flex-col items-stretch px-1 py-1 gap-[2px] relative z-20">
-                          <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
-                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
-                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
-                            <div className="w-[3px] h-[3px] rounded-full bg-border" />
-                          </div>
-                          {bottomOutsideItems.map(item => {
-                            const isTask = item.isTask;
-                            if (isTask) {
-                              const t = item.task;
-                              const occ = t.occDate ?? null;
-                              const done = isTaskDone(t, occ);
-                              const c = taskChipColors(t.color || undefined);
-                              return (
-                                <button key={item.key} data-task="1" onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}>
-                                  <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
-                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
-                                </button>
-                              );
-                            } else if (item.isPrayer) {
-                              const done = isPrayerDone(item.dateStr, item.key);
-                              return (
-                                <button key={item.id} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
-                                  <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
-                                    {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
-                                  </span>
-                                  <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
-                                    {item.label}
-                                  </span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
-                                    {formatTimeLabel(item.minutes, timeFormat)}
-                                  </span>
-                                </button>
-                              );
-                            } else {
-                              const ev = item.ev;
-                              const c = chipColors(ev);
-                              const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
-                              const dateStr = format(startDayDate, 'yyyy-MM-dd');
-                              const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
-                              return (
-                                <button key={item.key} data-event="1" onPointerDown={(e) => { e.stopPropagation(); handleEventMouseDown(e as unknown as React.MouseEvent, ev); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: isCompleted ? 0.5 : 1 }}>
-                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}>{ev.content || 'Untitled'}</span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
-                                </button>
-                              );
-                            }
-                          })}
-                        </div>
-                      )}
+                      
                     </div>
                   );
                 })}
