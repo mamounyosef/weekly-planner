@@ -53,6 +53,83 @@ export const dark: Palette = {
   scrim: 'rgba(0, 0, 0, 0.55)',
 };
 
+
+export const darkOcean: Palette = {
+  bg: '#0A1118',
+  surface: '#121D28',
+  surfaceAlt: '#1B2A3A',
+  line: '#273B4D',
+  ink: '#E2E8F0',
+  inkSoft: '#94A3B8',
+  inkFaint: '#64748B',
+  accent: '#38BDF8',
+  accentSoft: 'rgba(56, 189, 248, 0.14)',
+  accentInk: '#0A1118',
+  ok: '#34D399',
+  warn: '#FBBF24',
+  warnSoft: 'rgba(251, 191, 36, 0.14)',
+  danger: '#F87171',
+  shadow: '#000000',
+  scrim: 'rgba(0, 0, 0, 0.55)',
+};
+
+export const darkForest: Palette = {
+  bg: '#0D1410',
+  surface: '#16221A',
+  surfaceAlt: '#1E2D23',
+  line: '#2B4032',
+  ink: '#E8F5E9',
+  inkSoft: '#A5D6A7',
+  inkFaint: '#81C784',
+  accent: '#6EE7B7',
+  accentSoft: 'rgba(110, 231, 183, 0.14)',
+  accentInk: '#0D1410',
+  ok: '#4ADE80',
+  warn: '#FCD34D',
+  warnSoft: 'rgba(252, 211, 77, 0.14)',
+  danger: '#FCA5A5',
+  shadow: '#000000',
+  scrim: 'rgba(0, 0, 0, 0.55)',
+};
+
+export const darkPlum: Palette = {
+  bg: '#140D14',
+  surface: '#201620',
+  surfaceAlt: '#2D1D2D',
+  line: '#402B40',
+  ink: '#F5E8F5',
+  inkSoft: '#D6A5D6',
+  inkFaint: '#C781C7',
+  accent: '#F472B6',
+  accentSoft: 'rgba(244, 114, 182, 0.14)',
+  accentInk: '#140D14',
+  ok: '#4ADE80',
+  warn: '#FCD34D',
+  warnSoft: 'rgba(252, 211, 77, 0.14)',
+  danger: '#FB7185',
+  shadow: '#000000',
+  scrim: 'rgba(0, 0, 0, 0.55)',
+};
+
+export const darkCoffee: Palette = {
+  bg: '#181310',
+  surface: '#261F1B',
+  surfaceAlt: '#362C27',
+  line: '#4A3E38',
+  ink: '#F5EFE8',
+  inkSoft: '#D6C7BB',
+  inkFaint: '#BAA89A',
+  accent: '#FBBF24',
+  accentSoft: 'rgba(251, 191, 36, 0.14)',
+  accentInk: '#181310',
+  ok: '#34D399',
+  warn: '#F97316',
+  warnSoft: 'rgba(249, 115, 22, 0.14)',
+  danger: '#EF4444',
+  shadow: '#000000',
+  scrim: 'rgba(0, 0, 0, 0.55)',
+};
+
 export const light: Palette = {
   bg: '#F5F5FA',
   surface: '#FFFFFF',
@@ -73,6 +150,83 @@ export const light: Palette = {
 };
 
 /** Spacing scale. Everything is a multiple of 4 so rhythm holds on any screen. */
+
+export const lightDawn: Palette = {
+  bg: '#FCF9F5',
+  surface: '#FFFFFF',
+  surfaceAlt: '#F5EFE6',
+  line: '#E8DED0',
+  ink: '#2A1F18',
+  inkSoft: '#7A6B60',
+  inkFaint: '#A09388',
+  accent: '#EA580C',
+  accentSoft: 'rgba(234, 88, 12, 0.10)',
+  accentInk: '#FFFFFF',
+  ok: '#16A34A',
+  warn: '#D97706',
+  warnSoft: 'rgba(217, 119, 6, 0.10)',
+  danger: '#DC2626',
+  shadow: '#432E22',
+  scrim: 'rgba(42, 31, 24, 0.45)',
+};
+
+export const lightMint: Palette = {
+  bg: '#F5FAF7',
+  surface: '#FFFFFF',
+  surfaceAlt: '#EAF5F0',
+  line: '#D2E8DD',
+  ink: '#15241D',
+  inkSoft: '#5A7A6B',
+  inkFaint: '#87A396',
+  accent: '#059669',
+  accentSoft: 'rgba(5, 150, 105, 0.10)',
+  accentInk: '#FFFFFF',
+  ok: '#2563EB',
+  warn: '#D97706',
+  warnSoft: 'rgba(217, 119, 6, 0.10)',
+  danger: '#DC2626',
+  shadow: '#20362B',
+  scrim: 'rgba(21, 36, 29, 0.45)',
+};
+
+export const lightRose: Palette = {
+  bg: '#FFF5F7',
+  surface: '#FFFFFF',
+  surfaceAlt: '#FDE4E9',
+  line: '#FBCFE0',
+  ink: '#2B1218',
+  inkSoft: '#854E5C',
+  inkFaint: '#B07D8B',
+  accent: '#E11D48',
+  accentSoft: 'rgba(225, 29, 72, 0.10)',
+  accentInk: '#FFFFFF',
+  ok: '#16A34A',
+  warn: '#D97706',
+  warnSoft: 'rgba(217, 119, 6, 0.10)',
+  danger: '#EF4444',
+  shadow: '#401B24',
+  scrim: 'rgba(43, 18, 24, 0.45)',
+};
+
+export const lightOcean: Palette = {
+  bg: '#F0F9FF',
+  surface: '#FFFFFF',
+  surfaceAlt: '#E0F2FE',
+  line: '#BAE6FD',
+  ink: '#0C2331',
+  inkSoft: '#38637E',
+  inkFaint: '#6A92AB',
+  accent: '#0284C7',
+  accentSoft: 'rgba(2, 132, 199, 0.10)',
+  accentInk: '#FFFFFF',
+  ok: '#16A34A',
+  warn: '#D97706',
+  warnSoft: 'rgba(217, 119, 6, 0.10)',
+  danger: '#EF4444',
+  shadow: '#113348',
+  scrim: 'rgba(12, 35, 49, 0.45)',
+};
+
 export const space = {
   xs: 4,
   sm: 8,
@@ -231,9 +385,19 @@ export function isThemeMode(value: unknown): value is ThemeMode {
 }
 
 /** `scheme` is whatever the OS reports, which is not always one of the two. */
-export function resolvePalette(mode: ThemeMode, scheme: string | null | undefined): Palette {
-  if (mode === 'light') return light;
-  if (mode === 'dark') return dark;
-  // Undecided reads as dark, matching the value this app has always defaulted to.
-  return scheme === 'light' ? light : dark;
+export function resolvePalette(mode: ThemeMode, scheme: string | null | undefined, lightVariant: string = 'default', darkVariant: string = 'default'): Palette {
+  const isDark = mode === 'dark' || (mode === 'system' && scheme !== 'light');
+  if (isDark) {
+    if (darkVariant === 'ocean') return darkOcean;
+    if (darkVariant === 'forest') return darkForest;
+    if (darkVariant === 'plum') return darkPlum;
+    if (darkVariant === 'coffee') return darkCoffee;
+    return dark;
+  } else {
+    if (lightVariant === 'dawn') return lightDawn;
+    if (lightVariant === 'ocean') return lightOcean;
+    if (lightVariant === 'mint') return lightMint;
+    if (lightVariant === 'rose') return lightRose;
+    return light;
+  }
 }

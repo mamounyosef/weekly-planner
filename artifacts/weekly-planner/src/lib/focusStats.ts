@@ -238,6 +238,52 @@ export function dedupeFocusHistory<T extends FocusSessionRecord>(
 }
 
 /**
+ * Merge a new session into the most recent history session if they are 1 minute or less apart.
+ * 
+ * When a session hits zero and auto-continues, or is manually stopped and quickly restarted,
+ * logging them as two separate sessions makes the second one look like an under-achieved fragment.
+ * This checks if the new session's start is within 60 seconds of the most recent session's end,
+ * and if so, returns a single merged session using the previous session's id.
+ */
+export function mergeContiguousFocusSession<T extends FocusSessionRecord>(
+  history: readonly T[],
+  newSession: T
+): { merged: boolean; session: T } {
+  if (!history || history.length === 0) return { merged: false, session: newSession };
+  
+  let mostRecent: T | null = null;
+  let maxStart = -Infinity;
+  for (const s of history) {
+    if (s.id.startsWith('manual-')) continue;
+    const start = Date.parse(s.startedAt);
+    if (Number.isFinite(start) && start > maxStart) {
+      maxStart = start;
+      mostRecent = s;
+    }
+  }
+  
+  if (!mostRecent || !mostRecent.endedAt) return { merged: false, session: newSession };
+  
+  const lastEnd = Date.parse(mostRecent.endedAt);
+  const thisStart = Date.parse(newSession.startedAt);
+  
+  if (Number.isFinite(lastEnd) && Number.isFinite(thisStart)) {
+    const diff = (thisStart - lastEnd) / 1000;
+    if (Math.abs(diff) <= 60) {
+      const mergedSession = {
+        ...mostRecent,
+        endedAt: newSession.endedAt,
+        durationSeconds: mostRecent.durationSeconds + newSession.durationSeconds,
+        plannedSeconds: (mostRecent.plannedSeconds || 0) + (newSession.plannedSeconds || 0)
+      };
+      return { merged: true, session: mergedSession };
+    }
+  }
+  
+  return { merged: false, session: newSession };
+}
+
+/**
  * What collapsing the history would change, without changing it.
  *
  * For the repair tool and for the diagnostics screen: a number nobody can check

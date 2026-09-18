@@ -66,7 +66,7 @@ const LISTS: TaskList[] = [
   { id: 'work', name: 'Work', color: '#3b82f6' },
 ];
 
-const SECTIONS: SectionKey[] = ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'General', 'Done'];
+const SECTIONS: SectionKey[] = ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date', 'Done'];
 
 const group = (
   tasks: TaskData,
@@ -121,7 +121,7 @@ function main() {
     assert.deepEqual(out.Today.map(n => n.row.occId), ['today']);
     assert.deepEqual(out.Tomorrow.map(n => n.row.occId), ['tomorrow']);
     assert.deepEqual(out.Upcoming.map(n => n.row.occId), ['soon']);
-    assert.deepEqual(out.General.map(n => n.row.occId), ['undated']);
+    assert.deepEqual(out['No Date'].map(n => n.row.occId), ['undated']);
     assert.deepEqual(out.Done.map(n => n.row.occId), ['finished']);
 
     // No task is in two places, and none has gone missing.

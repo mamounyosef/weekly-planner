@@ -188,6 +188,13 @@ export interface HardwareInput {
    */
   kind: 'presence' | 'button_a' | 'button_b' | 'manual_stop' | 'tick';
   present?: boolean;
+  /**
+   * Tick only: the board has gone quiet, so nothing currently known about the
+   * desk is evidence. A silent sensor is not an absent person, so the
+   * destructive, time-driven half of the machine (terminating an abandoned
+   * session, chaining a new one) is held rather than run on a stale verdict.
+   */
+  sensorSilent?: boolean;
 }
 
 export interface ReducerResult {
@@ -242,6 +249,60 @@ export function presenceResync(
   if (at <= 0 || now - at > silentMs) return null;
   if (state.present === level.present) return null;
   return { kind: 'presence', present: level.present };
+}
+
+/**
+ * A blackout shorter than this is a hiccup -- a wifi retry, a dropped batch --
+ * and the desk carries on as if nothing happened. Anything longer is the board
+ * having actually gone away and come back: a reboot, a re-plug, or the PC
+ * having been off while the board sat there reporting to nobody.
+ */
+export const SENSOR_RECONNECT_GAP_MS = 30_000;
+
+/**
+ * Put the controller back to "you are not here yet" after the sensor returns.
+ *
+ * WHY THIS EXISTS. The two halves of this system come up independently: the
+ * board is mains-powered and is usually already awake when the PC finishes
+ * booting, and it can equally reboot on its own while the PC stays up. In
+ * either case, whatever the controller believed before the blackout is not an
+ * observation any more -- and the dangerous version of that is believing you
+ * are already present, because presence only ever acts on an EDGE. Sitting
+ * still after a reconnect produces no edge, so a controller that came back
+ * already convinced you were there would arm nothing, ever, and the LCD would
+ * sit on "Ready" for the rest of the day.
+ *
+ * Forgetting presence makes the first verdict after the reconnect an arrival,
+ * which is exactly what it is: it arms the normal countdown, cancellable by
+ * getting up, the same as walking to the desk.
+ *
+ * A session that outlived the blackout is kept, not killed. If it is sitting
+ * paused, `awaySince` is re-anchored to now so the arrival reads as a return
+ * and resumes it -- and, just as importantly, so the blackout itself does not
+ * count towards the terminate timeout. A silent sensor is not evidence that
+ * you left.
+ */
+export function sensorReturnReset(
+  state: HardwareControllerState,
+  session: SessionSnapshot,
+  now: number,
+): HardwareControllerState {
+  const next: HardwareControllerState = {
+    ...state,
+    present: false,
+    armingUntil: null,
+    awaySince: null,
+    // Arriving is a fresh intent to work, and this is an arrival. A stop you
+    // made before the board disappeared does not still apply on the far side
+    // of it, and leaving it set is what kept every later session from arming.
+    stoppedByHand: false,
+    pausedByAway: false,
+  };
+  if (session.hasSession && !session.isRunning) {
+    next.awaySince = now;
+    next.pausedByAway = true;
+  }
+  return next;
 }
 
 /**
@@ -419,6 +480,9 @@ export function reduceHardware(
     next.manualSession = false;
     if (settings.sensorEnabled
         && settings.autoRestartEnabled
+        // A verdict from a board that has gone quiet is not a reason to start
+        // anything: it says where you were when it stopped talking.
+        && !input.sensorSilent
         && state.present
         && !state.stoppedByHand
         && !(wasManual && !settings.manualFollowsSensor)
@@ -467,6 +531,11 @@ export function reduceHardware(
       // leaving it set was enough to have the desk resume a session the user
       // had paused by hand, several steps later, on the next return.
       next.pausedByAway = false;
+    } else if (input.sensorSilent) {
+      // The board went quiet mid-absence. Held rather than run: silence is not
+      // a person, and terminating here would kill a session over a wifi drop.
+      // The clock is re-anchored when the sensor comes back (sensorReturnReset),
+      // so the blackout never counts towards the timeout.
     } else if (now - state.awaySince >= settings.awayTerminateSeconds * 1000) {
       next.awaySince = null;
       next.pausedByAway = false;
@@ -677,6 +746,12 @@ export function useHardwareController(opts: HardwareControllerOptions): {
   const syncedRef = useRef(false);
   const lastStateRef = useRef<string | null>(null);
   const lastButtonRef = useRef<{ type: string; at: number } | null>(null);
+  // When the board was last known to be talking. Zero means "not since this
+  // window opened", which on a PC that has just booted is the same situation as
+  // a board that has just come back: nothing believed about the desk predates
+  // the sensor, so the first verdict is treated as an arrival.
+  const sensorLiveRef = useRef(false);
+  const lastSensorLiveAtRef = useRef(0);
 
   // Everything the poll loop needs, kept in refs so the interval does not have
   // to be torn down and rebuilt on every render.
@@ -811,6 +886,38 @@ export function useHardwareController(opts: HardwareControllerOptions): {
         // not freeze mid-flight.
       }
 
+      // --- did the board just come back? ---
+      // The PC and the desk boot independently and either can outlive the
+      // other, so "both are up and I have just sat down" has to be reachable
+      // from a controller that has been sitting on a belief formed before the
+      // gap. Anything believed across a long silence is discarded rather than
+      // trusted; see sensorReturnReset.
+      const sensorAt = level && typeof level.at === 'number' && Number.isFinite(level.at) ? level.at : 0;
+      const sensorLive = sensorAt > 0 && now - sensorAt <= SENSOR_SILENT_MS;
+      // Held until the timer has actually loaded: before that `hasSession` is a
+      // guess, and the reset below decides from it whether a surviving session
+      // should be resumed. Nothing is recorded either, so the reconnect is
+      // still pending on the next cycle rather than quietly consumed.
+      const sensorReady = sensorLive && o.session.ready !== false;
+      const wasSensorLive = sensorLiveRef.current;
+      const gapMs = lastSensorLiveAtRef.current > 0 ? now - lastSensorLiveAtRef.current : Infinity;
+      if (sensorReady || !sensorLive) sensorLiveRef.current = sensorReady;
+      if (sensorReady) lastSensorLiveAtRef.current = now;
+      if (sensorReady && !wasSensorLive && gapMs >= SENSOR_RECONNECT_GAP_MS && isOwnerRef.current) {
+        stateRef.current = sensorReturnReset(stateRef.current, o.session, now);
+        void fetch('/api/hardware/log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            input: 'sensor_return',
+            gapMs: Number.isFinite(gapMs) ? Math.round(gapMs) : null,
+            hadSession: o.session.hasSession,
+            wasRunning: o.session.isRunning,
+            actions: [],
+          }),
+        }).catch(() => {});
+      }
+
       // The sensor's standing verdict, used to correct a controller that
       // missed an edge. Appended rather than substituted: a real edge in this
       // batch is the better evidence and is processed first, after which the
@@ -830,7 +937,7 @@ export function useHardwareController(opts: HardwareControllerOptions): {
       // immediately after a pause the session still looks like it is running --
       // so it waits for the next cycle, by which point the state has settled.
       const hadEvents = inputs.length > 0;
-      if (!hadEvents) inputs.push({ kind: 'tick' });
+      if (!hadEvents) inputs.push({ kind: 'tick', sensorSilent: !sensorLive });
 
       for (const input of inputs) {
         const before = stateRef.current;

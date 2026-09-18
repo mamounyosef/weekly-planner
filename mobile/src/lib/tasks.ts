@@ -465,7 +465,7 @@ export const TASK_FILTER_LABELS: Record<TaskFilter, string> = {
   today: 'Today',
   overdue: 'Overdue',
   upcoming: 'Upcoming',
-  general: 'General',
+  general: 'No Date',
   completed: 'Completed',
 };
 

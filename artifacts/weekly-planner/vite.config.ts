@@ -959,7 +959,7 @@ export default defineConfig({
                 const abs = path.resolve(server.config.root, fileOnly);
                 if (fileOnly && !abs.startsWith('\\\\') && (await fs.stat(abs).then(() => true).catch(() => false))) {
                   const editor = process.env.VISUAL || process.env.EDITOR || 'code';
-                  spawn(editor, [abs], { stdio: 'ignore', detached: true, shell: true }).unref();
+                  spawn(editor, [abs], { stdio: 'ignore', detached: true, shell: true, windowsHide: true }).unref();
                 }
               } catch (err) {
                 console.warn('[open-in-editor] ignored:', (err as Error)?.message);
@@ -2708,7 +2708,6 @@ export default defineConfig({
             if (!auth) return;
 
             const script = path.resolve(rootDir, 'tools', 'restart-planner.pyw');
-            const pythonw = path.resolve(rootDir, '.venv-launcher', 'Scripts', 'pythonw.exe');
 
             try {
               await fsp.access(script);
@@ -2720,15 +2719,7 @@ export default defineConfig({
 
             try {
               const { spawn } = await import('child_process');
-              let usable = pythonw;
-              try {
-                await fsp.access(pythonw);
-              } catch {
-                // Fall back to whatever pythonw is on PATH. Never `python`:
-                // that one opens a console window, which is the single thing
-                // this whole launcher chain exists to avoid.
-                usable = 'pythonw.exe';
-              }
+              const usable = 'C:\\ProgramData\\anaconda3\\python.exe';
 
               // Detached and unref'd on purpose. The child has to outlive this
               // process — it is about to kill it.
@@ -3359,14 +3350,53 @@ ${body}
             req.on('data', chunk => { body += chunk; });
             req.on('end', async () => {
               try {
+                res.setHeader('Content-Type', 'application/json');
+                const parsed = body ? JSON.parse(body) : null;
+
+                // A SINGLE TOGGLE — one prayer, one day, added or removed. This
+                // is the shape the app now sends, and it is the only one that is
+                // safe: the whole-map save it replaces was written from a state
+                // up to twenty seconds old and shared by two windows, so it
+                // silently reverted whatever the phone or the other window had
+                // ticked in between. Applied per element inside the sync queue,
+                // every click is one independent fact and the union survives.
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                    && typeof parsed.date === 'string'
+                    && typeof parsed.key === 'string'
+                    && typeof parsed.present === 'boolean') {
+                  // The service re-validates (it is the authority on what the
+                  // shared record may hold); a rejection here is reported
+                  // rather than silently swallowed.
+                  const outcome = await syncService.togglePrayerDone(
+                    auth.user.username,
+                    syncPathsOf(userPaths),
+                    { date: parsed.date, key: parsed.key, present: parsed.present },
+                  );
+                  if (outcome.reason) {
+                    res.statusCode = 400;
+                    res.end(JSON.stringify({ error: outcome.reason }));
+                    return;
+                  }
+                  res.end(JSON.stringify({ success: true, changed: outcome.changed }));
+                  return;
+                }
+
+                // A WHOLE MAP from an older window that has not picked up this
+                // endpoint's new shape yet. Written as-is for compatibility and
+                // then folded into the sync log explicitly, so the phone hears
+                // about it now rather than at its next pull.
                 const force = new URL(req.url || '', 'http://localhost').searchParams.get('force') === '1';
                 const result = await safeWriteJsonFile({ filePath: userPaths.donePath, backupDir: userPaths.backupDir, baseName: 'prayer-done', body, kind: 'object', force });
-                res.setHeader('Content-Type', 'application/json');
                 if (!result.ok) {
                   res.statusCode = result.status;
                   res.end(JSON.stringify({ error: result.error }));
                   return;
                 }
+                void syncService.ingestFile(
+                  auth.user.username,
+                  syncPathsOf(userPaths),
+                  'prayerDone',
+                ).catch(err => console.error('[prayer-done] ingest failed:', err));
                 res.end(JSON.stringify({ success: true }));
               } catch {
                 res.statusCode = 500;
@@ -4414,25 +4444,9 @@ ${body}
             // The repo's own interpreter comes first. Anaconda's pythonw.exe was
             // quarantined by antivirus on this machine, and bare 'pythonw' is not
             // on PATH — see below for why that mattered so much.
-            const candidates = [
-              path.resolve(import.meta.dirname, '..', '..', '.venv-launcher', 'Scripts', 'pythonw.exe'),
-              'C:\\ProgramData\\anaconda3\\pythonw.exe',
-            ];
-            let spawnCmd: string | null = null;
-            for (const candidate of candidates) {
-              try {
-                await fs.access(candidate);
-                spawnCmd = candidate;
-                break;
-              } catch (_) { /* try the next one */ }
-            }
-
-            if (!spawnCmd) {
-              res.statusCode = 500;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ error: 'No pythonw.exe found to launch the widget' }));
-              return;
-            }
+            // The venv's pythonw.exe is a proxy that inadvertently spawns python.exe
+            // without suppressing the console. We must use the base python.exe directly.
+            const spawnCmd = 'C:\\ProgramData\\anaconda3\\python.exe';
 
             try {
               const child = spawn(spawnCmd, [pythonScript], {
@@ -4500,8 +4514,33 @@ ${body}
           // start instant; the ~5s build is paid once, after a code change.
           if (sourceAt > builtAt) {
             console.log('[planner] app changed — rebuilding the optimised bundle…');
-            const { build } = await import('vite');
-            await build({ logLevel: 'warn' });
+            // Deliberately a CHILD process, not an in-process `build()`.
+            // Rollup's peak heap for this bundle is several hundred MB, and V8
+            // never hands that back to the OS — so an in-process build left the
+            // long-lived server sitting at ~500 MB RSS for its whole uptime.
+            // A child pays the same peak and then dies, freeing all of it.
+            const { spawn } = await import('child_process');
+            await new Promise<void>((resolve) => {
+              const child = spawn(
+                process.execPath,
+                [
+                  path.resolve(import.meta.dirname, 'node_modules', 'vite', 'bin', 'vite.js'),
+                  'build',
+                  '--logLevel', 'warn',
+                ],
+                { cwd: import.meta.dirname, stdio: 'inherit', windowsHide: true },
+              );
+              // A missing binary must not take the server down with it; the
+              // stale bundle in dist/ is still perfectly serveable.
+              child.on('error', (err) => {
+                console.error('[planner] rebuild could not start:', err);
+                resolve();
+              });
+              child.on('exit', (code) => {
+                if (code !== 0) console.error(`[planner] rebuild failed (exit ${code}); serving the previous bundle.`);
+                resolve();
+              });
+            });
             console.log('[planner] bundle ready.');
           }
 

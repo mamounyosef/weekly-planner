@@ -326,6 +326,31 @@ for (const dKey of testDates) {
   }
 }
 
+// The ESP32 LCD reset at 00:00 instead of at the day-start hour, because the
+// desk display summed the day using `now` rather than the focus day's own
+// midnight. sumFocusSecondsForDay buckets by the CALENDAR date it is handed,
+// so after midnight but before the cutoff the two differ by a whole day.
+{
+  const startH = 4;
+  const sessions = [
+    { id: 'a', startedAt: '2026-09-06T16:00:00', endedAt: '2026-09-06T18:00:00', durationSeconds: 7200, plannedSeconds: 7200 },
+    { id: 'b', startedAt: '2026-09-06T23:46:00', endedAt: '2026-09-07T00:36:00', durationSeconds: 3000, plannedSeconds: 3000 },
+  ];
+  const now = new Date(2026, 8, 7, 0, 34, 0);
+  const todayKey = focusDayKey(now, startH);
+  assertEqual(todayKey, '2026-09-06', 'after midnight, before the cutoff, today is still yesterday');
+  assertEqual(
+    sumFocusSecondsForDay(sessions, new Date(`${todayKey}T00:00:00`), startH),
+    10200,
+    'summing at the focus day midnight keeps the whole night',
+  );
+  assertEqual(
+    sumFocusSecondsForDay(sessions, now, startH),
+    0,
+    'summing at `now` is the bug that blanked the LCD at midnight',
+  );
+}
+
 // Running session edit banking tests
 const NOW = Date.parse('2026-08-17T12:00:00');
 const running: FocusTimerState = {

@@ -34,7 +34,7 @@
 // the cell and to the scroll view, so tapping and scrolling are untouched.
 
 import React, { useMemo, useRef, useState } from 'react';
-import { PanResponder, Pressable, ScrollView, View } from 'react-native';
+import { PanResponder, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Text, useTheme } from '../../ui/kit';
 import { PRESS_DELAY, radius, space } from '../../theme';
@@ -61,10 +61,10 @@ const HOLD_SLOP = 10;
 const COLS = 7;
 
 /** One lane of bands, and the band drawn inside it. */
-const BAND_ROW = 15;
-const BAND_H = 12;
+const BAND_ROW = 17;
+const BAND_H = 14;
 /** Where the first lane starts, measured under the date number. */
-const BAND_TOP = 21;
+const BAND_TOP = 33;
 
 export function MonthView({
   anchor, events, today, weekStartsOn, onOpenDay, onLongPressDay, onCreateSpan, categories,
@@ -140,6 +140,8 @@ export function MonthView({
   weeksRef.current = weeks;
   const onCreateRef = useRef(onCreateSpan);
   onCreateRef.current = onCreateSpan;
+  const longPressRef = useRef(onLongPressDay);
+  longPressRef.current = onLongPressDay;
 
   const holdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const downRef = useRef({ x: 0, y: 0 });
@@ -241,8 +243,17 @@ export function MonthView({
     onPanResponderRelease: () => {
       const span = selectionRef.current;
       const create = onCreateRef.current;
+      const longPress = longPressRef.current;
       reset();
-      if (span && create) create({ startDate: span.startDate, endDate: span.endDate });
+      if (span) {
+        // Single-day hold (even with micro-jitter) = zoom popup.
+        // Multi-day drag = create an all-day event.
+        if (span.startDate === span.endDate && longPress) {
+          longPress(span.startDate);
+        } else if (create) {
+          create({ startDate: span.startDate, endDate: span.endDate });
+        }
+      }
     },
 
     onPanResponderTerminate: () => reset(),
@@ -289,7 +300,7 @@ export function MonthView({
       }}>
         {headings.map((h, i) => (
           <View key={i} style={{ flex: 1, alignItems: 'center' }}>
-            <Text variant="caption" tone="faint" style={{ fontSize: 10 }}>{h}</Text>
+            <Text variant="caption" tone="faint" style={{ fontSize: 11, fontWeight: '600' }}>{h}</Text>
           </View>
         ))}
       </View>
@@ -336,6 +347,7 @@ export function MonthView({
                       lane={pl.lane}
                       title={pl.item.title}
                       colour={pl.item.colour || p.accent}
+                      allDay={pl.item.allDay}
                     />
                   ))}
                 </View>
@@ -401,7 +413,7 @@ function colStyle(startCol: number, endCol: number) {
 }
 
 function Band({
-  startCol, endCol, startsHere, endsHere, lane, title, colour,
+  startCol, endCol, startsHere, endsHere, lane, title, colour, allDay,
 }: {
   startCol: number;
   endCol: number;
@@ -410,10 +422,58 @@ function Band({
   lane: number;
   title: string;
   colour: string;
+  allDay?: boolean;
 }) {
+  const p = useTheme();
+  const r = radius.sm;
+  const isMultiDay = startCol !== endCol || !startsHere || !endsHere;
+  const isAllDay = allDay || isMultiDay;
+
+  if (!isAllDay) {
+    return (
+      <View
+        style={{
+          position: 'absolute',
+          top: BAND_TOP + lane * BAND_ROW,
+          height: BAND_H,
+          ...colStyle(startCol, endCol),
+          paddingHorizontal: 2,
+          marginLeft: 1,
+          marginRight: 1,
+          flexDirection: 'row',
+          alignItems: 'center',
+          overflow: 'hidden',
+        }}
+      >
+        <View
+          style={{
+            width: 4,
+            height: 4,
+            borderRadius: 2,
+            backgroundColor: colour,
+            marginRight: 2.5,
+            flexShrink: 0,
+          }}
+        />
+        <Text
+          numberOfLines={1}
+          style={{
+            fontSize: 9.5,
+            lineHeight: BAND_H,
+            fontWeight: '600',
+            color: p.ink,
+            flex: 1,
+            letterSpacing: -0.1,
+          }}
+        >
+          {title}
+        </Text>
+      </View>
+    );
+  }
+
   // Only the REAL ends are rounded. A band cut by the end of a week row is left
   // square there, so the eye carries it onto the next row as the same object.
-  const r = radius.sm;
   return (
     <View
       style={{
@@ -421,20 +481,21 @@ function Band({
         top: BAND_TOP + lane * BAND_ROW,
         height: BAND_H,
         ...colStyle(startCol, endCol),
-        paddingHorizontal: 4,
-        marginLeft: startsHere ? 3 : 0,
-        marginRight: endsHere ? 3 : 0,
+        paddingHorizontal: 3,
+        marginLeft: startsHere ? 1 : 0,
+        marginRight: endsHere ? 1 : 0,
         backgroundColor: colour,
         justifyContent: 'center',
         borderTopLeftRadius: startsHere ? r : 0,
         borderBottomLeftRadius: startsHere ? r : 0,
         borderTopRightRadius: endsHere ? r : 0,
         borderBottomRightRadius: endsHere ? r : 0,
+        overflow: 'hidden',
       }}
     >
       <Text
         numberOfLines={1}
-        style={{ fontSize: 9, lineHeight: 11, fontWeight: '700', color: inkOn(colour) }}
+        style={{ fontSize: 9.5, lineHeight: BAND_H, fontWeight: '700', color: inkOn(colour), letterSpacing: -0.1 }}
       >
         {title}
       </Text>
@@ -512,32 +573,42 @@ function Cell({ date, count, total, reserve, inMonth, isToday, onPress, onPressO
       onPressOut={onPressOut}
       accessibilityRole="button"
       accessibilityLabel={`${date}, ${total === 0 ? 'nothing' : `${total} items`}`}
-      accessibilityHint="Opens the day. Hold and drag across days to block off a range."
+      accessibilityHint="Opens the day. Hold to preview events."
       android_ripple={{ color: p.accentSoft }}
       style={{
         flex: 1,
-        minHeight: 74 + reserve,
+        minHeight: 70 + reserve,
         padding: 4,
-        borderWidth: 0.5,
+        borderWidth: StyleSheet.hairlineWidth,
         borderColor: p.line,
-        backgroundColor: 'transparent',
-        opacity: inMonth ? 1 : 0.35,
+        backgroundColor: isToday ? p.accentSoft : 'transparent',
+        opacity: inMonth ? 1 : 0.40,
       }}
     >
+      {/* Today badge: larger circle with a subtle glow */}
       <View style={{
-        width: 24,
-        height: 24,
-        borderRadius: 12,
+        width: 28,
+        height: 28,
+        borderRadius: 14,
         backgroundColor: isToday ? p.accent : 'transparent',
         alignItems: 'center',
         justifyContent: 'center',
+        ...(isToday ? Platform.select({
+          android: { elevation: 4 },
+          default: {
+            shadowColor: p.accent,
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: 0.45,
+            shadowRadius: 6,
+          },
+        }) : {}),
       }}>
         <Text
           variant="caption"
           style={{
-            fontSize: 12,
+            fontSize: 13,
             fontWeight: isToday ? '800' : '500',
-            color: isToday ? '#FFFFFF' : p.ink
+            color: isToday ? '#FFFFFF' : p.ink,
           }}
         >
           {day}
@@ -548,25 +619,27 @@ function Cell({ date, count, total, reserve, inMonth, isToday, onPress, onPressO
           than inside any one cell. */}
       <View style={{ height: reserve }} />
 
-      <View style={{ flexDirection: 'row', gap: 3, marginTop: 3, flexWrap: 'wrap', paddingHorizontal: 2 }}>
-        {Array.from({ length: marks }, (_, i) => (
-          <View
-            key={i}
-            style={{
-              width: 4,
-              height: 4,
-              borderRadius: 2,
-              backgroundColor: p.accent,
-              opacity: 0.8 - i * 0.15,
-            }}
-          />
-        ))}
-        {count > 3 ? (
-          <Text variant="caption" tone="faint" style={{ fontSize: 9, lineHeight: 11 }}>
-            +{count - 3}
-          </Text>
-        ) : null}
-      </View>
+      {marks > 0 ? (
+        <View style={{ flexDirection: 'row', gap: 3, marginTop: 3, flexWrap: 'wrap', paddingHorizontal: 2 }}>
+          {Array.from({ length: marks }, (_, i) => (
+            <View
+              key={i}
+              style={{
+                width: 5,
+                height: 5,
+                borderRadius: 2.5,
+                backgroundColor: p.accent,
+                opacity: 0.85 - i * 0.15,
+              }}
+            />
+          ))}
+          {count > 3 ? (
+            <Text variant="caption" tone="faint" style={{ fontSize: 9, lineHeight: 11 }}>
+              +{count - 3}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
     </Pressable>
   );
 }

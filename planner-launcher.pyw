@@ -46,7 +46,12 @@ AWAKE_FLAGS = [
     "--disable-renderer-backgrounding",
     # The above three predate "intensive throttling", which is the one that
     # imposes the once-a-minute ceiling after five minutes hidden.
-    "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore",
+    "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore,"
+    # Chrome downloads its on-device language model into whatever profile it
+    # is running from. In this one it is 4 GB of a repo folder, spent so a
+    # kiosk window showing a calendar can do nothing with it.
+    "OptimizationGuideOnDeviceModel,OptimizationGuideModelDownloading,"
+    "OptimizationHints,TextSafetyClassifier",
     "--hide-crash-restore-bubble",
     "--disable-session-crashed-bubble",
     "--no-first-run",
@@ -196,12 +201,11 @@ def sanitize_chrome_profile(profile_path):
 
 
 def pythonw():
-    if os.path.exists(PYTHONW):
-        return PYTHONW
-    exe = sys.executable
-    # If we were somehow started by python.exe, prefer its windowless twin.
-    alt = exe.replace("python.exe", "pythonw.exe")
-    return alt if os.path.exists(alt) else exe
+    # Avast quarantined the real pythonw.exe, and the venv proxy pythonw.exe 
+    # unintentionally spawns python.exe with a visible console window.
+    # To fix this, we directly return the base python.exe and rely strictly on
+    # subprocess.Popen's CREATE_NO_WINDOW flag to keep it invisible.
+    return r"C:\ProgramData\anaconda3\python.exe"
 
 
 def spawn(args):
@@ -281,9 +285,14 @@ def main():
         # Output goes to a log file, not DEVNULL — if the server ever dies on
         # boot there needs to be something to read afterwards.
         log = open(SERVER_LOG, "ab", buffering=0)
+        node_exe = "node.exe"
+        vite_js = os.path.join(ROOT, "artifacts", "weekly-planner", "node_modules", "vite", "bin", "vite.js")
+        
+        # Bypass npx.cmd and pnpm.cmd to avoid cmd.exe wrappers that can flash consoles on Windows.
+        # Running node directly inherits CREATE_NO_WINDOW seamlessly.
         subprocess.Popen(
-            ["npx.cmd", "pnpm", "--filter", "@workspace/weekly-planner", "dev"],
-            cwd=ROOT,
+            [node_exe, vite_js, "--config", "vite.config.ts", "--host", "0.0.0.0"],
+            cwd=os.path.join(ROOT, "artifacts", "weekly-planner"),
             creationflags=SERVER_FLAGS,
             stdin=subprocess.DEVNULL,
             stdout=log,

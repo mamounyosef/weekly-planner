@@ -22,41 +22,61 @@ const ThemeContext = createContext<Palette>(dark);
 interface ThemeModeValue {
   mode: ThemeMode;
   setMode(next: ThemeMode): void;
+  lightVariant: string;
+  setLightVariant(next: string): void;
+  darkVariant: string;
+  setDarkVariant(next: string): void;
 }
 
-const ThemeModeContext = createContext<ThemeModeValue>({ mode: 'system', setMode: () => {} });
+const ThemeModeContext = createContext<ThemeModeValue>({ 
+  mode: 'system', setMode: () => {},
+  lightVariant: 'default', setLightVariant: () => {},
+  darkVariant: 'default', setDarkVariant: () => {}
+});
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const scheme = useColorScheme();
   const [mode, setModeState] = useState<ThemeMode>('system');
+  const [lightVariant, setLightVariantState] = useState<string>('default');
+  const [darkVariant, setDarkVariantState] = useState<string>('default');
 
-  // Read once at launch rather than gating the first render on it: this provider
-  // wraps the splash, and a keystore that is slow to answer must never be able to
-  // hold the whole app on a blank screen. The worst case is one frame of the
-  // system theme before the saved choice lands.
   useEffect(() => {
     let cancelled = false;
-    void prefs.getThemeMode().then(saved => {
-      if (!cancelled) setModeState(saved);
+    void Promise.all([
+      prefs.getThemeMode(),
+      prefs.getLightTheme(),
+      prefs.getDarkTheme()
+    ]).then(([savedMode, savedLight, savedDark]) => {
+      if (!cancelled) {
+        setModeState(savedMode);
+        setLightVariantState(savedLight);
+        setDarkVariantState(savedDark);
+      }
     });
     return () => { cancelled = true; };
   }, []);
 
   const setMode = useCallback((next: ThemeMode) => {
-    // Paint first, persist after. Nothing downstream depends on the write, and
-    // a tap on a theme button should never feel like it is waiting on storage.
     setModeState(next);
     void prefs.setThemeMode(next);
   }, []);
 
-  // The planner is checked last thing at night as often as first thing in the
-  // morning, so both themes are real designs rather than one plus an inversion.
-  //
-  // Memoised because this object IS the context value: rebuilding it hands a
-  // new identity to every `useTheme()` in the app, which is very nearly every
-  // component there is.
-  const palette = useMemo(() => resolvePalette(mode, scheme), [mode, scheme]);
-  const modeValue = useMemo(() => ({ mode, setMode }), [mode, setMode]);
+  const setLightVariant = useCallback((next: string) => {
+    setLightVariantState(next);
+    void prefs.setLightTheme(next);
+  }, []);
+
+  const setDarkVariant = useCallback((next: string) => {
+    setDarkVariantState(next);
+    void prefs.setDarkTheme(next);
+  }, []);
+
+  const palette = useMemo(() => resolvePalette(mode, scheme, lightVariant, darkVariant), [mode, scheme, lightVariant, darkVariant]);
+  const modeValue = useMemo(() => ({ 
+    mode, setMode,
+    lightVariant, setLightVariant,
+    darkVariant, setDarkVariant
+  }), [mode, setMode, lightVariant, setLightVariant, darkVariant, setDarkVariant]);
 
   return (
     <ThemeModeContext.Provider value={modeValue}>

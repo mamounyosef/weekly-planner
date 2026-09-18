@@ -643,22 +643,71 @@ export function Today({
 
   return (
     <View style={StyleSheet.absoluteFill}>
-      {zoomedDay && (
+      {zoomedDay && (() => {
+        const zoomedDate = new Date(`${zoomedDay}T00:00:00`);
+        const fullDate = zoomedDate.toLocaleDateString(undefined, {
+          weekday: 'long', month: 'short', day: 'numeric',
+        });
+        const isZoomedToday = zoomedDay === today;
+        return (
         <Modal transparent visible animationType="fade" onRequestClose={() => setZoomedDay(null)}>
-          <View style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'center', padding: space.xl }}>
-            <View style={{ backgroundColor: p.surface, borderRadius: radius.lg, padding: space.lg, maxHeight: '80%' }}>
-              <Row style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: space.lg }}>
-                <Text variant="title">{dayLabel(zoomedDay, now)}</Text>
-                <Pressable onPress={() => setZoomedDay(null)} hitSlop={HIT}>
-                  <Text variant="heading" tone="faint">×</Text>
+          <Pressable
+            style={{ flex: 1, backgroundColor: p.scrim, justifyContent: 'center', padding: space.xl }}
+            onPress={() => setZoomedDay(null)}
+          >
+            <Pressable
+              onPress={() => {/* prevent dismiss when tapping the card itself */}}
+              style={{
+                backgroundColor: p.surface,
+                borderRadius: radius.lg + 4,
+                padding: space.lg,
+                maxHeight: '80%',
+                elevation: 8,
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.3,
+                shadowRadius: 12,
+              }}
+            >
+              <Row style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: space.md }}>
+                <View style={{ flex: 1 }}>
+                  <Row gap={space.sm} style={{ alignItems: 'center' }}>
+                    {isZoomedToday && (
+                      <View style={{
+                        width: 8, height: 8, borderRadius: 4,
+                        backgroundColor: p.accent,
+                      }} />
+                    )}
+                    <Text variant="title">{dayLabel(zoomedDay, now)}</Text>
+                  </Row>
+                  <Text variant="caption" tone="soft" style={{ marginTop: 2 }}>{fullDate}</Text>
+                </View>
+                <Pressable
+                  onPress={() => setZoomedDay(null)}
+                  hitSlop={HIT}
+                  style={{
+                    width: 32, height: 32, borderRadius: 16,
+                    backgroundColor: p.surfaceAlt,
+                    alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  <Text variant="heading" tone="faint" style={{ fontSize: 18, lineHeight: 20 }}>×</Text>
                 </Pressable>
               </Row>
+
+              <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: p.line, marginBottom: space.md }} />
+
               <ScrollView showsVerticalScrollIndicator={false}>
                 {(() => {
                   const agenda = eventsOf(zoomedDay);
                   const items = [...agenda.allDay, ...agenda.timed];
                   if (items.length === 0) {
-                    return <Text variant="body" tone="soft" style={{ textAlign: 'center', marginVertical: space.xl }}>Nothing planned.</Text>;
+                    return (
+                      <View style={{ alignItems: 'center', marginVertical: space.xxl }}>
+                        <Text variant="body" tone="soft" style={{ fontSize: 32, marginBottom: space.sm }}>📭</Text>
+                        <Text variant="body" tone="soft">Nothing planned</Text>
+                      </View>
+                    );
                   }
                   return items.map(item => (
                     <View key={item.id} style={{ marginBottom: space.sm }}>
@@ -679,7 +728,16 @@ export function Today({
                 })()}
               </ScrollView>
               <Pressable
-                style={{ marginTop: space.lg, backgroundColor: p.accentSoft, borderRadius: radius.pill, padding: space.md, alignItems: 'center' }}
+                style={({ pressed }) => ({
+                  marginTop: space.lg,
+                  backgroundColor: pressed ? p.accent : p.accentSoft,
+                  borderRadius: radius.pill,
+                  padding: space.md,
+                  alignItems: 'center',
+                  flexDirection: 'row',
+                  justifyContent: 'center',
+                  gap: space.xs,
+                })}
                 onPress={() => {
                   setZoomedDay(null);
                   setSelected(zoomedDay);
@@ -687,11 +745,13 @@ export function Today({
                 }}
               >
                 <Text variant="bodyStrong" tone="accent">Go to Day</Text>
+                <Text variant="bodyStrong" tone="accent">→</Text>
               </Pressable>
-            </View>
-          </View>
+            </Pressable>
+          </Pressable>
         </Modal>
-      )}
+        );
+      })()}
       <View style={{ flex: 1, backgroundColor: p.surface }}>
 
       {/* ── Header ─────────────────────────────────────────────────────── */}

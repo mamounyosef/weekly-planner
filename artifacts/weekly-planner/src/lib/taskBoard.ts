@@ -63,7 +63,7 @@ export function orderKey(t: Task): number {
     : Number.MAX_SAFE_INTEGER;
 }
 
-export type Bucket = 'Overdue' | 'Today' | 'Tomorrow' | 'Upcoming' | 'General';
+export type Bucket = 'Overdue' | 'Today' | 'Tomorrow' | 'Upcoming' | 'No Date';
 export type SectionKey = Bucket | 'Done';
 
 export interface Row {
@@ -205,7 +205,7 @@ export function groupTasks(
   }
 
   const out: Record<SectionKey, Node[]> = {
-    Overdue: [], Today: [], Tomorrow: [], Upcoming: [], General: [], Done: []
+    Overdue: [], Today: [], Tomorrow: [], Upcoming: [], 'No Date': [], Done: []
   };
 
   for (const r of roots) {
@@ -226,7 +226,7 @@ export function groupTasks(
     const node: Node = { row: r, children };
 
     if (r.done) out.Done.push(node);
-    else if (!r.due) out.General.push(node);
+    else if (!r.due) out['No Date'].push(node);
     else if (r.due < today) out.Overdue.push(node);
     else if (r.due === today) out.Today.push(node);
     else if (r.due === tomorrowStr) out.Tomorrow.push(node);
@@ -262,7 +262,7 @@ export function groupTasks(
       || tie;
   };
 
-  for (const key of ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'General'] as const) {
+  for (const key of ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'] as const) {
     out[key].sort(sortFn);
   }
   // Newest first, and the id again so two things finished in the same

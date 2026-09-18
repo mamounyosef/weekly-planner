@@ -20,6 +20,7 @@ import {
   FILE_STORES,
   ingestSnapshot,
   loadBundle,
+  PC_DEVICE_ID,
   pullOps,
   pushOps,
   rebuildStoreFile,
@@ -31,11 +32,15 @@ import {
 import {
   arrayAdapter,
   baseIdOf,
+  canonicalJson,
+  isSettingsWipeOp,
   opsToSnapshot,
+  prayerDoneAdapter,
   settingsAdapter,
   type Snapshot,
   type StoreAdapter,
 } from './src/lib/syncBridge';
+import { PRAYER_KEYS, isPlannerDate } from './src/lib/prayerTimes';
 import {
   applySharedSettings,
   SHARED_SETTING_KEYS,
@@ -46,6 +51,8 @@ import {
 const SHARED_SETTING_SET: ReadonlySet<string> = new Set(SHARED_SETTING_KEYS);
 import {
   DELETED_FIELD,
+  makeOps,
+  readEntity,
   resolveConflict,
   mergeOps,
   type SyncConflict,
@@ -86,6 +93,12 @@ const ADAPTERS: Partial<Record<SyncStore, StoreAdapter>> = {
   // Sessions are ordered by when they began, which is also how the PC writes
   // them, so a rebuild produces the file the PC would have produced itself.
   focusSessions: arrayAdapter('startedAt'),
+  // The PC's file is `{ date: ['fajr', ...] }` and the engine's is
+  // `{ date: { done: ['fajr', ...] } }`. Without the translation the PC's array
+  // was ingested as fields named "0", "1", ... and the engine's record was
+  // written back in a shape the PC could not read — each device then erased the
+  // other's ticks. See `prayerDoneAdapter`.
+  prayerDone: prayerDoneAdapter(),
 };
 
 /** Which file each syncable store is written back to. */
@@ -368,7 +381,15 @@ export function createSyncService(opts: SyncServiceOptions = {}) {
         continue;
       }
       const known = seen.get(store);
-      if (known && known.raw === current.raw) continue;
+      // Comparing RAW TEXT is not enough on its own: a baseline recorded by an
+      // older build may carry a snapshot the current adapter no longer produces
+      // (prayer-done.json's ticks were once stranded under array-index fields),
+      // so the identical bytes would be skipped for ever and the corrected
+      // reading would never reach the log. When the interpretation differs from
+      // what the adapter produces today, the file is re-ingested once — which
+      // folds the recovered reading in and rewrites the baseline.
+      if (known && known.raw === current.raw
+        && canonicalJson(known.snapshot) === canonicalJson(current.snapshot)) continue;
       noteBase(username, store, current.snapshot);
       // Whatever we last saw in the file is exactly what the writer was looking
       // at, so only its real changes become ops.
@@ -641,6 +662,64 @@ export function createSyncService(opts: SyncServiceOptions = {}) {
       });
     },
 
+    /**
+     * One prayer ticked or un-ticked, from a PC window.
+     *
+     * A WHOLE-MAP SAVE CANNOT DO THIS SAFELY. The PC's tick state is a 20-second
+     * poll behind the server and is shared by two windows, so "here is my whole
+     * map" written whatever it happened to remember — including un-ticking a
+     * prayer the phone had marked in between. Applied as a single set element
+     * inside the per-user queue, a toggle is one independent fact: two windows
+     * and the phone can tick in any order and the union survives. Repeat clicks
+     * are free — `makeOps` emits nothing when the element is already in the
+     * asked-for state.
+     */
+    async togglePrayerDone(
+      username: string,
+      paths: UserSyncPaths,
+      args: { date: string; key: string; present: boolean },
+    ): Promise<{ changed: boolean; reason?: string }> {
+      // Validated here as well as at the HTTP door. The HTTP layer and this
+      // method will not always be deployed together (a stale window against a
+      // fresh server, or a future second caller), and a bogus date or prayer
+      // key written straight into the shared record would then be replicated
+      // to every device before anyone could notice.
+      const reason = validatePrayerToggle(args);
+      if (reason) return { changed: false, reason };
+      return withUser<{ changed: boolean }>(username, paths, async bundle => {
+        const current = readEntity(bundle.state, 'prayerDone', args.date);
+        const members = Array.isArray((current as any)?.done)
+          ? [...(current as any).done as string[]]
+          : [];
+        const next = args.present
+          ? [...new Set([...members, args.key])]
+          : members.filter(k => k !== args.key);
+        const ops = makeOps(bundle.state, {
+          store: 'prayerDone',
+          entityId: args.date,
+          device: PC_DEVICE_ID,
+          at: now(),
+          changes: { done: next },
+        });
+        if (ops.length === 0) return { bundle, result: { changed: false } };
+        const merged = mergeOps(bundle.state, ops);
+        const appended = appendToLog(bundle, ops);
+        const nextBundle: SyncBundle = {
+          ...bundle,
+          state: merged.state,
+          log: appended.log,
+          seq: appended.seq,
+          conflicts: bundle.conflicts,
+          devices: bundle.devices,
+        };
+        return {
+          bundle: nextBundle,
+          dirty: ['prayerDone' as SyncStore],
+          result: { changed: true },
+        };
+      });
+    },
+
     /** A device confirms it has stored everything up to `cursor`. */
     async ack(username: string, paths: UserSyncPaths, deviceId: string, cursor: number) {
       return withUser(username, paths, async bundle => {
@@ -855,6 +934,18 @@ export async function handleSyncRequest(
 
 const MAX_OPS_PER_PUSH = 5_000;
 
+/**
+ * How large one op's value may be, serialised.
+ *
+ * The log is durable and replicated forever, so a single op is the unit of
+ * unbounded growth: a client that pushed one enormous field thousands of times
+ * would wedge the server's disk without this. No legitimate planner value comes
+ * anywhere close — the largest real field is a recurrence spec or a note, orders
+ * of magnitude under this line — so a value this big is a bug or an attack
+ * either way, and the door is the only place rejection is cheap.
+ */
+const MAX_OP_VALUE_BYTES = 256 * 1024;
+
 export function validateOp(raw: unknown): SyncOp | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
@@ -869,6 +960,24 @@ export function validateOp(raw: unknown): SyncOp | null {
   if (o.baseLamport !== undefined && typeof o.baseLamport !== 'number') return null;
   if (o.baseDevice !== undefined && typeof o.baseDevice !== 'string') return null;
   if (o.present !== undefined && typeof o.present !== 'boolean') return null;
+
+  // A set-ELEMENT op carries exactly one member, and every set field in the
+  // planner holds strings (dates, prayer keys). Anything else — an object, a
+  // number, a null — would enter the set through `elementKey`'s stringification
+  // and sit there for ever under add-wins semantics, unmatchable by any real
+  // lookup, on every device. The whole-array legacy form (no `present`) is
+  // exempt: it is how older builds still write set fields, and its array is
+  // diffed into real members on arrival.
+  if (o.present !== undefined && typeof o.value !== 'string') return null;
+
+  // A `value: undefined` never survives JSON in the first place, so an op
+  // arriving without one is a legitimate register CLEAR, not wreckage. Only
+  // values that are actually present are bounded here.
+  if (o.value !== undefined) {
+    let size = 0;
+    try { size = JSON.stringify(o.value).length; } catch { return null; }
+    if (!Number.isFinite(size) || size > MAX_OP_VALUE_BYTES) return null;
+  }
 
   const allowed: SyncStore[] = [
     'events', 'tasks', 'taskLists', 'categories', 'settings',
@@ -885,6 +994,17 @@ export function validateOp(raw: unknown): SyncOp | null {
   if (o.store === 'settings'
     && o.field !== DELETED_FIELD
     && !SHARED_SETTING_SET.has(o.field)) {
+    return null;
+  }
+
+  // A SETTINGS STRUCTURE IS NEVER ERASED BY AN OP. `categories: undefined` is
+  // not something any correct client sends: clearing a category list is `[]`.
+  // It is what a bad diff produces, and once such an op is in the log every
+  // device applies it and the data is gone everywhere at once. This is the
+  // door, so it also stops a phone still running the build that had the bug.
+  if (isSettingsWipeOp({
+    store: o.store, field: o.field, value: o.value, present: o.present as boolean | undefined,
+  })) {
     return null;
   }
 
@@ -951,4 +1071,25 @@ export function validateWait(raw: unknown): number {
 export function validateCursor(raw: unknown): number {
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return 0;
   return Math.floor(raw);
+}
+
+/**
+ * Is this a toggle the shared prayer record may accept?
+ *
+ * Returns a human-readable reason when it is not, or null when it is. The
+ * prayer record is USER DATA replicated to every device: a malformed date or a
+ * made-up key does not stay local, it becomes part of everyone's planner, so
+ * the check is exact rather than best-effort.
+ */
+export function validatePrayerToggle(
+  args: { date: unknown; key: unknown; present: unknown },
+): string | null {
+  if (!args || typeof args !== 'object') return 'A toggle body is required.';
+  // One exact definition of a real day, shared with the prayer file adapter.
+  if (!isPlannerDate(args.date)) return 'date must be a yyyy-MM-dd calendar date.';
+  if (typeof args.key !== 'string' || !(PRAYER_KEYS as readonly string[]).includes(args.key)) {
+    return 'key must be one of the planner prayer keys.';
+  }
+  if (typeof args.present !== 'boolean') return 'present must be a boolean.';
+  return null;
 }

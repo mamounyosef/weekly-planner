@@ -101,7 +101,7 @@ const ORDER: { key: string; title: string; tone: 'danger' | 'accent' | 'ink' | '
   { key: 'Today', title: 'Today', tone: 'accent' },
   { key: 'Tomorrow', title: 'Tomorrow', tone: 'ink' },
   { key: 'Upcoming', title: 'Upcoming', tone: 'ink' },
-  { key: 'General', title: 'Anytime', tone: 'faint' },
+  { key: 'No Date', title: 'No Date', tone: 'faint' },
   { key: 'Done', title: 'Done', tone: 'faint' },
 ];
 
@@ -248,11 +248,11 @@ export function Tasks() {
 
 
   
-  const openNodes = grouped.Overdue.length + grouped.Today.length + grouped.Tomorrow.length + grouped.Upcoming.length + grouped.General.length;
+  const openNodes = grouped.Overdue.length + grouped.Today.length + grouped.Tomorrow.length + grouped.Upcoming.length + grouped['No Date'].length;
 
   const open = useMemo(() => {
     let n = 0;
-    for (const key of ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'General'] as const) {
+    for (const key of ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'] as const) {
       for (const node of grouped[key]) {
         n += 1;
         n += node.children.filter(c => !c.done).length;

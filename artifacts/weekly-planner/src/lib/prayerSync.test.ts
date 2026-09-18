@@ -146,8 +146,11 @@ async function main() {
     });
     phone = (await syncOnce(phone, t, 2_100)).data;
 
+    // The file the PC app reads is the one it has always written: the ticks as
+    // a plain array per date. The engine's `{ done: [...] }` shape must never
+    // leak into it — `/api/prayer-done` hands this file straight to the app.
     const onPc = await readJson(paths.prayerDonePath!);
-    assert.deepEqual(onPc['2026-08-30'].done, ['fajr'], 'The PC file records it');
+    assert.deepEqual(onPc['2026-08-30'], ['fajr'], 'The PC file records it, as an array');
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -166,10 +169,14 @@ async function main() {
       store: 'prayerDone', entityId: '2026-08-30', changes: { done: ['fajr'] }, at: 2_000,
     });
 
-    // Meanwhile the PC marks Dhuhr, writing its whole file as it always does.
+    // Meanwhile the PC marks Dhuhr, writing its file as `/api/prayer-done`
+    // always has: the ticks as a plain array per date. THIS is the shape the
+    // real app writes — an earlier version of this test wrote the engine's
+    // `{ done: [...] }` shape here, which is why the format clash between the
+    // two ends was never caught by a suite that passed.
     await fsp.writeFile(
       paths.prayerDonePath!,
-      JSON.stringify({ '2026-08-30': { done: ['dhuhr'] } }, null, 2),
+      JSON.stringify({ '2026-08-30': ['dhuhr'] }, null, 2),
       'utf-8',
     );
     await svc.refresh(USER, paths);
@@ -177,8 +184,8 @@ async function main() {
     phone = (await syncOnce(phone, t, 3_000)).data;
 
     const onPc = await readJson(paths.prayerDonePath!);
-    assert.deepEqual([...onPc['2026-08-30'].done].sort(), ['dhuhr', 'fajr'],
-      'Both marks survived on the PC');
+    assert.deepEqual([...onPc['2026-08-30']].sort(), ['dhuhr', 'fajr'],
+      'Both marks survived on the PC, still as an array');
 
     const onPhone = (readClientStore(phone, 'prayerDone') as any)['2026-08-30'];
     assert.deepEqual([...onPhone.done].sort(), ['dhuhr', 'fajr'], 'and on the phone');
@@ -198,15 +205,95 @@ async function main() {
       store: 'prayerDone', entityId: '2026-08-30', changes: { done: ['fajr', 'dhuhr'] }, at: 2_000,
     });
     phone = (await syncOnce(phone, t, 2_100)).data;
-    assert.equal((await readJson(paths.prayerDonePath!))['2026-08-30'].done.length, 2);
+    assert.equal((await readJson(paths.prayerDonePath!))['2026-08-30'].length, 2);
 
     phone = applyLocalChange(phone, {
       store: 'prayerDone', entityId: '2026-08-30', changes: { done: ['dhuhr'] }, at: 3_000,
     });
     phone = (await syncOnce(phone, t, 3_100)).data;
 
-    assert.deepEqual((await readJson(paths.prayerDonePath!))['2026-08-30'].done, ['dhuhr'],
+    assert.deepEqual((await readJson(paths.prayerDonePath!))['2026-08-30'], ['dhuhr'],
       'The mark was taken back');
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('--- 5b. THE PC TOGGLES ONE PRAYER WITHOUT STEPPING ON ANYONE ---');
+  {
+    // The whole-map save the PC used to make was built from a state up to a
+    // poll interval old and shared by two windows, so it reverted whatever the
+    // phone or the other window had ticked in between. `togglePrayerDone`
+    // applies one element inside the user queue instead — the exact race behind
+    // "I ticked it and later found it unclicked".
+    const paths = await freshUser('toggle');
+    const svc = createSyncService();
+    const t = httpTransport(svc, paths);
+    let phone = (await syncOnce(emptyClientData(PHONE), t, 1_000)).data;
+
+    // The PC ticks Fajr and Maghrib, the way two clicks a moment apart arrive.
+    await svc.togglePrayerDone(USER, paths, { date: '2026-08-30', key: 'fajr', present: true });
+    await svc.togglePrayerDone(USER, paths, { date: '2026-08-30', key: 'maghrib', present: true });
+
+    // Meanwhile the phone ticks Dhuhr, and both sides learn about each other.
+    phone = applyLocalChange(phone, {
+      store: 'prayerDone', entityId: '2026-08-30', changes: { done: ['dhuhr'] }, at: 2_000,
+    });
+    phone = (await syncOnce(phone, t, 2_100)).data;
+
+    const onPc = await readJson(paths.prayerDonePath!);
+    assert.deepEqual([...onPc['2026-08-30']].sort(), ['dhuhr', 'fajr', 'maghrib'],
+      'All three ticks survived');
+    const onPhone = (readClientStore(phone, 'prayerDone') as any)['2026-08-30'];
+    assert.deepEqual([...onPhone.done].sort(), ['dhuhr', 'fajr', 'maghrib'],
+      'and the phone holds all three');
+
+    // A repeat click (the server already holds the tick) changes nothing and
+    // must not resurrect a value into the file out of nowhere.
+    await svc.togglePrayerDone(USER, paths, { date: '2026-08-30', key: 'fajr', present: true });
+    assert.deepEqual([...(await readJson(paths.prayerDonePath!))['2026-08-30']].sort(),
+      ['dhuhr', 'fajr', 'maghrib'], 'A repeat tick is a no-op');
+
+    // Un-ticking from the PC reaches the phone.
+    await svc.togglePrayerDone(USER, paths, { date: '2026-08-30', key: 'fajr', present: false });
+    phone = (await syncOnce(phone, t, 3_000)).data;
+    assert.deepEqual((await readJson(paths.prayerDonePath!))['2026-08-30'].sort(),
+      ['dhuhr', 'maghrib'], 'The PC un-tick took');
+    const onPhone2 = (readClientStore(phone, 'prayerDone') as any)['2026-08-30'];
+    assert.deepEqual([...onPhone2.done].sort(), ['dhuhr', 'maghrib'], 'and the phone agrees');
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  console.log('--- 5c. DAMAGE ALREADY ON DISK IS REPAIRED, NOT MADE PERMANENT ---');
+  {
+    // A file written by the broken build holds the same day as
+    // `{ "0": "maghrib", "1": "isha", done: [] }`: real ticks stranded under
+    // array indices, invisible to both apps. The adapter folds them back into
+    // the set, so what the user actually ticked reappears on both devices
+    // instead of the corruption being read as the truth.
+    const paths = await freshUser('repair');
+    const svc = createSyncService();
+    const t = httpTransport(svc, paths);
+    let phone = (await syncOnce(emptyClientData(PHONE), t, 1_000)).data;
+
+    await fsp.writeFile(
+      paths.prayerDonePath!,
+      JSON.stringify({ '2026-08-30': { '0': 'maghrib', '1': 'isha', done: [] } }, null, 2),
+      'utf-8',
+    );
+    await svc.refresh(USER, paths);
+    phone = (await syncOnce(phone, t, 2_000)).data;
+
+    const onPc = await readJson(paths.prayerDonePath!);
+    assert.deepEqual([...onPc['2026-08-30']].sort(), ['isha', 'maghrib'],
+      'The stranded ticks are back in the file, as an array');
+    const onPhone = (readClientStore(phone, 'prayerDone') as any)['2026-08-30'];
+    assert.deepEqual([...onPhone.done].sort(), ['isha', 'maghrib'], 'and they reached the phone');
+
+    // Repairing must not churn: a second refresh with nothing changed writes
+    // nothing (the file is byte-identical to what the log now holds).
+    const before = await fsp.readFile(paths.prayerDonePath!, 'utf-8');
+    await svc.refresh(USER, paths);
+    assert.equal(await fsp.readFile(paths.prayerDonePath!, 'utf-8'), before,
+      'The repair happened exactly once');
   }
 
   // ───────────────────────────────────────────────────────────────────────────

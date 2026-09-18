@@ -2,5 +2,8 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true
-  }
+  },
+  // Tests run under tsx with node builtins, which the app tsconfig has no
+  // types for — the web app excludes them from typecheck the same way.
+  "exclude": ["node_modules", "**/*.test.ts"]
 }

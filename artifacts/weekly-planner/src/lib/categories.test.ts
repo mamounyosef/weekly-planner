@@ -22,9 +22,13 @@ import {
 
 console.log('--- 1. CATEGORY DEFAULTS & CONSTANTS ---');
 assert.equal(UNCATEGORISED, '__none__', 'UNCATEGORISED must be __none__');
-assert.equal(DEFAULT_CATEGORIES.length, 2, 'Default categories has 2 items');
+// ONE built-in, deliberately. "University Calendar" used to ship alongside it,
+// but it is one person's life, not everybody's: a new account should start with
+// a single neutral category and build its own, not inherit someone's timetable.
+assert.equal(DEFAULT_CATEGORIES.length, 1, 'Exactly one built-in category ships');
 assert.equal(DEFAULT_CATEGORIES[0].id, 'personal');
-assert.equal(DEFAULT_CATEGORIES[1].id, 'university-calendar');
+assert.ok(!DEFAULT_CATEGORIES.some(c => c.id === 'university-calendar'),
+  'University Calendar is no longer a built-in');
 assert.ok(PRESET_CATEGORY_COLORS.length >= 12, 'At least 12 preset colors available');
 
 console.log('--- 2. COERCE CATEGORIES ---');
@@ -210,7 +214,7 @@ assert.ok(glowing.boxShadow?.includes('#a855f7'));
   assert.equal(resurrected.length, DEFAULT_CATEGORIES.length,
     'an empty array really is read as corruption');
   assert.deepEqual(resurrected.map(c => c.id), DEFAULT_CATEGORIES.map(c => c.id),
-    'and really does come back as the built-in two');
+    'and really does come back as the built-in default');
 
   // ── The rule ──────────────────────────────────────────────────────────────
   assert.equal(canDeleteCategory(two, 'a'), true, 'one of two can go');
@@ -270,17 +274,23 @@ assert.ok(glowing.boxShadow?.includes('#a855f7'));
     assert.ok(c.name.trim().length > 0, `${c.id} has a name`);
     assert.ok(!/[–—]/.test(c.name), `${c.id} carries no em or en dash`);
   }
-  const uni = DEFAULT_CATEGORIES.find(c => c.id === 'university-calendar');
-  assert.ok(uni, 'the university default is still there under its own id');
-  assert.equal(uni!.name, 'University Calendar', 'and is spelled correctly');
-  assert.ok(!DEFAULT_CATEGORIES.some(c => /Calender/.test(c.name)),
-    'nothing shipped says "Calender"');
+  assert.ok(!DEFAULT_CATEGORIES.some(c => c.id === 'university-calendar'),
+    'the university default no longer ships');
+  assert.ok(!DEFAULT_CATEGORIES.some(c => /Calend[ae]r/.test(c.name)),
+    'and neither spelling of it is shipped');
 
-  // The ids are what everything else keys on, so a rename must not touch them.
-  assert.deepEqual(DEFAULT_CATEGORIES.map(c => c.id), ['personal', 'university-calendar'],
-    'the ids are unchanged, so no existing item is orphaned by the spelling fix');
+  // The id is what everything else keys on. AN ACCOUNT THAT ALREADY HAS a
+  // university-calendar category keeps it: dropping it from the built-ins only
+  // changes what a NEW account starts with, and never rewrites an existing list.
+  assert.deepEqual(DEFAULT_CATEGORIES.map(c => c.id), ['personal'],
+    'the surviving id is unchanged, so no existing item is orphaned');
+  assert.deepEqual(
+    coerceCategories([{ id: 'university-calendar', name: 'University Calender', color: '#f97316' }])
+      .map(c => c.id),
+    ['university-calendar'],
+    'a user who already has it keeps it, untouched by the change to the defaults');
 
-  console.log('  Defaults are named correctly and keyed unchanged');
+  console.log('  The single default is named correctly and keyed unchanged');
 }
 
 console.log('\nALL PASS (categories & gcalColor)');

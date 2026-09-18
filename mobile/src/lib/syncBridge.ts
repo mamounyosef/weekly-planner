@@ -29,6 +29,7 @@ import {
   type SyncState,
   type SyncStore,
 } from './sync';
+import { PRAYER_KEYS } from './prayerTimes';
 
 /**
  * Fields that must NEVER become operations.
@@ -48,6 +49,59 @@ export const PC_ONLY_FIELDS: ReadonlySet<string> = new Set([
 
 /** View-only fields stamped onto expanded occurrences; never persisted. */
 export const TRANSIENT_FIELDS: ReadonlySet<string> = new Set(['masterId', 'occDate']);
+
+/**
+ * Stores where a field MISSING from a save does not mean the user cleared it.
+ *
+ * THIS EXISTS BECAUSE IT ONCE ATE NINE CATEGORIES. On 2026-08-30 a settings save
+ * reached the server without a `categories` key. The diff below read that
+ * absence as "the user cleared this field", emitted `categories: undefined`, and
+ * every device dutifully merged the erasure. The app then fell back to its two
+ * built-in categories and saved THOSE, so the erasure became the new truth.
+ *
+ * `settings.json` is not a map of records. Its snapshot is BUILT by picking the
+ * shared keys that happen to be present (`sharedSettingsOf`), so an absent key
+ * means "this writer did not send it" — a partial save, an older client, a file
+ * written before the field existed. Not one of those is a user clearing
+ * anything. Every shared setting has a default and is always present when it is
+ * genuinely set; a category list emptied on purpose arrives as `[]`, which is a
+ * value and travels normally. So omission here can only ever be silence, and
+ * silence must never delete.
+ */
+export const OMISSION_NEVER_CLEARS: ReadonlySet<SyncStore> = new Set<SyncStore>(['settings']);
+
+/**
+ * Shared settings that are structures rather than scalars.
+ *
+ * A structure being replaced by `undefined` is the shape of the categories loss,
+ * never the shape of a real edit: the app writes `[]` or `{}`, never nothing. So
+ * such an op is refused wherever one is seen, no matter which client produced
+ * it, which is what protects this data from a build that is not this one.
+ */
+export const SETTINGS_STRUCTURE_FIELDS: ReadonlySet<string> = new Set([
+  'categories',
+  'taskLists',
+  'prayer',
+  'notifications',
+  'taskFilters',
+  'focusExcludedDates',
+]);
+
+/**
+ * Would this op erase a settings structure outright?
+ *
+ * Used both when ops are made and when they arrive from another device, so a
+ * peer running older code cannot do what a local bug is now prevented from
+ * doing.
+ */
+export function isSettingsWipeOp(op: {
+  store: string; field: string; value?: unknown; present?: boolean;
+}): boolean {
+  if (op.store !== 'settings') return false;
+  if (op.present !== undefined) return false; // a set-member op carries a member
+  if (!SETTINGS_STRUCTURE_FIELDS.has(op.field)) return false;
+  return op.value === undefined || op.value === null;
+}
 
 export const isSyncableField = (field: string): boolean =>
   !PC_ONLY_FIELDS.has(field) && !TRANSIENT_FIELDS.has(field) && field !== DELETED_FIELD;
@@ -130,6 +184,77 @@ export function settingsAdapter(
       const local = onDisk && typeof onDisk === 'object' && !Array.isArray(onDisk) ? onDisk : {};
       return applyShared(local, getOwn(next, SETTINGS_ENTITY) ?? {});
     },
+    detectDeletes: false,
+  };
+}
+
+/**
+ * Prayer completion marks: the PC's file vs the engine's shape.
+ *
+ * `prayer-done.json` has always been `{ 'yyyy-MM-dd': ['fajr', ...] }` — the PC
+ * app reads and writes it through `/api/prayer-done`, which hands the whole map
+ * over. The sync engine instead keeps one entity per date with a single SET
+ * field called `done`, so two devices ticking different prayers on the same day
+ * merge instead of fight. Without this adapter the two shapes were read as each
+ * other: the engine saw the PC's array as an object keyed "0", "1", ... and the
+ * PC could not read the engine's `{ done: [...] }` back at all. Each device then
+ * overwrote the other's ticks with something neither could parse — the file this
+ * produced held the same day as `{ "0": "maghrib", "1": "isha", done: [] }`,
+ * which both apps rendered as nothing ticked.
+ *
+ * The engine sees `{ date: { done: [...] } }`; the file keeps the array form the
+ * PC has always written.
+ *
+ * The digit-keyed members are a deliberate rescue, not toleration: a day saved
+ * by the OLD code has its ticks stranded under their array indices, invisible to
+ * both apps. They were real ticks, so they are folded back into `done`.
+ */
+export function prayerDoneAdapter(): StoreAdapter {
+  const isPrayerKey = (v: unknown): v is string =>
+    typeof v === 'string' && (PRAYER_KEYS as readonly string[]).includes(v);
+
+  const membersOf = (value: unknown): string[] => {
+    const members = new Set<string>();
+    if (Array.isArray(value)) {
+      for (const v of value) if (isPrayerKey(v)) members.add(v);
+    } else if (value && typeof value === 'object') {
+      const rec = value as Record<string, unknown>;
+      if (Array.isArray(rec.done)) {
+        for (const v of rec.done) if (isPrayerKey(v)) members.add(v);
+      }
+      for (const [k, v] of Object.entries(rec)) {
+        // Legacy damage: an array ingested as an object lands under "0", "1", ...
+        if (/^\d+$/.test(k) && isPrayerKey(v)) members.add(v);
+      }
+    }
+    // In prayer order, so the rebuilt file matches what the PC itself writes.
+    return PRAYER_KEYS.filter(k => members.has(k));
+  };
+
+  return {
+    toSnapshot(raw) {
+      const out: Snapshot = {};
+      const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+      for (const [date, value] of Object.entries(src)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+        const rec: Record<string, unknown> = { done: membersOf(value) };
+        setOwn(out, date, rec);
+      }
+      return out;
+    },
+    fromSnapshot(next) {
+      const out: Record<string, string[]> = {};
+      for (const [date, rec] of Object.entries(next)) {
+        const done = (rec as Record<string, unknown> | undefined)?.done;
+        if (Array.isArray(done) && done.length > 0) out[date] = done;
+      }
+      return out;
+    },
+    // An id this peer has tombstoned must never resurrect — but a DATE cannot be
+    // tombstoned at all: it is stable for ever, and un-ticking a day's last
+    // prayer (a missing or empty entry in the next save) must not make the same
+    // date un-tick-able an hour later. Removal is expressed per ELEMENT by the
+    // set merge, never by omitting the entity.
     detectDeletes: false,
   };
 }
@@ -252,7 +377,7 @@ export function snapshotToOps(
     // A field the record used to have and no longer does was CLEARED. Without
     // this the phone would keep a value the PC deleted — the stale-notify bug.
     // Skipped entirely in additive mode: see `additive` above.
-    if (current && !additive) {
+    if (current && !additive && !OMISSION_NEVER_CLEARS.has(store)) {
       for (const field of Object.keys(current)) {
         if (!isSyncableField(field)) continue;
         if (Object.hasOwn(incoming, field)) continue;
@@ -289,7 +414,12 @@ export function snapshotToOps(
     }
   }
 
-  return ops;
+  // LAST GATE. Nothing above should be able to produce one of these any more,
+  // but an op that erases a settings structure is destructive and irreversible
+  // once it has been replicated, so it is checked for on the way out as well as
+  // prevented on the way in. Cheap; and the one time it mattered cost the user
+  // nine categories they had built by hand.
+  return ops.filter(op => !isSettingsWipeOp(op));
 }
 
 /**

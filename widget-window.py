@@ -183,6 +183,13 @@ user32.ReleaseCapture.restype = ctypes.wintypes.BOOL
 user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint64, ctypes.c_int64]
 user32.PostMessageW.restype = ctypes.wintypes.BOOL
 
+# Cursor + key state — used by the manual drag loop.
+user32.GetCursorPos.argtypes = [ctypes.POINTER(ctypes.wintypes.POINT)]
+user32.GetCursorPos.restype = ctypes.wintypes.BOOL
+
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+
 # ShowWindow / LoadImageW / SendMessageW — used to force a taskbar button and icon
 user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
 user32.ShowWindow.restype = ctypes.wintypes.BOOL
@@ -255,6 +262,39 @@ user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
 
 
 
+VK_LBUTTON = 0x01
+_drag_thread = None
+
+
+def _drag_loop(hwnd):
+    """Move `hwnd` with the cursor until the left mouse button is released."""
+    SWP_NOSIZE = 0x0001
+    SWP_NOZORDER = 0x0004
+    SWP_NOACTIVATE = 0x0010
+    try:
+        pt = ctypes.wintypes.POINT()
+        if not user32.GetCursorPos(ctypes.byref(pt)):
+            return
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return
+        off_x = rect.left - pt.x
+        off_y = rect.top - pt.y
+
+        last = None
+        while user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000:
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                break
+            pos = (pt.x + off_x, pt.y + off_y)
+            if pos != last:
+                last = pos
+                user32.SetWindowPos(hwnd, 0, pos[0], pos[1], 0, 0,
+                                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+            time.sleep(0.008)
+    except Exception as e:
+        print("Drag loop failed:", e)
+
+
 class Api:
     def minimize(self):
         window.minimize()
@@ -262,12 +302,23 @@ class Api:
         window.destroy()
     
     def start_drag(self):
+        """Drag the window ourselves, following the physical cursor.
+
+        The old approach posted WM_SYSCOMMAND/SC_MOVE after ReleaseCapture(),
+        which is the standard trick for a frameless window -- but it only works
+        when the capturing control lives in this process. WebView2 renders in a
+        separate process (msedgewebview2.exe), so our ReleaseCapture() frees
+        nothing, the OS move loop starts with no mouse input reaching it, and the
+        window simply never follows the cursor. Polling the cursor and moving the
+        window directly sidesteps process boundaries entirely.
+        """
+        global _drag_thread
         try:
+            if _drag_thread and _drag_thread.is_alive():
+                return
             hwnd = int(window.native.Handle.ToInt64())
-            # Release mouse capture from the child browser control
-            user32.ReleaseCapture()
-            # Post WM_SYSCOMMAND (0x0112) with SC_MOVE + HTCAPTION (0xF012) to start OS-level window drag asynchronously (prevents UI deadlock)
-            user32.PostMessageW(hwnd, 0x0112, 0xF012, 0)
+            _drag_thread = threading.Thread(target=_drag_loop, args=(hwnd,), daemon=True)
+            _drag_thread.start()
         except Exception as e:
             print("Failed to start native drag:", e)
     def move_window_relative(self, dx, dy):
@@ -340,7 +391,12 @@ class Api:
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
-            "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore",
+            "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore,"
+    # Chrome downloads its on-device language model into whatever profile it
+    # is running from. In this one it is 4 GB of a repo folder, spent so a
+    # kiosk window showing a calendar can do nothing with it.
+    "OptimizationGuideOnDeviceModel,OptimizationGuideModelDownloading,"
+    "OptimizationHints,TextSafetyClassifier",
             "--hide-crash-restore-bubble",
             "--disable-session-crashed-bubble",
             "--no-first-run",

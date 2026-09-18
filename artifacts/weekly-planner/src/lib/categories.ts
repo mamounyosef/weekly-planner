@@ -40,17 +40,6 @@ export const DEFAULT_CATEGORIES: EventCategory[] = [
     showInWidget: true,
     description: 'Personal tasks, routines, and life events',
   },
-  {
-    id: 'university-calendar',
-    name: 'University Calendar',
-    color: '#f97316', // Vivid orange
-    defaultDurationMin: 60,
-    defaultNoDuration: false,
-    defaultAllDay: false,
-    defaultNoCheckbox: false,
-    showInWidget: true,
-    description: 'University courses, exams, deadlines, and academic calendar',
-  },
 ];
 
 export const PRESET_CATEGORY_COLORS: Array<{ hex: string; label: string }> = [
@@ -158,11 +147,11 @@ export function resolveEventColor(
 }
 
 // ─── Deleting one, without emptying the list ─────────────────────────────────
-// `coerceCategories` treats an empty array as CORRUPT and hands back the two
-// built-in categories. That is right for a damaged file and catastrophic for a
+// `coerceCategories` treats an empty array as CORRUPT and hands back the
+// built-in category. That is right for a damaged file and catastrophic for a
 // deliberate delete: removing the last category wrote `[]`, the next settings
-// snapshot coerced it straight back into Personal and University Calendar, and
-// those then broadcast to every device. Two screens offered the same operation
+// snapshot coerced it straight back into the built-in Personal, and that then
+// broadcast to every device. Two screens offered the same operation
 // and only one of them refused. The rule lives here now so all of them share it.
 
 /** What the user is told when the last category is what they tried to remove. */

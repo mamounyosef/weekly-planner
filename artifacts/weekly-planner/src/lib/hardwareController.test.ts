@@ -15,6 +15,9 @@ import {
   coerceHardwareSettings,
   armingSecondsLeft,
   dropCrosstalkButtons,
+  presenceResync,
+  sensorReturnReset,
+  SENSOR_RECONNECT_GAP_MS,
   type HardwareAction,
   type HardwareControllerState,
   type HardwareSettings,
@@ -55,10 +58,14 @@ class Desk {
     }
   }
 
+  /** Is the board talking? False = it is unplugged, rebooting, or the PC just
+   *  woke up next to a board that has been reporting to nobody. */
+  sensorLive = true;
+
   private run(kind: 'presence' | 'button_a' | 'button_b' | 'manual_stop' | 'tick', present?: boolean) {
     const r = reduceHardware(
       this.state,
-      { kind, present },
+      { kind, present, sensorSilent: kind === 'tick' ? !this.sensorLive : undefined },
       { isRunning: this.isRunning, hasSession: this.hasSession, ready: this.ready },
       this.settings,
       this.t,
@@ -91,6 +98,27 @@ class Desk {
 
   /** The planned time runs out and the app logs the session. */
   sessionEnds() { this.isRunning = false; this.hasSession = false; }
+
+  /** The board stops reporting: unplugged, rebooting, or the PC is off. */
+  sensorDies() { this.sensorLive = false; }
+
+  /**
+   * The board comes back after a long gap, with the desk in the state given.
+   * Mirrors the hook exactly: the reconnect reset first, then the level resync
+   * that turns the standing verdict into the edge the reducer acts on.
+   */
+  sensorReturns(present: boolean, gapSeconds = 120) {
+    this.t += gapSeconds * 1000;
+    this.sensorLive = true;
+    this.state = sensorReturnReset(
+      this.state,
+      { isRunning: this.isRunning, hasSession: this.hasSession, ready: this.ready },
+      this.t,
+    );
+    this.saved = { ...this.state };
+    const resync = presenceResync(this.state, { present, ready: true, at: this.t }, this.t);
+    if (resync) this.run('presence', resync.present);
+  }
 
   /** A page reload, or the lease moving to the other window. */
   handOff() {
@@ -965,6 +993,159 @@ console.log('\n--- LAYER B: EXHAUSTIVE SCENARIO MATRIX ---');
 
   d.advance(30); // 30s advances across midnight
   check('session continues running uninterrupted across midnight boundary', d.isRunning && d.hasSession);
+}
+
+
+// -- cold start: the PC and the desk come up independently --------------------
+section('Sensor blackout and return');
+{
+  // PC boots next to a board that has been on the whole time, and you are
+  // already sitting there. The old failure: no edge ever arrives, because
+  // sitting still is not one, so the LCD sits on "Ready" all day.
+  const d = new Desk();
+  d.sensorLive = false;              // nothing heard yet this session
+  d.sensorReturns(true);
+  check('boot beside an occupied desk arms a countdown', armingSecondsLeft(d.state, d.t) === 30,
+    `got ${armingSecondsLeft(d.state, d.t)}`);
+  d.advance(31);
+  check('and starts the session', d.isRunning && d.hasSession);
+}
+{
+  // The user's own setting is 60s, not the default 30. The reconnect must use
+  // the configured grace period, not a special one of its own.
+  const d = new Desk({ armSeconds: 60 });
+  d.sensorLive = false;
+  d.sensorReturns(true);
+  check('reconnect honours armSeconds=60', armingSecondsLeft(d.state, d.t) === 60,
+    `got ${armingSecondsLeft(d.state, d.t)}`);
+  d.advance(59);
+  check('nothing at 59s', !d.hasSession);
+  d.advance(2);
+  check('starts at 60s', d.isRunning);
+}
+{
+  // Board dies while you are sitting there working, then comes back. The
+  // controller still believed `present`, so without the reset there is no edge.
+  const d = new Desk();
+  d.event('presence', true); d.advance(31);
+  check('working before the blackout', d.isRunning);
+  d.sessionEnds();
+  d.advance(1);
+  check('chained a second session', d.isRunning);
+  d.sessionEnds();
+  d.sensorDies();
+  d.advance(300);
+  check('nothing chains while the board is silent', !d.hasSession);
+  d.sensorReturns(true);
+  d.advance(31);
+  check('a new session arms and starts once it is back', d.isRunning && d.hasSession);
+}
+{
+  // A running session must survive the blackout untouched, and keep running.
+  const d = new Desk();
+  d.event('presence', true); d.advance(31);
+  d.sensorDies();
+  d.advance(600);
+  check('a running session is left alone through the blackout', d.isRunning && d.hasSession);
+  d.sensorReturns(true);
+  d.advance(5);
+  check('and is still running after the board returns', d.isRunning);
+  check('no terminate was issued', !d.actions.includes('terminate'));
+}
+{
+  // Paused when the board vanished: adopted and resumed on return, per the
+  // decision that a silent sensor is not evidence you left.
+  const d = new Desk();
+  d.event('presence', true); d.advance(31);
+  d.event('presence', false); d.advance(1);
+  check('paused by walking away', d.paused);
+  d.sensorDies();
+  d.advance(600);   // ten minutes, far beyond awayTerminateSeconds
+  check('the away countdown is held while the sensor is silent', d.paused,
+    'session was terminated during the blackout');
+  d.sensorReturns(true);
+  check('resumed when the board comes back and sees you', d.isRunning);
+}
+{
+  // The blackout must not count towards the terminate timeout: coming back to
+  // an empty desk restarts that clock rather than firing it instantly.
+  const d = new Desk();
+  d.event('presence', true); d.advance(31);
+  d.event('presence', false); d.advance(1);
+  d.sensorDies();
+  d.advance(3600);
+  d.sensorReturns(false);
+  d.advance(60);
+  check('terminate clock restarts on return, not fires', d.hasSession);
+  d.advance(70);
+  check('and fires a full awayTerminateSeconds later', !d.hasSession);
+}
+{
+  // A brief wifi hiccup is not a reconnect. Nothing may be forgotten, or a
+  // dropped batch would re-arm a session over a working one.
+  const d = new Desk();
+  d.event('presence', true); d.advance(31);
+  const before = { ...d.state };
+  d.sensorDies();
+  d.advance(10);
+  d.sensorLive = true;
+  d.advance(5);
+  check('a 10s gap is below the reconnect threshold', 10_000 < SENSOR_RECONNECT_GAP_MS);
+  check('a short hiccup changes nothing', d.isRunning && d.state.present === before.present);
+}
+{
+  // You stopped a session by hand and stayed sitting. Before the blackout that
+  // (correctly) arms nothing; after a real reconnect it is an arrival again.
+  const d = new Desk();
+  d.event('presence', true); d.advance(31);
+  d.handStop();
+  d.advance(120);
+  check('stopping by hand keeps the desk quiet', !d.hasSession && d.state.stoppedByHand);
+  d.sensorDies();
+  d.sensorReturns(true);
+  d.advance(31);
+  check('a reconnect is a fresh arrival and starts a new one', d.isRunning);
+}
+{
+  // Presence is forgotten, not inverted: a reconnect to an EMPTY desk must
+  // start nothing at all.
+  const d = new Desk();
+  d.sensorLive = false;
+  d.sensorReturns(false);
+  d.advance(120);
+  check('reconnect to an empty desk starts nothing', !d.hasSession && !d.state.present);
+  check('and no countdown is pending', d.state.armingUntil === null);
+}
+{
+  // The reset is a pure function; check the shape directly for the two cases
+  // the resume decision hangs on.
+  const now = 1_700_000_000_000;
+  const running = sensorReturnReset(
+    { ...INITIAL_CONTROLLER_STATE, present: true, stoppedByHand: true, awaySince: now - 1000 },
+    { isRunning: true, hasSession: true, ready: true }, now);
+  check('reset forgets presence', running.present === false);
+  check('reset clears a stale hand-stop', running.stoppedByHand === false);
+  check('a running session claims no away timer', running.awaySince === null && !running.pausedByAway);
+
+  const paused = sensorReturnReset(
+    { ...INITIAL_CONTROLLER_STATE, present: true },
+    { isRunning: false, hasSession: true, ready: true }, now);
+  check('a paused session is re-anchored to now', paused.awaySince === now && paused.pausedByAway === true);
+
+  const idle = sensorReturnReset(
+    { ...INITIAL_CONTROLLER_STATE, present: true, armingUntil: now + 5000 },
+    { isRunning: false, hasSession: false, ready: true }, now);
+  check('a pending countdown is dropped', idle.armingUntil === null);
+  check('no session means no away timer', idle.awaySince === null);
+}
+{
+  // The blackout must not be mistaken for the board being back: a stale level
+  // can never resync the controller.
+  const now = 1_700_000_000_000;
+  check('a silent board cannot resync',
+    presenceResync({ ...INITIAL_CONTROLLER_STATE }, { present: true, ready: true, at: now - 60_000 }, now) === null);
+  check('a warming-up filter cannot resync',
+    presenceResync({ ...INITIAL_CONTROLLER_STATE }, { present: true, ready: false, at: now }, now) === null);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);

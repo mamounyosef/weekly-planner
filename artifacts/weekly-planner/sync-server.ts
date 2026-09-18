@@ -552,7 +552,7 @@ export function acknowledge(
       lastSeen: opts.at,
     },
   };
-  const trimmed = trimLog(bundle.log, devices);
+  const trimmed = trimLog(bundle.log, devices, opts.at);
   return {
     ...bundle,
     devices,
@@ -561,14 +561,41 @@ export function acknowledge(
   };
 }
 
-/** Trim the log to what the slowest known device still needs, plus slack. */
+/**
+ * How long a device's cursor keeps holding the log in place.
+ *
+ * THE SLOWEST DEVICE WAS FOREVER. Trimming used to respect every device ever
+ * seen, including one that synced once and never came back — an old phone
+ * install, a browser profile since deleted. Its cursor never moved again, the
+ * minimum never rose, and the log grew without bound for as long as the
+ * planner was used. The safety net for going back on this promise already
+ * exists: a device that asks for ops below `trimmedBelow` is told to take a
+ * full snapshot, which rebuilds its state exactly. A device absent this long
+ * therefore costs nothing but one resync when it returns, whereas honouring it
+ * for ever cost a log that never shrank.
+ */
+export const DEVICE_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Trim the log to what the slowest STILL-ACTIVE device needs, plus slack.
+ *
+ * `now` is the server clock the caller is operating on; without it every known
+ * device counts, which is the old behaviour and what direct unit callers get.
+ * With no active device at all nothing is trimmed: there is no cursor to
+ * justify trimming to, and guessing one could maroon a device that is merely
+ * quiet rather than gone.
+ */
 export function trimLog(
   log: readonly SyncOp[],
   devices: Record<string, DeviceRecord>,
+  now?: number,
 ): { log: SyncOp[]; trimmedBelow: number } {
-  const cursors = Object.values(devices).map(d => d.cursor);
-  if (cursors.length === 0) return { log: [...log], trimmedBelow: 0 };
-  const slowest = Math.min(...cursors);
+  const all = Object.values(devices);
+  const active = now === undefined
+    ? all
+    : all.filter(d => now - d.lastSeen <= DEVICE_ACTIVE_WINDOW_MS);
+  if (active.length === 0) return { log: [...log], trimmedBelow: 0 };
+  const slowest = Math.min(...active.map(d => d.cursor));
   const below = Math.max(0, slowest - LOG_SLACK);
   if (below <= 0) return { log: [...log], trimmedBelow: 0 };
   return { log: log.filter(op => (op.seq ?? 0) > below), trimmedBelow: below };
@@ -596,11 +623,16 @@ export async function rebuildStoreFile(
   // while the PC app writes them in insertion order, so a byte comparison would
   // report "changed" on every single sync — rewriting database.json, firing the
   // db-stream, and making every open window reload for no reason at all.
-  if (canonicalJson(next) === canonicalJson(onDisk)) return null;
-
-  // Through the adapter on the way out too, so the parts of the file that never
-  // synced are carried through rather than dropped.
+  //
+  // Through the ADAPTER on BOTH sides, and at FILE level rather than engine
+  // level. An adapter deliberately drops what the log may still hold (a prayer
+  // day un-ticked to empty, legacy index damage in a prayer-done entity);
+  // comparing engine snapshots would see that difference for ever and rewrite
+  // the file on every sweep, while the files themselves already agree.
   const body = adapter ? adapter.fromSnapshot(next, raw) : next;
+  const onFile = adapter ? adapter.fromSnapshot(onDisk, raw) : raw;
+  if (canonicalJson(body) === canonicalJson(onFile)) return null;
+
   return JSON.stringify(body, null, 2);
 }
 

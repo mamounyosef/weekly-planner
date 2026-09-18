@@ -477,8 +477,8 @@ function main() {
 
     const { spans, covered } = spansForRange(events, from, to, 0);
     const ids = spans.map(s => s.id).sort();
-    assert.deepEqual(ids, ['holiday', 'redeye', 'trip'],
-      'all day and multi day items only; deleted, undated and out of range are out');
+    assert.deepEqual(ids, ['holiday', 'redeye', 'standup', 'trip'],
+      'all day and timed items included; deleted, undated and out of range are out');
 
     const trip = spans.find(s => s.id === 'trip')!;
     assert.deepEqual([trip.startDate, trip.endDate], ['2026-08-03', '2026-08-05']);
@@ -487,10 +487,29 @@ function main() {
     assert.equal(trip.allDay, true);
     assert.equal(spans.find(s => s.id === 'redeye')!.allDay, false, 'a timed multi day item is still a band');
 
+    const standup = spans.find(s => s.id === 'standup')!;
+    assert.deepEqual([standup.startDate, standup.endDate], ['2026-08-10', '2026-08-10']);
+    assert.equal(standup.title, 'Standup');
+    assert.equal(standup.masterId, 'standup');
+    assert.equal(standup.allDay, false);
+    assert.equal(standup.startMin, 540);
+
     assert.equal(covered['2026-08-03'], 1);
     assert.equal(covered['2026-08-05'], 1);
     assert.equal(covered['2026-08-06'], undefined, 'the day after is untouched');
+    assert.equal(covered['2026-08-10'], 1, 'the timed standup item');
     assert.equal(covered['2026-08-11'], 1, 'the one day holiday');
+
+    // Mixed day: all-day items sit above timed items, and timed items order by time
+    const mixed = [
+      { id: 'movie', startDate: '2026-08-31', endDate: '2026-08-31', allDay: false, startMin: 1200, title: 'Movie' },
+      { id: 'allday', startDate: '2026-08-31', endDate: '2026-08-31', allDay: true, startMin: null, title: 'All day event' },
+      { id: 'breakfast', startDate: '2026-08-31', endDate: '2026-08-31', allDay: false, startMin: 540, title: 'Breakfast' },
+    ];
+    const mixedLayout = layoutSpans(mixed, weeks);
+    assert.equal(mixedLayout.lanes.allday, 0, 'all-day event gets top lane');
+    assert.equal(mixedLayout.lanes.breakfast, 1, 'earlier timed event gets second lane');
+    assert.equal(mixedLayout.lanes.movie, 2, 'later timed event gets third lane');
 
     // A repeat produces one span per occurrence, each carrying its own dates.
     const weekly = spansForRange({

@@ -40,10 +40,10 @@ def register() -> None:
     """
     import winreg
 
-    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    if not os.path.exists(pythonw):
-        pythonw = sys.executable
-    target = f'"{pythonw}" "{os.path.abspath(__file__)}" "%1"'
+    # Use wscript.exe to execute a VBS wrapper so that clicking a toast notification
+    # never flashes a console window, even if pythonw.exe is unavailable.
+    vbs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify-action.vbs")
+    target = f'"wscript.exe" "{vbs}" "%1"'
 
     base = rf"Software\Classes\{PROTOCOL}"
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as key:

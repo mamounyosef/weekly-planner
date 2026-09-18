@@ -10,7 +10,7 @@ import { Tick } from '../ui/Tick';
 export function ViewFilter({ onClose }: { onClose: () => void }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const { categories, calendarView, hiddenCategoriesByView, setHiddenCategories } = usePlanner();
+  const { categories, calendarView, hiddenCategoriesByView, setHiddenCategories, canUndo, canRedo, undoLabel, redoLabel, undo, redo } = usePlanner();
 
   const activeHidden = hiddenCategoriesByView[calendarView] || [];
   
@@ -59,7 +59,7 @@ export function ViewFilter({ onClose }: { onClose: () => void }) {
             hitSlop={space.sm}
             style={({ pressed }) => [{ paddingHorizontal: space.xs, paddingVertical: space.xs, justifyContent: 'center' }, pressed ? PRESSED : null]}
           >
-            <Text variant="title" tone="accent">�</Text>
+            <Text variant="title" tone="accent">←</Text>
           </Pressable>
           <View style={{ flex: 1 }}>
             <Text variant="heading">Filters</Text>
@@ -118,6 +118,53 @@ export function ViewFilter({ onClose }: { onClose: () => void }) {
             </Pressable>
           );
         })}
+        {/* Undo / redo, at the tail of the sheet: reachable, but out of the
+            way of the filter rows the thumb is already tapping. An undo here
+            is a real synced edit, so it lands on the PC too. */}
+        <Row gap={space.md} style={{ marginTop: space.sm }}>
+          <Pressable
+            unstable_pressDelay={PRESS_DELAY}
+            onPress={() => { void undo(); }}
+            disabled={!canUndo}
+            accessibilityRole="button"
+            accessibilityLabel={"Undo" + (undoLabel ? " " + undoLabel : "")}
+            style={({ pressed }) => [{
+              flex: 1,
+              alignItems: "center",
+              paddingVertical: space.md,
+              backgroundColor: p.surface,
+              borderRadius: radius.md,
+              gap: space.xs,
+              opacity: canUndo ? 1 : 0.35,
+            }, pressed && canUndo ? PRESSED : null]}
+          >
+            <Text variant="body" tone={canUndo ? "accent" : "faint"}>↺  Undo</Text>
+            {undoLabel ? (
+              <Text variant="caption" tone="faint" numberOfLines={1}>{undoLabel}</Text>
+            ) : null}
+          </Pressable>
+          <Pressable
+            unstable_pressDelay={PRESS_DELAY}
+            onPress={() => { void redo(); }}
+            disabled={!canRedo}
+            accessibilityRole="button"
+            accessibilityLabel={"Redo" + (redoLabel ? " " + redoLabel : "")}
+            style={({ pressed }) => [{
+              flex: 1,
+              alignItems: "center",
+              paddingVertical: space.md,
+              backgroundColor: p.surface,
+              borderRadius: radius.md,
+              gap: space.xs,
+              opacity: canRedo ? 1 : 0.35,
+            }, pressed && canRedo ? PRESSED : null]}
+          >
+            <Text variant="body" tone={canRedo ? "accent" : "faint"}>↻  Redo</Text>
+            {redoLabel ? (
+              <Text variant="caption" tone="faint" numberOfLines={1}>{redoLabel}</Text>
+            ) : null}
+          </Pressable>
+        </Row>
         <Spacer size={space.lg} />
       </ScrollView>
     </View>

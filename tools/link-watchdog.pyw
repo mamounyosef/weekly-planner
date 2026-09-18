@@ -179,13 +179,9 @@ def server_up():
 def start_planner():
     """Hand off to the normal launcher. It is mutex-guarded and only starts what
     is missing, so this cannot end up with two servers or a second window."""
-    launcher = os.path.join(ROOT, "planner-launcher.pyw")
-    pythonw = os.path.join(ROOT, ".venv-launcher", "Scripts", "pythonw.exe")
-    if not os.path.exists(pythonw):
-        pythonw = sys.executable.replace("python.exe", "pythonw.exe")
     try:
         subprocess.Popen(
-            [pythonw, launcher],
+            ["wscript.exe", os.path.join(ROOT, "launch.vbs")],
             cwd=ROOT,
             creationflags=NO_WINDOW,
             stdin=subprocess.DEVNULL,

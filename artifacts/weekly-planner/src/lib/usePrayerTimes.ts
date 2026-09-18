@@ -100,7 +100,14 @@ export function usePrayerTimes(
   }, []);
 
   // ── Done state, shared through the server like every other store ───────────
+  const inFlightToggles = useRef(0);
+
   const pullDone = useCallback(() => {
+    // A toggle is on its way to the server. The poll's copy is older than the
+    // optimistic one on screen, and applying it now would flicker the tick back
+    // off for up to a poll interval; the toggle refetches on its own once the
+    // server has answered, and that answer is the merged truth.
+    if (inFlightToggles.current > 0) return;
     fetch('/api/prayer-done')
       .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then(data => setDone(coercePrayerDone(data)))
@@ -119,14 +126,28 @@ export function usePrayerTimes(
 
   const toggleDone = useCallback((dateStr: string, key: PrayerKey) => {
     const next = togglePrayerDone(doneRef.current, dateStr, key);
+    doneRef.current = next;
     setDone(next);
-    const url = Object.keys(next).length === 0 ? '/api/prayer-done?force=1' : '/api/prayer-done';
-    fetch(url, {
+    const present = !!next[dateStr]?.includes(key);
+    // ONE ELEMENT, not the whole map. The map in `doneRef` may be twenty seconds
+    // behind the server and is shared with the widget window, so posting it
+    // wholesale un-ticked whatever anybody else had marked in between — the
+    // report behind "I ticked it and later found it unclicked". The server
+    // applies a single set element, so clicks from every window and the phone
+    // merge instead of overwrite.
+    inFlightToggles.current += 1;
+    fetch('/api/prayer-done', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(next),
-    }).catch(err => console.error('Failed to save prayer completion:', err));
-  }, []);
+      body: JSON.stringify({ date: dateStr, key, present }),
+    })
+      .then(r => { if (!r.ok) throw new Error(String(r.status)); })
+      .catch(err => console.error('Failed to save prayer completion:', err))
+      .finally(() => {
+        inFlightToggles.current -= 1;
+        pullDone();
+      });
+  }, [pullDone]);
 
   /** Prayers to draw on one day — empty when disabled or past the horizon. */
   const prayersFor = useCallback((date: Date): PrayerOccurrence[] => {

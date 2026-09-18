@@ -298,7 +298,7 @@ export function WeekView({
     return arr;
   }, [days, dayOf, prayersOn]);
 
-  const laidOutByDate = useMemo(() => {
+  const layout = useMemo(() => {
     const logicalCols: GridItem[][] = allDays.map(() => []);
 
     for (let c = 0; c < allDays.length; c++) {
@@ -323,53 +323,73 @@ export function WeekView({
       }
     }
 
-    // Every piece pushed above already carries the coordinates of the SEGMENT
-    // it is, inside this column's own window. So the top and the height are
-    // read straight off it: re-deriving them from the original event is what
-    // put a head half a day above its own column.
-    return logicalCols.map(colItems => {
-      return layoutDay<GridItem>(colItems, { pxPerHour, dayStartHour: dayStartH })
-        .map(pl => {
-          const segStart = pl.item.startMin;
-          const segEnd = blockEnd(pl.item);
-          const isTail = pl.item.isTail === true;
-          const isHead = pl.item.isHead === true;
-          // Three answers, not two. A block can be absent from the drawn
-          // hours entirely, or present but cut at one end, and the second case
-          // used to be silent: a night from half past midnight to nine, on a
-          // grid that stops at two, was drawn as an hour and a half of sleep
-          // with nothing to say the other seven existed.
-          //
-          // Hidden is judged on the WHOLE span now, not on the start alone.
-          // Something beginning in an hour that is not drawn and running into
-          // one that is used to become a stub, throwing away the part of it
-          // there was room for.
-          const clip = clipSpan(segStart, segEnd, shown);
+    // LAYOUT RUNS ON WHAT WILL BE DRAWN, AND ONLY ON THAT. Each piece is
+    // clipped against the drawn hours first; the hidden ones are set aside for
+    // the bands below, and `layoutDay` sees the rest. Laying everything out and
+    // filtering afterwards is the bug where an item falling entirely in the
+    // hidden hours — a 3am test on a grid that stops at 2am — still took a lane
+    // in the overlap run it landed beside: the sleeping block next to it was
+    // drawn at half width with an empty lane at its side, because its
+    // neighbour had been filtered out of the paint but not out of the
+    // arithmetic.
+    const drawnIds = new Set<string>();
+    const hiddenCols: GridItem[][] = [];
 
-          const at = yAt(segStart);
-          return {
-            ...pl,
-            top: at,
-            height: Math.max(2, yAt(segEnd) - at),
-            isHidden: clip.hidden,
-            // A head arrived from the column before and a tail leaves for the
-            // one after. Neither is clipped by the drawn hours as such, but
-            // both are continuations and read identically to one that is.
-            continuesAbove: clip.clippedAbove || isHead,
-            continuesBelow: clip.clippedBelow || isTail,
-            isTail,
-            isHead,
-          };
-        });
+    const laidOut = logicalCols.map((colItems, i) => {
+      const clipped = colItems.map(pl => ({
+        pl,
+        clip: clipSpan(pl.startMin, blockEnd(pl), shown),
+      }));
+      hiddenCols[i] = clipped.filter(p => p.clip.hidden).map(p => p.pl);
+      for (const p of clipped) {
+        if (!p.clip.hidden) drawnIds.add(p.pl.item.id);
+      }
+
+      // Every piece pushed above already carries the coordinates of the SEGMENT
+      // it is, inside this column's own window. So the top and the height are
+      // read straight off it: re-deriving them from the original event is what
+      // put a head half a day above its own column.
+      return layoutDay<GridItem>(
+        clipped.filter(p => !p.clip.hidden).map(p => p.pl),
+        { pxPerHour, dayStartHour: dayStartH },
+      ).map(pl => {
+        const segStart = pl.item.startMin;
+        const segEnd = blockEnd(pl.item);
+        const isTail = pl.item.isTail === true;
+        const isHead = pl.item.isHead === true;
+        // A block here is present but may be cut at one end, which used to be
+        // silent: a night from half past midnight to nine, on a grid that
+        // stops at two, was drawn as an hour and a half of sleep with nothing
+        // to say the other seven existed. The cut is marked by the arrow, and
+        // the piece's time line names the hour it really ends.
+        const clip = clipSpan(segStart, segEnd, shown);
+
+        const at = yAt(segStart);
+        return {
+          ...pl,
+          top: at,
+          height: Math.max(2, yAt(segEnd) - at),
+          // A head arrived from the column before and a tail leaves for the
+          // one after. Neither is clipped by the drawn hours as such, but
+          // both are continuations and read identically to one that is.
+          continuesAbove: clip.clippedAbove || isHead,
+          continuesBelow: clip.clippedBelow || isTail,
+          isTail,
+          isHead,
+        };
+      });
     });
+
+    return { laidOut, hiddenCols, drawnIds };
   }, [allDays, dayStartH, pxPerHour, shown, yAt, days.length]);
 
-  /** What the columns actually draw. Anything with no drawn minutes is not
-   *  among them: it is listed under the grid instead. */
-  const placedByDate = useMemo(
-    () => laidOutByDate.map(col => col.filter(pl => !pl.isHidden)),
-    [laidOutByDate],
-  );
+  const laidOutByDate = layout.laidOut;
+  const hiddenByDate = layout.hiddenCols;
+  const drawnIds = layout.drawnIds;
+
+  /** What the columns actually draw — already only the visible pieces.
+   *  Anything with no drawn minutes is listed under the grid instead. */
+  const placedByDate = laidOutByDate;
 
   /**
    * Everything that falls in hours this device does not draw.
@@ -386,23 +406,33 @@ export function WeekView({
    * gap in the timeline is drawn as a gap.
    */
   const { topOutsideByDate, bottomOutsideByDate } = useMemo(() => {
-    const topByDate: OutsideEntry[][] = [];
-    const bottomByDate: OutsideEntry[][] = [];
+    const topByDate: OutsideEntry[][] = allDays.map(() => []);
+    const bottomByDate: OutsideEntry[][] = allDays.map(() => []);
 
     allDays.forEach((d, i) => {
-      const top: OutsideEntry[] = [];
-      const bottom: OutsideEntry[] = [];
-
-      for (const pl of laidOutByDate[i] ?? []) {
-        if (!pl.isHidden) continue;
-        const item = pl.item.item;
+      for (const pl of hiddenByDate[i] ?? []) {
+        // AN OCCURRENCE THE GRID DRAWS SOMEWHERE IS NOT LISTED HERE. Get Up at
+        // 12:15am is inside the drawn hours of the column BEFORE -- the foot of
+        // that column runs past midnight into the next morning -- so it was
+        // painted there in full AND listed in this band, and the reader saw
+        // the same item twice, once cut and once not. The band is for what has
+        // no drawn home anywhere, not for a second telling of what does.
+        if (drawnIds.has(pl.item.id)) continue;
+        // ON THE FIRST VISIBLE DAY, items before the day start belong to the
+        // night of the PREVIOUS day -- a day that is not on screen. Drawing
+        // them in THIS day's band is misleading: the reader sees Get Up on
+        // Sunday when it is really Saturday's night. The previous column is
+        // not there to claim it, so `drawnIds` cannot filter it, but it still
+        // should not show here.
+        if (i === 0 && pl.startMin < dayStartH * 60) continue;
+        const item = pl.item;
         
         const entry: OutsideEntry = {
-          key: pl.item.id,
-          at: pl.item.startMin,
+          key: pl.id,
+          at: pl.startMin,
           label: item.title,
           detail: blockTiming({
-            startMin: item.startMin ?? pl.item.startMin,
+            startMin: item.startMin ?? pl.startMin,
             endMin: item.endMin,
             timeFormat: clock,
             minutesLeft: null,
@@ -412,31 +442,32 @@ export function WeekView({
           onPress: () => onOpenItem(item),
         };
 
-        if (pl.item.startMin < dayStartH * 60) top.push(entry);
-        else bottom.push(entry);
+        if (pl.startMin < dayStartH * 60) {
+          topByDate[i].push(entry);
+          if (i > 0) {
+            bottomByDate[i - 1].push({
+              ...entry,
+              key: entry.key + '_prev',
+              at: pl.startMin + 1440,
+            });
+          }
+        } else {
+          bottomByDate[i].push(entry);
+          if (i + 1 < allDays.length) {
+            topByDate[i + 1].push({
+              ...entry,
+              key: entry.key + '_next',
+              at: pl.startMin - 1440,
+            });
+          }
+        }
       }
 
       for (const pr of d.prayers) {
         // We no longer add 1440 to early morning prayers because we want them
         // to legitimately appear BEFORE the day starts (at the top).
         const at = pr.minutes;
-        
-        // However, if we evaluate `isMinuteVisible`, we should check `at`.
-        // Wait, `isMinuteVisible` checks against `shown` which expects `dayStartH` to `dayStartH + shown.hours`.
-        // If `at < dayStartH * 60`, `isMinuteVisible` will be false, which is correct.
-        // What if the prayer is actually from the PREVIOUS night but falls at e.g. 25:00 (1am next day)?
-        // Prayers are strictly 0-1440. If a prayer is 1am (60 mins), and dayStartH is 6am (360),
-        // it goes to `top`. It's the 1am prayer of THIS day (i.e. Fajr or Tahajjud).
-        // What if the day ends at 2am (26 hours)? The Isha prayer of THIS day is around 20:00 (1200 mins).
-        // It's inside the grid.
-        // What if Isha is at 2am next day? (1560 mins). `d.prayers` only gives 0-1439.
-        // So a prayer at 1am (60) is ALWAYS treated as the morning of the current day!
-        // That is correct for Islamic prayers.
         if (isMinuteVisible(at, shown)) continue;
-        // Wait! What if the prayer is at 1am (60 mins), but the grid is from 6am to 2am next day?
-        // The 1am prayer of the NEXT day should be at the bottom?
-        // But `d.prayers` contains the prayers of THIS day! So the 1am prayer is from THIS day's morning!
-        // So it belongs at the top!
         
         const done = isPrayerDone ? isPrayerDone(d.date, pr.key) : false;
         const entry: OutsideEntry = {
@@ -451,7 +482,7 @@ export function WeekView({
         };
 
         if (at < dayStartH * 60) {
-          top.push(entry);
+          topByDate[i].push(entry);
           // Also place it at the bottom of the previous day, since it represents
           // the late night of that previous day!
           if (i > 0) {
@@ -462,34 +493,25 @@ export function WeekView({
             });
           }
         } else {
-          bottom.push(entry);
+          bottomByDate[i].push(entry);
+          if (i + 1 < allDays.length) {
+            topByDate[i + 1].push({
+              ...entry,
+              key: entry.key + '_next',
+              at: at - 1440,
+            });
+          }
         }
       }
-
-      // Top is in reverse chronological order: things closest to the grid are at the bottom of the top stack.
-      // E.g., 5am is below 4am. Wait, the visual order should be:
-      // - 4am
-      // - 5am
-      // - (Grid starts at 6am)
-      // This is normal chronological order! 
-      // But the user said: "But obviously they should be in reverse order because they will be in reverse order when they are displayed at the top."
-      // Let's think: if the dots are at the bottom, and the events are above them.
-      // - 5am (closest to grid)
-      // - 4am
-      // - 3am
-      // This means Time flows backwards as you go up!
-      // This is reverse chronological order. `b.at - a.at`.
-      top.sort((a, b) => (b.at - a.at) || a.key.localeCompare(b.key));
-      
-      // Bottom is normal chronological order.
-      bottom.sort((a, b) => (a.at - b.at) || a.key.localeCompare(b.key));
-
-      topByDate.push(top);
-      bottomByDate.push(bottom);
     });
 
+    for (let i = 0; i < allDays.length; i++) {
+      topByDate[i].sort((a, b) => (a.at - b.at) || a.key.localeCompare(b.key));
+      bottomByDate[i].sort((a, b) => (a.at - b.at) || a.key.localeCompare(b.key));
+    }
+
     return { topOutsideByDate: topByDate, bottomOutsideByDate: bottomByDate };
-  }, [days, laidOutByDate, shown, dayStartH, clock, p.accent, prayerColour,
+  }, [days, hiddenByDate, drawnIds, shown, dayStartH, clock, p.accent, prayerColour,
        isPrayerDone, onTogglePrayer, onOpenItem]);
 
   const anyTopOutside = topOutsideByDate.some(list => list.length > 0);
@@ -1036,7 +1058,7 @@ export function WeekView({
                           it does for the in-grid marker. */}
                       {chipMode === 'dot' ? formatClock(pr.minutes, clock) : pr.label}
                     </Text>
-                    {chipMode === 'full' ? (
+                    {chipMode !== 'dot' ? (
                       <Text style={{
                         color: colour, fontSize: 8.5, lineHeight: 12, opacity: 0.8,
                         marginLeft: 'auto',
@@ -1134,6 +1156,7 @@ export function WeekView({
                 key={`top-outside-${d.date}`}
                 entries={topOutsideByDate[i] ?? []}
                 detailed={detailed}
+                showTime={detailed || colW >= 92}
                 top
               />
             ))}
@@ -1321,6 +1344,7 @@ export function WeekView({
                 key={`bottom-outside-${d.date}`}
                 entries={bottomOutsideByDate[i] ?? []}
                 detailed={detailed}
+                showTime={detailed || colW >= 92}
               />
             ))}
           </View>
@@ -1705,8 +1729,10 @@ function DayColumn({
               flex: 1,
               backgroundColor: fill,
               borderRadius: radius.sm,
-              paddingHorizontal: detailed ? 6 : 3,
+              paddingHorizontal: detailed ? 8 : 4,
               paddingTop: 1,
+              borderWidth: 0.5,
+              borderColor: p.bg,
               // Three states, in order of how loud they should be: carried
               // (faint, the ghost is doing the talking), lifted (raised and
               // outlined), normal.
@@ -1837,12 +1863,13 @@ function DayColumn({
             style={{
               color: colour, fontSize: 9, lineHeight: 11, fontWeight: '700',
               textDecorationLine: done ? 'line-through' : 'none',
+              flexShrink: 1,
             }}
           >
             {pr.label}
           </Text>
         ) : null;
-        const time = chipMode === 'full' && prayerLabels !== false ? (
+        const time = named ? (
           <Text style={{ color: colour, fontSize: 8.5, lineHeight: 11, opacity: 0.8 }}>
             {formatClock(pr.minutes, clock)}
           </Text>
@@ -2009,10 +2036,19 @@ function NowMarker({ top }: { top: number }) {
  * drawn hours is a display choice, and a display choice must not take anything
  * away from you.
  */
-function OutsideHours({ entries, detailed, top }: {
+function OutsideHours({ entries, detailed, top, showTime }: {
   entries: readonly OutsideEntry[];
   detailed?: boolean;
   top?: boolean;
+  /**
+   * Whether the prayer chips name their hour.
+   *
+   * A prayer row without its time answers "when?" with a name only, and Fajr
+   * moves every day — the one thing you cannot guess. So the chips carry the
+   * clock whenever the column is wide enough to hold it, and the name yields
+   * first when they are not.
+   */
+  showTime?: boolean;
 }) {
   const p = useTheme();
   if (entries.length === 0) return <View style={{ flex: 1 }} />;
@@ -2078,11 +2114,12 @@ function OutsideHours({ entries, detailed, top }: {
                   style={{
                     color: entry.colour, fontSize: 9, lineHeight: 11, fontWeight: '700',
                     textDecorationLine: entry.done ? 'line-through' : 'none',
+                    flexShrink: 1,
                   }}
                 >
                   {entry.label}
                 </Text>
-                {detailed ? (
+                {showTime ? (
                   <View style={{ marginLeft: 'auto' }}>
                     <Text style={{ color: entry.colour, fontSize: 8.5, lineHeight: 11, opacity: 0.8 }}>
                       {entry.detail.range}

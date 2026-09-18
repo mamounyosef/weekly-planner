@@ -390,11 +390,6 @@ export function splitAcrossWindows(
   const out: DaySpan[] = [];
   const inRange = (c: number) => c >= 0 && c < opts.columns;
 
-  if (start < dayStartMin && end <= dayStartMin && inRange(opts.col)) {
-    // The event is entirely before the day starts. We want it to ALSO appear
-    // in the top OutsideHours of this column.
-    out.push({ col: opts.col, startMin: start, endMin: end, isTail: false, isHead: false });
-  }
 
   if (to <= windowEnd) {
     if (inRange(col)) out.push({ col, startMin: from, endMin: to, isTail: false, isHead: false });

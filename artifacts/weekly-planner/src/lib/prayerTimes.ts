@@ -264,6 +264,28 @@ export function prayerDateKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * Is this a real calendar day, written 'yyyy-MM-dd'?
+ *
+ * One definition, used everywhere a date crosses a trust boundary (the sync
+ * door, the prayer file adapter, coercion): a plain digits-and-dashes regex
+ * accepts month 13 and February 30th, and a day that cannot exist must not
+ * enter records that every device treats as the truth. Leap years follow the
+ * full Gregorian rule, computed by hand because `Date` maps years 0–99 onto
+ * 1900+ and would misjudge them.
+ */
+export function isPlannerDate(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const m = value.match(/^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const daysInMonth = [31, month === 2 && leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
 /** Whether a date is inside the "next N days" display horizon. */
 export function withinPrayerHorizon(dateStr: string, settings: PrayerSettings, today = new Date()): boolean {
   const todayStr = prayerDateKey(today);
@@ -282,7 +304,7 @@ export function coercePrayerDone(raw: unknown): PrayerDoneMap {
   const out: PrayerDoneMap = {};
   if (!raw || typeof raw !== 'object') return out;
   for (const [date, keys] of Object.entries(raw as Record<string, unknown>)) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Array.isArray(keys)) continue;
+    if (!isPlannerDate(date) || !Array.isArray(keys)) continue;
     const valid = PRAYER_KEYS.filter(k => (keys as unknown[]).includes(k));
     if (valid.length) out[date] = valid;
   }

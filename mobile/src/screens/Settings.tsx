@@ -67,7 +67,7 @@ export function Settings({
     shared, edit,
   } = usePlanner();
 
-  const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
+  const { mode: themeMode, setMode: setThemeMode, lightVariant, setLightVariant, darkVariant, setDarkVariant } = useThemeMode();
 
   // How a task LOOKS is answered here, beside the theme, because that is the
   // question being asked. It is still a shared setting rather than a device one,
@@ -275,6 +275,44 @@ export function Settings({
               <Pressable
         unstable_pressDelay={PRESS_DELAY} key={choice.mode} onPress={() => setThemeMode(choice.mode)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line }, pressed ? PRESSED : null]}>
                 <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{choice.label}</Text>
+              </Pressable>
+            );
+          })}
+        </Row>
+        <Spacer size={space.lg} />
+        <Text variant="body">Light Appearance</Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>
+          {[
+            { id: 'default', label: 'Default' },
+            { id: 'dawn', label: 'Dawn' },
+            { id: 'mint', label: 'Mint' },
+            { id: 'rose', label: 'Rose' },
+            { id: 'ocean', label: 'Ocean' },
+          ].map(c => {
+            const on = c.id === lightVariant;
+            return (
+              <Pressable unstable_pressDelay={PRESS_DELAY} key={c.id} onPress={() => setLightVariant(c.id)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ minWidth: '30%', height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line, marginBottom: space.xs }, pressed ? PRESSED : null]}>
+                <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{c.label}</Text>
+              </Pressable>
+            );
+          })}
+        </Row>
+        <Spacer size={space.lg} />
+        <Text variant="body">Dark Appearance</Text>
+        <Spacer size={space.sm} />
+        <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>
+          {[
+            { id: 'default', label: 'Default' },
+            { id: 'ocean', label: 'Midnight' },
+            { id: 'forest', label: 'Forest' },
+            { id: 'plum', label: 'Plum' },
+            { id: 'coffee', label: 'Coffee' },
+          ].map(c => {
+            const on = c.id === darkVariant;
+            return (
+              <Pressable unstable_pressDelay={PRESS_DELAY} key={c.id} onPress={() => setDarkVariant(c.id)} accessibilityRole="button" accessibilityState={{ selected: on }} style={({ pressed }) => [{ minWidth: '30%', height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: on ? p.accentSoft : p.surfaceAlt, borderWidth: 1, borderColor: on ? p.accent : p.line, marginBottom: space.xs }, pressed ? PRESSED : null]}>
+                <Text variant="bodyStrong" tone={on ? 'accent' : 'soft'}>{c.label}</Text>
               </Pressable>
             );
           })}

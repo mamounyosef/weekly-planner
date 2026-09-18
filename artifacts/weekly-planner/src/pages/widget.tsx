@@ -12,6 +12,7 @@ import {
 } from 'date-fns';
 import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { mergeContiguousFocusSession } from '@/lib/focusStats';
 import {
   resolveWeekTasks,
   toggleTaskDone as toggleTaskDoneHelper,
@@ -987,7 +988,11 @@ export default function Widget() {
     };
 
     setFocusSessions(prev => {
-      const next = dedupeFocusSessions([session, ...prev]).slice(0, 1000);
+      const { merged, session: finalSession } = mergeContiguousFocusSession(prev, session);
+      const nextRaw = merged
+        ? [finalSession, ...prev.filter(s => s.id !== finalSession.id)]
+        : [finalSession, ...prev];
+      const next = dedupeFocusSessions(nextRaw).slice(0, 1000);
       persistFocusSessions(next);
       return next;
     });
@@ -1246,8 +1251,11 @@ export default function Widget() {
       const todayKey = focusDayKey(new Date(now), focusDayStartHour);
       const liveSeconds = Math.max(0, focusSessionTruth(timer, lastBeatRef.current, now).seconds
         - Math.max(0, timer.creditedSeconds ?? 0));
-      // Recompute todaySeconds using the live time + static completed time
-      const baseTodaySeconds = sumFocusSecondsForDay(focusSessions, new Date(now), focusDayStartHour);
+      // Recompute todaySeconds using the live time + static completed time.
+      // sumFocusSecondsForDay buckets by the CALENDAR date of the date given,
+      // so it must be handed the focus day's own midnight: passing `now` made
+      // the LCD's total reset at 00:00 instead of at the day-start hour.
+      const baseTodaySeconds = sumFocusSecondsForDay(focusSessions, new Date(`${todayKey}T00:00:00`), focusDayStartHour);
       const todaySeconds = baseTodaySeconds + (timer.sessionStartedAt && focusDayKey(timer.sessionStartedAt, focusDayStartHour) === todayKey ? liveSeconds : 0);
       
       return {
@@ -1913,8 +1921,11 @@ export default function Widget() {
                 return (
                   <button
                     key={p.id}
+                    type="button"
+                    data-prayer="1"
+                    onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => togglePrayerDone(p.dateStr, p.key)}
-                    className="px-1.5 py-0.5 rounded-md border text-[10px] font-semibold flex items-center gap-1"
+                    className="px-1.5 py-0.5 rounded-md border text-[10px] font-semibold flex items-center gap-1 transition-opacity hover:opacity-90 active:opacity-75 cursor-pointer select-none"
                     style={{
                       background: `${widgetPrayer.color}22`,
                       borderColor: `${widgetPrayer.color}66`,
@@ -2004,8 +2015,11 @@ export default function Widget() {
               return (
                 <button
                   key={p.id}
+                  type="button"
+                  data-prayer="1"
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => togglePrayerDone(p.dateStr, p.key)}
-                  className="absolute flex items-center gap-1 rounded-md px-1.5 z-20"
+                  className="absolute flex items-center gap-1 rounded-md px-1.5 z-20 transition-opacity hover:opacity-90 active:opacity-75 select-none cursor-pointer"
                   style={{
                     top, left: 2, right: 2, height: 16,
                     background: `${widgetPrayer.color}26`,
@@ -2034,17 +2048,20 @@ export default function Widget() {
               <div
                 key={p.id}
                 className="absolute left-0 right-0 z-20 pointer-events-none flex items-center"
-                style={{ top: top - 8, height: 16, opacity: done ? 0.45 : 1 }}
+                style={{ top: top - 9, height: 18, opacity: done ? 0.45 : 1 }}
               >
                 <div
                   className="flex-1 min-w-0"
                   style={{ height: 0, borderTop: `1px solid ${widgetPrayer.color}`, opacity: 0.85 }}
                 />
                 <button
+                  type="button"
+                  data-prayer="1"
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => togglePrayerDone(p.dateStr, p.key)}
-                  className="flex-shrink-0 flex items-center gap-1 rounded-full pl-1.5 pr-2 pointer-events-auto transition-transform active:scale-95 mx-1 cursor-pointer"
+                  className="flex-shrink-0 flex items-center gap-1 rounded-full pl-2 pr-2.5 pointer-events-auto transition-opacity hover:opacity-90 active:opacity-75 mx-1 cursor-pointer select-none relative before:absolute before:-inset-y-1.5 before:-inset-x-1 before:content-['']"
                   style={{
-                    height: 15,
+                    height: 17,
                     background: darkMode ? widgetTheme.cardBg : '#ffffff',
                     border: `1px solid ${widgetPrayer.color}80`,
                     boxShadow: `0 1px 3px rgba(0,0,0,${darkMode ? '0.35' : '0.12'})`,
@@ -2083,7 +2100,11 @@ export default function Widget() {
             const fullEndMin   = timeToMin(ev.endTime);
             const sNormEv      = normalizeMin(fullStartMin, dayStartH);
             let eNormEv        = normalizeMin(fullEndMin, dayStartH);
-            if (eNormEv <= sNormEv) eNormEv += 1440;
+            if (ev.noDuration || ev.endTime === ev.startTime) {
+              eNormEv = sNormEv + 10;
+            } else if (eNormEv <= sNormEv) {
+              eNormEv += 1440;
+            }
             // "Live" is scoped to this segment's own on-screen range (each segment lives in a
             // different day column, so at most one of tail/head is ever the active one).
             const isLive       = normNowMin >= item.startMin && normNowMin < item.endMin;

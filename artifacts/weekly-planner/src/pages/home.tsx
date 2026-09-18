@@ -5,7 +5,13 @@ import {
   ROLLING_DAYS, describeFocusRange, explainFocusMode, focusPeriodRange,
   type FocusRangeMode,
 } from '@/lib/focusPeriod';
-import { computeAllTimeStreaks } from '@/lib/focusStats';
+import { computeAllTimeStreaks, mergeContiguousFocusSession } from '@/lib/focusStats';
+import {
+  buildSessionDetail,
+  dayMapPercent,
+  dayMapSpanPercent,
+  type SessionDetailMatch,
+} from '@/lib/sessionDetail';
 import { createPortal, flushSync } from 'react-dom';
 import {
   format,
@@ -27,7 +33,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut } from 'lucide-react';
+import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut, Sunrise, Sunset, Activity } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion';
 import {
@@ -130,6 +136,7 @@ import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
 import { FocusLiveCountdown, FocusLiveProgress, FocusLiveStartingLabel } from '@/components/FocusLiveBits';
 import { publishLiveClock } from '@/lib/liveClock';
+import { liveScrollTarget } from '@/lib/liveScroll';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
@@ -1193,8 +1200,31 @@ export default function DailyPlanner() {
   const [analysisWeekCursor, setAnalysisWeekCursor]   = useState(() => new Date());
   const [analysisMonthCursor, setAnalysisMonthCursor] = useState(() => new Date());
   const [analysisYearCursor, setAnalysisYearCursor]   = useState(() => new Date().getFullYear());
+  /**
+   * The sessions-detail page, opened by clicking a "N sessions" count anywhere in
+   * the analysis. `'week'` shows every session in the week the week tab is on;
+   * a `YYYY-MM-DD` focus-day key shows that one day's sessions. Null = the
+   * regular analysis panels.
+   */
+  const [sessionDetail, setSessionDetail] = useState<string | null>(null);
   const [editingFocusDayKey, setEditingFocusDayKey]   = useState<string | null>(null);
   const [editingFocusInput, setEditingFocusInput]     = useState<string>('');
+  // Per-session editing modal state
+  interface EditSessionModalState {
+    sessionId: string;
+    original: FocusSession;
+    startDate: string;
+    startTime: string;
+    endDate: string;
+    endTime: string;
+    durationMinutes: number;
+    durationText: string;
+    durationSeconds: number;
+    plannedMinutes: number;
+    isManual: boolean;
+    error?: string | null;
+  }
+  const [editSessionModal, setEditSessionModal] = useState<EditSessionModalState | null>(null);
   const [focusExcludedDates, setFocusExcludedDates]   = useState<string[]>(initialSettings.focusExcludedDates);
   const focusExcludedSet = useMemo(() => new Set(focusExcludedDates), [focusExcludedDates]);
   const toggleExcludeFocusDay = useCallback((dateKeyStr: string) => {
@@ -2554,7 +2584,7 @@ export default function DailyPlanner() {
           transform: i === 0 ? 'translateY(2px)' : 'translateY(-50%)',
         }}
       >
-        <span className={`leading-none px-1 tabular-nums ${isHour ? 'text-[10px] font-bold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/50'}`}>
+        <span className={`leading-none px-1.5 tabular-nums ${isHour ? 'text-[10px] font-bold text-muted-foreground' : 'text-[8.5px] text-muted-foreground/50'}`}>
           {formatSlotLabel(time, timeFormat)}
         </span>
       </div>
@@ -2753,9 +2783,177 @@ export default function DailyPlanner() {
     ? Math.max(PRAYER_ROW_MIN_H, maxPrayersInAnyCol * (PRAYER_CHIP_H + 2) + 8)
     : 0;
 
+  // ── Outside-hours items (late night / pre-dawn cutoff hours) ───────────────
+  const outsideByCol = useMemo(() => {
+    const map = new Map<number, { top: any[]; bottom: any[] }>();
+    for (const colIdx of visibleCols) {
+      map.set(colIdx, { top: [], bottom: [] });
+    }
+    if (!isTimelineView) return map;
+
+    const seenTop = new Set<string>();
+    const seenBottom = new Set<string>();
+
+    const addTop = (colIdx: number, item: any) => {
+      const entry = map.get(colIdx);
+      if (!entry) return;
+      const key = `${colIdx}:${item.key || item.id}`;
+      if (seenTop.has(key)) return;
+      seenTop.add(key);
+      entry.top.push(item);
+    };
+
+    const addBottom = (colIdx: number, item: any) => {
+      const entry = map.get(colIdx);
+      if (!entry) return;
+      const key = `${colIdx}:${item.key || item.id}`;
+      if (seenBottom.has(key)) return;
+      seenBottom.add(key);
+      entry.bottom.push(item);
+    };
+
+    // Cutoff window between day D and day D+1: [cutoffStart, cutoffEnd]
+    const cutoffStart = dayEndMin;
+    const cutoffEnd = dayStartMin + 1440;
+    const gridSpan = dayEndMin - dayStartMin;
+
+    // 1. Events
+    for (const ev of weekTimedEvents) {
+      const rawS = timeToMin(ev.startTime);
+      let rawE = timeToMin(ev.endTime);
+      let dur = rawE - rawS;
+      if (dur < 0 || (dur === 0 && !ev.noDuration && ev.startTime !== ev.endTime)) {
+        dur += 1440;
+      }
+      if (ev.noDuration || ev.endTime === ev.startTime) {
+        dur = 0;
+      }
+      const normS = normalizeMin(rawS, dayStartH);
+      const normE = normS + dur;
+
+      // Overlap with the cutoff window between dayIndex and dayIndex + 1
+      const cutoffMin = cutoffEnd > cutoffStart
+        ? (dur === 0
+            ? (normS >= cutoffStart && normS < cutoffEnd ? 1 : 0)
+            : Math.max(0, Math.min(normE, cutoffEnd) - Math.max(normS, cutoffStart)))
+        : 0;
+
+      // Total minutes visible on the grid (across dayIndex and dayIndex + 1)
+      const visDayD = Math.max(0, Math.min(normE, dayEndMin) - Math.max(normS, dayStartMin));
+      const visDayDNext = Math.max(0, Math.min(normE, cutoffEnd + gridSpan) - Math.max(normS, cutoffEnd));
+      const totalVisibleMin = visDayD + visDayDNext;
+
+      // Only display in cutoff items if it intersects the cutoff window AND
+      // less than 2 hours (120 minutes) is displayed on the visible grid
+      if (cutoffMin > 0 && totalVisibleMin < 120) {
+        addBottom(ev.dayIndex, {
+          key: `outside:ev:${ev.id}:bot`,
+          ev,
+          isTask: false,
+          isPrayer: false,
+          startMin: normS,
+          normS,
+        });
+        addTop(ev.dayIndex + 1, {
+          key: `outside:ev:${ev.id}:top`,
+          ev,
+          isTask: false,
+          isPrayer: false,
+          startMin: rawS,
+          normS: rawS,
+        });
+      }
+    }
+
+    // 2. Timed tasks
+    for (const [colIdx, tasks] of timedTasksByCol.entries()) {
+      for (const t of tasks) {
+        if (!t.startTime) continue;
+        const rawS = timeToMin(t.startTime);
+        let rawE = timeToMin(t.endTime || t.startTime);
+        let dur = rawE - rawS;
+        if (dur <= 0) dur = t.endTime ? dur + 1440 : 10;
+        const normS = normalizeMin(rawS, dayStartH);
+        const normE = normS + dur;
+
+        const cutoffMin = cutoffEnd > cutoffStart
+          ? Math.max(0, Math.min(normE, cutoffEnd) - Math.max(normS, cutoffStart))
+          : 0;
+        const visDayD = Math.max(0, Math.min(normE, dayEndMin) - Math.max(normS, dayStartMin));
+        const visDayDNext = Math.max(0, Math.min(normE, cutoffEnd + gridSpan) - Math.max(normS, cutoffEnd));
+        const totalVisibleMin = visDayD + visDayDNext;
+
+        if (cutoffMin > 0 && totalVisibleMin < 120) {
+          addBottom(colIdx, {
+            key: `outside:task:${t.id}:bot`,
+            task: t,
+            isTask: true,
+            isPrayer: false,
+            startMin: normS,
+            normS,
+          });
+          addTop(colIdx + 1, {
+            key: `outside:task:${t.id}:top`,
+            task: t,
+            isTask: true,
+            isPrayer: false,
+            startMin: rawS,
+            normS: rawS,
+          });
+        }
+      }
+    }
+
+    // 3. Prayers
+    if (prayer.style !== 'row' && prayer.enabled) {
+      for (const colIdx of visibleCols) {
+        const day = dayAt(colIdx);
+        const prayers = columnPrayers(day);
+        for (const p of prayers) {
+          const norm = p.norm;
+          if (norm < dayStartMin) {
+            addTop(colIdx, {
+              ...p,
+              key: `outside:prayer:${p.id}:top`,
+              isPrayer: true,
+              isTask: false,
+              startMin: norm,
+            });
+          } else if (norm >= dayEndMin) {
+            addBottom(colIdx, {
+              ...p,
+              key: `outside:prayer:${p.id}:bot`,
+              isPrayer: true,
+              isTask: false,
+              startMin: norm,
+            });
+          }
+        }
+      }
+    }
+
+    for (const entry of map.values()) {
+      entry.top.sort((a, b) => a.startMin - b.startMin);
+      entry.bottom.sort((a, b) => a.startMin - b.startMin);
+    }
+
+    return map;
+  }, [visibleCols, weekTimedEvents, timedTasksByCol, dayStartH, dayEndMin, dayStartMin, prayer.style, prayer.enabled, dayAt, columnPrayers, isTimelineView]);
+
+  const maxTopOutsideCount = useMemo(() => {
+    return visibleCols.reduce((m, c) => Math.max(m, outsideByCol.get(c)?.top.length || 0), 0);
+  }, [outsideByCol, visibleCols]);
+
+  const maxBottomOutsideCount = useMemo(() => {
+    return visibleCols.reduce((m, c) => Math.max(m, outsideByCol.get(c)?.bottom.length || 0), 0);
+  }, [outsideByCol, visibleCols]);
+
+  const topOutsideHeight = isTimelineView && maxTopOutsideCount > 0 ? maxTopOutsideCount * 22 + 32 : 0;
+  const bottomOutsideHeight = isTimelineView && maxBottomOutsideCount > 0 ? maxBottomOutsideCount * 22 + 32 : 0;
+
   /**
    * Total height of every fixed band above the scrollable time grid: the day
-   * header, the All Day row, the task row and the prayer row.
+   * header, the All Day row, the task row, the prayer row and the top outside-hours band.
    *
    * EVERY mouse-Y ─ minute conversion and every absolutely-positioned overlay
    * inside `daysGridRef` MUST use this instead of adding the pieces up itself —
@@ -2772,7 +2970,8 @@ export default function DailyPlanner() {
     (isPhone || isScrolled ? HEADER_COMPACT_PX : HEADER_PX)
     + (!isPhone && isScrolled && maxAllDayRowIndex === 0 ? 0 : allDayHeight)
     + (!isPhone && isScrolled && maxTasksInAnyCol === 0 ? 0 : taskRowHeight)
-    + prayerRowHeight;
+    + prayerRowHeight
+    + topOutsideHeight;
 
   // ── Scroll-aware sticky heights ──────────────────────────────────────────
   // When scrolled, compact the day header and hide empty all-day/tasks rows.
@@ -3474,36 +3673,6 @@ export default function DailyPlanner() {
   }, [writeEvents, weekStartsOn]);
   const applyDeleteRef = useRef(applyDelete);
 
-  useLayoutEffect(() => {
-    if (!daysGridRef.current) return;
-    
-    // Sync top bands
-    const topBands = Array.from(daysGridRef.current.querySelectorAll('.top-outside-band')) as HTMLElement[];
-    let maxTop = 0;
-    topBands.forEach(b => {
-      b.style.minHeight = '0px';
-      maxTop = Math.max(maxTop, b.offsetHeight);
-    });
-    topBands.forEach(b => {
-      b.style.minHeight = maxTop + 'px';
-    });
-    const gutterTop = document.getElementById('hour-gutter-top-spacer');
-    if (gutterTop) gutterTop.style.height = maxTop + 'px';
-
-    // Sync bottom bands
-    const botBands = Array.from(daysGridRef.current.querySelectorAll('.bottom-outside-band')) as HTMLElement[];
-    let maxBot = 0;
-    botBands.forEach(b => {
-      b.style.minHeight = '0px';
-      maxBot = Math.max(maxBot, b.offsetHeight);
-    });
-    botBands.forEach(b => {
-      b.style.minHeight = maxBot + 'px';
-    });
-    const gutterBot = document.getElementById('hour-gutter-bottom-spacer');
-    if (gutterBot) gutterBot.style.height = maxBot + 'px';
-  });
-
   useEffect(() => { applyDeleteRef.current = applyDelete; }, [applyDelete]);
 
   // Delete several visible occurrences at once (keyboard delete = 'one' each).
@@ -3772,9 +3941,36 @@ export default function DailyPlanner() {
   // home first, then scroll once the line actually exists in the DOM.
   const pendingLiveScrollRef = useRef(false);
 
+  // Scroll ONLY the main scroller so the now-line sits centred. Never
+  // scrollIntoView here: it walks EVERY scrollable ancestor of the line, and
+  // the line lives inside the today column's clipped grid, so a stray overflow
+  // range in that inner box once let this button scroll today's column alone
+  // out from under itself — one day's blocks drifting a screen above the rest
+  // of the week, with no scrollbar (overflow: hidden) to undo it. One measured
+  // container, one scrollTop; the arithmetic lives in lib/liveScroll.ts.
+  const scrollMainToLive = useCallback(() => {
+    const scroller = mainRef.current;
+    const line = nowLineRef.current;
+    if (!scroller || !line) return false;
+    const sRect = scroller.getBoundingClientRect();
+    const lRect = line.getBoundingClientRect();
+    scroller.scrollTo({
+      top: liveScrollTarget({
+        scrollTop: scroller.scrollTop,
+        clientHeight: scroller.clientHeight,
+        boundingTop: sRect.top,
+        boundingHeight: sRect.height,
+        scrollHeight: scroller.scrollHeight,
+        lineTop: lRect.top,
+        lineHeight: lRect.height,
+      }),
+      behavior: 'smooth',
+    });
+    return true;
+  }, []);
+
   const scrollToLive = useCallback(() => {
-    if (nowLineRef.current) {
-      nowLineRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (scrollMainToLive()) {
       setShowLiveBtn(false);
       return;
     }
@@ -3783,7 +3979,8 @@ export default function DailyPlanner() {
     setDirection(0);
     setCurrentDate(new Date());
     setShowFocusAnalysis(false);
-  }, []);
+    setSessionDetail(null);
+  }, [scrollMainToLive]);
 
   // Finish a pending jump: the week slider animates the new week in, so the line
   // isn't mounted on the next tick — poll a few frames until it appears.
@@ -3794,9 +3991,8 @@ export default function DailyPlanner() {
     const tryScroll = () => {
       if (!pendingLiveScrollRef.current) return;
       const line = nowLineRef.current;
-      if (line) {
+      if (line && scrollMainToLive()) {
         pendingLiveScrollRef.current = false;
-        line.scrollIntoView({ behavior: 'smooth', block: 'center' });
         setShowLiveBtn(false);
         return;
       }
@@ -3805,7 +4001,7 @@ export default function DailyPlanner() {
     };
     raf = requestAnimationFrame(tryScroll);
     return () => cancelAnimationFrame(raf);
-  }, [viewedWeekKey, calendarView, showFocusAnalysis, liveLineOnScreen]);
+  }, [viewedWeekKey, calendarView, showFocusAnalysis, liveLineOnScreen, scrollMainToLive]);
   const focusElapsedSeconds = getFocusTimerElapsedSeconds(focusTimer, nowTick);
   // What the live session adds to a DAY TOTAL. Differs from the elapsed time
   // above only after a manual edit of that day's total, which banks the seconds
@@ -4052,6 +4248,51 @@ export default function DailyPlanner() {
       bestKey: (validDays.length > 0 ? validDays : dayList).reduce((b, d) => (d.seconds > b.seconds ? d : b), dayList[0]).key,
     };
   }, [focusAnalysis.weekDays, activeFocusDayKey, focusDayLiveSeconds]);
+
+  // ── Sessions-detail page data ───────────────────────────────────────────────
+  // Everything the detail page shows, derived once per change rather than per
+  // tick. The rules — focus-day bucketing, manual entries carrying no clock,
+  // gaps measured only between real sessions — live in `sessionDetail.ts`,
+  // where every one of them has a test.
+  const sessionDetailData = useMemo(() => {
+    if (!sessionDetail) return null;
+    const isWeek = sessionDetail === 'week';
+    const wkStart = startOfWeek(analysisWeekCursor, { weekStartsOn });
+    const wkEnd = endOfWeek(analysisWeekCursor, { weekStartsOn });
+    const days = isWeek
+      ? eachDayOfInterval({ start: wkStart, end: wkEnd }).map(d => dateKey(d))
+      : [sessionDetail];
+    const raw = buildSessionDetail(focusSessions, days, focusDayStartHour);
+    // Enrich matches with Date objects for the JSX (avoids `new Date(ms)` everywhere).
+    const enrichedMatches = raw.matches.map(m => ({
+      ...m,
+      startD: new Date(m.startMs),
+      endD: new Date(m.endMs),
+    }));
+    // Enrich groups with a Date + aliased `sessions` array.
+    const enrichedGroups = raw.groups.map(g => ({
+      ...g,
+      date: new Date(g.key + 'T00:00:00'),
+      sessions: g.matches.map(gm => {
+        // Look up the enriched match by session id for consistent Date objects.
+        return enrichedMatches.find(em => em.session.id === gm.session.id) ?? { ...gm, startD: new Date(gm.startMs), endD: new Date(gm.endMs) };
+      }),
+    }));
+    return {
+      ...raw,
+      matches: enrichedMatches,
+      groups: enrichedGroups,
+      isWeek,
+      rangeStart: isWeek ? wkStart : new Date(sessionDetail + 'T00:00:00'),
+      rangeEnd: isWeek ? wkEnd : new Date(sessionDetail + 'T00:00:00'),
+      // Convenience aliases matching what the JSX reads.
+      totalPlanned: raw.totalPlannedSeconds,
+      longest: raw.longestSeconds,
+      avg: raw.avgSeconds,
+      firstStart: raw.firstStartMs != null ? new Date(raw.firstStartMs) : null,
+      lastEnd: raw.lastEndMs != null ? new Date(raw.lastEndMs) : null,
+    };
+  }, [sessionDetail, focusSessions, focusDayStartHour, analysisWeekCursor, weekStartsOn]);
 
   // Same idea for the month tab's total: the in-progress session isn't logged yet.
   const monthLiveExtraSeconds = useMemo(() => {
@@ -4510,6 +4751,74 @@ export default function DailyPlanner() {
     });
   }, [focusDayStartHour, focusTimer, persistFocusSessions]);
 
+  const openEditSessionModal = useCallback((session: FocusSession, isManual = false) => {
+    const dStart = new Date(session.startedAt);
+    const dEnd = new Date(session.endedAt);
+    const validStart = !isNaN(dStart.getTime()) ? dStart : new Date();
+    const validEnd = !isNaN(dEnd.getTime()) ? dEnd : new Date();
+    const duration = Math.max(1, Math.round(session.durationSeconds || ((validEnd.getTime() - validStart.getTime()) / 1000)));
+    const planned = Math.max(0, Math.round((session.plannedSeconds || 0) / 60));
+
+    setEditSessionModal({
+      sessionId: session.id,
+      original: session,
+      startDate: format(validStart, 'yyyy-MM-dd'),
+      startTime: format(validStart, 'HH:mm:ss'),
+      endDate: format(validEnd, 'yyyy-MM-dd'),
+      endTime: format(validEnd, 'HH:mm:ss'),
+      durationMinutes: Math.round(duration / 60),
+      durationSeconds: duration,
+      durationText: formatFocusDuration(duration),
+      plannedMinutes: planned,
+      isManual: isManual || (typeof session.id === 'string' && session.id.startsWith('manual-')),
+      error: null,
+    });
+  }, []);
+
+  const saveSessionEdit = useCallback((state: EditSessionModalState) => {
+    try {
+      const startD = new Date(`${state.startDate}T${state.startTime}`);
+      const endD = new Date(`${state.endDate}T${state.endTime}`);
+      if (isNaN(startD.getTime()) || isNaN(endD.getTime())) {
+        setEditSessionModal(prev => prev ? { ...prev, error: 'Please enter valid start and end dates/times.' } : null);
+        return;
+      }
+      if (endD.getTime() < startD.getTime()) {
+        setEditSessionModal(prev => prev ? { ...prev, error: 'End time cannot be earlier than start time.' } : null);
+        return;
+      }
+      const durationSeconds = state.durationSeconds > 0
+        ? state.durationSeconds
+        : Math.max(1, Math.round((endD.getTime() - startD.getTime()) / 1000));
+
+      const updatedSession: FocusSession = {
+        ...state.original,
+        startedAt: startD.toISOString(),
+        endedAt: endD.toISOString(),
+        durationSeconds,
+        plannedSeconds: state.plannedMinutes * 60,
+      };
+
+      setFocusSessions(prev => {
+        const next = prev.map(s => s.id === state.sessionId ? updatedSession : s);
+        persistFocusSessions(next);
+        return next;
+      });
+      setEditSessionModal(null);
+    } catch (e: any) {
+      setEditSessionModal(prev => prev ? { ...prev, error: e?.message || 'Failed to save session.' } : null);
+    }
+  }, [persistFocusSessions]);
+
+  const deleteSessionFromModal = useCallback((sessionId: string) => {
+    setFocusSessions(prev => {
+      const next = prev.filter(s => s.id !== sessionId);
+      persistFocusSessions(next, { removedIds: [sessionId] });
+      return next;
+    });
+    setEditSessionModal(null);
+  }, [persistFocusSessions]);
+
   const submittingEditRef = useRef(false);
 
   /**
@@ -4586,7 +4895,13 @@ export default function DailyPlanner() {
     };
 
     setFocusSessions(prev => {
-      const next = dedupeFocusSessions([session, ...prev]).slice(0, 1000);
+      const { merged, session: finalSession } = mergeContiguousFocusSession(prev, session);
+      // If it was merged, the finalSession replaces the old one which had the same ID.
+      // So dedupeFocusSessions will naturally keep it since it's at the front.
+      const nextRaw = merged
+        ? [finalSession, ...prev.filter(s => s.id !== finalSession.id)]
+        : [finalSession, ...prev];
+      const next = dedupeFocusSessions(nextRaw).slice(0, 1000);
       persistFocusSessions(next);
       return next;
     });
@@ -6458,7 +6773,7 @@ export default function DailyPlanner() {
   // ── Event CRUD helpers ────────────────────────────────────────────────────
   const handleColClick = (e: React.MouseEvent<HTMLDivElement>, dayIdx: number) => {
     if (didDragRef.current) return;
-    if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
+    if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]') || (e.target as HTMLElement).closest('[data-prayer]')) return;
     if (e.ctrlKey || e.metaKey) return; // Ctrl+click → rubber band handled in onMouseDown
     // A finger tap must not create anything. Scrolling a day means dragging
     // across empty grid constantly, and a stray tap that spawns a 30-minute
@@ -6810,7 +7125,7 @@ export default function DailyPlanner() {
         switchCalendarView('month');
       }
     },
-    toggleAnalysis: () => setShowFocusAnalysis(v => !v),
+    toggleAnalysis: () => { setSessionDetail(null); setShowFocusAnalysis(v => !v); },
     toggleSettings: () => navigateToSettings(),
     openWidget: () => openWidget(),
     newEvent: () => { setShowFocusAnalysis(false); handleHeaderCreateClick(); },
@@ -7502,7 +7817,7 @@ export default function DailyPlanner() {
                 {/* Which week of the shown month this is (week view only). */}
                 {calendarView === 'week' && (
                   <span
-                    className="text-[9.5px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md whitespace-nowrap -ml-2.5"
+                    className="text-[9.5px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md whitespace-nowrap -ml-2.5"
                     style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: headerInactive }}
                     title={`Week ${weekOfMonth} of ${format(weekStart, 'MMMM')}`}
                   >
@@ -7554,7 +7869,7 @@ export default function DailyPlanner() {
                       <button
                         onClick={() => setCustomAnchor('day')}
                         title="Anchor custom view to the current day (Today)"
-                        className="px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-smooth uppercase tracking-wider"
+                        className="px-2 py-0.5 text-[8.5px] font-bold rounded transition-smooth uppercase tracking-wider"
                         style={{
                           background: customAnchor === 'day' ? (darkMode ? 'rgba(255,255,255,0.16)' : '#fff') : 'transparent',
                           color: customAnchor === 'day' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
@@ -7566,7 +7881,7 @@ export default function DailyPlanner() {
                       <button
                         onClick={() => setCustomAnchor('week')}
                         title="Anchor custom view to the start and end of the week"
-                        className="px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-smooth uppercase tracking-wider"
+                        className="px-2 py-0.5 text-[8.5px] font-bold rounded transition-smooth uppercase tracking-wider"
                         style={{
                           background: customAnchor === 'week' ? (darkMode ? 'rgba(255,255,255,0.16)' : '#fff') : 'transparent',
                           color: customAnchor === 'week' ? (darkMode ? '#f5f5f5' : menuText) : headerInactive,
@@ -7578,7 +7893,7 @@ export default function DailyPlanner() {
                     </div>
 
                     {/* Steppers */}
-                    <div className="flex flex-col rounded-lg px-1 py-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                    <div className="flex flex-col rounded-lg px-1.5 py-0.5 shadow-sm" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
                       {([
                         {
                           label: 'Before',
@@ -7648,7 +7963,7 @@ export default function DailyPlanner() {
               <button
                 onClick={() => setAppZoom(z => clampZoom(z - ZOOM_STEP))}
                 disabled={appZoom <= ZOOM_MIN + 1e-9}
-                className="px-1 py-1 transition-colors disabled:opacity-30"
+                className="px-1.5 py-1 transition-colors disabled:opacity-30"
                 style={{ color: headerInactive }}
                 onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -7681,7 +7996,7 @@ export default function DailyPlanner() {
               <button
                 onClick={() => setAppZoom(z => clampZoom(z + ZOOM_STEP))}
                 disabled={appZoom >= ZOOM_MAX - 1e-9}
-                className="px-1 py-1 transition-colors disabled:opacity-30"
+                className="px-1.5 py-1 transition-colors disabled:opacity-30"
                 style={{ color: headerInactive }}
                 onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = hoverBg; }}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -7768,7 +8083,7 @@ export default function DailyPlanner() {
                   title={nextPrayer
                     ? `Next: ${nextPrayer.label} at ${formatTimeLabel(nextPrayer.minutes, timeFormat)}. Click for the whole day`
                     : "Today's prayer times"}
-                  className="flex items-center gap-1 px-1.5 py-1.5 rounded-lg text-[11px] font-semibold transition-colors shadow-sm"
+                  className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors shadow-sm"
                   style={{
                     background: prayerPanelOpen ? `${prayer.color}26` : surfaceBg,
                     border: `1px solid ${prayerPanelOpen ? prayer.color : surfaceBdr}`,
@@ -7812,8 +8127,10 @@ export default function DailyPlanner() {
                           return (
                             <button
                               key={p.id}
+                              type="button"
+                              data-prayer="1"
                               onClick={() => togglePrayerDone(p.dateStr, p.key)}
-                              className="w-full px-3 py-1.5 flex items-center gap-2 transition-colors text-left"
+                              className="w-full px-3 py-1.5 flex items-center gap-2 transition-colors text-left select-none cursor-pointer"
                               style={{ background: isNext ? `${prayer.color}1f` : 'transparent' }}
                               onMouseEnter={e => { if (!isNext) e.currentTarget.style.background = hoverBg; }}
                               onMouseLeave={e => { if (!isNext) e.currentTarget.style.background = 'transparent'; }}
@@ -7870,7 +8187,7 @@ export default function DailyPlanner() {
               <Filter size={15} />
               Filter
               {anyFilterActive && (
-                <span className="text-[10px] font-bold tabular-nums px-1 rounded-full" style={{ background: 'rgba(96,165,250,0.30)' }}>
+                <span className="text-[10px] font-bold tabular-nums px-1.5 rounded-full" style={{ background: 'rgba(96,165,250,0.30)' }}>
                   {hiddenCategoryIds.length}
                 </span>
               )}
@@ -8004,7 +8321,7 @@ export default function DailyPlanner() {
                 duration: 0.14,
                 ease: [0.16, 1, 0.3, 1],
               }}
-              className={isCompact ? 'w-full max-w-full px-1.5 py-2 flex flex-col min-h-0 flex-1' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
+              className={isCompact ? 'w-full max-w-full px-2 py-2 flex flex-col min-h-0 flex-1' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
             >
           {/* ── Focus banner ────────────────────────────────────────────────
               Expanded it is ~200px — a quarter of a phone screen spent before
@@ -8700,11 +9017,15 @@ export default function DailyPlanner() {
                   </div>
                 )}
                 
-                <div id="hour-gutter-top-spacer" className="flex-shrink-0 transition-all duration-100" style={{ height: 0 }}></div>
+                {topOutsideHeight > 0 && (
+                  <div style={{ height: topOutsideHeight }} className="border-b border-border/50 flex-shrink-0 bg-background/20" />
+                )}
                 <div className="relative" style={{ height: totalH }}>
                   {timeAxisRows}
                 </div>
-                <div id="hour-gutter-bottom-spacer" className="flex-shrink-0 transition-all duration-100" style={{ height: 0 }}></div>
+                {bottomOutsideHeight > 0 && (
+                  <div style={{ height: bottomOutsideHeight }} className="border-t border-border/50 flex-shrink-0 bg-background/20" />
+                )}
               </div>
 
               {/* Day columns */}
@@ -8753,7 +9074,11 @@ export default function DailyPlanner() {
                       const origEnd24   = timeToMin(ev.endTime);
                       const origS       = normalizeMin(origStart24, dayStartH);
                       let origE         = normalizeMin(origEnd24, dayStartH);
-                      if (origE <= origS) origE += 1440;
+                      if (ev.noDuration || ev.endTime === ev.startTime) {
+                        origE = origS + 10;
+                      } else if (origE <= origS) {
+                        origE += 1440;
+                      }
 
                       let targetDayIndex = ev.dayIndex;
                       let targetStart24  = origStart24;
@@ -8782,7 +9107,11 @@ export default function DailyPlanner() {
 
                       const targetS = normalizeMin(targetStart24, dayStartH);
                       let targetE   = normalizeMin(targetEnd24, dayStartH);
-                      if (targetE <= targetS) targetE += 1440;
+                      if (!isDragging && !isResizing && (ev.noDuration || ev.endTime === ev.startTime)) {
+                        targetE = targetS + 10;
+                      } else if (targetE <= targetS) {
+                        targetE += 1440;
+                      }
 
                       if (isDragging) {
                         // 1. Dashed placeholder preview at the target drop location
@@ -8860,64 +9189,27 @@ export default function DailyPlanner() {
                         }
                       }
                     }
+                    const { top: topOutsideItems, bottom: bottomOutsideItems } = outsideByCol.get(colIdx) || { top: [], bottom: [] };
+
                     const visibleGridEvents: typeof renderItems = [];
-                    const visibleGridTasks: any[] = [];
-                    const topOutsideItems: any[] = [];
-                    const bottomOutsideItems: any[] = [];
-
                     renderItems.forEach(item => {
-                      if (colIdx === 0 && item.startMin < dayStartMin) return;
-                      if (item.endMin <= dayStartMin) {
-                        topOutsideItems.push({ ...item, isTask: false });
-                      } else if (item.startMin >= dayEndMin) {
-                        bottomOutsideItems.push({ ...item, isTask: false });
-                      } else {
-                        visibleGridEvents.push(item);
-                      }
+                      if (item.startMin >= dayEndMin || item.endMin <= dayStartMin) return;
+                      visibleGridEvents.push(item);
                     });
 
-                    const colTimedTasks = (showTaskBand ? timedTasksByCol.get(colIdx) : undefined) ?? [];
-                    const timedTaskItems: any[] = [];
-                    const allColTimedTasks = (showTaskBand ? [
-                      ...(timedTasksByCol.get(colIdx) || []),
-                      ...(timedTasksByCol.get(colIdx + 1) || [])
-                    ] : []);
+                    const visibleGridTasks: any[] = [];
+                    const allColTimedTasks = (showTaskBand ? (timedTasksByCol.get(colIdx) || []) : []);
                     allColTimedTasks.forEach(t => {
-                      const rawS = timeToMin(t.startTime!);
-                      let rawE = timeToMin(t.endTime || t.startTime!);
+                      if (!t.startTime) return;
+                      const rawS = timeToMin(t.startTime);
+                      let rawE = timeToMin(t.endTime || t.startTime);
                       if (rawE <= rawS) rawE = rawS + (t.endTime ? 30 : 10);
-                      const tDayIndex = t.dayIndex ?? 0;
-                      
-                      if (tDayIndex === colIdx) {
-                        timedTaskItems.push({ task: t, key: `task:${t.id}`, startMin: rawS, endMin: rawE });
-                      }
-                      
-                      if (tDayIndex - 1 === colIdx && rawS < dayStartMin) {
-                        timedTaskItems.push({ task: t, key: `task:${t.id}__prev`, startMin: rawS + 1440, endMin: rawE + 1440 });
-                      }
+                      const normS = normalizeMin(rawS, dayStartH);
+                      let normE = normalizeMin(rawE, dayStartH);
+                      if (normE <= normS) normE += 1440;
+                      if (normS >= dayEndMin || normE <= dayStartMin) return;
+                      visibleGridTasks.push({ task: t, key: `task:${t.id}`, startMin: normS, endMin: normE });
                     });
-
-                    timedTaskItems.forEach(item => {
-                      if (colIdx === 0 && item.startMin < dayStartMin) return;
-                      if (item.endMin <= dayStartMin) {
-                        topOutsideItems.push({ ...item, isTask: true });
-                      } else if (item.startMin >= dayEndMin) {
-                        bottomOutsideItems.push({ ...item, isTask: true });
-                      } else {
-                        visibleGridTasks.push(item);
-                      }
-                    });
-
-                    if (prayer.style !== 'row') {
-                      columnPrayers(day).forEach(p => {
-                        const norm = p.norm;
-                        if (norm < dayStartMin) topOutsideItems.push({ ...p, isPrayer: true, startMin: norm });
-                        else if (norm >= dayEndMin) bottomOutsideItems.push({ ...p, isPrayer: true, startMin: norm });
-                      });
-                    }
-
-                    topOutsideItems.sort((a, b) => a.startMin - b.startMin);
-                    bottomOutsideItems.sort((a, b) => a.startMin - b.startMin);
 
                     const colEvents = visibleGridEvents;
 
@@ -9065,7 +9357,7 @@ export default function DailyPlanner() {
                             overflow: 'hidden',
                             transition: 'height 0.15s ease',
                           }}
-                          className={`flex-shrink-0 border-b border-border/50 relative group px-1 py-1 flex flex-col gap-[2px] ${stickyTasksMain ? 'sticky z-[34]' : ''}`}
+                          className={`flex-shrink-0 border-b border-border/50 relative group px-1.5 py-1 flex flex-col gap-[2px] ${stickyTasksMain ? 'sticky z-[34]' : ''}`}
                           onDragOver={(e) => {
                             if (!taskDragId) return;
                             e.preventDefault();                       // required, or the drop never fires
@@ -9129,7 +9421,7 @@ export default function DailyPlanner() {
                                       onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
                                       onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
                                       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
-                                      className={`flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
+                                      className={`flex items-center gap-1 rounded-[5px] px-2 text-left transition-opacity ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                       style={{
                                         height: TASK_CHIP_H,
                                         background: c.bg,
@@ -9169,7 +9461,7 @@ export default function DailyPlanner() {
                                       e.stopPropagation();
                                       setTaskOverflowModal({ dayLabel: format(day, 'EEEE, MMM d'), tasks: colTasks });
                                     }}
-                                    className="flex items-center justify-center gap-0.5 rounded px-1 py-0.5 text-[9px] font-semibold transition-colors bg-background/70 hover:bg-background border border-border/40 text-muted-foreground z-20 shadow-2xs cursor-pointer"
+                                    className="flex items-center justify-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold transition-colors bg-background/70 hover:bg-background border border-border/40 text-muted-foreground z-20 shadow-2xs cursor-pointer"
                                     title="Click to view all tasks for this day"
                                   >
                                     <MoreHorizontal size={10} />
@@ -9203,15 +9495,18 @@ export default function DailyPlanner() {
                       {showPrayerBand && (
                         <div
                           style={{ height: prayerRowHeight }}
-                          className="flex-shrink-0 border-b border-border/50 px-1 py-1 flex flex-col gap-[2px] overflow-hidden"
+                          className="flex-shrink-0 border-b border-border/50 px-1.5 py-1 flex flex-col gap-[2px] overflow-hidden"
                         >
                           {prayersFor(day).map(p => {
                             const done = isPrayerDone(p.dateStr, p.key);
                             return (
                               <button
                                 key={p.id}
+                                type="button"
+                                data-prayer="1"
+                                onPointerDown={(e) => e.stopPropagation()}
                                 onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
-                                className="flex items-center gap-1 rounded-[5px] px-1.5 text-left transition-opacity"
+                                className="flex items-center gap-1 rounded-[5px] px-2 text-left transition-opacity hover:opacity-90 active:opacity-75 select-none cursor-pointer"
                                 style={{
                                   height: PRAYER_CHIP_H,
                                   background: `${prayer.color}22`,
@@ -9255,74 +9550,161 @@ export default function DailyPlanner() {
 
                       
                       {/* Top outside-hours band sync wrapper */}
-                      <div className="top-outside-band flex flex-col justify-end flex-shrink-0 relative z-20">
+                      <div className="top-outside-band flex flex-col justify-end flex-shrink-0 relative z-20" style={{ height: topOutsideHeight }}>
                         {/* Top outside-hours band */}
-                      {topOutsideItems.length > 0 && (
-                        <div className="border-b border-border/50 bg-background/30 flex flex-col items-stretch px-1 py-1 gap-[2px]">
-                          {topOutsideItems.map(item => {
-                            const isTask = item.isTask;
-                            if (isTask) {
-                              const t = item.task;
-                              const occ = t.occDate ?? null;
-                              const done = isTaskDone(t, occ);
-                              const c = taskChipColors(t.color || undefined);
-                              return (
-                                <button key={item.key} data-task="1" onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}>
-                                  <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
-                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
-                                </button>
-                              );
-                            } else if (item.isPrayer) {
-                              const done = isPrayerDone(item.dateStr, item.key);
-                              return (
-                                <button key={item.id} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
-                                  <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
-                                    {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
-                                  </span>
-                                  <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
-                                    {item.label}
-                                  </span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
-                                    {formatTimeLabel(item.minutes, timeFormat)}
-                                  </span>
-                                </button>
-                              );
-                            } else {
-                              const ev = item.ev;
-                              const c = chipColors(ev);
-                              const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
-                              const dateStr = format(startDayDate, 'yyyy-MM-dd');
-                              const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
-                              return (
-                                <button key={item.key} data-event="1" onPointerDown={(e) => { e.stopPropagation(); handleEventMouseDown(e as unknown as React.MouseEvent, ev); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: isCompleted ? 0.5 : 1 }}>
-                                  
-                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}>{ev.content || 'Untitled'}</span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
-                                </button>
-                              );
-                            }
-                          })}
-                          <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
-                            <div className="w-[3px] h-[3px] rounded-full bg-border" />
-                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
-                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
+                        {topOutsideItems.length > 0 ? (
+                          <div className="border-b border-border/50 bg-background/30 flex flex-col items-stretch px-1.5 py-1 gap-[2px] h-full justify-end">
+                            {topOutsideItems.map(item => {
+                              const isTask = item.isTask;
+                              if (isTask) {
+                                const t = item.task;
+                                const occ = t.occDate ?? null;
+                                const done = isTaskDone(t, occ);
+                                const c = taskChipColors(t.color || undefined);
+                                const rawS = timeToMin(t.startTime!);
+                                let rawE = t.endTime ? timeToMin(t.endTime) : null;
+                                let taskTimeDisplay = formatTimeLabel(rawS, timeFormat);
+                                if (rawE !== null) {
+                                  if (rawE <= rawS) rawE += 1440;
+                                  const dur = rawE - rawS;
+                                  const dh = Math.floor(dur / 60);
+                                  const dm = dur % 60;
+                                  const df = dh > 0 ? (dm > 0 ? `${dh}h ${dm}m` : `${dh}h`) : `${dm}m`;
+                                  taskTimeDisplay = `${formatTimeLabel(rawS, timeFormat)} – ${formatTimeLabel(rawE % 1440, timeFormat)} (${df})`;
+                                }
+                                return (
+                                  <button
+                                    key={item.key}
+                                    data-task="1"
+                                    onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                    className="flex items-center gap-1 rounded-[4px] px-2 h-[20px] flex-shrink-0 text-left transition-opacity cursor-pointer border hover:opacity-80"
+                                    style={{ background: `${c.bg}80`, borderColor: darkMode ? '#121316' : '#ffffff', opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}
+                                    title={`${t.title || 'Untitled task'} · ${taskTimeDisplay}`}
+                                  >
+                                    <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
+                                    <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
+                                    <span className="text-[8.5px] tabular-nums leading-none ml-auto opacity-80 whitespace-nowrap flex-shrink-0" style={{ color: c.textMuted }}>{taskTimeDisplay}</span>
+                                  </button>
+                                );
+                              } else if (item.isPrayer) {
+                                const done = isPrayerDone(item.dateStr, item.key);
+                                return (
+                                  <button key={item.key || item.id} type="button" data-prayer="1" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-2 h-[20px] flex-shrink-0 text-left transition-opacity hover:opacity-80 active:opacity-60 cursor-pointer border select-none" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
+                                    <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                      {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                    </span>
+                                    <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
+                                      {item.label}
+                                    </span>
+                                    <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                      {formatTimeLabel(item.minutes ?? item.startMin, timeFormat)}
+                                    </span>
+                                  </button>
+                                );
+                              } else {
+                                const ev = item.ev;
+                                const c = chipColors(ev);
+                                const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
+                                const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                                const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+
+                                const start24 = timeToMin(ev.startTime);
+                                let end24 = timeToMin(ev.endTime);
+                                if (end24 <= start24) end24 += 1440;
+                                const durMin = end24 - start24;
+                                const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
+                                const durHours = Math.floor(durMin / 60);
+                                const durMins = durMin % 60;
+                                const durFormatted = durHours > 0 ? (durMins > 0 ? `${durHours}h ${durMins}m` : `${durHours}h`) : `${durMins}m`;
+                                const timeDisplay = isNoDur
+                                  ? formatTimeLabel(start24, timeFormat)
+                                  : `${formatTimeLabel(start24, timeFormat)} – ${formatTimeLabel(end24 % 1440, timeFormat)} (${durFormatted})`;
+
+                                return (
+                                  <button
+                                    key={item.key}
+                                    data-event="1"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openMenu(e, ev);
+                                    }}
+                                    onContextMenu={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      openMenu(e, ev);
+                                    }}
+                                    onDoubleClick={(e) => {
+                                      e.stopPropagation();
+                                      openMenu(e, ev);
+                                      enterEdit(ev.id);
+                                    }}
+                                    className="flex items-center gap-1 rounded-[4px] px-2 h-[20px] flex-shrink-0 text-left transition-opacity cursor-pointer border hover:opacity-80"
+                                    style={{
+                                      background: `${c.bg}80`,
+                                      borderColor: darkMode ? '#121316' : '#ffffff',
+                                      opacity: isCompleted ? 0.5 : 1,
+                                    }}
+                                    title={`${ev.content || 'Untitled'} · ${timeDisplay}`}
+                                  >
+                                    {!ev.noCheckbox && (
+                                      <span
+                                        role="button"
+                                        tabIndex={-1}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          toggleEventCompleted(ev.id, day);
+                                        }}
+                                        className="flex-shrink-0 flex items-center justify-center cursor-pointer"
+                                        style={{ color: c.text }}
+                                      >
+                                        {isCompleted ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                      </span>
+                                    )}
+                                    <span
+                                      className="text-[10px] font-semibold truncate flex-1 min-w-0"
+                                      style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}
+                                    >
+                                      {ev.content || 'Untitled'}
+                                    </span>
+                                    <span
+                                      className="text-[8.5px] tabular-nums leading-none ml-auto opacity-80 whitespace-nowrap flex-shrink-0"
+                                      style={{ color: c.textMuted }}
+                                    >
+                                      {timeDisplay}
+                                    </span>
+                                  </button>
+                                );
+                              }
+                            })}
+                            <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
+                              <div className="w-[3px] h-[3px] rounded-full bg-border" />
+                              <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
+                              <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        ) : (
+                          topOutsideHeight > 0 && <div className="border-b border-border/50 h-full" />
+                        )}
                       </div>
 
 <div
                         className="relative"
                         style={{
-                          height: totalH, overflow: 'hidden',
+                          // `clip`, not `hidden`: both draw the same clipping,
+                          // but a `hidden` box is still a scroll box -- browsers
+                          // will move its content for scrollIntoView, focus or
+                          // find-in-page, with no scrollbar to undo it. That is
+                          // how this column once scrolled alone under the
+                          // "Go to Live" button. A clipped box cannot scroll at
+                          // all; visibility is the main scroller's job only.
+                          height: totalH, overflow: 'clip',
                           contain: (isDraggingAnything || isResizingAnything) ? undefined : 'layout style',
                           cursor: isDraggingAnything ? 'grabbing' : 'crosshair',
                           ...columnGridBackground,
                         }}
                         onClick={(e) => handleColClick(e, colIdx)}
                         onPointerDown={(e) => {
-                          if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]')) return;
+                          if ((e.target as HTMLElement).closest('[data-event]') || (e.target as HTMLElement).closest('[data-task]') || (e.target as HTMLElement).closest('[data-prayer]')) return;
                           if (e.button !== 0) return;
                           const rect = e.currentTarget.getBoundingClientRect();
                           const y = (e.clientY - rect.top) / gridScale();
@@ -9383,7 +9765,7 @@ export default function DailyPlanner() {
                               />
                               {/* Live time chip */}
                               <div
-                                className="absolute text-[9px] font-bold tabular-nums px-1.5 py-[1px] rounded-full whitespace-nowrap"
+                                className="absolute text-[9px] font-bold tabular-nums px-2 py-[1px] rounded-full whitespace-nowrap"
                                 style={{ right: 3, top: -8, background: nowAccent, color: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)', letterSpacing: '0.02em' }}
                               >
                                 {formatTimeLabel(nowMin, timeFormat)}
@@ -9406,8 +9788,11 @@ export default function DailyPlanner() {
                             return (
                               <button
                                 key={p.id}
+                                type="button"
+                                data-prayer="1"
+                                onPointerDown={(e) => e.stopPropagation()}
                                 onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
-                                className="absolute flex items-center gap-1 rounded-md px-1.5 z-20 transition-opacity"
+                                className="absolute flex items-center gap-1 rounded-md px-2 z-20 transition-opacity hover:opacity-90 active:opacity-75 select-none cursor-pointer"
                                 style={{
                                   top, left: 2, right: 2, height: 16,
                                   background: `${prayer.color}26`,
@@ -9436,17 +9821,20 @@ export default function DailyPlanner() {
                             <div
                               key={p.id}
                               className="absolute left-0 right-0 z-20 pointer-events-none flex items-center"
-                              style={{ top: top - 8, height: 16, opacity: done ? 0.45 : 1 }}
+                              style={{ top: top - 9, height: 18, opacity: done ? 0.45 : 1 }}
                             >
                               <div
                                 className="flex-1 min-w-0"
                                 style={{ height: 0, borderTop: `1px solid ${prayer.color}`, opacity: 0.85 }}
                               />
                               <button
+                                type="button"
+                                data-prayer="1"
+                                onPointerDown={(e) => e.stopPropagation()}
                                 onClick={(e) => { e.stopPropagation(); togglePrayerDone(p.dateStr, p.key); }}
-                                className="flex-shrink-0 flex items-center gap-1 rounded-full pl-1.5 pr-2 pointer-events-auto transition-transform active:scale-95 mx-1 cursor-pointer"
+                                className="flex-shrink-0 flex items-center gap-1 rounded-full pl-2 pr-2.5 pointer-events-auto transition-opacity hover:opacity-90 active:opacity-75 mx-1 cursor-pointer select-none relative before:absolute before:-inset-y-1.5 before:-inset-x-1 before:content-['']"
                                 style={{
-                                  height: 15,
+                                  height: 17,
                                   background: darkMode ? currentDarkTheme.cardBg : '#ffffff',
                                   border: `1px solid ${prayer.color}80`,
                                   boxShadow: `0 1px 3px rgba(0,0,0,${darkMode ? '0.35' : '0.12'})`,
@@ -9524,7 +9912,11 @@ export default function DailyPlanner() {
 
                           const sNormEv = normalizeMin(activeStart24, dayStartH);
                           let eNormEv   = normalizeMin(activeEnd24, dayStartH);
-                          if (eNormEv <= sNormEv) eNormEv += 1440;
+                          if (!isMoving && (ev.noDuration || ev.endTime === ev.startTime)) {
+                            eNormEv = sNormEv + 10;
+                          } else if (eNormEv <= sNormEv) {
+                            eNormEv += 1440;
+                          }
                           const spansBoundary = sNormEv < dayStartMin + 1440 && eNormEv > dayStartMin + 1440;
 
                           const isLive   = isNowCol && normNowMin >= item.startMin && normNowMin < item.endMin;
@@ -9575,7 +9967,7 @@ export default function DailyPlanner() {
                                   top, height,
                                   left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
                                   right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
-                                  borderColor: border,
+                                  borderColor: darkMode ? '#121316' : '#ffffff',
                                   backgroundColor: darkMode ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)',
                                   opacity: 0.45,
                                 }}
@@ -9608,7 +10000,7 @@ export default function DailyPlanner() {
                                 left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
                                 right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
                                 backgroundColor: bg,
-                                borderColor: border,
+                                borderColor: darkMode ? '#121316' : '#ffffff',
                                 borderBottomStyle: 'solid',
                                 borderTopStyle: 'solid',
                                 color: text,
@@ -9689,7 +10081,7 @@ export default function DailyPlanner() {
                               {/* Top time tooltip */}
                               {showTopTime && resizeDisp && (
                                 <div className="absolute z-50 pointer-events-none" style={{ top: -22, left: '50%', transform: 'translateX(-50%)' }}>
-                                  <div className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
+                                  <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
                                     {formatTimeLabel(resizeDisp.startMin, timeFormat)}
                                   </div>
                                 </div>
@@ -9704,7 +10096,7 @@ export default function DailyPlanner() {
                                 return (
                                   <div
                                     className={`absolute inset-0 flex flex-col overflow-hidden ${
-                                      isMicroCard || isShortCard ? 'px-1.5 py-0' : isCompactCard || isMediumCard ? 'px-2 py-1' : 'px-2 pt-2.5 pb-2'
+                                      isMicroCard || isShortCard ? 'px-2 py-0' : isCompactCard || isMediumCard ? 'px-2 py-1' : 'px-2 pt-2.5 pb-2'
                                     }`}
                                     style={{
                                       top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : isMediumCard ? 3 : 6,
@@ -9933,7 +10325,7 @@ export default function DailyPlanner() {
                               {/* Bottom time tooltip */}
                               {showBottomTime && resizeDisp && (
                                 <div className="absolute z-50 pointer-events-none" style={{ bottom: -22, left: '50%', transform: 'translateX(-50%)' }}>
-                                  <div className="text-[10px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
+                                  <div className="text-[10px] font-semibold px-2 py-0.5 rounded whitespace-nowrap" style={{ background: text, color: bg, boxShadow: '0 1px 4px rgba(0,0,0,0.25)' }}>
                                     {formatTimeLabel(resizeDisp.endMin, timeFormat)}
                                   </div>
                                 </div>
@@ -10019,7 +10411,7 @@ export default function DailyPlanner() {
                               }}
                               title={isTouch ? t.title : `${t.title}. Drag to the top of a day, or to another day`}
                             >
-                              <div className="flex items-start gap-1 px-1.5 py-1">
+                              <div className="flex items-start gap-1 px-2 py-1">
                                 <span
                                   role="button"
                                   tabIndex={-1}
@@ -10042,7 +10434,7 @@ export default function DailyPlanner() {
                                 {t.recur && <Repeat size={9} style={{ color: c.textMuted, flexShrink: 0, marginTop: 2 }} />}
                               </div>
                               {h >= 38 && (
-                                <div className="px-1.5 text-[9.5px] tabular-nums" style={{ color: c.textMuted }}>
+                                <div className="px-2 text-[9.5px] tabular-nums" style={{ color: c.textMuted }}>
                                   {formatTimeLabel(startMin, timeFormat)}
                                 </div>
                               )}
@@ -10050,65 +10442,147 @@ export default function DailyPlanner() {
                           );
                         })}
                       
-                      {/* Bottom outside-hours band sync wrapper */}
-                      <div className="bottom-outside-band flex flex-col justify-start flex-shrink-0 relative z-20">
-                        {/* Bottom outside-hours band */}
-                      {bottomOutsideItems.length > 0 && (
-                        <div className="border-t border-border/50 bg-background/30 flex flex-col items-stretch px-1 py-1 gap-[2px] relative z-20">
-                          <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
-                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
-                            <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
-                            <div className="w-[3px] h-[3px] rounded-full bg-border" />
-                          </div>
-                          {bottomOutsideItems.map(item => {
-                            const isTask = item.isTask;
-                            if (isTask) {
-                              const t = item.task;
-                              const occ = t.occDate ?? null;
-                              const done = isTaskDone(t, occ);
-                              const c = taskChipColors(t.color || undefined);
-                              return (
-                                <button key={item.key} data-task="1" onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}>
-                                  <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
-                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
-                                </button>
-                              );
-                            } else if (item.isPrayer) {
-                              const done = isPrayerDone(item.dateStr, item.key);
-                              return (
-                                <button key={item.id} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
-                                  <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
-                                    {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
-                                  </span>
-                                  <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
-                                    {item.label}
-                                  </span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
-                                    {formatTimeLabel(item.minutes, timeFormat)}
-                                  </span>
-                                </button>
-                              );
-                            } else {
-                              const ev = item.ev;
-                              const c = chipColors(ev);
-                              const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
-                              const dateStr = format(startDayDate, 'yyyy-MM-dd');
-                              const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
-                              return (
-                                <button key={item.key} data-event="1" onPointerDown={(e) => { e.stopPropagation(); handleEventMouseDown(e as unknown as React.MouseEvent, ev); }} className="flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-left transition-opacity cursor-pointer border hover:opacity-80" style={{ background: `${c.bg}80`, borderColor: c.border, opacity: isCompleted ? 0.5 : 1 }}>
-                                  <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}>{ev.content || 'Untitled'}</span>
-                                  <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: c.textMuted }}>{formatTimeLabel(item.startMin, timeFormat)}</span>
-                                </button>
-                              );
-                            }
-                          })}
-                        </div>
-                      )}
-                      </div>
+                      
 
 </div>
                       
+                      {/* Bottom outside-hours band sync wrapper */}
+                      <div className="bottom-outside-band flex flex-col justify-start flex-shrink-0 relative z-20" style={{ height: bottomOutsideHeight }}>
+                        {/* Bottom outside-hours band */}
+                        {bottomOutsideItems.length > 0 ? (
+                          <div className="border-t border-border/50 bg-background/30 flex flex-col items-stretch px-1.5 py-1 gap-[2px] relative z-20 h-full justify-start">
+                            <div className="flex flex-col items-center justify-center py-1 gap-[3px] opacity-60">
+                              <div className="w-[3px] h-[3px] rounded-full bg-border opacity-30" />
+                              <div className="w-[3px] h-[3px] rounded-full bg-border opacity-60" />
+                              <div className="w-[3px] h-[3px] rounded-full bg-border" />
+                            </div>
+                            {bottomOutsideItems.map(item => {
+                              const isTask = item.isTask;
+                              if (isTask) {
+                                const t = item.task;
+                                const occ = t.occDate ?? null;
+                                const done = isTaskDone(t, occ);
+                                const c = taskChipColors(t.color || undefined);
+                                const rawS = timeToMin(t.startTime!);
+                                let rawE = t.endTime ? timeToMin(t.endTime) : null;
+                                let taskTimeDisplay = formatTimeLabel(rawS, timeFormat);
+                                if (rawE !== null) {
+                                  if (rawE <= rawS) rawE += 1440;
+                                  const dur = rawE - rawS;
+                                  const dh = Math.floor(dur / 60);
+                                  const dm = dur % 60;
+                                  const df = dh > 0 ? (dm > 0 ? `${dh}h ${dm}m` : `${dh}h`) : `${dm}m`;
+                                  taskTimeDisplay = `${formatTimeLabel(rawS, timeFormat)} – ${formatTimeLabel(rawE % 1440, timeFormat)} (${df})`;
+                                }
+                                return (
+                                  <button
+                                    key={item.key}
+                                    data-task="1"
+                                    onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                    className="flex items-center gap-1 rounded-[4px] px-2 h-[20px] flex-shrink-0 text-left transition-opacity cursor-pointer border hover:opacity-80"
+                                    style={{ background: `${c.bg}80`, borderColor: darkMode ? '#121316' : '#ffffff', opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}
+                                    title={`${t.title || 'Untitled task'} · ${taskTimeDisplay}`}
+                                  >
+                                    <span role="button" tabIndex={-1} onClick={(e) => { e.stopPropagation(); handleToggleTaskDone(t.id); }} className="flex-shrink-0 flex items-center justify-center" style={{ color: c.text }}>{done ? (taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />) : (taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />)}</span>
+                                    <span className="text-[10px] font-semibold truncate flex-1 min-w-0" style={{ color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{t.title || 'Untitled task'}</span>
+                                    <span className="text-[8.5px] tabular-nums leading-none ml-auto opacity-80 whitespace-nowrap flex-shrink-0" style={{ color: c.textMuted }}>{taskTimeDisplay}</span>
+                                  </button>
+                                );
+                              } else if (item.isPrayer) {
+                                const done = isPrayerDone(item.dateStr, item.key);
+                                return (
+                                  <button key={item.key || item.id} type="button" data-prayer="1" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); togglePrayerDone(item.dateStr, item.key); }} className="flex items-center gap-1 rounded-full px-2 h-[20px] flex-shrink-0 text-left transition-opacity hover:opacity-80 active:opacity-60 cursor-pointer border select-none" style={{ background: `${prayer.color}26`, borderColor: `${prayer.color}80`, opacity: done ? 0.5 : 1 }}>
+                                    <span className="flex-shrink-0 flex items-center" style={{ color: prayer.color }}>
+                                      {done ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                    </span>
+                                    <span className="text-[10px] font-semibold truncate leading-none flex-1 min-w-0" style={{ color: prayer.color, textDecoration: done ? 'line-through' : 'none' }}>
+                                      {item.label}
+                                    </span>
+                                    <span className="text-[9px] tabular-nums leading-none ml-auto opacity-80" style={{ color: prayer.color }}>
+                                      {formatTimeLabel(item.minutes ?? item.startMin, timeFormat)}
+                                    </span>
+                                  </button>
+                                );
+                              } else {
+                                const ev = item.ev;
+                                const c = chipColors(ev);
+                                const startDayDate = dayAt(ev.visibleDayIndex ?? ev.dayIndex);
+                                const dateStr = format(startDayDate, 'yyyy-MM-dd');
+                                const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
+
+                                const start24 = timeToMin(ev.startTime);
+                                let end24 = timeToMin(ev.endTime);
+                                if (end24 <= start24) end24 += 1440;
+                                const durMin = end24 - start24;
+                                const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
+                                const durHours = Math.floor(durMin / 60);
+                                const durMins = durMin % 60;
+                                const durFormatted = durHours > 0 ? (durMins > 0 ? `${durHours}h ${durMins}m` : `${durHours}h`) : `${durMins}m`;
+                                const timeDisplay = isNoDur
+                                  ? formatTimeLabel(start24, timeFormat)
+                                  : `${formatTimeLabel(start24, timeFormat)} – ${formatTimeLabel(end24 % 1440, timeFormat)} (${durFormatted})`;
+
+                                return (
+                                  <button
+                                    key={item.key}
+                                    data-event="1"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openMenu(e, ev);
+                                    }}
+                                    onContextMenu={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      openMenu(e, ev);
+                                    }}
+                                    onDoubleClick={(e) => {
+                                      e.stopPropagation();
+                                      openMenu(e, ev);
+                                      enterEdit(ev.id);
+                                    }}
+                                    className="flex items-center gap-1 rounded-[4px] px-2 h-[20px] flex-shrink-0 text-left transition-opacity cursor-pointer border hover:opacity-80"
+                                    style={{
+                                      background: `${c.bg}80`,
+                                      borderColor: darkMode ? '#121316' : '#ffffff',
+                                      opacity: isCompleted ? 0.5 : 1,
+                                    }}
+                                    title={`${ev.content || 'Untitled'} · ${timeDisplay}`}
+                                  >
+                                    {!ev.noCheckbox && (
+                                      <span
+                                        role="button"
+                                        tabIndex={-1}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          toggleEventCompleted(ev.id, day);
+                                        }}
+                                        className="flex-shrink-0 flex items-center justify-center cursor-pointer"
+                                        style={{ color: c.text }}
+                                      >
+                                        {isCompleted ? <CheckCircle2 size={10} /> : <Circle size={10} />}
+                                      </span>
+                                    )}
+                                    <span
+                                      className="text-[10px] font-semibold truncate flex-1 min-w-0"
+                                      style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}
+                                    >
+                                      {ev.content || 'Untitled'}
+                                    </span>
+                                    <span
+                                      className="text-[8.5px] tabular-nums leading-none ml-auto opacity-80 whitespace-nowrap flex-shrink-0"
+                                      style={{ color: c.textMuted }}
+                                    >
+                                      {timeDisplay}
+                                    </span>
+                                  </button>
+                                );
+                              }
+                            })}
+                          </div>
+                        ) : (
+                          bottomOutsideHeight > 0 && <div className="border-t border-border/50 h-full" />
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -10168,7 +10642,7 @@ export default function DailyPlanner() {
                           width: `calc(${widthPct}% - 8px)`,
                           transition: 'top 150ms ease, left 260ms cubic-bezier(0.22,1,0.36,1), width 260ms cubic-bezier(0.22,1,0.36,1), box-shadow 140ms ease, transform 140ms cubic-bezier(0.22,1,0.36,1), outline-color 140ms ease',
                           backgroundColor: bg,
-                          borderColor: border,
+                          borderColor: darkMode ? '#121316' : '#ffffff',
                           // 'Minimal' carries the colour on the left edge only.
                           borderLeft: accentBar ? `3px solid ${accentBar}` : undefined,
                           color: text,
@@ -10259,17 +10733,17 @@ export default function DailyPlanner() {
                         : `${dur}m`;
                       return (
                         <>
-                          <div className="absolute left-1/2 text-[10px] font-bold tabular-nums px-1.5 py-[2px] rounded whitespace-nowrap"
+                          <div className="absolute left-1/2 text-[10px] font-bold tabular-nums px-2 py-[2px] rounded whitespace-nowrap"
                                style={{ ...chip, top: -20, transform: 'translateX(-50%)' }}>
                             {formatTimeLabel(createDisp.startMin, timeFormat)}
                           </div>
-                          <div className="absolute left-1/2 text-[10px] font-bold tabular-nums px-1.5 py-[2px] rounded whitespace-nowrap"
+                          <div className="absolute left-1/2 text-[10px] font-bold tabular-nums px-2 py-[2px] rounded whitespace-nowrap"
                                style={{ ...chip, bottom: -20, transform: 'translateX(-50%)' }}>
                             {formatTimeLabel(createDisp.endMin, timeFormat)}
                           </div>
                           {selRect.height >= 26 && (
                             <div className="absolute inset-0 flex items-center justify-center">
-                              <span className="text-[10px] font-bold tabular-nums px-1.5 py-[1px] rounded"
+                              <span className="text-[10px] font-bold tabular-nums px-2 py-[1px] rounded"
                                     style={{ background: darkMode ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.75)', color: darkMode ? '#dbeafe' : '#1e40af' }}>
                                 {durLabel}
                               </span>
@@ -10490,8 +10964,18 @@ export default function DailyPlanner() {
                               ? (darkMode ? 'rgba(96,165,250,0.16)' : 'rgba(37,99,235,0.10)')
                               : hoverBg;
                         
-                        // Timed events for this cell
-                        const timedEvents = cellEvents.filter(e => !e.allDay);
+                        // Timed events for this cell, sorted chronologically
+                        const timedEvents = cellEvents
+                          .filter(e => !e.allDay)
+                          .sort((a, b) => {
+                            const aTime = timeToMin(a.startTime);
+                            const bTime = timeToMin(b.startTime);
+                            if (aTime !== bTime) return aTime - bTime;
+                            const aEnd = timeToMin(a.endTime);
+                            const bEnd = timeToMin(b.endTime);
+                            if (aEnd !== bEnd) return aEnd - bEnd;
+                            return (a.content || '').localeCompare(b.content || '') || a.id.localeCompare(b.id);
+                          });
 
                         return (
                           <div
@@ -10580,41 +11064,77 @@ export default function DailyPlanner() {
                                 )}
                               </div>
                             ) : (
-                            <div className="flex flex-col gap-1 overflow-hidden">
-                              {timedEvents.slice(0, 3).map(ev => {
-                                const { bg, border, text, accentBar } = chipColors(ev);
-                                const label = formatTimeLabel(timeToMin(ev.startTime), timeFormat);
-                                const isBeingDragged = monthItemDrag?.event.id === ev.id;
+                            <div className="flex flex-col gap-0.5 overflow-hidden">
+                              {(() => {
+                                const isSpacious = timedEvents.length + allDayRowCount <= 2;
                                 return (
-                                  <div
-                                    key={ev.id}
-                                    data-event="1"
-                                    className={`rounded-lg px-2 py-1 truncate text-[10.5px] font-semibold leading-tight transition-all duration-150 hover:translate-x-[1px] cursor-grab active:cursor-grabbing shadow-xs ${
-                                      isBeingDragged ? 'opacity-25' : 'hover:shadow-sm'
-                                    }`}
-                                    style={{
-                                      background: bg,
-                                      borderLeft: `3.5px solid ${accentBar || border}`,
-                                      borderTop: `1px solid ${border}40`,
-                                      borderRight: `1px solid ${border}40`,
-                                      borderBottom: `1px solid ${border}40`,
-                                      color: text,
-                                      borderRadius: '7px',
-                                    }}
-                                    onMouseDown={(e) => handleMonthItemMouseDown(ev, date, e)}
-                                    onTouchStart={(e) => handleMonthItemTouchStart(ev, date, e)}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (monthItemDragJustEndedRef.current) return;
-                                      openMenu(e, ev);
-                                    }}
-                                    title={`${label} ${ev.content}`}
-                                  >
-                                    <span className="tabular-nums opacity-85 font-bold mr-1">{label}</span>{ev.content ? <span>{ev.content}</span> : ''}
-                                  </div>
+                                  <>
+                                    {timedEvents.slice(0, 3).map(ev => {
+                                      const { border, accentBar } = chipColors(ev);
+                                      const label = formatTimeLabel(timeToMin(ev.startTime), timeFormat);
+                                      const isBeingDragged = monthItemDrag?.event.id === ev.id;
+                                      const dotColor = accentBar || border || '#3b82f6';
+                                      return (
+                                        <div
+                                          key={ev.id}
+                                          data-event="1"
+                                          className={`flex ${isSpacious ? 'flex-col items-start gap-0.5' : 'items-center gap-1'} rounded px-1 py-0.5 leading-tight transition-colors duration-150 cursor-grab active:cursor-grabbing select-none ${
+                                            isBeingDragged ? 'opacity-25' : ''
+                                          }`}
+                                          style={{
+                                            color: menuText,
+                                          }}
+                                          onMouseEnter={e => { e.currentTarget.style.backgroundColor = darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)'; }}
+                                          onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                                          onMouseDown={(e) => handleMonthItemMouseDown(ev, date, e)}
+                                          onTouchStart={(e) => handleMonthItemTouchStart(ev, date, e)}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (monthItemDragJustEndedRef.current) return;
+                                            openMenu(e, ev);
+                                          }}
+                                          title={`${label} ${ev.content}`}
+                                        >
+                                          {isSpacious ? (
+                                            <>
+                                              <div className="flex items-center gap-1 w-full overflow-hidden">
+                                                <span
+                                                  className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                                                  style={{ backgroundColor: dotColor }}
+                                                />
+                                                <span className="truncate flex-1 font-medium text-[11px]">
+                                                  {ev.content || <span className="opacity-40 italic">Untitled</span>}
+                                                </span>
+                                              </div>
+                                              {label && (
+                                                <span className="tabular-nums font-medium opacity-60 text-[9.5px] pl-2.5">
+                                                  {label}
+                                                </span>
+                                              )}
+                                            </>
+                                          ) : (
+                                            <>
+                                              <span
+                                                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                                                style={{ backgroundColor: dotColor }}
+                                              />
+                                              {label && (
+                                                <span className="tabular-nums font-semibold opacity-70 text-[9px] flex-shrink-0">
+                                                  {label}
+                                                </span>
+                                              )}
+                                              <span className="truncate flex-1 font-medium text-[10px]">
+                                                {ev.content || <span className="opacity-40 italic">Untitled</span>}
+                                              </span>
+                                            </>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                    {timedEvents.length > 3 && <span className="text-[9.5px] pl-1 font-medium" style={{ color: menuSub }}>+{timedEvents.length - 3} more</span>}
+                                  </>
                                 );
-                              })}
-                              {timedEvents.length > 3 && <span className="text-[9.5px] pl-1 font-medium" style={{ color: menuSub }}>+{timedEvents.length - 3} more</span>}
+                              })()}
                             </div>
                             )}
                           </div>
@@ -10653,7 +11173,7 @@ export default function DailyPlanner() {
                                 left: `calc(${leftPct}% + 3px)`,
                                 width: `calc(${widthPct}% - 6px)`,
                                 backgroundColor: bg,
-                                borderColor: border,
+                                borderColor: darkMode ? '#121316' : '#ffffff',
                                 borderWidth: 1,
                                 borderStyle: 'solid',
                                 borderLeft: accentBar ? `3.5px solid ${accentBar}` : undefined,
@@ -10743,7 +11263,7 @@ export default function DailyPlanner() {
                         className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold flex items-center gap-2 border backdrop-blur-md"
                         style={{
                           background: bg,
-                          borderColor: border,
+                          borderColor: darkMode ? '#121316' : '#ffffff',
                           borderWidth: 1,
                           borderStyle: 'solid',
                           borderLeft: accentBar ? `4px solid ${accentBar}` : undefined,
@@ -10827,6 +11347,568 @@ export default function DailyPlanner() {
               ))}
             </div>
 
+            {sessionDetail && sessionDetailData ? (() => {
+              const sd = sessionDetailData;
+              const isDay = !sd.isWeek;
+              const dayDate = sd.rangeStart;
+              const isExcludedDay = isDay && focusExcludedSet.has(sessionDetail);
+              // The session in progress right now, if it belongs to the day on screen.
+              const liveHere = isDay
+                && activeFocusDayKey === sessionDetail
+                && !!focusTimer.sessionStartedAt
+                && (focusTimer.isRunning || focusElapsedSeconds > 0);
+              const fmtTime = (d: Date) => format(d, 'h:mm a');
+              const fmtTimeSec = (d: Date) => format(d, 'h:mm:ss a');
+              const periodOf = (d: Date) => {
+                const h = d.getHours();
+                if (h < 5) return { label: 'Night', Icon: Moon };
+                if (h < 12) return { label: 'Morning', Icon: Sunrise };
+                if (h < 17) return { label: 'Afternoon', Icon: Sun };
+                if (h < 21) return { label: 'Evening', Icon: Sunset };
+                return { label: 'Night', Icon: Moon };
+              };
+              const step = (dir: number) => {
+                if (sd.isWeek) setAnalysisWeekCursor(d => addWeeks(d, dir));
+                else setSessionDetail(dateKey(addDays(dayDate, dir)));
+              };
+
+              // Reversible order: Newest / latest sessions first!
+              const displayMatches = [...sd.matches].reverse();
+
+              const card = (m: (typeof sd.matches)[number], isLatestCompleted = false) => {
+                const period = periodOf(m.startD);
+                const met = m.planned > 0 && m.actual >= m.planned;
+                const under = m.planned > 0 && m.actual < m.planned;
+                return (
+                  <div key={m.session.id} className="relative flex gap-3 group">
+                    {/* Timeline rail: numbered bubble */}
+                    <div className="flex flex-col items-center">
+                      <div
+                        className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center text-[10px] font-bold z-10 tabular-nums shadow-sm transition-transform group-hover:scale-110"
+                        style={{
+                          background: isLatestCompleted
+                            ? (darkMode ? 'rgba(59,130,246,0.25)' : 'rgba(37,99,235,0.18)')
+                            : (darkMode ? 'rgba(96,165,250,0.14)' : 'rgba(37,99,235,0.10)'),
+                          color: '#60a5fa',
+                          border: isLatestCompleted ? '1.5px solid #3b82f6' : '1px solid rgba(96,165,250,0.40)',
+                        }}
+                        title={`Session #${m.index + 1}`}
+                      >
+                        {m.index + 1}
+                      </div>
+                      <div className="w-px flex-1 my-1" style={{ background: surfaceBdr }} />
+                    </div>
+
+                    <div
+                      className="flex-1 min-w-0 rounded-xl px-4 py-3 mb-3 transition-all duration-200 hover:border-blue-500/40"
+                      style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}
+                    >
+                      {/* Exact clock times, seconds included + Edit / Delete Controls */}
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-baseline gap-2 flex-wrap min-w-0">
+                          <span
+                            onClick={() => openEditSessionModal(m.session, m.isManual)}
+                            className="text-base font-bold tabular-nums cursor-pointer hover:text-blue-400 transition-colors"
+                            style={{ color: menuText }}
+                            title="Click to edit session times"
+                          >
+                            {fmtTimeSec(m.startD)}
+                          </span>
+                          {m.startsOtherDay && (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-blue-500/15 text-blue-400">
+                              started {format(m.startD, 'MMM d')}
+                            </span>
+                          )}
+                          <span className="text-xs opacity-60" style={{ color: menuSub }}>→</span>
+                          <span
+                            onClick={() => openEditSessionModal(m.session, m.isManual)}
+                            className="text-base font-bold tabular-nums cursor-pointer hover:text-blue-400 transition-colors"
+                            style={{ color: menuText }}
+                            title="Click to edit session times"
+                          >
+                            {fmtTimeSec(m.endD)}
+                          </span>
+                          {m.endsOtherDay && (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-blue-500/15 text-blue-400">
+                              ended {format(m.endD, 'MMM d')}
+                            </span>
+                          )}
+                          {isLatestCompleted && (
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                              Latest
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => openEditSessionModal(m.session, m.isManual)}
+                            className="px-2.5 py-1 rounded-lg text-sm font-bold tabular-nums flex items-center gap-1.5 hover:bg-blue-500/20 transition-all cursor-pointer"
+                            style={{ background: 'rgba(96,165,250,0.14)', color: '#60a5fa' }}
+                            title="Click to edit duration & hours"
+                          >
+                            <span>{formatFocusDuration(m.actual)}</span>
+                            <Pencil size={11} className="opacity-70 group-hover:opacity-100" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (window.confirm(`Delete Session #${m.index + 1} (${formatFocusDuration(m.actual)})?`)) {
+                                deleteSessionFromModal(m.session.id);
+                              }
+                            }}
+                            className="p-1.5 rounded-lg opacity-40 hover:opacity-100 hover:bg-rose-500/15 hover:text-rose-400 transition-all text-neutral-400 cursor-pointer"
+                            title="Delete this session"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Detail chips */}
+                      <div className="flex items-center gap-1.5 mt-2 flex-wrap text-[10px] font-semibold">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md" style={{ background: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', color: menuSub }}>
+                          <period.Icon size={10} />
+                          {period.label}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md tabular-nums" style={{ background: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', color: menuSub }}>
+                          {Math.round(m.actual / 60)} min · {m.actual.toLocaleString()} s
+                        </span>
+                        {m.gapBeforeSeconds != null && (
+                          <span className="px-2 py-0.5 rounded-md tabular-nums" style={{ background: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', color: menuSub }}>
+                            {m.gapBeforeSeconds < 60 ? 'Back-to-back' : `${formatFocusDuration(m.gapBeforeSeconds)} break before`}
+                          </span>
+                        )}
+                        {m.isManual && (
+                          <span className="px-2 py-0.5 rounded-md font-bold" style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.3)' }}>
+                            Manual entry
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Planned vs actual */}
+                      {m.planned > 0 && (
+                        <div className="mt-2.5">
+                          <div className="flex items-center justify-between text-[10px] mb-1" style={{ color: menuSub }}>
+                            <span className="tabular-nums">Planned {formatFocusDuration(m.planned)}</span>
+                            <span className="font-bold" style={{ color: met ? '#34d399' : '#f59e0b' }}>
+                              {met
+                                ? 'Full plan ✓'
+                                : `${m.actual >= m.planned ? '+' : '−'}${formatFocusDuration(Math.abs(m.planned - m.actual))} ${under ? 'under plan' : 'over plan'}`}
+                            </span>
+                          </div>
+                          <div className="h-1.5 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+                            <div
+                              className="h-full rounded-full transition-all duration-300"
+                              style={{ width: `${Math.min(100, (m.actual / m.planned) * 100)}%`, background: met ? '#34d399' : '#f59e0b' }}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              };
+
+              const dayStartHour = focusDayStartHour;
+              const planPct = sd.totalPlanned > 0 ? Math.round((sd.totalSeconds / sd.totalPlanned) * 100) : 0;
+
+              return (
+                <div className="rounded-xl overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)', border: `1px solid ${surfaceBdr}` }}>
+                  {/* Page header */}
+                  <div className={`flex items-center justify-between gap-2 ${isCompact ? 'px-3 py-2.5 gap-2 flex-wrap' : 'px-5 py-3'}`} style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <button
+                        onClick={() => setSessionDetail(null)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors shrink-0"
+                        style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}`, color: menuSub }}
+                        onMouseEnter={e => (e.currentTarget.style.color = menuText)}
+                        onMouseLeave={e => (e.currentTarget.style.color = menuSub)}
+                        title="Back to the analysis panels"
+                      >
+                        <ArrowLeft size={13} />
+                        Analysis
+                      </button>
+                      <div className="w-7 h-7 rounded-md flex items-center justify-center shrink-0" style={{ background: 'rgba(96,165,250,0.16)', color: '#60a5fa' }}>
+                        <Timer size={14} />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold truncate flex items-center gap-2" style={{ color: menuText }}>
+                          <span className="truncate">
+                            {sd.isWeek
+                              ? `Week of ${format(sd.rangeStart, 'MMM d')} – ${format(sd.rangeEnd, 'MMM d, yyyy')}`
+                              : format(dayDate, 'EEEE, MMM d, yyyy')}
+                          </span>
+                          {isDay && isSameDay(dayDate, nowDate) && (
+                            <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: '#60a5fa' }}>Today</span>
+                          )}
+                          {isExcludedDay && (
+                            <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-500 border border-amber-500/30">Excluded</span>
+                          )}
+                        </div>
+                        <div className="text-[10px] truncate" style={{ color: menuSub }}>
+                          {sd.matches.length} session{sd.matches.length === 1 ? '' : 's'} · {formatFocusDuration(sd.totalSeconds)} focused
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {!sd.isWeek && !isSameDay(dayDate, nowDate) && (
+                        <button
+                          onClick={() => setSessionDetail(dateKey(nowDate))}
+                          className="text-xs font-medium px-2 py-1 rounded-md transition-colors"
+                          style={{ color: menuSub }}
+                          onMouseEnter={e => (e.currentTarget.style.background = hoverBg)}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                        >
+                          Today
+                        </button>
+                      )}
+                      <button onClick={() => step(-1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')} title={sd.isWeek ? 'Previous week' : 'Previous day'}>
+                        <ChevronLeft size={16} />
+                      </button>
+                      <button onClick={() => step(1)} className="p-1.5 rounded-md transition-colors" style={{ color: menuSub }} onMouseEnter={e => (e.currentTarget.style.background = hoverBg)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')} title={sd.isWeek ? 'Next week' : 'Next day'}>
+                        <ChevronRight size={16} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className={isCompact ? 'px-3 py-3' : 'px-5 py-4'}>
+                    {/* Summary tiles */}
+                    <div className={`grid gap-2.5 mb-4 ${isPhone ? 'grid-cols-2' : 'grid-cols-6 gap-3'}`}>
+                      {[
+                        ['Total focused', formatFocusDuration(sd.totalSeconds)],
+                        ['Sessions', `${sd.matches.length}`],
+                        ['Longest', sd.matches.length ? formatFocusDuration(sd.longest) : '—'],
+                        ['Avg session', sd.matches.length ? formatFocusDuration(sd.avg) : '—'],
+                        ['First start', sd.firstStart ? fmtTime(sd.firstStart) : '—'],
+                        ['Last end', sd.lastEnd ? fmtTime(sd.lastEnd) : '—'],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-xl px-3 py-2.5" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                          <div className="text-[9px] font-bold uppercase tracking-widest truncate mb-1" style={{ color: menuSub }}>{label}</div>
+                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Plan vs actual across the whole range */}
+                    {sd.totalPlanned > 0 && (
+                      <div className="mb-4 rounded-xl px-3.5 py-3" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
+                        <div className="flex items-center justify-between text-[10px] mb-1.5 flex-wrap gap-1" style={{ color: menuSub }}>
+                          <span className="font-bold uppercase tracking-widest">Plan vs actual</span>
+                          <span className="tabular-nums">
+                            {formatFocusDuration(sd.totalPlanned)} planned ·{' '}
+                            <span className="font-bold" style={{ color: planPct >= 100 ? '#34d399' : '#f59e0b' }}>{planPct}%</span>
+                            {' of plan'}
+                          </span>
+                        </div>
+                        <div className="h-2 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+                          <div
+                            className="h-full rounded-full"
+                            style={{ width: `${Math.min(100, planPct)}%`, background: planPct >= 100 ? '#34d399' : '#60a5fa' }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Redesigned 24-Hour Focus Map (No overlapping text, accurate session widths) */}
+                    {isDay && sd.matches.length > 0 && (() => {
+                      const tickHours = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24];
+                      const nowMs = nowDate.getTime();
+                      const nowPct = isSameDay(dayDate, nowDate) ? dayMapPercent(nowMs, dayStartHour) : null;
+                      const liveStartMs = liveHere && focusTimer.sessionStartedAt ? new Date(focusTimer.sessionStartedAt).getTime() : null;
+
+                      return (
+                        <div className="mb-6 rounded-xl p-4 border" style={{ background: surfaceBg, borderColor: surfaceBdr }}>
+                          {/* Map Header with Legend */}
+                          <div className="flex items-center justify-between gap-3 mb-2.5 flex-wrap">
+                            <div className="flex items-center gap-2">
+                              <CalendarRange size={14} className="text-blue-400" />
+                              <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: menuText }}>24-Hour Focus Map</span>
+                              <span className="text-[10px] tabular-nums px-2 py-0.5 rounded font-medium" style={{ background: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', color: menuSub }}>
+                                {`${dayStartHour % 12 === 0 ? 12 : dayStartHour % 12} ${dayStartHour < 12 ? 'AM' : 'PM'}`} → {`${dayStartHour % 12 === 0 ? 12 : dayStartHour % 12} ${dayStartHour < 12 ? 'PM' : 'AM'} (+1d)`}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-3 text-[10px] font-medium flex-wrap" style={{ color: menuSub }}>
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="w-2.5 h-2.5 rounded-xs bg-gradient-to-r from-blue-500 to-indigo-600 border border-blue-400/80 inline-block" />
+                                Timed ({sd.matches.filter(m => !m.isManual).length})
+                              </span>
+                              {sd.manualCount > 0 && (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span className="w-2.5 h-2.5 rounded-xs bg-gradient-to-r from-amber-500 to-orange-600 border border-amber-400/80 inline-block" />
+                                  Manual ({sd.manualCount})
+                                </span>
+                              )}
+                              {liveHere && (
+                                <span className="inline-flex items-center gap-1.5 text-emerald-400 font-semibold">
+                                  <span className="w-2.5 h-2.5 rounded-xs bg-emerald-400 animate-pulse inline-block" />
+                                  Live Now
+                                </span>
+                              )}
+                              {nowPct != null && (
+                                <span className="inline-flex items-center gap-1.5 text-rose-400 font-semibold">
+                                  <span className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.9)] inline-block" />
+                                  Now ({format(nowDate, 'h:mm a')})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Hour Labels Axis - completely separate row above track so numbers NEVER overlap session blocks */}
+                          <div className="relative h-5 mb-1 select-none">
+                            {tickHours.map(hOff => {
+                              const absHour = (dayStartHour + hOff) % 24;
+                              const leftPct = (hOff / 24) * 100;
+                              const label = `${absHour % 12 === 0 ? 12 : absHour % 12} ${absHour < 12 ? 'AM' : 'PM'}`;
+                              const isEnd = hOff === 24;
+                              const isStart = hOff === 0;
+                              return (
+                                <div
+                                  key={hOff}
+                                  className={`absolute top-0 text-[9px] font-semibold tabular-nums text-neutral-400 dark:text-neutral-500 whitespace-nowrap ${
+                                    isStart ? 'translate-x-0' : isEnd ? '-translate-x-full' : '-translate-x-1/2'
+                                  }`}
+                                  style={{ left: `${leftPct}%` }}
+                                >
+                                  {label}
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {/* The Timeline Track */}
+                          <div
+                            className="relative h-9 rounded-lg overflow-hidden select-none"
+                            style={{
+                              background: darkMode ? 'rgba(15,23,42,0.85)' : 'rgba(241,245,249,0.95)',
+                              border: `1px solid ${surfaceBdr}`,
+                              boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.2)',
+                            }}
+                          >
+                            {/* Vertical divider guide lines every 1 hour */}
+                            {tickHours.map(hOff => (
+                              <div
+                                key={hOff}
+                                className="absolute top-0 bottom-0 w-px pointer-events-none"
+                                style={{
+                                  left: `${(hOff / 24) * 100}%`,
+                                  background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
+                                }}
+                              />
+                            ))}
+
+                            {/* Completed Session Blocks */}
+                            {sd.matches.map(m => {
+                              const sessionSec = Math.max(1, m.actual);
+                              const widthPct = Math.min(100, (sessionSec / 86400) * 100);
+                              const displayWidth = Math.max(0.85, widthPct);
+                              const startPct = dayMapPercent(m.startMs, dayStartHour);
+                              const tooltip = `Session #${m.index + 1}: ${fmtTimeSec(m.startD)} → ${fmtTimeSec(m.endD)} (${formatFocusDuration(m.actual)}) · Click to edit`;
+
+                              // Handle 24h wrapping
+                              const fragments = (startPct + displayWidth <= 100)
+                                ? [{ left: startPct, width: displayWidth }]
+                                : [
+                                    { left: startPct, width: 100 - startPct },
+                                    { left: 0, width: (startPct + displayWidth) - 100 },
+                                  ];
+
+                              return fragments.map((frag, fragIdx) => (
+                                <div
+                                  key={`${m.session.id}-${fragIdx}`}
+                                  onClick={() => openEditSessionModal(m.session, m.isManual)}
+                                  className="absolute top-1.5 bottom-1.5 rounded-md cursor-pointer transition-transform hover:scale-y-110 hover:brightness-125 z-10"
+                                  title={tooltip}
+                                  style={{
+                                    left: `${frag.left}%`,
+                                    width: `${frag.width}%`,
+                                    minWidth: '6px',
+                                    background: m.isManual
+                                      ? 'linear-gradient(135deg, rgba(245,158,11,0.95), rgba(217,119,6,0.95))'
+                                      : 'linear-gradient(135deg, rgba(59,130,246,0.95), rgba(37,99,235,0.95))',
+                                    border: m.isManual
+                                      ? '1px solid rgba(251,191,36,0.9)'
+                                      : '1px solid rgba(147,197,253,0.9)',
+                                    boxShadow: m.isManual
+                                      ? '0 1px 4px rgba(245,158,11,0.3)'
+                                      : '0 1px 4px rgba(59,130,246,0.3)',
+                                  }}
+                                />
+                              ));
+                            })}
+
+                            {/* Live session block (if running today) */}
+                            {liveHere && liveStartMs && (() => {
+                              const liveStartPct = dayMapPercent(liveStartMs, dayStartHour);
+                              const liveWidthPct = Math.max(0.9, Math.min(100, (focusElapsedSeconds / 86400) * 100));
+                              return (
+                                <div
+                                  className="absolute top-1.5 bottom-1.5 rounded-md z-15 animate-pulse"
+                                  title={`Live Session Running: started ${fmtTimeSec(new Date(liveStartMs))} (${formatFocusDuration(focusElapsedSeconds)})`}
+                                  style={{
+                                    left: `${liveStartPct}%`,
+                                    width: `${Math.min(100 - liveStartPct, liveWidthPct)}%`,
+                                    minWidth: '8px',
+                                    background: 'linear-gradient(135deg, rgba(16,185,129,0.95), rgba(20,184,166,0.95))',
+                                    border: '1px solid rgba(110,231,183,0.9)',
+                                    boxShadow: '0 0 8px rgba(16,185,129,0.6)',
+                                  }}
+                                />
+                              );
+                            })()}
+
+                            {/* Now needle indicator on today's map */}
+                            {nowPct != null && (
+                              <div
+                                className="absolute top-0 bottom-0 w-[2px] bg-rose-500 z-20 pointer-events-none"
+                                style={{
+                                  left: `${nowPct}%`,
+                                  boxShadow: '0 0 8px rgba(244,63,94,0.9)',
+                                }}
+                              >
+                                <div
+                                  className="absolute -top-1 -left-[3.5px] w-2.5 h-2.5 rounded-full bg-rose-500 ring-2 ring-white/90 dark:ring-slate-950 shadow"
+                                  title={`Current Time: ${format(nowDate, 'h:mm:ss a')}`}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Section Header: Individual Sessions (reversed order) */}
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <Clock size={13} style={{ color: menuSub }} />
+                        <span className="text-xs font-bold uppercase tracking-wider" style={{ color: menuText }}>
+                          Sessions ({sd.matches.length}{liveHere ? ' + 1 running' : ''})
+                        </span>
+                        <span className="text-[10px] opacity-70 px-1.5 py-0.5 rounded font-medium" style={{ background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: menuSub }}>
+                          Newest first
+                        </span>
+                      </div>
+                      <span className="text-[10px]" style={{ color: menuSub }}>
+                        Click any session or duration to edit
+                      </span>
+                    </div>
+
+                    {/* LIVE SESSION CARD - Rendered FIRST at the top */}
+                    {liveHere && focusTimer.sessionStartedAt && (
+                      <div className="relative flex gap-3 group mb-3">
+                        <div className="flex flex-col items-center">
+                          <div
+                            className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center text-[10px] font-bold z-10 tabular-nums shadow-lg shadow-emerald-500/20 animate-pulse"
+                            style={{
+                              background: 'rgba(16,185,129,0.25)',
+                              color: '#34d399',
+                              border: '1.5px solid #10b981',
+                            }}
+                            title="Session running right now"
+                          >
+                            <Activity size={13} />
+                          </div>
+                          <div className="w-px flex-1 my-1" style={{ background: 'rgba(16,185,129,0.4)' }} />
+                        </div>
+
+                        <div
+                          className="flex-1 min-w-0 rounded-xl px-4 py-3.5 mb-3 border border-emerald-500/40 shadow-lg shadow-emerald-500/5 transition-all"
+                          style={{ background: darkMode ? 'rgba(6,78,59,0.18)' : 'rgba(16,185,129,0.08)' }}
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
+                              <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                                Live Now
+                              </span>
+                              <span className="text-base font-bold tabular-nums" style={{ color: menuText }}>
+                                {fmtTimeSec(new Date(focusTimer.sessionStartedAt))}
+                              </span>
+                              <span className="text-xs opacity-60" style={{ color: menuSub }}>→</span>
+                              <span className="text-sm font-semibold text-emerald-400 animate-pulse">
+                                In progress...
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <div className="px-3 py-1 rounded-lg text-sm font-bold tabular-nums bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                {formatFocusDuration(focusElapsedSeconds)}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => focusTimer.isRunning ? pauseFocus() : startFocus()}
+                                className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 transition-colors cursor-pointer"
+                                title={focusTimer.isRunning ? "Pause session" : "Resume session"}
+                              >
+                                {focusTimer.isRunning ? <Pause size={14} /> : <Play size={14} />}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => stopFocus()}
+                                className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white shadow transition-colors cursor-pointer"
+                                title="Finish and save current session"
+                              >
+                                Finish
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="mt-2.5">
+                            <div className="flex items-center justify-between text-[10px] mb-1" style={{ color: menuSub }}>
+                              <span className="tabular-nums font-medium">
+                                Goal: {formatFocusDuration(focusTimer.plannedSeconds)}
+                              </span>
+                              <span className="tabular-nums font-bold text-emerald-400">
+                                {Math.min(100, Math.round(focusProgressPct))}% completed
+                              </span>
+                            </div>
+                            <div className="h-2 rounded-full overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-300"
+                                style={{ width: `${Math.min(100, focusProgressPct)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* The sessions themselves, in REVERSED chronological order (newest first) */}
+                    {sd.matches.length === 0 && !liveHere ? (
+                      <div className="rounded-xl px-4 py-8 flex flex-col items-center gap-1.5 text-center" style={{ border: `1px solid ${surfaceBdr}` }}>
+                        <Timer size={18} style={{ color: menuSub, opacity: 0.6 }} />
+                        <span className="text-xs font-medium" style={{ color: menuText }}>No sessions here</span>
+                        <span className="text-[10px]" style={{ color: menuSub }}>
+                          {sd.isWeek ? 'No session was logged to any day of this week.' : 'No session was logged to this focus day.'}
+                        </span>
+                      </div>
+                    ) : sd.isWeek ? (
+                      // Week mode: days ordered newest first, sessions within each day ordered newest first
+                      [...sd.groups].reverse().map(g => (
+                        <div key={g.key}>
+                          <div className="flex items-center justify-between mt-5 mb-2.5 first:mt-0">
+                            <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: menuText }}>
+                              <Clock size={11} style={{ opacity: 0.5 }} />
+                              {format(g.date, 'EEEE, MMM d')}
+                              {isSameDay(g.date, nowDate) && <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: '#60a5fa' }}>Today</span>}
+                            </span>
+                            <span className="text-[11px] tabular-nums" style={{ color: menuSub }}>
+                              {formatFocusDuration(g.seconds)} · {g.sessions.length} session{g.sessions.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                          {[...g.sessions].reverse().map((m, idx) => card(m, idx === 0))}
+                        </div>
+                      ))
+                    ) : (
+                      // Day mode: newest completed sessions first!
+                      displayMatches.map((m, idx) => card(m, idx === 0))
+                    )}
+                  </div>
+                </div>
+              );
+            })() : (
             <div className="rounded-xl overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)', border: `1px solid ${surfaceBdr}` }}>
               {/* Panel header: tab switcher */}
               <div className={`flex items-center justify-between ${isCompact ? 'px-3 py-2.5 gap-2 flex-wrap' : 'px-5 py-3'}`} style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
@@ -10954,7 +12036,18 @@ export default function DailyPlanner() {
                       ].map(([label, value]) => (
                         <div key={label} className="min-w-0">
                           <div className="text-[9px] font-bold uppercase tracking-widest truncate" style={{ color: menuSub }}>{label}</div>
-                          <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                          {label === 'Sessions' && focusAnalysis.wkSessions > 0 ? (
+                            <button
+                              onClick={() => setSessionDetail('week')}
+                              className="text-sm font-semibold tabular-nums truncate hover:text-blue-400 hover:underline underline-offset-2 transition-colors text-left"
+                              style={{ color: menuText }}
+                              title="View every session of this week in detail"
+                            >
+                              {value}
+                            </button>
+                          ) : (
+                            <div className="text-sm font-semibold tabular-nums truncate" style={{ color: menuText }}>{value}</div>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -10963,10 +12056,14 @@ export default function DailyPlanner() {
                     <div className="flex items-end gap-2.5 h-44 mb-2">
                       {weekAnalysisLive.days.map(d => {
                         const pct = d.seconds > 0 ? Math.max(4, (d.seconds / weekAnalysisLive.maxSeconds) * 100) : 0;
-                        const isTodayCol = isSameDay(d.date, nowDate);
+                        const isTodayCol = d.key === todayFocusKey;
                         const isBest = d.seconds > 0 && d.key === weekAnalysisLive.bestKey;
                         return (
-                          <div key={d.key} className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0">
+                          <div 
+                            key={d.key} 
+                            className="flex-1 h-full flex flex-col justify-end gap-1 min-w-0 cursor-pointer group"
+                            onClick={() => setSessionDetail(d.key)}
+                          >
                             {/* Exact time above each bar */}
                             <div
                               className="text-[10px] font-bold tabular-nums text-center truncate"
@@ -10976,7 +12073,7 @@ export default function DailyPlanner() {
                             </div>
                             <div className="flex-1 flex items-end">
                               <div
-                                className="w-full rounded-t-md transition-smooth duration-300"
+                                className="w-full rounded-t-md transition-smooth duration-300 group-hover:opacity-80"
                                 title={`${format(d.date, 'EEEE, MMM d')}: ${formatFocusDuration(d.seconds)}${d.sessions ? ` · ${d.sessions} session${d.sessions === 1 ? '' : 's'}` : ''}`}
                                 style={{
                                   height: `${pct}%`,
@@ -10989,8 +12086,18 @@ export default function DailyPlanner() {
                             <div className="text-[9px] font-semibold text-center uppercase truncate" style={{ color: isTodayCol ? '#60a5fa' : menuSub }}>
                               {format(d.date, 'EEE')}
                             </div>
-                            <div className="text-[8.5px] tabular-nums text-center truncate" style={{ color: menuSub }}>
-                              {format(d.date, 'd')}
+                            <div className="flex justify-center mt-0.5">
+                              <div
+                                className="text-[8.5px] tabular-nums text-center flex items-center justify-center rounded-full"
+                                style={{
+                                  color: isTodayCol ? '#ffffff' : menuSub,
+                                  background: isTodayCol ? '#3b82f6' : 'transparent',
+                                  width: '16px',
+                                  height: '16px',
+                                }}
+                              >
+                                {format(d.date, 'd')}
+                              </div>
                             </div>
                           </div>
                         );
@@ -10999,28 +12106,31 @@ export default function DailyPlanner() {
 
                     {/* Exact per-day breakdown table (double-click row or duration to modify, or use 3-dots menu) */}
                     <div className="mt-4 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
-                      {weekAnalysisLive.days.map((d, i) => (
+                      {weekAnalysisLive.days.map((d, i) => {
+                        const isTodayRow = d.key === todayFocusKey;
+                        return (
                         <div
                           key={d.key}
                           onDoubleClick={() => startEditingFocusDay('week', d.key, d.date, d.seconds)}
+                          onClick={() => setSessionDetail(d.key)}
                           className="flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5 relative group"
                           style={{
                             background: d.isExcluded
                               ? (darkMode ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.05)')
-                              : (isSameDay(d.date, nowDate)
+                              : (isTodayRow
                                   ? (darkMode ? 'rgba(96,165,250,0.10)' : 'rgba(37,99,235,0.06)')
                                   : (i % 2 === 0 ? surfaceBg : 'transparent')),
                             borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
                           }}
                         >
                           <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-medium flex items-center gap-1.5" style={{ color: isSameDay(d.date, nowDate) ? '#60a5fa' : menuText }}>
+                            <span className="font-medium flex items-center gap-1.5" style={{ color: isTodayRow ? '#60a5fa' : menuText }}>
                               <Clock size={11} style={{ opacity: 0.5 }} />
                               {format(d.date, 'EEEE, MMM d')}
-                              {isSameDay(d.date, nowDate) && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
+                              {isTodayRow && <span className="text-[9px] font-bold uppercase tracking-wider">Today</span>}
                             </span>
                             {d.isExcluded && (
-                              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-500 border border-amber-500/30">
+                              <span className="px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-500 border border-amber-500/30">
                                 Excluded
                               </span>
                             )}
@@ -11054,7 +12164,21 @@ export default function DailyPlanner() {
                               ) : (
                                 <>
                                   <span className={`font-semibold ${d.isExcluded ? 'line-through opacity-75' : ''}`}>{formatFocusDuration(d.seconds)}</span>
-                                  <span style={{ color: menuSub }}> · {d.sessions} session{d.sessions === 1 ? '' : 's'}</span>
+                                  {d.sessions > 0 ? (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSessionDetail(d.key);
+                                      }}
+                                      className="hover:text-blue-400 hover:underline underline-offset-2 transition-colors cursor-pointer"
+                                      style={{ color: menuSub }}
+                                      title="View each session's exact start, end and duration"
+                                    >
+                                      · {d.sessions} session{d.sessions === 1 ? '' : 's'}
+                                    </button>
+                                  ) : (
+                                    <span style={{ color: menuSub }}> · 0 sessions</span>
+                                  )}
                                 </>
                               )}
                             </span>
@@ -11078,6 +12202,17 @@ export default function DailyPlanner() {
                                   className="absolute right-0 top-full mt-1 w-48 rounded-lg shadow-xl z-30 p-1 border text-xs flex flex-col gap-0.5 text-left"
                                   style={{ background: darkMode ? '#121316' : '#ffffff', borderColor: surfaceBdr }}
                                 >
+                                  <button
+                                    onClick={() => {
+                                      setOpenDayMenuKey(null);
+                                      setSessionDetail(d.key);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
+                                    style={{ color: menuText }}
+                                  >
+                                    <Clock size={13} className="text-blue-400" />
+                                    View sessions
+                                  </button>
                                   <button
                                     onClick={() => {
                                       setOpenDayMenuKey(null);
@@ -11112,7 +12247,8 @@ export default function DailyPlanner() {
                             </div>
                           </div>
                         </div>
-                      ))}
+                      );
+                    })}
                     </div>
 
                     {weekAnalysisLive.seconds === 0 && (
@@ -11171,7 +12307,7 @@ export default function DailyPlanner() {
                         const sessions = focusAnalysis.byDaySessions.get(key) ?? 0;
                         const inMonth = focusAnalysis.monthInRange.has(key);
                         const intensity = secs > 0 ? Math.min(1, 0.18 + 0.82 * (secs / focusAnalysis.monthMaxSeconds)) : 0;
-                        const todayCell = isSameDay(d, nowDate);
+                        const todayCell = key === todayFocusKey;
                         const hot = secs > focusAnalysis.monthMaxSeconds * 0.45;
                         return (
                           <div
@@ -11210,6 +12346,17 @@ export default function DailyPlanner() {
                                   className="absolute right-0 top-full mt-1 w-44 rounded-lg shadow-xl z-50 p-1 border text-xs flex flex-col gap-0.5 text-left"
                                   style={{ background: darkMode ? '#121316' : '#ffffff', borderColor: surfaceBdr }}
                                 >
+                                  <button
+                                    onClick={() => {
+                                      setOpenDayMenuKey(null);
+                                      setSessionDetail(key);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-blue-500/15 font-medium transition-colors"
+                                    style={{ color: menuText }}
+                                  >
+                                    <Clock size={12} className="text-blue-400" />
+                                    View sessions
+                                  </button>
                                   <button
                                     onClick={() => {
                                       setOpenDayMenuKey(null);
@@ -11284,9 +12431,18 @@ export default function DailyPlanner() {
                               <span className="text-[9px] font-bold uppercase tracking-wider text-amber-500 leading-none">Excl</span>
                             ) : (
                               sessions > 0 && (
-                                <span className={`${isPhone ? 'text-[9px]' : 'text-[11px]'} font-bold tabular-nums leading-none`} style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSessionDetail(key);
+                                  }}
+                                  onDoubleClick={(e) => e.stopPropagation()}
+                                  className={`${isPhone ? 'text-[9px]' : 'text-[11px]'} font-bold tabular-nums leading-none hover:underline underline-offset-2 transition-colors`}
+                                  style={{ color: hot ? 'rgba(255,255,255,0.9)' : menuSub }}
+                                  title="View each session's exact start, end and duration"
+                                >
                                   {sessions}×
-                                </span>
+                                </button>
                               )
                             )}
                           </div>
@@ -11382,6 +12538,7 @@ export default function DailyPlanner() {
                 )}
               </div>
             </div>
+            )}
           </ViewShell>
         )}
       </AnimatePresence>
@@ -11410,7 +12567,7 @@ export default function DailyPlanner() {
                     <Clock size={12} />
                     <span>Go to Live</span>
                     {!isPhone && (
-                      <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
+                      <kbd className="ml-1 px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
                         {formatCombo(shortcuts.goToLive)}
                       </kbd>
                     )}
@@ -11537,6 +12694,316 @@ export default function DailyPlanner() {
         document.body
       )}
 
+      {/* Edit Individual Focus Session Modal */}
+      {editSessionModal && createPortal(
+        <div
+          className="fixed inset-0 z-[99999] flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setEditSessionModal(null)}
+        >
+          <div
+            className="w-full max-w-md max-h-[90dvh] overflow-y-auto overscroll-contain rounded-2xl p-6 border shadow-2xl relative animate-in fade-in zoom-in-95 duration-150"
+            style={{
+              background: darkMode ? '#18181b' : '#ffffff',
+              borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)',
+              color: darkMode ? '#ffffff' : '#09090b',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between pb-3 mb-4 border-b" style={{ borderColor: darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.10)' }}>
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-blue-500/10 text-blue-400">
+                  <Pencil size={18} />
+                </div>
+                <div>
+                  <h3 className="text-base font-semibold">Edit Focus Session</h3>
+                  <p className="text-xs opacity-70" style={{ color: darkMode ? '#a1a1aa' : '#71717a' }}>
+                    Modify start, end, duration & hours
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditSessionModal(null)}
+                className="p-1.5 rounded-lg opacity-60 hover:opacity-100 hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Error alert */}
+            {editSessionModal.error && (
+              <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center gap-2">
+                <AlertTriangle size={15} className="shrink-0" />
+                <span>{editSessionModal.error}</span>
+              </div>
+            )}
+
+            {/* Manual Entry Notice */}
+            {editSessionModal.isManual && (
+              <div className="mb-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs flex items-start gap-2">
+                <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold block">Manual Day Total Entry</span>
+                  Adjust the duration below to update this entry. You can also specify exact start and end times to convert it to a timed session.
+                </div>
+              </div>
+            )}
+
+            {/* Form Fields */}
+            <div className="space-y-4 text-xs">
+              {/* Start Time */}
+              <div>
+                <label className="font-semibold block mb-1" style={{ color: darkMode ? '#e4e4e7' : '#27272a' }}>
+                  Start Time
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    value={editSessionModal.startDate}
+                    onChange={e => {
+                      const newDate = e.target.value;
+                      setEditSessionModal(prev => {
+                        if (!prev) return null;
+                        const startD = new Date(`${newDate}T${prev.startTime}`);
+                        const endD = new Date(startD.getTime() + prev.durationSeconds * 1000);
+                        return {
+                          ...prev,
+                          startDate: newDate,
+                          endDate: format(endD, 'yyyy-MM-dd'),
+                          endTime: format(endD, 'HH:mm:ss'),
+                          error: null,
+                        };
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border text-xs bg-transparent tabular-nums cursor-pointer"
+                    style={{ borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)' }}
+                  />
+                  <input
+                    type="time"
+                    step="1"
+                    value={editSessionModal.startTime}
+                    onChange={e => {
+                      const newTime = e.target.value;
+                      setEditSessionModal(prev => {
+                        if (!prev) return null;
+                        const startD = new Date(`${prev.startDate}T${newTime}`);
+                        const endD = new Date(startD.getTime() + prev.durationSeconds * 1000);
+                        return {
+                          ...prev,
+                          startTime: newTime,
+                          endDate: format(endD, 'yyyy-MM-dd'),
+                          endTime: format(endD, 'HH:mm:ss'),
+                          error: null,
+                        };
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border text-xs bg-transparent tabular-nums cursor-pointer"
+                    style={{ borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)' }}
+                  />
+                </div>
+                <p className="mt-1 text-[10px] opacity-60 tabular-nums">
+                  {(() => {
+                    const d = new Date(`${editSessionModal.startDate}T${editSessionModal.startTime}`);
+                    return !isNaN(d.getTime()) ? format(d, 'EEEE, MMM d, yyyy · h:mm:ss a') : '';
+                  })()}
+                </p>
+              </div>
+
+              {/* End Time */}
+              <div>
+                <label className="font-semibold block mb-1" style={{ color: darkMode ? '#e4e4e7' : '#27272a' }}>
+                  End Time
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    value={editSessionModal.endDate}
+                    onChange={e => {
+                      const newDate = e.target.value;
+                      setEditSessionModal(prev => {
+                        if (!prev) return null;
+                        const startD = new Date(`${prev.startDate}T${prev.startTime}`);
+                        const endD = new Date(`${newDate}T${prev.endTime}`);
+                        const diffSec = Math.max(0, Math.round((endD.getTime() - startD.getTime()) / 1000));
+                        return {
+                          ...prev,
+                          endDate: newDate,
+                          durationSeconds: diffSec,
+                          durationMinutes: Math.round(diffSec / 60),
+                          durationText: formatFocusDuration(diffSec),
+                          error: null,
+                        };
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border text-xs bg-transparent tabular-nums cursor-pointer"
+                    style={{ borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)' }}
+                  />
+                  <input
+                    type="time"
+                    step="1"
+                    value={editSessionModal.endTime}
+                    onChange={e => {
+                      const newTime = e.target.value;
+                      setEditSessionModal(prev => {
+                        if (!prev) return null;
+                        const startD = new Date(`${prev.startDate}T${prev.startTime}`);
+                        const endD = new Date(`${prev.endDate}T${newTime}`);
+                        const diffSec = Math.max(0, Math.round((endD.getTime() - startD.getTime()) / 1000));
+                        return {
+                          ...prev,
+                          endTime: newTime,
+                          durationSeconds: diffSec,
+                          durationMinutes: Math.round(diffSec / 60),
+                          durationText: formatFocusDuration(diffSec),
+                          error: null,
+                        };
+                      });
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border text-xs bg-transparent tabular-nums cursor-pointer"
+                    style={{ borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)' }}
+                  />
+                </div>
+                <p className="mt-1 text-[10px] opacity-60 tabular-nums">
+                  {(() => {
+                    const d = new Date(`${editSessionModal.endDate}T${editSessionModal.endTime}`);
+                    return !isNaN(d.getTime()) ? format(d, 'EEEE, MMM d, yyyy · h:mm:ss a') : '';
+                  })()}
+                </p>
+              </div>
+
+              {/* Duration Input & Quick Adjusters */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-semibold" style={{ color: darkMode ? '#e4e4e7' : '#27272a' }}>
+                    Duration
+                  </label>
+                  <span className="text-[10px] tabular-nums text-blue-400 font-bold">
+                    {editSessionModal.durationSeconds.toLocaleString()} seconds
+                  </span>
+                </div>
+
+                <input
+                  type="text"
+                  value={editSessionModal.durationText}
+                  placeholder="e.g. 45m, 1h 15m, 90, 1:15:00"
+                  onChange={e => {
+                    const text = e.target.value;
+                    const parsed = parseDurationInput(text);
+                    setEditSessionModal(prev => {
+                      if (!prev) return null;
+                      const startD = new Date(`${prev.startDate}T${prev.startTime}`);
+                      const endD = parsed > 0 ? new Date(startD.getTime() + parsed * 1000) : new Date(startD);
+                      return {
+                        ...prev,
+                        durationText: text,
+                        durationSeconds: parsed,
+                        durationMinutes: Math.round(parsed / 60),
+                        endDate: format(endD, 'yyyy-MM-dd'),
+                        endTime: format(endD, 'HH:mm:ss'),
+                        error: null,
+                      };
+                    });
+                  }}
+                  className="w-full px-3 py-2 rounded-xl border text-xs bg-transparent tabular-nums font-semibold"
+                  style={{ borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)' }}
+                />
+
+                {/* Quick duration modifier buttons */}
+                <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                  {[-15, -5, 5, 15, 30].map(deltaMins => (
+                    <button
+                      key={deltaMins}
+                      type="button"
+                      onClick={() => {
+                        setEditSessionModal(prev => {
+                          if (!prev) return null;
+                          const newSec = Math.max(60, prev.durationSeconds + deltaMins * 60);
+                          const startD = new Date(`${prev.startDate}T${prev.startTime}`);
+                          const endD = new Date(startD.getTime() + newSec * 1000);
+                          return {
+                            ...prev,
+                            durationSeconds: newSec,
+                            durationMinutes: Math.round(newSec / 60),
+                            durationText: formatFocusDuration(newSec),
+                            endDate: format(endD, 'yyyy-MM-dd'),
+                            endTime: format(endD, 'HH:mm:ss'),
+                            error: null,
+                          };
+                        });
+                      }}
+                      className="px-2 py-1 rounded-lg text-[10px] font-semibold transition-colors border cursor-pointer"
+                      style={{
+                        background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                        borderColor: darkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+                        color: deltaMins > 0 ? '#60a5fa' : menuSub,
+                      }}
+                    >
+                      {deltaMins > 0 ? `+${deltaMins}m` : `${deltaMins}m`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Planned Time (optional) */}
+              <div>
+                <label className="font-semibold block mb-1" style={{ color: darkMode ? '#e4e4e7' : '#27272a' }}>
+                  Planned Target (minutes)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1440"
+                  value={editSessionModal.plannedMinutes || ''}
+                  placeholder="e.g. 60"
+                  onChange={e => {
+                    const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                    setEditSessionModal(prev => prev ? { ...prev, plannedMinutes: val } : null);
+                  }}
+                  className="w-full px-3 py-2 rounded-xl border text-xs bg-transparent tabular-nums"
+                  style={{ borderColor: darkMode ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)' }}
+                />
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-between pt-5 mt-5 border-t" style={{ borderColor: darkMode ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.10)' }}>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm('Delete this session permanently?')) {
+                    deleteSessionFromModal(editSessionModal.sessionId);
+                  }
+                }}
+                className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-400 hover:bg-rose-500/10 border border-rose-500/30 transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 size={13} />
+                Delete
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditSessionModal(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                  style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: darkMode ? '#ffffff' : '#09090b' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveSessionEdit(editSessionModal)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white shadow-md transition-colors cursor-pointer"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
       {/* ── Keyboard shortcut help overlay ────────────────────────────────── */}
       {showShortcutHelp && createPortal(
         <AnimatePresence>
@@ -11580,7 +13047,7 @@ export default function DailyPlanner() {
                       <div key={def.action} className="flex items-center justify-between gap-3">
                         <span className="text-[11.5px] truncate" style={{ color: menuText }}>{def.label}</span>
                         <kbd
-                          className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0"
+                          className="text-[9.5px] font-semibold px-2 py-0.5 rounded whitespace-nowrap flex-shrink-0"
                           style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText, fontFamily: 'inherit' }}
                         >
                           {formatCombo(shortcuts[def.action])}
@@ -11847,7 +13314,7 @@ export default function DailyPlanner() {
                     <button
                       type="button"
                       onClick={() => { setFocusChime(DEFAULT_FOCUS_CHIME); setFocusCues({ ...DEFAULT_FOCUS_CUES }); }}
-                      className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded transition-colors"
+                      className="text-[9.5px] font-semibold px-2 py-0.5 rounded transition-colors"
                       style={{ color: menuSub, border: `1px solid ${surfaceBdr}` }}
                       title="Reset focus chime and cues to defaults"
                     >
@@ -11886,7 +13353,7 @@ export default function DailyPlanner() {
                           <span className="flex items-center gap-1.5">
                             <span className="block text-xs font-semibold truncate" style={{ color: active ? '#60a5fa' : menuText }}>{c.label}</span>
                             <span
-                              className="text-[8.5px] font-medium px-1.5 py-0.5 rounded uppercase tracking-wider opacity-60"
+                              className="text-[8.5px] font-medium px-2 py-0.5 rounded uppercase tracking-wider opacity-60"
                               style={{ background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}
                             >
                               {c.category}
@@ -11945,7 +13412,7 @@ export default function DailyPlanner() {
                   <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Keyboard Shortcuts</span>
                   <button
                     onClick={() => setShortcuts({ ...DEFAULT_SHORTCUTS })}
-                    className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded"
+                    className="text-[9.5px] font-semibold px-2 py-0.5 rounded"
                     style={{ color: menuSub, border: `1px solid ${surfaceBdr}` }}
                     title="Restore every shortcut to its default"
                   >
@@ -11979,7 +13446,7 @@ export default function DailyPlanner() {
                         >
                           <span className="text-[11px] font-medium truncate" style={{ color: menuText }}>{def.label}</span>
                           <kbd
-                            className="text-[9.5px] font-semibold px-1.5 py-0.5 rounded whitespace-nowrap flex-shrink-0"
+                            className="text-[9.5px] font-semibold px-2 py-0.5 rounded whitespace-nowrap flex-shrink-0"
                             style={{
                               background: surfaceBg,
                               border: `1px solid ${conflicts.length ? 'rgba(248,113,113,0.55)' : surfaceBdr}`,
@@ -12700,7 +14167,7 @@ export default function DailyPlanner() {
                       setMenuSize(reset);
                       try { localStorage.setItem('planner-event-menu-size', JSON.stringify(reset)); } catch (_) {}
                     }}
-                    className="text-[10px] px-1.5 py-0.5 rounded transition-opacity hover:opacity-100 opacity-60 hover:bg-white/10"
+                    className="text-[10px] px-2 py-0.5 rounded transition-opacity hover:opacity-100 opacity-60 hover:bg-white/10"
                     style={{ color: menuSub }}
                     title="Reset window size"
                   >
@@ -12764,7 +14231,7 @@ export default function DailyPlanner() {
                     </span>
                     <div className="flex items-center gap-1.5">
                       <span
-                        className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                        className="text-[9px] font-bold px-2 py-0.5 rounded-full"
                         style={{
                           background: isEventToday ? 'rgba(34,197,94,0.15)' : (darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)'),
                           color: isEventToday ? (darkMode ? '#4ade80' : '#16a34a') : menuSub,
@@ -12784,7 +14251,7 @@ export default function DailyPlanner() {
                               occDate: format(today, 'yyyy-MM-dd'),
                             });
                           }}
-                          className="text-[9px] font-semibold px-1.5 py-0.5 rounded border transition-colors hover:opacity-100 opacity-80 cursor-pointer"
+                          className="text-[9px] font-semibold px-2 py-0.5 rounded border transition-colors hover:opacity-100 opacity-80 cursor-pointer"
                           style={{ background: hoverBg, borderColor: menuBdr, color: menuText }}
                           title="Jump to today"
                         >
@@ -12922,7 +14389,7 @@ export default function DailyPlanner() {
                               <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>
                                 End
                               </span>
-                              <span className="text-[9px] font-semibold px-1 rounded bg-muted/20 text-muted-foreground">
+                              <span className="text-[9px] font-semibold px-1.5 rounded bg-muted/20 text-muted-foreground">
                                 {durFormatted}
                               </span>
                             </div>
@@ -13123,7 +14590,7 @@ export default function DailyPlanner() {
                           const newDayIndex = differenceInDays(newStartDt, newWs);
                           applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, occDate: val });
                         }}
-                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
+                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-2 py-1 outline-none cursor-pointer"
                         style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
                       />
                     </div>
@@ -13148,7 +14615,7 @@ export default function DailyPlanner() {
                             applyEdit(menuEvent.id, { weekKey: newWeekKey, dayIndex: newDayIndex, daysSpan: 1, occDate: val });
                           }
                         }}
-                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-1.5 py-1 outline-none cursor-pointer"
+                        className="w-full text-[11px] font-medium tabular-nums rounded-md px-2 py-1 outline-none cursor-pointer"
                         style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
                       />
                     </div>
@@ -13283,7 +14750,7 @@ export default function DailyPlanner() {
                 {menuEvent.categoryId && (() => {
                   const activeCat = categories.find(c => c.id === menuEvent.categoryId);
                   return activeCat ? (
-                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full flex items-center gap-1" style={{ backgroundColor: `${activeCat.color}20`, color: activeCat.color }}>
+                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1" style={{ backgroundColor: `${activeCat.color}20`, color: activeCat.color }}>
                       <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: activeCat.color }} />
                       {activeCat.name}
                     </span>
@@ -13360,7 +14827,7 @@ export default function DailyPlanner() {
                   {menuEvent.categoryId ? 'Category Color' : 'Color Options'}
                 </span>
                 {menuEvent.gCalHex ? (
-                  <span className="text-[9px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1" style={{ background: darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(37,99,235,0.1)', color: darkMode ? '#93c5fd' : '#2563eb' }}>
+                  <span className="text-[9px] font-medium px-2 py-0.5 rounded flex items-center gap-1" style={{ background: darkMode ? 'rgba(59,130,246,0.18)' : 'rgba(37,99,235,0.1)', color: darkMode ? '#93c5fd' : '#2563eb' }}>
                     <Sparkles size={9} /> Google Calendar
                   </span>
                 ) : menuEvent.categoryId ? (() => {
@@ -13500,7 +14967,7 @@ export default function DailyPlanner() {
                   <div className="flex items-center justify-between">
                     <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: menuSub }}>Linked movement</span>
                     {linkedNow.length > 0 && (
-                      <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{ background: 'rgba(96,165,250,0.18)', color: '#93c5fd' }}>
+                      <span className="text-[9px] font-semibold px-2 py-0.5 rounded" style={{ background: 'rgba(96,165,250,0.18)', color: '#93c5fd' }}>
                         {linkedNow.length + 1} coupled
                       </span>
                     )}
@@ -13720,7 +15187,7 @@ export default function DailyPlanner() {
                       className="px-3 py-2 rounded-lg border text-xs font-medium flex items-center gap-2 shadow-2xs cursor-pointer transition-opacity"
                       style={{
                         background: c.bg,
-                        borderColor: c.border,
+                        borderColor: darkMode ? '#121316' : '#ffffff',
                         color: c.text,
                         opacity: done ? 0.5 : 1,
                       }}
@@ -13841,7 +15308,7 @@ export default function DailyPlanner() {
                     <Icon size={19} strokeWidth={active ? 2.5 : 2} />
                     {item.badge > 0 && (
                       <span
-                        className="absolute -top-1.5 -right-2 min-w-[15px] h-[15px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center tabular-nums"
+                        className="absolute -top-1.5 -right-2 min-w-[15px] h-[15px] px-1.5 rounded-full text-[9px] font-bold flex items-center justify-center tabular-nums"
                         style={{ background: taskColor, color: darkMode ? '#0b0b0c' : '#ffffff' }}
                       >
                         {item.badge > 99 ? '99+' : item.badge}
@@ -14054,8 +15521,10 @@ export default function DailyPlanner() {
                     return (
                       <button
                         key={p.id}
+                        type="button"
+                        data-prayer="1"
                         onClick={() => { haptic(6); togglePrayerDone(p.dateStr, p.key); }}
-                        className="w-full px-3.5 h-12 flex items-center gap-3 text-left active:opacity-60 transition-smooth cursor-pointer"
+                        className="w-full px-3.5 h-12 flex items-center gap-3 text-left active:opacity-60 transition-smooth cursor-pointer select-none"
                         style={{
                           background: isNext ? `${prayer.color}1c` : surfaceBg,
                           borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
@@ -14104,7 +15573,7 @@ export default function DailyPlanner() {
               )}
 
               {/* Footer with Method info and Quick link to settings */}
-              <div className="flex items-center justify-between px-1 pt-1">
+              <div className="flex items-center justify-between px-1.5 pt-1">
                 <span className="text-[11px]" style={{ color: menuSub }}>
                   Method: {PRAYER_METHODS.find(m => m.id === prayer.method)?.label.split('(')[0].trim() || 'Standard'} ({prayer.school === 1 ? 'Hanafi' : 'Shafi/Standard'})
                 </span>
@@ -14258,8 +15727,10 @@ export default function DailyPlanner() {
                       return (
                         <button
                           key={p.id}
+                          type="button"
+                          data-prayer="1"
                           onClick={() => { haptic(6); togglePrayerDone(p.dateStr, p.key); }}
-                          className="w-full px-3 h-11 flex items-center gap-2.5 text-left active:opacity-60 transition-opacity"
+                          className="w-full px-3 h-11 flex items-center gap-2.5 text-left active:opacity-60 transition-opacity select-none cursor-pointer"
                           style={{
                             background: isNext ? `${prayer.color}1f` : surfaceBg,
                             borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}`,
@@ -14519,7 +15990,7 @@ function CategoryFilterList({
           <button
             type="button"
             onClick={handleExit}
-            className="flex items-center gap-1.5 text-xs font-semibold px-1.5 py-1 rounded-md transition-opacity hover:opacity-75"
+            className="flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-md transition-opacity hover:opacity-75"
             style={{ color: theme.menuSub }}
           >
             <ArrowLeft size={13} strokeWidth={2.5} />
@@ -14778,7 +16249,7 @@ function CategoryFilterList({
   return (
     <div className="flex flex-col gap-1">
       {/* Header with Title and Quick + New Button */}
-      <div className="flex items-center justify-between px-1 pb-1.5 mb-1 border-b" style={{ borderColor: theme.surfaceBdr }}>
+      <div className="flex items-center justify-between px-1.5 pb-1.5 mb-1 border-b" style={{ borderColor: theme.surfaceBdr }}>
         <span className="text-[11px] font-bold uppercase tracking-wider opacity-75" style={{ color: theme.menuSub }}>
           Show categories
         </span>
@@ -15047,7 +16518,7 @@ function PrayerNextBadge({ minutes, color }: { minutes: number; color: string })
   if (diffSec <= 0) {
     return (
       <span
-        className="text-[9.5px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-md whitespace-nowrap tabular-nums flex-shrink-0"
+        className="text-[9.5px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md whitespace-nowrap tabular-nums flex-shrink-0"
         style={{ background: `${color}26`, color }}
       >
         Now
@@ -15065,7 +16536,7 @@ function PrayerNextBadge({ minutes, color }: { minutes: number; color: string })
 
   return (
     <span
-      className="text-[10px] font-bold tracking-tight px-1.5 py-0.5 rounded-md whitespace-nowrap tabular-nums flex-shrink-0 flex items-center gap-1"
+      className="text-[10px] font-bold tracking-tight px-2 py-0.5 rounded-md whitespace-nowrap tabular-nums flex-shrink-0 flex items-center gap-1"
       style={{ background: `${color}26`, color }}
     >
       <span>Next in {countdownText}</span>

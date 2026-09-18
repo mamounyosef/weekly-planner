@@ -404,7 +404,7 @@ function TasksPanel({
   // Sectioning & Sorting
   const sections = useMemo(() => {
     const tomorrowStr = format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd');
-    const openSecs: Record<string, Row[]> = { Overdue: [], Today: [], Tomorrow: [], Upcoming: [], General: [] };
+    const openSecs: Record<string, Row[]> = { Overdue: [], Today: [], Tomorrow: [], Upcoming: [], 'No Date': [] };
     const doneSecs: Row[] = [];
 
     for (const r of rows) {
@@ -412,7 +412,7 @@ function TasksPanel({
       const visible = !filters.length || (r.done ? filters.includes('completed') : filters.includes(bucket));
       if (!visible) continue;
       if (r.done) { doneSecs.push(r); continue; }
-      if (!r.due) openSecs.General.push(r);
+      if (!r.due) openSecs['No Date'].push(r);
       else if (r.due < today) openSecs.Overdue.push(r);
       else if (r.due === today) openSecs.Today.push(r);
       else if (r.due === tomorrowStr) openSecs.Tomorrow.push(r);

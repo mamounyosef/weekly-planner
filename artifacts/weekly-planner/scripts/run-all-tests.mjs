@@ -60,9 +60,13 @@ const testFiles = [
   'src/lib/settingsScope.test.ts',
   'src/lib/settingsRoundTrip.test.ts',
   'src/lib/focusStats.test.ts',
+  'src/lib/sessionDetail.test.ts',
   'src/lib/yearStats.test.ts',
   'src/lib/grid.test.ts',
   'src/lib/prayerSync.test.ts',
+  'src/lib/prayerInteractions.test.ts',
+  'src/lib/syncRobustness.test.ts',
+  'src/lib/syncHealth.test.ts',
   'src/lib/dragGrid.test.ts',
   'src/lib/monthDrag.test.ts',
   'src/lib/occurrence.test.ts',
@@ -77,6 +81,7 @@ const testFiles = [
   'src/lib/overlayStack.test.ts',
   'src/lib/pendingDone.test.ts',
   'src/lib/liveMarker.test.ts',
+  'src/lib/liveScroll.test.ts',
   'src/lib/quickAdd.test.ts',
   'src/lib/dayWindows.test.ts',
   'src/lib/displaySettings.test.ts',
@@ -87,6 +92,7 @@ const testFiles = [
   'src/lib/dayCache.test.ts',
   'src/lib/gcalColor.test.ts',
   'src/lib/focusIntegrity.test.ts',
+  'src/lib/settingsWipe.test.ts',
 ];
 
 console.log(`\n======================================================`);

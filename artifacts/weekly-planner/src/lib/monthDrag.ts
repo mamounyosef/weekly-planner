@@ -24,7 +24,7 @@
 // items never share a lane, and the assignment is stable so a band does not hop
 // between rows when an unrelated event elsewhere in the month is edited.
 
-import { colourOf, titleOf, ymd } from './agenda';
+import { colourOf, minutesOf, titleOf, ymd } from './agenda';
 import type { EventCategory } from './categories';
 import { occurrenceStarts, parseDate, type RecurFields, type WeekStartsOn } from './recurrence';
 
@@ -304,13 +304,43 @@ export function layoutSpans<T extends SpanItem>(
   const sorted = items
     .filter(it => it && isDate(it.startDate) && isDate(it.endDate) && it.startDate <= it.endDate)
     .slice()
-    .sort((a, b) => (
-      a.startDate < b.startDate ? -1 : a.startDate > b.startDate ? 1
-        // Longer first, so the long backdrop event sits above the short ones
-        // rather than being pushed down by whichever short item started with it.
-        : a.endDate > b.endDate ? -1 : a.endDate < b.endDate ? 1
-          : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
-    ));
+    .sort((a, b) => {
+      // 1. Earlier start date first
+      if (a.startDate !== b.startDate) {
+        return a.startDate < b.startDate ? -1 : 1;
+      }
+      // 2. All-day / multi-day events MUST come before single-day timed items
+      const aIsAllDay = (a as any).allDay === true || a.startDate !== a.endDate;
+      const bIsAllDay = (b as any).allDay === true || b.startDate !== b.endDate;
+      if (aIsAllDay !== bIsAllDay) {
+        return aIsAllDay ? -1 : 1;
+      }
+      // 3. For all-day/multi-day items: longer span first
+      if (aIsAllDay && bIsAllDay) {
+        if (a.endDate !== b.endDate) {
+          return a.endDate > b.endDate ? -1 : 1;
+        }
+      } else {
+        // 4. For timed items: clock order (earlier start time first, then earlier end time)
+        const aStart = (a as any).startMin ?? Number.POSITIVE_INFINITY;
+        const bStart = (b as any).startMin ?? Number.POSITIVE_INFINITY;
+        if (aStart !== bStart) {
+          return aStart - bStart;
+        }
+        const aEnd = (a as any).endMin ?? Number.POSITIVE_INFINITY;
+        const bEnd = (b as any).endMin ?? Number.POSITIVE_INFINITY;
+        if (aEnd !== bEnd) {
+          return aEnd - bEnd;
+        }
+      }
+      // 5. Stable tie-break by title then id
+      const aTitle = (a as any).title ?? '';
+      const bTitle = (b as any).title ?? '';
+      if (aTitle !== bTitle) {
+        return aTitle < bTitle ? -1 : 1;
+      }
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
 
   const laneEnds: string[] = [];
   const lanes: Record<string, number> = {};
@@ -346,6 +376,8 @@ export interface MonthSpan extends SpanItem {
   title: string;
   colour?: string;
   allDay: boolean;
+  startMin?: number | null;
+  endMin?: number | null;
 }
 
 export interface MonthSpanResult {
@@ -356,7 +388,7 @@ export interface MonthSpanResult {
 }
 
 /**
- * Every all day or multi day item touching a range, in ONE pass over the store.
+ * Every all day or timed item touching a range, in ONE pass over the store.
  *
  * WHY ONE PASS IS NOT NEGOTIABLE. The month view used to build a full agenda per
  * cell: forty-two walks of the whole planner, each expanding every recurrence,
@@ -387,12 +419,15 @@ export function spansForRange(
     const clippedEnd = endDate > to ? to : endDate;
     if (clippedEnd < from || clippedStart > to) return;
 
+    const isAllDay = raw.allDay === true;
     spans.push({
       id,
       masterId,
       title: titleOf(raw),
       colour: colourOf(raw, categories),
-      allDay: raw.allDay === true,
+      allDay: isAllDay,
+      startMin: isAllDay ? null : minutesOf(raw.startTime),
+      endMin: isAllDay ? null : minutesOf(raw.endTime),
       // The UNclipped dates are kept, so the ends know whether they are a real
       // start or the grid running out.
       startDate,
@@ -410,9 +445,6 @@ export function spansForRange(
 
     const rec = raw as unknown as RecurFields;
     const daysSpan = Math.max(1, rec.daysSpan ?? 1);
-    // A band is for things that OCCUPY days rather than a moment: anything
-    // all day, and anything running over more than one day even if it is timed.
-    if (raw.allDay !== true && daysSpan <= 1) continue;
 
     if (!rec.recur) {
       if (!isDate(rec.weekKey)) continue;

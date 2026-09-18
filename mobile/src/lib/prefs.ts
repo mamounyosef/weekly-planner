@@ -82,6 +82,8 @@ const KEY_CUSTOM_AFTER = 'planner.customDaysAfter';
 const KEY_DAY_START = 'planner.dayStartH';
 const KEY_DAY_END = 'planner.dayEndH';
 const KEY_SWIPE_VIEWS = 'planner.swipeViewSwitch';
+const KEY_LIGHT_THEME = 'planner.lightThemeVariant';
+const KEY_DARK_THEME = 'planner.darkThemeVariant';
 const KEY_FOCUS_RANGE_MODE = 'planner.focusRangeMode';
 const KEY_TASK_SORT = 'planner.taskSort';
 const KEY_HIDDEN_CATEGORIES = 'planner.hiddenCategoriesByView';
@@ -115,6 +117,8 @@ export const PREF_KEYS = [
   KEY_DAY_START,
   KEY_DAY_END,
   KEY_SWIPE_VIEWS,
+  KEY_LIGHT_THEME,
+  KEY_DARK_THEME,
   KEY_FOCUS_RANGE_MODE,
   KEY_TASK_SORT,
   KEY_HIDDEN_CATEGORIES,
@@ -378,7 +382,17 @@ export const prefs = {
     const raw = await read(KEY_THEME);
     return isThemeMode(raw) ? raw : 'system';
   },
-  setThemeMode: (mode: ThemeMode) => write(KEY_THEME, mode),
+    setThemeMode: (mode: ThemeMode) => write(KEY_THEME, mode),
+
+  async getLightTheme(): Promise<string> {
+    return (await read(KEY_LIGHT_THEME)) || 'default';
+  },
+  setLightTheme: (variant: string) => write(KEY_LIGHT_THEME, variant),
+
+  async getDarkTheme(): Promise<string> {
+    return (await read(KEY_DARK_THEME)) || 'default';
+  },
+  setDarkTheme: (variant: string) => write(KEY_DARK_THEME, variant),
 
   /**
    * The focus timer, as one JSON blob.

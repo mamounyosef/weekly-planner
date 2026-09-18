@@ -41,12 +41,17 @@ import {
   type SyncPhase,
   type SyncStatus,
 } from '../lib/syncClient';
+import {
+  createUndoHistory, diffForUndo, restoreChanges,
+  type UndoEntry, type UndoHistory,
+} from '../lib/undoHistory';
 import { createStorage, type SyncStorage } from '../lib/syncStorage';
 import { createExpoRunner, openPlannerDatabase } from '../lib/sqlite';
 import { createTransport, isAuthError, type PlannerTransport } from '../lib/syncTransport';
 import { prefs, flushPrefs, warmPrefs } from '../lib/prefs';
 import { createCoalescer } from '../lib/coalesce';
 import { createKeyedCache, dayCacheKey } from '../lib/dayCache';
+import { mergeContiguousFocusSession } from '../lib/focusStats';
 import {
   DEFAULT_DAY_WINDOW, DEFAULT_PRAYER_APPEARANCE, DEFAULT_SWIPE_VIEW_SWITCH,
   withDayEnd, withDayStart,
@@ -241,6 +246,20 @@ interface PlannerContextValue {
   saveDraft(store: SyncStore, draft: DraftInput, editingId?: string): Promise<string>;
   /** Remove an item everywhere. A tombstone, never a local hide. */
   removeItem(store: SyncStore, id: string): Promise<void>;
+  /**
+   * Session undo/redo over the planner items (events and tasks).
+   *
+   * An undo is itself an edit: the previous image is re-applied as ordinary ops
+   * and syncs, so the PC sees the revert instead of re-importing the mistake.
+   * Buttons live in the Filters sheet.
+   */
+  canUndo: boolean;
+  canRedo: boolean;
+  /** What the next undo/redo would act on, or null when there is nothing. */
+  undoLabel: string | null;
+  redoLabel: string | null;
+  undo(): Promise<void>;
+  redo(): Promise<void>;
   /**
    * Change or delete a repeating item at ONE date, or from it onwards, or
    * everywhere.
@@ -454,6 +473,17 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const waitRef = useRef(false);
   /** When holds may be attempted again, after this path refused one. */
   const holdBlockedUntilRef = useRef(0);
+
+  // ── Undo / redo ──
+  const historyRef = useRef<UndoHistory>(createUndoHistory());
+  /** Bumped whenever the stacks move, so the buttons repaint. */
+  const [historyVersion, bumpHistory] = useState(0);
+  /** True while undo/redo itself is writing: a revert is not a new action. */
+  const applyingHistoryRef = useRef(false);
+  /** What the user just did, consumed by the recorder as the entry's name. */
+  const pendingLabelRef = useRef<string | null>(null);
+  /** True while one action is several awaited writes, so it records ONE entry. */
+  const suppressHistoryRef = useRef(false);
 
   dataRef.current = data;
 
@@ -889,6 +919,19 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const newOps = next.outbox.slice(previous.outbox.length);
     commit(next);
 
+    // RECORD FOR UNDO. The recorder owns the label either way: a wrapper sets
+    // the name before its write, and an earlier set must never leak into a
+    // later action that had no name of its own.
+    const label = pendingLabelRef.current;
+    pendingLabelRef.current = null;
+    if (!applyingHistoryRef.current && !suppressHistoryRef.current) {
+      const changes = diffForUndo(previous, next);
+      if (changes.length > 0) {
+        historyRef.current.push({ label: label ?? 'Edit', changes });
+        bumpHistory(v => v + 1);
+      }
+    }
+
     // THE DURABLE HALF, IMMEDIATELY. Three small rows, and they are the only
     // copy of an edit made with no PC in reach.
     if (storage) await storage.saveOps(newOps);
@@ -908,7 +951,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   ) => {
     const previous = dataRef.current;
     const next = applyLocalChange(previous, { store, entityId, changes, at: Date.now() });
-    if (next === previous) return;
+    if (next === previous) { pendingLabelRef.current = null; return; }
     await persistEdit(next, previous);
   }, [persistEdit]);
 
@@ -922,6 +965,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     // the second set of ops would claim a base the first set already replaced.
     // Folding them here is the honest reading of "set this, then set that on the
     // same row": one edit with the later value.
+    pendingLabelRef.current = 'Move';
     const byId = new Map<string, Record<string, unknown>>();
     const order: string[] = [];
     for (const e of edits) {
@@ -936,7 +980,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       order.map(id => ({ store, entityId: id, changes: byId.get(id)! })),
       Date.now(),
     );
-    if (next === previous) return;
+    if (next === previous) { pendingLabelRef.current = null; return; }
     await persistEdit(next, previous);
   }, [persistEdit]);
 
@@ -945,9 +989,16 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   ) => {
     const previous = dataRef.current;
     const next = applyLocalRecord(previous, { store, entityId, record, at: Date.now() });
-    if (next === previous) return;
+    if (next === previous) { pendingLabelRef.current = null; return; }
     await persistEdit(next, previous);
   }, [persistEdit]);
+
+  const saveMergedFocusSession = useCallback(async (sessionToSave: any) => {
+    const byId = readStore(dataRef.current.state, 'focusSessions') as Record<string, any>;
+    const history = Object.values(byId || {});
+    const { session } = mergeContiguousFocusSession(history as any, sessionToSave);
+    await saveRecord('focusSessions', session.id, session as any);
+  }, [saveRecord]);
 
   /**
    * Tick something off.
@@ -971,6 +1022,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const nextDates = item.completed
       ? done.filter(d => d !== item.date)
       : [...new Set([...done, item.date])];
+
+    pendingLabelRef.current = item.completed ? 'Mark not done' : 'Mark done';
 
     if (store === 'events' || item.repeating) {
       await edit(store, item.masterId, { completedDates: nextDates });
@@ -1120,6 +1173,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
       : undefined;
 
     const meta = { id, now: Date.now(), weekStartsOn };
+    pendingLabelRef.current = editingId ? 'Edit item' : 'Add item';
     const record = store === 'events'
       ? buildEventRecord(draftInput, meta, existing)
       : buildTaskRecord(draftInput, meta, existing);
@@ -1131,6 +1185,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   const removeItem = useCallback(async (store: SyncStore, id: string) => {
     // A TOMBSTONE, not a local removal. Dropping the record here would leave the
     // PC holding it, and the next sync would hand it straight back.
+    pendingLabelRef.current = 'Delete';
     await edit(store, id, { [DELETED_FIELD]: true });
   }, [edit]);
 
@@ -1155,12 +1210,62 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
 
     // An empty plan is a genuine no-op, so it must not become a write. A
     // redundant write is a sync op that can lose a race against a real one.
-    for (const w of plan.writes) {
-      if (w.op === 'remove') await removeItem(store, w.id);
-      else await saveRecord(store, w.id, w.record as Record<string, unknown>);
+    // ONE USER ACTION, ONE UNDO ENTRY. "This and the following" can split a
+    // series into several awaited writes; the recorder is held off while they
+    // land and the whole plan is diffed and named at the end.
+    suppressHistoryRef.current = true;
+    const beforeData = dataRef.current;
+    try {
+      for (const w of plan.writes) {
+        if (w.op === 'remove') await removeItem(store, w.id);
+        else await saveRecord(store, w.id, w.record as Record<string, unknown>);
+      }
+    } finally {
+      suppressHistoryRef.current = false;
+      pendingLabelRef.current = null;
+    }
+    const grouped = diffForUndo(beforeData, dataRef.current);
+    if (grouped.length > 0) {
+      historyRef.current.push({
+        label: action === 'edit' ? 'Edit occurrence' : 'Delete occurrence',
+        changes: grouped,
+      });
+      bumpHistory(v => v + 1);
     }
     return plan.targetId;
   }, [removeItem, saveRecord, weekStartsOn]);
+
+  // ── Undo / redo ──
+  // The ops themselves come from `restoreChanges` in `undoHistory.ts`, which is
+  // pure and tested side by side with the sync engine it writes through.
+  const applyUndoEntry = useCallback(async (entry: UndoEntry, direction: 'undo' | 'redo') => {
+    applyingHistoryRef.current = true;
+    try {
+      const previous = dataRef.current;
+      const next = applyLocalChanges(
+        previous,
+        restoreChanges(entry, direction, previous.state),
+        Date.now(),
+      );
+      if (next !== previous) await persistEdit(next, previous);
+    } finally {
+      applyingHistoryRef.current = false;
+    }
+  }, [persistEdit]);
+
+  const undo = useCallback(async () => {
+    const entry = historyRef.current.undo();
+    if (!entry) return;
+    bumpHistory(v => v + 1);
+    await applyUndoEntry(entry, 'undo');
+  }, [applyUndoEntry]);
+
+  const redo = useCallback(async () => {
+    const entry = historyRef.current.redo();
+    if (!entry) return;
+    bumpHistory(v => v + 1);
+    await applyUndoEntry(entry, 'redo');
+  }, [applyUndoEntry]);
 
   /**
    * The whole timer, in one place: reduce, persist, log, push.
@@ -1185,7 +1290,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     // random, so the same session completed on both machines collapses to one
     // record rather than counting the hour twice.
     if (out.session) {
-      await saveRecord('focusSessions', out.session.id, out.session as any);
+      await saveMergedFocusSession(out.session);
     }
 
     void transportRef.current?.putFocusTimer(out.state as any).catch(() => {
@@ -1214,7 +1319,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const mine = focusTimerRef.current;
     const merged = mergeFocusTimers(mine, coerceFocusTimer(remote), Date.now());
     if (merged.salvaged) {
-      await saveRecord('focusSessions', merged.salvaged.id, merged.salvaged as any);
+      await saveMergedFocusSession(merged.salvaged);
     }
     if (merged.state !== mine) {
       focusTimerRef.current = merged.state;
@@ -1335,8 +1440,8 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const pending = pendingFocusSessionRef.current;
     if (!pending) return;
     pendingFocusSessionRef.current = null;
-    void saveRecord('focusSessions', pending.id, pending);
-  }, [ready, saveRecord]);
+    void saveMergedFocusSession(pending);
+  }, [ready, saveMergedFocusSession]);
 
   const answerConflict = useCallback(async (conflict: SyncConflict, choice: ResolveChoice) => {
     const previous = dataRef.current;
@@ -1709,6 +1814,12 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     toggleDone,
     saveDraft,
     removeItem,
+    canUndo: historyRef.current.canUndo(),
+    canRedo: historyRef.current.canRedo(),
+    undoLabel: historyRef.current.undoLabel(),
+    redoLabel: historyRef.current.redoLabel(),
+    undo,
+    redo,
     applyScoped,
     weekStartsOn,
     shared,
@@ -1758,7 +1869,7 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
   }), [
     ready, signedIn, username, serverUrl, data, status, alarmSummary,
     day, events, tasks, connect, signOut, syncNow, edit, editMany, saveRecord, toggleDone,
-    saveDraft, removeItem, applyScoped, weekStartsOn, shared, categories,
+    saveDraft, removeItem, applyScoped, undo, redo, historyVersion, weekStartsOn, shared, categories,
     taskLists, focusSessions, focusTimer, runFocusTimer,
     unreadNotifications, snoozeOptions,
     notifyRead, notifyUnread, notifyDismiss, notifySnooze, notifyClear,

@@ -223,30 +223,19 @@ def stop_server():
 
 
 def relaunch():
-    python = PYTHONW if os.path.exists(PYTHONW) else None
-    if python:
-        args = [python, LAUNCHER]
-    else:
-        # No windowless interpreter: let Windows open the .pyw with whatever is
-        # registered for it. Still no console, because .pyw maps to pythonw.
-        args = None
-
-    log(f"relaunching with {'pythonw' if python else 'shell association'}")
+    log("relaunching via wscript")
     try:
-        if args:
-            subprocess.Popen(
-                args,
-                cwd=ROOT,
-                creationflags=NO_WINDOW | 0x00000200,   # new process group
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-        else:
-            os.startfile(LAUNCHER)
+        subprocess.Popen(
+            ["wscript.exe", os.path.join(ROOT, "launch.vbs")],
+            cwd=ROOT,
+            creationflags=NO_WINDOW | 0x00000200,   # new process group
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
     except Exception as exc:
-        log(f"relaunch failed: {exc}")
+        log(f"failed to relaunch: {exc}")
 
 
 def main():
