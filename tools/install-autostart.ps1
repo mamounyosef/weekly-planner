@@ -30,6 +30,13 @@ $taskName = 'Daily Planner Autostart'
 if (-not (Test-Path $script))  { throw "missing $script" }
 if (-not (Test-Path $pythonw)) { throw "missing $pythonw" }
 
+# A fresh venv puts CPython's redirector stubs in Scripts\, and the pythonw
+# stub launches the CONSOLE interpreter as a child. Task Scheduler cannot pass
+# CREATE_NO_WINDOW, so that child gets a console and a terminal window appears
+# on screen. Heal it here so re-registering autostart can never bring back a
+# black window at logon.
+& (Join-Path $PSScriptRoot 'fix-venv-launcher.ps1')
+
 $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">

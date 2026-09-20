@@ -875,8 +875,13 @@ export function createNotificationEngine(opts: EngineOptions) {
   function registerToastProtocol(): void {
     if (process.platform !== 'win32') return;
     const agent = path.resolve(opts.rootDir, 'tools', 'notify-action.pyw');
+    // pythonw.exe is GUI-subsystem, so no console is ever created. The repo's
+    // own venv comes first; tools/fix-venv-launcher.ps1 is what keeps that
+    // pythonw.exe a real interpreter rather than CPython's redirector stub,
+    // which used to re-launch the CONSOLE build and flash a terminal on screen.
     const candidates = [
       path.resolve(opts.rootDir, '.venv-launcher', 'Scripts', 'pythonw.exe'),
+      'C:\\ProgramData\\anaconda3\\pythonw.exe',
       'pythonw.exe',
     ];
     const tryNext = (i: number) => {

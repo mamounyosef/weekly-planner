@@ -1,5 +1,39 @@
 import os
 import secrets
+import sys
+
+
+def _attach_stdio():
+    """Give print() somewhere to go when there is no console.
+
+    Under pythonw.exe (GUI subsystem) the process gets no console, so
+    sys.stdout and sys.stderr are None and every print() raises
+    AttributeError. All of the prints in this file sit inside `except` blocks,
+    so without this a handled, survivable error would crash the widget
+    instead. Log to a file rather than os.devnull: these lines are the only
+    record of what went wrong in a window with nowhere to show it.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    stream = None
+    try:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "database", "widget.log"
+        )
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        stream = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except Exception:
+        try:
+            stream = open(os.devnull, "w", encoding="utf-8")
+        except Exception:
+            return
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
+_attach_stdio()
 
 # Must be set before webview (and therefore WebView2) starts. WebView2 is Chromium
 # and throttles timers in a window it thinks nobody is looking at, down to about

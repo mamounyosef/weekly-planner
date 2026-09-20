@@ -16,6 +16,14 @@ $taskName = 'Daily Planner Link Watchdog'
 if (-not (Test-Path $script))  { throw "missing $script" }
 if (-not (Test-Path $pythonw)) { throw "missing $pythonw" }
 
+# A fresh venv puts CPython's redirector stubs in Scripts\, and the pythonw
+# stub launches the CONSOLE interpreter as a child. Task Scheduler cannot pass
+# CREATE_NO_WINDOW, so that child gets a console and Windows Terminal pops a
+# window on screen every single run -- a terminal flashing in the user's face
+# every few minutes, all day. Heal it here so re-registering the task can never
+# reintroduce the flash.
+& (Join-Path $PSScriptRoot 'fix-venv-launcher.ps1')
+
 # Written as XML rather than built with New-ScheduledTask* because the repeat
 # forever trigger is the whole point and PowerShell cannot express an unbounded
 # repetition without the same XML anyway.

@@ -1,4 +1,5 @@
 import path from 'path';
+import fsSync from 'fs';
 import fsp from 'fs/promises';
 import crypto from 'crypto';
 import react from '@vitejs/plugin-react';
@@ -66,6 +67,34 @@ import {
   safeRuntimeVersion,
 } from './ota-server';
 import { createFunnelWatchdog } from './funnel-watchdog';
+
+/**
+ * The interpreter to run a windowless helper .pyw with.
+ *
+ * pythonw.exe is GUI-subsystem, so the process is handed no console and there
+ * is nothing that could ever appear on screen. python.exe is console-subsystem:
+ * it only stays invisible while every launch remembers `windowsHide`, and that
+ * is a guarantee one forgotten option removes. Prefer the repo's own venv so
+ * this does not depend on an Anaconda install the planner does not own; note
+ * that tools/fix-venv-launcher.ps1 is what keeps that venv's pythonw.exe a real
+ * interpreter rather than CPython's redirector stub, which used to re-launch
+ * the CONSOLE interpreter and flash a terminal on screen.
+ *
+ * Only ever pass a script with no print() on a normal path: under pythonw
+ * sys.stdout is None and print() raises.
+ */
+function windowlessPython(rootDir: string): string {
+  const candidates = [
+    path.resolve(rootDir, '.venv-launcher', 'Scripts', 'pythonw.exe'),
+    'C:\\ProgramData\\anaconda3\\pythonw.exe',
+  ];
+  for (const exe of candidates) {
+    // Sync on purpose: two stat calls on a rare code path, and it keeps this
+    // usable from anywhere without threading a promise through the callers.
+    try { if (fsSync.existsSync(exe)) return exe; } catch { /* try the next */ }
+  }
+  return 'pythonw.exe';
+}
 
 // Keep the persisted shortcut migration in step with src/lib/shortcuts.ts.
 // This server-side copy also lets the windowless Windows hotkey helper see the
@@ -2720,7 +2749,13 @@ export default defineConfig({
 
             try {
               const { spawn } = await import('child_process');
-              const usable = 'C:\\ProgramData\\anaconda3\\python.exe';
+              // pythonw.exe, so the helper is handed no console at all. This
+              // used to be a hardcoded console python.exe kept invisible only
+              // by `windowsHide` — and `detached` on Windows otherwise gives a
+              // console child its OWN window, so that was one forgotten option
+              // away from a terminal appearing. restart-planner.pyw prints
+              // nothing, so it is safe under a consoleless interpreter.
+              const usable = windowlessPython(rootDir);
 
               // Detached and unref'd on purpose. The child has to outlive this
               // process — it is about to kill it.
@@ -4517,12 +4552,14 @@ ${body}
             // opens no console at all. Going through `conda run` used to pop a black
             // terminal in the user's face every time — conda.exe is a console program
             // and Node's windowsHide can't suppress it once detached.
-            // The repo's own interpreter comes first. Anaconda's pythonw.exe was
-            // quarantined by antivirus on this machine, and bare 'pythonw' is not
-            // on PATH — see below for why that mattered so much.
-            // The venv's pythonw.exe is a proxy that inadvertently spawns python.exe
-            // without suppressing the console. We must use the base python.exe directly.
-            const spawnCmd = 'C:\\ProgramData\\anaconda3\\python.exe';
+            //
+            // This was a hardcoded console python.exe for a while, because the
+            // venv's pythonw.exe was CPython's redirector stub and re-launched
+            // the console interpreter behind our back. tools/fix-venv-launcher.ps1
+            // replaced that stub with the real interpreter, so the correct
+            // binary is available again — and widget-window.py now survives
+            // having no stdout, which is what made it unsafe before.
+            const spawnCmd = windowlessPython(path.resolve(import.meta.dirname, '..', '..'));
 
             try {
               const child = spawn(spawnCmd, [pythonScript], {

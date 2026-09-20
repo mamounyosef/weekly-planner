@@ -33,6 +33,43 @@ def _root():
 
 
 ROOT = _root()
+
+
+def _attach_stdio():
+    """Give print() somewhere to go when there is no console.
+
+    A real pythonw.exe hands the process no console at all, so sys.stdout and
+    sys.stderr are None and every print() raises AttributeError. All of the
+    prints below sit inside `except` blocks, so that would turn a handled,
+    survivable error into a crashed launcher: no app window, no widget, no
+    server. This never bit before only because .venv-launcher's pythonw.exe
+    used to be a stub that re-launched the CONSOLE interpreter -- the same stub
+    that flashed a terminal on screen every time the scheduled tasks ran.
+
+    Log to a file rather than to os.devnull: these messages are the only record
+    of a failed startup step, and a launcher that fails silently is exactly how
+    the last boot problem went unnoticed for days.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    stream = None
+    try:
+        path = os.path.join(ROOT, "database", "launcher.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        stream = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except Exception:
+        try:
+            stream = open(os.devnull, "w", encoding="utf-8")
+        except Exception:
+            return
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
+_attach_stdio()
+
 URL = "http://127.0.0.1:5173"
 APP_URL = "http://localhost:5173"
 PROFILE = os.path.join(ROOT, ".chrome-profile")
@@ -221,10 +258,12 @@ def sanitize_chrome_profile(profile_path):
 def pythonw():
     """The interpreter that runs the widget and the focus hotkey.
 
-    python.exe, not pythonw.exe: Avast quarantined the real pythonw.exe once,
-    and the venv's proxy pythonw.exe spawns python.exe with a VISIBLE console.
-    Every spawn here passes CREATE_NO_WINDOW, which suppresses the console
-    outright, so the console-mode binary is both safer and quieter.
+    python.exe, not pythonw.exe: every spawn here passes CREATE_NO_WINDOW, which
+    suppresses the console outright, and the console-mode binary keeps print()
+    working in the widget and the hotkey. (This used to matter more: the venv's
+    pythonw.exe was a stub that re-launched the console interpreter WITHOUT our
+    CREATE_NO_WINDOW, so it flashed a terminal. tools/fix-venv-launcher.ps1
+    replaced both stubs with the real interpreters.)
 
     Resolved in order of preference rather than hardcoded. This used to return
     an absolute Anaconda path, which made a second-party install that the
@@ -234,11 +273,11 @@ def pythonw():
     planner depends on something it ships and controls.
     """
     candidates = [venv_base_python()]
-    # The venv's own python.exe is a REDIRECTOR, not an interpreter: it spawns
-    # the base interpreter as a child process. That costs a second process per
-    # window and, worse, the child is created by the stub rather than by us, so
-    # it does not inherit CREATE_NO_WINDOW and can flash a console. It is kept
-    # only as a fallback, because a console flash still beats no widget.
+    # The venv's own python.exe is a real interpreter again (see
+    # tools/fix-venv-launcher.ps1); before that it was a REDIRECTOR that spawned
+    # the base interpreter as a child, and the child, being created by the stub
+    # rather than by us, did not inherit CREATE_NO_WINDOW and flashed a console.
+    # Kept second so the base install stays the primary path either way.
     candidates.append(os.path.join(ROOT, ".venv-launcher", "Scripts", "python.exe"))
     # Not when frozen: sys.executable is then the launcher .exe itself, which
     # would re-run the launcher instead of the widget.
