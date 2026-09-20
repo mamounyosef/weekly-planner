@@ -67,7 +67,11 @@ $xml = @"
     <StartWhenAvailable>true</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <Enabled>true</Enabled>
-    <Hidden>false</Hidden>
+    <!-- Hidden, so Task Scheduler never shows a window for this run.
+         The action is a windowless interpreter already, but a task left
+         visible is one misconfigured action away from flashing a console
+         in the user's face every five minutes. -->
+    <Hidden>true</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <!-- Well above the worst case (a relaunch waits up to 60s for the server),

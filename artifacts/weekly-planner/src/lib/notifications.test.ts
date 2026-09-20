@@ -919,7 +919,20 @@ console.log(`all-day anchor ${DEFAULT_NOTIFICATION_SETTINGS.allDayHour}:00, task
   const logs: string[] = [];
   const commandsRun: string[] = [];
 
-  // Case 1: Healthy status -> no repair attempted.
+  // NOTE. Cases 1 to 4 used to assert that health was decided by the text of
+  // `tailscale funnel status`. That contract was deliberately removed on
+  // 2026-09-20: on 2026-09-09 tailscaled reported a perfectly configured funnel
+  // for eleven days while the public DNS record was unpublished and the phone
+  // could not sync. Local configuration is no longer accepted as evidence, so
+  // those assertions now describe a bug rather than a requirement.
+  //
+  // The replacement contract is asserted exhaustively in
+  // src/lib/funnelWatchdog.test.ts (24 cases: the probe-over-config rule, the
+  // escalation ladder, propagation patience, and alerting). What follows is the
+  // smoke test that keeps this file honest about which contract is in force.
+
+  // A reachable public endpoint is healthy, and repairs nothing, EVEN WHEN the
+  // local config would have looked broken to the old check.
   const healthyWatchdog = createFunnelWatchdog({
     rootDir: 'd:/mock',
     port: 5000,
@@ -927,68 +940,41 @@ console.log(`all-day anchor ${DEFAULT_NOTIFICATION_SETTINGS.allDayHour}:00, task
     log: l => logs.push(l),
     runner: async (_bin, args) => {
       commandsRun.push(args.join(' '));
-      return { code: 0, out: 'Funnel on: https://node.ts.net -> http://127.0.0.1:5000' };
+      return { code: 0, out: JSON.stringify({ Self: { DNSName: 'node.ts.net.' } }) };
     },
+    fetcher: (async () => ({ ok: true, json: async () => ({ Answer: [{ type: 1, data: '1.2.3.4' }] }) })) as any,
+    probeAddress: async () => ({ ok: true, detail: 'HTTP 200' }),
   });
   await healthyWatchdog.kick();
-  check('healthy funnel status triggers no repair commands',
-    commandsRun.length === 1 && commandsRun[0] === 'funnel status' && healthyWatchdog.health().state === 'up');
+  check('a reachable public endpoint is healthy and repairs nothing',
+    commandsRun.length === 1
+    && commandsRun[0] === 'status --json'
+    && healthyWatchdog.health().state === 'up');
 
-  // Case 2: Status missing "Funnel on" -> repairs once.
+  // And the inverse, which is the whole point: config that looks perfect plus
+  // an unreachable public endpoint is an OUTAGE, and it is repaired.
   commandsRun.length = 0;
-  const brokenWatchdog = createFunnelWatchdog({
+  const lyingConfigWatchdog = createFunnelWatchdog({
     rootDir: 'd:/mock',
     port: 5000,
+    graceMs: 0,
+    now: () => 0,
+    sleep: async () => {},
     tailscaleBinary: () => 'tailscale.exe',
     log: l => logs.push(l),
     runner: async (_bin, args) => {
       commandsRun.push(args.join(' '));
-      if (args[0] === 'funnel' && args[1] === '--bg') return { code: 0, out: '' };
-      if (commandsRun.length === 1) return { code: 0, out: 'Funnel off' };
+      if (args[0] === 'status') return { code: 0, out: JSON.stringify({ Self: { DNSName: 'node.ts.net.' } }) };
       return { code: 0, out: 'Funnel on: https://node.ts.net -> http://127.0.0.1:5000' };
     },
+    fetcher: (async () => ({ ok: true, json: async () => ({ Answer: [] }) })) as any,
+    probeAddress: async () => ({ ok: true, detail: 'never consulted' }),
   });
-  await brokenWatchdog.kick();
-  check('missing funnel status triggers repair command and succeeds',
-    commandsRun.length === 3
-    && commandsRun[1] === 'funnel --bg --https=443 http://127.0.0.1:5000'
-    && brokenWatchdog.health().repairs === 1
-    && brokenWatchdog.health().state === 'up');
-
-  // Case 3: Funnel pointing at wrong port (3000 instead of 5000) -> repairs.
-  commandsRun.length = 0;
-  const wrongPortWatchdog = createFunnelWatchdog({
-    rootDir: 'd:/mock',
-    port: 5000,
-    tailscaleBinary: () => 'tailscale.exe',
-    log: l => logs.push(l),
-    runner: async (_bin, args) => {
-      commandsRun.push(args.join(' '));
-      if (args[0] === 'funnel' && args[1] === '--bg') return { code: 0, out: '' };
-      if (commandsRun.length === 1) return { code: 0, out: 'Funnel on: https://node.ts.net -> http://127.0.0.1:3000' };
-      return { code: 0, out: 'Funnel on: https://node.ts.net -> http://127.0.0.1:5000' };
-    },
-  });
-  await wrongPortWatchdog.kick();
-  check('status pointing at wrong port triggers repair to correct port',
-    commandsRun.includes('funnel --bg --https=443 http://127.0.0.1:5000')
-    && wrongPortWatchdog.health().state === 'up');
-
-  // Case 4: Repair that fails -> state is down, not looped.
-  commandsRun.length = 0;
-  const failingWatchdog = createFunnelWatchdog({
-    rootDir: 'd:/mock',
-    port: 5000,
-    tailscaleBinary: () => 'tailscale.exe',
-    log: l => logs.push(l),
-    runner: async (_bin, args) => {
-      commandsRun.push(args.join(' '));
-      return { code: 1, out: 'Funnel off' };
-    },
-  });
-  await failingWatchdog.kick();
-  check('repair that fails marks state down without looping',
-    failingWatchdog.health().state === 'down' && commandsRun.length === 3);
+  await lyingConfigWatchdog.kick();
+  check('config that looks healthy does not override an unreachable public endpoint',
+    lyingConfigWatchdog.health().state === 'down'
+    && lyingConfigWatchdog.health().detail === 'no public DNS record'
+    && commandsRun.includes('funnel --bg --https=443 http://127.0.0.1:5000'));
 
   // Case 5: Tailscale binary absent -> disables itself after one log line and never runs commands.
   commandsRun.length = 0;

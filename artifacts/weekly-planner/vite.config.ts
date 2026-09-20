@@ -22,6 +22,7 @@ import {
   getUserDbPaths,
   ensureUserDb,
   migrateLegacyDatabase,
+  sweepOrphanedTemps,
   createSessionToken,
   getAuthUser,
   isLocalAddress,
@@ -3436,11 +3437,86 @@ ${body}
 
           // The public link is what the phone depends on, and it can be taken
           // down by things outside this app entirely. Watch it and put it back.
+          //
+          // The alert is not decoration. On 2026-09-09 the link died and the
+          // only symptom anywhere was the phone quietly failing to sync; it
+          // took eleven days and a manual investigation to find out. A toast
+          // the moment self-repair gives up is what turns that into minutes.
           const funnelWatchdog = createFunnelWatchdog({
             rootDir,
             port: Number(server.config.server.port) || 5173,
+            onAlert: ({ down, detail, strikes }) => {
+              if (process.platform !== 'win32') return;
+              void (async () => {
+              const { spawn } = await import('child_process');
+              const args = [
+                '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', path.resolve(rootDir, 'tools', 'notify-toast.ps1'),
+                '-Tag', 'planner-public-link',
+                '-Kind', 'system',
+                '-Title', down ? 'Planner link is down' : 'Planner link is back',
+                '-Body', down
+                  ? `The phone cannot reach this PC (${detail}). Self-repair has failed ${strikes} times running.`
+                  : `The public link is working again (${detail}).`,
+                '-Priority', down ? 'critical' : 'normal',
+              ];
+              if (down) args.push('-Critical');
+              try {
+                // Fire and forget. A failed toast must never be able to take
+                // the watchdog, or the server, down with it.
+                const child = spawn('powershell.exe', args, { windowsHide: true, stdio: 'ignore' });
+                child.on('error', () => { /* no toast is survivable; a crash is not */ });
+              } catch { /* same */ }
+              })();
+            },
           });
           funnelWatchdog.start();
+
+          // Atomic writes leave a temp file behind whenever the process is
+          // killed between writing it and renaming it over the real file, which
+          // happens every time the server is stopped mid-save. They are
+          // harmless but they only ever accumulate: one account had 198 of them
+          // from three dead process ids. Sweep them once per startup, leaving
+          // anything younger than an hour strictly alone so a write in flight
+          // is never touched.
+          void sweepOrphanedTemps(rootDir)
+            .then(removed => {
+              if (removed.length > 0) {
+                console.log(`[planner] cleaned up ${removed.length} orphaned temp file(s) from interrupted writes`);
+              }
+            })
+            .catch(() => { /* tidying is never worth failing a startup over */ });
+
+          // The OUT-OF-PROCESS watchdog, which is the only one that can revive
+          // a dead dev server, runs from a Windows scheduled task. That task
+          // was found simply missing on 2026-09-20: it had stopped running on
+          // 2026-09-09 and nothing noticed, which is half the reason the outage
+          // lasted eleven days. A watchdog that can quietly cease to exist is
+          // not a watchdog, so the server re-registers it whenever it is gone.
+          void (async () => {
+            if (process.platform !== 'win32') return;
+            const { execFile } = await import('child_process');
+            const exec = (bin: string, args: string[]) => new Promise<number>(resolve => {
+              try {
+                execFile(bin, args, { windowsHide: true, timeout: 60_000 }, err => {
+                  resolve(err ? ((err as any).code ?? 1) : 0);
+                });
+              } catch { resolve(1); }
+            });
+
+            const TASK = 'Daily Planner Link Watchdog';
+            const present = await exec('schtasks', ['/query', '/tn', TASK]);
+            if (present === 0) return;
+
+            console.log(`[watchdog] scheduled task "${TASK}" is missing; re-registering it`);
+            const installer = path.resolve(rootDir, 'tools', 'install-link-watchdog.ps1');
+            const code = await exec('powershell.exe', [
+              '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', installer,
+            ]);
+            console.log(code === 0
+              ? '[watchdog] scheduled task restored'
+              : `[watchdog] could not restore the scheduled task (exit ${code})`);
+          })();
 
           const readBody = (req: any): Promise<any> => new Promise(resolve => {
             let body = '';

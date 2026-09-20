@@ -131,6 +131,7 @@ import {
   parseDate,
   getEventWeekOverlap,
 } from '@/lib/recurrence';
+import { timeToMin, minToTime } from '@/lib/timeOfDay';
 import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColor';
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
@@ -455,16 +456,6 @@ function matchPresetColor(hex: string | undefined): EventColor | null {
 }
 
 // ─── Utilities ─────────────────────────────────────────────────────────────────
-function timeToMin(t: string): number {
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
-}
-function minToTime(min: number): string {
-  const normMin = ((min % 1440) + 1440) % 1440;
-  const h = Math.floor(normMin / 60);
-  const m = normMin % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-}
 function formatTimeLabel(min: number, fmt: TimeFormat = '12h'): string {
   const normMin = ((min % 1440) + 1440) % 1440;
   const h = Math.floor(normMin / 60);
@@ -966,6 +957,7 @@ export default function DailyPlanner() {
     y: number;
     width?: number;
     height?: number;
+    edge?: 'left' | 'right';
   } | null>(null);
   const monthItemDragRef = useRef<{
     event: PlannerEvent;
@@ -978,6 +970,7 @@ export default function DailyPlanner() {
     width?: number;
     height?: number;
     moved: boolean;
+    edge?: 'left' | 'right';
   } | null>(null);
   const monthItemDragJustEndedRef = useRef(false);
 
@@ -1288,6 +1281,48 @@ export default function DailyPlanner() {
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
+  // ── Global App Back (Mouse Button 4 / Back) ────────────────────────────────
+  useEffect(() => {
+    const onAppBack = (e: Event) => {
+      if (e.defaultPrevented) return;
+      
+      // Topmost modals & menus
+      if (confirmFocusModal) { setConfirmFocusModal(null); e.preventDefault(); return; }
+      if (showShortcutHelp)  { setShowShortcutHelp(false); e.preventDefault(); return; }
+      if (filterMenuOpen)    { setFilterMenuOpen(false); e.preventDefault(); return; }
+      if (prayerPanelOpen)   { setPrayerPanelOpen(false); e.preventDefault(); return; }
+      if (mobilePrayerOpen)  { setMobilePrayerOpen(false); e.preventDefault(); return; }
+      if (mobileMenuOpen)    { setMobileMenuOpen(false); e.preventDefault(); return; }
+      if (mobileViewPickerOpen) { setMobileViewPickerOpen(false); e.preventDefault(); return; }
+      if (openDayMenuKey)    { setOpenDayMenuKey(null); e.preventDefault(); return; }
+      if (taskMenuId)        { setTaskMenuId(null); e.preventDefault(); return; }
+      if (editingFocusDayKey){ setEditingFocusDayKey(null); e.preventDefault(); return; }
+      if (notifyPanelOpen)   { setNotifyPanelOpen(false); e.preventDefault(); return; }
+      if (menuId)            { setMenuId(null); e.preventDefault(); return; }
+      if (selectedIds.size > 0) { setSelectedIds(new Set()); e.preventDefault(); return; }
+
+      // Content/Subviews
+      if (sessionDetail)     { setSessionDetail(null); e.preventDefault(); return; }
+
+      // Side panels / Mobile Tabs
+      let closedPanel = false;
+      if (isPhone && mobileTab !== 'calendar') {
+        setMobileTab('calendar');
+        closedPanel = true;
+      } else {
+        if (showFocusAnalysis) { setShowFocusAnalysis(false); closedPanel = true; }
+        else if (tasksPanelOpen) { setTasksPanelOpen(false); closedPanel = true; }
+      }
+      
+      if (closedPanel) {
+        e.preventDefault();
+        return;
+      }
+    };
+    window.addEventListener('app-back', onAppBack);
+    return () => window.removeEventListener('app-back', onAppBack);
+  });
+
   const openCreateForRange = (
     startDate: Date,
     endDate: Date,
@@ -1498,7 +1533,7 @@ export default function DailyPlanner() {
     }
   };
 
-  const handleMonthItemMouseDown = (ev: PlannerEvent, sourceDate: Date, e: React.MouseEvent) => {
+  const handleMonthItemMouseDown = (ev: PlannerEvent, sourceDate: Date, e: React.MouseEvent, edge?: 'left' | 'right') => {
     if (e.button !== 0) return;
     e.stopPropagation();
 
@@ -1515,6 +1550,7 @@ export default function DailyPlanner() {
       width: rect.width,
       height: rect.height,
       moved: false,
+      edge,
     };
 
     const handleWindowMouseMove = (moveEvent: MouseEvent) => {
@@ -1556,24 +1592,59 @@ export default function DailyPlanner() {
       window.removeEventListener('mouseup', handleWindowMouseUp);
 
       if (!monthItemDragRef.current) return;
-      const { event, sourceDate, targetDate, moved } = monthItemDragRef.current;
+      const { event, sourceDate, targetDate, moved, edge } = monthItemDragRef.current;
       monthItemDragRef.current = null;
       setMonthItemDrag(null);
 
-      if (moved && !isSameDay(sourceDate, targetDate)) {
+      if (moved && (!isSameDay(sourceDate, targetDate) || edge)) {
         monthItemDragJustEndedRef.current = true;
         setTimeout(() => { monthItemDragJustEndedRef.current = false; }, 120);
 
-        const newWs = startOfWeek(targetDate, { weekStartsOn });
-        const newWeekKey = format(newWs, 'yyyy-MM-dd');
-        const newDayIndex = differenceInDays(targetDate, newWs);
-        const newOccDate = format(targetDate, 'yyyy-MM-dd');
+        if (edge) {
+          const eventStart = parseDate(event.weekKey || format(sourceDate, 'yyyy-MM-dd'));
+          const oldStart = addDays(eventStart, event.dayIndex || 0);
+          const oldSpan = Math.max(1, event.daysSpan || 1);
+          const oldEnd = addDays(oldStart, oldSpan - 1);
 
-        applyEdit(event.id, {
-          weekKey: newWeekKey,
-          dayIndex: newDayIndex,
-          occDate: newOccDate,
-        });
+          let newStart = oldStart;
+          let newEnd = oldEnd;
+
+          if (edge === 'right') {
+            newEnd = targetDate;
+          } else if (edge === 'left') {
+            newStart = targetDate;
+          }
+
+          if (newStart > newEnd) {
+            const temp = newStart;
+            newStart = newEnd;
+            newEnd = temp;
+          }
+
+          const newWs = startOfWeek(newStart, { weekStartsOn });
+          const newWeekKey = format(newWs, 'yyyy-MM-dd');
+          const newDayIndex = differenceInDays(newStart, newWs);
+          const newSpan = differenceInDays(newEnd, newStart) + 1;
+          const newOccDate = format(newStart, 'yyyy-MM-dd');
+
+          applyEdit(event.id, {
+            weekKey: newWeekKey,
+            dayIndex: newDayIndex,
+            daysSpan: newSpan,
+            occDate: newOccDate,
+          });
+        } else {
+          const newWs = startOfWeek(targetDate, { weekStartsOn });
+          const newWeekKey = format(newWs, 'yyyy-MM-dd');
+          const newDayIndex = differenceInDays(targetDate, newWs);
+          const newOccDate = format(targetDate, 'yyyy-MM-dd');
+
+          applyEdit(event.id, {
+            weekKey: newWeekKey,
+            dayIndex: newDayIndex,
+            occDate: newOccDate,
+          });
+        }
       }
     };
 
@@ -1581,7 +1652,7 @@ export default function DailyPlanner() {
     window.addEventListener('mouseup', handleWindowMouseUp);
   };
 
-  const handleMonthItemTouchStart = (ev: PlannerEvent, sourceDate: Date, e: React.TouchEvent) => {
+  const handleMonthItemTouchStart = (ev: PlannerEvent, sourceDate: Date, e: React.TouchEvent, edge?: 'left' | 'right') => {
     e.stopPropagation();
     const touch = e.touches[0];
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -1597,6 +1668,7 @@ export default function DailyPlanner() {
       width: rect.width,
       height: rect.height,
       moved: false,
+      edge,
     };
   };
 
@@ -1642,24 +1714,59 @@ export default function DailyPlanner() {
 
   const handleMonthItemTouchEnd = (_e: React.TouchEvent) => {
     if (!monthItemDragRef.current) return;
-    const { event, sourceDate, targetDate, moved } = monthItemDragRef.current;
+    const { event, sourceDate, targetDate, moved, edge } = monthItemDragRef.current;
     monthItemDragRef.current = null;
     setMonthItemDrag(null);
 
-    if (moved && !isSameDay(sourceDate, targetDate)) {
+    if (moved && (!isSameDay(sourceDate, targetDate) || edge)) {
       monthItemDragJustEndedRef.current = true;
       setTimeout(() => { monthItemDragJustEndedRef.current = false; }, 120);
 
-      const newWs = startOfWeek(targetDate, { weekStartsOn });
-      const newWeekKey = format(newWs, 'yyyy-MM-dd');
-      const newDayIndex = differenceInDays(targetDate, newWs);
-      const newOccDate = format(targetDate, 'yyyy-MM-dd');
+      if (edge) {
+        const eventStart = parseDate(event.weekKey || format(sourceDate, 'yyyy-MM-dd'));
+        const oldStart = addDays(eventStart, event.dayIndex || 0);
+        const oldSpan = Math.max(1, event.daysSpan || 1);
+        const oldEnd = addDays(oldStart, oldSpan - 1);
 
-      applyEdit(event.id, {
-        weekKey: newWeekKey,
-        dayIndex: newDayIndex,
-        occDate: newOccDate,
-      });
+        let newStart = oldStart;
+        let newEnd = oldEnd;
+
+        if (edge === 'right') {
+          newEnd = targetDate;
+        } else if (edge === 'left') {
+          newStart = targetDate;
+        }
+
+        if (newStart > newEnd) {
+          const temp = newStart;
+          newStart = newEnd;
+          newEnd = temp;
+        }
+
+        const newWs = startOfWeek(newStart, { weekStartsOn });
+        const newWeekKey = format(newWs, 'yyyy-MM-dd');
+        const newDayIndex = differenceInDays(newStart, newWs);
+        const newSpan = differenceInDays(newEnd, newStart) + 1;
+        const newOccDate = format(newStart, 'yyyy-MM-dd');
+
+        applyEdit(event.id, {
+          weekKey: newWeekKey,
+          dayIndex: newDayIndex,
+          daysSpan: newSpan,
+          occDate: newOccDate,
+        });
+      } else {
+        const newWs = startOfWeek(targetDate, { weekStartsOn });
+        const newWeekKey = format(newWs, 'yyyy-MM-dd');
+        const newDayIndex = differenceInDays(targetDate, newWs);
+        const newOccDate = format(targetDate, 'yyyy-MM-dd');
+
+        applyEdit(event.id, {
+          weekKey: newWeekKey,
+          dayIndex: newDayIndex,
+          occDate: newOccDate,
+        });
+      }
     }
   };
 
@@ -2499,8 +2606,11 @@ export default function DailyPlanner() {
   visibleColsRef.current = visibleCols;
 
   // Restore scroll position when transitioning between calendar views (e.g. Month <-> Custom preview)
+  // or when returning from the Analysis panel.
   const prevCalendarViewRef = useRef<CalendarView>(calendarView);
   useLayoutEffect(() => {
+    if (showFocusAnalysis) return;
+
     const prevView = prevCalendarViewRef.current;
     prevCalendarViewRef.current = calendarView;
 
@@ -2546,7 +2656,7 @@ export default function DailyPlanner() {
       window.clearTimeout(t3);
       isRestoringViewScrollRef.current = false;
     };
-  }, [calendarView, customFrom, customTo, updateScrollState]);
+  }, [calendarView, customFrom, customTo, showFocusAnalysis, updateScrollState]);
   const slots       = useMemo(() => generateSlots(interval, dayStartH, dayEndH), [interval, dayStartH, dayEndH]);
   const sh          = SLOT_H[interval];
   const totalH      = slots.length * sh;
@@ -2643,14 +2753,16 @@ export default function DailyPlanner() {
   }, [weekTimedEvents]);
   const weekAllDayEvents = useMemo(() => {
     const rawAllDays = Object.values(weekEvents).filter(ev => ev.allDay && !ev.deleted);
-    const mapped: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
+    const mapped: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft: boolean; isContinuationRight: boolean }> = [];
     for (const ev of rawAllDays) {
       const overlap = getEventWeekOverlap(ev, weekStart, viewRange);
       if (overlap) {
         mapped.push({
           ...ev,
           visibleDayIndex: overlap.dayIndex,
-          visibleDaysSpan: overlap.daysSpan
+          visibleDaysSpan: overlap.daysSpan,
+          isContinuationLeft: overlap.isContinuationLeft,
+          isContinuationRight: overlap.isContinuationRight,
         });
       }
     }
@@ -2997,7 +3109,7 @@ export default function DailyPlanner() {
     const weeks: Array<{
       weekKey: string;
       cells: Array<{ date: Date; events: PlannerEvent[] }>;
-      weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }>;
+      weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft: boolean; isContinuationRight: boolean }>;
       allDayLayoutMap: Map<string, { row: number; visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft?: boolean; isContinuationRight?: boolean }>;
       allDayRowCount: number;
     }> = [];
@@ -3023,7 +3135,7 @@ export default function DailyPlanner() {
 
       const rawAllDays = Object.values(resolved)
         .filter(ev => ev.allDay && !ev.deleted && (!hiddenCategoryIds.length || !hiddenSet.has(ev.categoryId || UNCATEGORISED)));
-      const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number }> = [];
+      const weekAllDays: Array<PlannerEvent & { visibleDayIndex: number; visibleDaysSpan: number; isContinuationLeft: boolean; isContinuationRight: boolean }> = [];
       for (const ev of rawAllDays) {
         const overlap = getEventWeekOverlap(ev, weekStartDate);
         if (overlap) {
@@ -3031,6 +3143,8 @@ export default function DailyPlanner() {
             ...ev,
             visibleDayIndex: overlap.dayIndex,
             visibleDaysSpan: overlap.daysSpan,
+            isContinuationLeft: overlap.isContinuationLeft,
+            isContinuationRight: overlap.isContinuationRight,
           });
         }
       }
@@ -8539,11 +8653,12 @@ export default function DailyPlanner() {
                           />
                         ) : (
                           <span
+                            onClick={(e) => e.stopPropagation()}
                             onDoubleClick={(e) => {
                               e.stopPropagation();
                               startEditingFocusDay('bar', day.key, day.day, day.seconds);
                             }}
-                            className={`cursor-pointer hover:underline ${day.isExcluded ? 'line-through text-amber-500 opacity-75' : ''}`}
+                            className={`cursor-text hover:underline ${day.isExcluded ? 'line-through text-amber-500 opacity-75' : ''}`}
                             title="Double-click to edit focus time"
                           >
                             {day.seconds > 0 ? formatFocusDuration(day.seconds) : '0m'}
@@ -8552,12 +8667,12 @@ export default function DailyPlanner() {
                       </div>
                       <div className="flex-1 flex items-end">
                         <div
-                          onDoubleClick={(e) => {
-                            e.stopPropagation();
-                            startEditingFocusDay('bar', day.key, day.day, day.seconds);
+                          onClick={() => {
+                            setSessionDetail(day.key);
+                            setShowFocusAnalysis(true);
                           }}
-                          className="w-full rounded-t-md transition-smooth duration-300 cursor-pointer"
-                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}${day.isExcluded ? ' (Excluded from analysis)' : (day.sessions ? ` · ${day.sessions} session${day.sessions === 1 ? '' : 's'}` : '')} (Double-click to edit)`}
+                          className="w-full rounded-t-md transition-smooth duration-300 cursor-pointer hover:opacity-80"
+                          title={`${format(day.day, 'EEEE')}: ${formatFocusDuration(day.seconds)}${day.isExcluded ? ' (Excluded from analysis)' : (day.sessions ? ` · ${day.sessions} session${day.sessions === 1 ? '' : 's'}` : '')} (Click to view sessions)`}
                           style={{
                             height: `${pct}%`,
                             minHeight: day.seconds > 0 || day.isExcluded ? 3 : 0,
@@ -10940,11 +11055,36 @@ export default function DailyPlanner() {
 
                         const isItemDropTarget = monthItemDrag ? (() => {
                           if (monthItemDrag.event.allDay) {
-                            const s = startOfDay(monthItemDrag.targetDate);
-                            const span = Math.max(1, monthItemDrag.event.daysSpan || 1);
-                            const end = addDays(s, span - 1);
-                            const cTime = startOfDay(date).getTime();
-                            return cTime >= s.getTime() && cTime <= end.getTime();
+                            if (monthItemDrag.edge) {
+                              const eventStart = parseDate(monthItemDrag.event.weekKey || format(monthItemDrag.sourceDate, 'yyyy-MM-dd'));
+                              const oldStart = addDays(eventStart, monthItemDrag.event.dayIndex || 0);
+                              const oldSpan = Math.max(1, monthItemDrag.event.daysSpan || 1);
+                              const oldEnd = addDays(oldStart, oldSpan - 1);
+
+                              let newStart = oldStart;
+                              let newEnd = oldEnd;
+
+                              if (monthItemDrag.edge === 'right') {
+                                newEnd = startOfDay(monthItemDrag.targetDate);
+                              } else if (monthItemDrag.edge === 'left') {
+                                newStart = startOfDay(monthItemDrag.targetDate);
+                              }
+
+                              if (newStart > newEnd) {
+                                const temp = newStart;
+                                newStart = newEnd;
+                                newEnd = temp;
+                              }
+
+                              const cTime = startOfDay(date).getTime();
+                              return cTime >= newStart.getTime() && cTime <= newEnd.getTime();
+                            } else {
+                              const s = startOfDay(monthItemDrag.targetDate);
+                              const span = Math.max(1, monthItemDrag.event.daysSpan || 1);
+                              const end = addDays(s, span - 1);
+                              const cTime = startOfDay(date).getTime();
+                              return cTime >= s.getTime() && cTime <= end.getTime();
+                            }
                           }
                           return isSameDay(date, monthItemDrag.targetDate);
                         })() : false;
@@ -10987,7 +11127,16 @@ export default function DailyPlanner() {
                               if (monthDragJustEndedRef.current || monthItemDragJustEndedRef.current || swipeJustEndedRef.current) return;
                               openCreateForDate(date, e);
                             }}
-                            title={`Add event · ${format(date, 'MMM d')}`}
+                            title={(() => {
+                              const daysDiff = differenceInDays(startOfDay(date), startOfDay(nowDate));
+                              let diffText = '';
+                              if (daysDiff === 0) diffText = ' (today)';
+                              else if (daysDiff === 1) diffText = ' (1 day left)';
+                              else if (daysDiff === -1) diffText = ' (1 day ago)';
+                              else if (daysDiff > 1) diffText = ` (${daysDiff} days left)`;
+                              else diffText = ` (${Math.abs(daysDiff)} days ago)`;
+                              return `Add event · ${format(date, 'MMM d')}${diffText}`;
+                            })()}
                             className={`${isPhone ? 'min-h-[68px] p-1.5' : 'min-h-[112px] p-2'} border-r border-border/40 last:border-r-0 cursor-pointer flex flex-col gap-1.5 relative select-none`}
                             style={{
                               background: baseBg,
@@ -11158,7 +11307,7 @@ export default function DailyPlanner() {
                           const startDayDate = addDays(weekStartDate, startIdx);
                           const dateStr = format(startDayDate, 'yyyy-MM-dd');
                           const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
-                          const isBeingDragged = monthItemDrag?.event.id === ev.id;
+                          const isBeingDragged = monthItemDrag?.event.id === ev.id && !monthItemDrag.edge;
 
                           return (
                             <div
@@ -11189,6 +11338,14 @@ export default function DailyPlanner() {
                               }}
                               title={`All day: ${ev.content || 'Untitled'}`}
                             >
+                              {!ev.isContinuationLeft && (
+                                <div
+                                  className="absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize hover:bg-black/10 dark:hover:bg-white/10 z-10"
+                                  style={{ borderTopLeftRadius: 7, borderBottomLeftRadius: 7 }}
+                                  onMouseDown={(e) => { e.stopPropagation(); handleMonthItemMouseDown(ev, startDayDate, e, 'left'); }}
+                                  onTouchStart={(e) => { e.stopPropagation(); handleMonthItemTouchStart(ev, startDayDate, e, 'left'); }}
+                                />
+                              )}
                               {!ev.noCheckbox && (
                                 <button
                                   type="button"
@@ -11196,7 +11353,7 @@ export default function DailyPlanner() {
                                     e.stopPropagation();
                                     toggleEventCompleted(ev.id, startDayDate);
                                   }}
-                                  className="flex-shrink-0 p-1 -m-1 flex items-center justify-center cursor-pointer"
+                                  className="flex-shrink-0 p-1 -m-1 flex items-center justify-center cursor-pointer z-10"
                                   title={isCompleted ? 'Mark incomplete' : 'Mark complete'}
                                 >
                                   <span
@@ -11210,9 +11367,18 @@ export default function DailyPlanner() {
                                   </span>
                                 </button>
                               )}
-                              <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                              <span className={`truncate flex-1 z-0 px-0.5 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text, pointerEvents: 'none' }}>
                                 {ev.content || <span style={{ opacity: 0.4, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
                               </span>
+                              {!ev.isContinuationRight && (
+                                <div
+                                  className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize hover:bg-black/10 dark:hover:bg-white/10 z-10"
+                                  style={{ borderTopRightRadius: 7, borderBottomRightRadius: 7 }}
+                                  onMouseDown={(e) => { e.stopPropagation(); handleMonthItemMouseDown(ev, startDayDate, e, 'right'); }}
+                                  onTouchStart={(e) => { e.stopPropagation(); handleMonthItemTouchStart(ev, startDayDate, e, 'right'); }}
+                                />
+                              )}
+
                             </div>
                           );
                         })}
@@ -11245,7 +11411,7 @@ export default function DailyPlanner() {
               })}
 
               {/* Floating item drag ghost preview */}
-              {monthItemDrag && (
+              {monthItemDrag && !monthItemDrag.edge && (
                 <div
                   className="fixed z-[300] pointer-events-none transform -translate-x-1/2 -translate-y-1/2 transition-none"
                   style={{
@@ -11909,7 +12075,7 @@ export default function DailyPlanner() {
                 </div>
               );
             })() : (
-            <div className="rounded-xl overflow-hidden" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)', border: `1px solid ${surfaceBdr}` }}>
+            <div className="rounded-xl" style={{ background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.30)', border: `1px solid ${surfaceBdr}` }}>
               {/* Panel header: tab switcher */}
               <div className={`flex items-center justify-between ${isCompact ? 'px-3 py-2.5 gap-2 flex-wrap' : 'px-5 py-3'}`} style={{ borderBottom: `1px solid ${surfaceBdr}` }}>
                 <div className="flex items-center gap-2.5 min-w-0">
@@ -12066,8 +12232,14 @@ export default function DailyPlanner() {
                           >
                             {/* Exact time above each bar */}
                             <div
-                              className="text-[10px] font-bold tabular-nums text-center truncate"
+                              className="text-[10px] font-bold tabular-nums text-center truncate cursor-text"
                               style={{ color: d.seconds > 0 ? (isTodayCol ? '#60a5fa' : menuText) : menuSub, opacity: d.seconds > 0 ? 1 : 0.5 }}
+                              title="Double-click to edit focus time"
+                              onClick={e => e.stopPropagation()}
+                              onDoubleClick={e => {
+                                e.stopPropagation();
+                                startEditingFocusDay('week', d.key, d.date, d.seconds);
+                              }}
                             >
                               <span>{d.seconds > 0 ? formatFocusDuration(d.seconds) : '0m'}</span>
                             </div>
@@ -12105,7 +12277,7 @@ export default function DailyPlanner() {
                     </div>
 
                     {/* Exact per-day breakdown table (double-click row or duration to modify, or use 3-dots menu) */}
-                    <div className="mt-4 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
+                    <div className="mt-4 rounded-xl" style={{ border: `1px solid ${surfaceBdr}` }}>
                       {weekAnalysisLive.days.map((d, i) => {
                         const isTodayRow = d.key === todayFocusKey;
                         return (
@@ -12113,7 +12285,7 @@ export default function DailyPlanner() {
                           key={d.key}
                           onDoubleClick={() => startEditingFocusDay('week', d.key, d.date, d.seconds)}
                           onClick={() => setSessionDetail(d.key)}
-                          className="flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5 relative group"
+                          className={`flex items-center justify-between px-3.5 py-2.5 text-xs cursor-pointer select-none transition-colors hover:bg-blue-500/5 relative group ${i === 0 ? 'rounded-t-[11px]' : ''} ${i === weekAnalysisLive.days.length - 1 ? 'rounded-b-[11px]' : ''}`}
                           style={{
                             background: d.isExcluded
                               ? (darkMode ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.05)')
@@ -12137,8 +12309,14 @@ export default function DailyPlanner() {
                           </div>
                           <div className="flex items-center gap-3">
                             <span
-                              className="tabular-nums flex items-center gap-2"
+                              className="tabular-nums flex items-center gap-2 cursor-text"
                               style={{ color: d.isExcluded ? '#f59e0b' : (d.seconds > 0 ? menuText : menuSub) }}
+                              title="Double-click to edit focus time"
+                              onClick={e => e.stopPropagation()}
+                              onDoubleClick={e => {
+                                e.stopPropagation();
+                                startEditingFocusDay('week', d.key, d.date, d.seconds);
+                              }}
                             >
                               {editingFocusDayKey === focusEditKey('week', d.key) ? (
                                 <input
@@ -12513,14 +12691,14 @@ export default function DailyPlanner() {
                     </div>
 
                     {/* Monthly breakdown table */}
-                    <div className="mt-5 rounded-xl overflow-hidden" style={{ border: `1px solid ${surfaceBdr}` }}>
+                    <div className="mt-5 rounded-xl" style={{ border: `1px solid ${surfaceBdr}` }}>
                       {focusAnalysis.monthTotals.filter(m => m.seconds > 0 || m.sessions > 0).length === 0 ? (
                         <div className="px-4 py-6 text-center text-xs" style={{ color: menuSub }}>{analysisRangeMode === 'rolling' ? 'No focus sessions logged in these twelve months.' : `No focus sessions logged in ${analysisYearCursor}.`}</div>
                       ) : (
-                        focusAnalysis.monthTotals.map((m, i) => (
+                        focusAnalysis.monthTotals.map((m, i, arr) => (
                           <div
                             key={m.month.toISOString()}
-                            className="flex items-center justify-between px-3.5 py-2 text-xs"
+                            className={`flex items-center justify-between px-3.5 py-2 text-xs ${i === 0 ? 'rounded-t-[11px]' : ''} ${i === arr.length - 1 ? 'rounded-b-[11px]' : ''}`}
                             style={{ background: i % 2 === 0 ? surfaceBg : 'transparent', borderTop: i === 0 ? 'none' : `1px solid ${surfaceBdr}` }}
                           >
                             <span className="font-medium flex items-center gap-1.5" style={{ color: menuText }}>
@@ -15946,6 +16124,18 @@ function CategoryFilterList({
     }
     setMode('list');
   };
+
+  useEffect(() => {
+    const onAppBack = (e: Event) => {
+      if (e.defaultPrevented) return;
+      if (mode !== 'list') {
+        handleExit();
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('app-back', onAppBack);
+    return () => window.removeEventListener('app-back', onAppBack);
+  });
 
   const handleSave = () => {
     const trimmed = formState.name.trim();

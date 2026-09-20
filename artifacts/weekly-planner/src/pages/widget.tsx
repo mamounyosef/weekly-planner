@@ -73,6 +73,7 @@ import {
   type FocusHeartbeat,
 } from '@/lib/focusSessions';
 import { type Recurrence, weekKeyOf, migrateEvents, resolveWeek, parseOccId, parseDate, getEventWeekOverlap } from '@/lib/recurrence';
+import { timeToMin } from '@/lib/timeOfDay';
 import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcalColor';
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { DEFAULT_CATEGORIES, resolveEventColor, coerceCategories, type EventCategory } from '@/lib/categories';
@@ -146,10 +147,6 @@ const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
-function timeToMin(t: string): number {
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
-}
 
 function formatTimeLabel(min: number, fmt: TimeFormat = '12h'): string {
   const normMin = ((min % 1440) + 1440) % 1440;

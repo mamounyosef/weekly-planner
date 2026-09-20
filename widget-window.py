@@ -29,6 +29,11 @@ _always_on_top_enabled = True
 # local server will only attach it to an account after the signed-in main app
 # explicitly approves it. Keeping the real session out of this command line and
 # URL avoids duplicating credentials between the two browser engines.
+# Keeps any child process from flashing a console window. The browser is a
+# GUI app and shows none today, but every other spawn in this project carries
+# the flag and an exception is how a console flash gets reintroduced.
+NO_WINDOW = 0x08000000
+
 WIDGET_PAIRING_ID = secrets.token_hex(32)
 
 
@@ -439,11 +444,11 @@ class Api:
             pass
         
         if os.path.exists(chrome_path1):
-            subprocess.Popen([chrome_path1, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags)
+            subprocess.Popen([chrome_path1, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags, creationflags=NO_WINDOW)
         elif os.path.exists(chrome_path2):
-            subprocess.Popen([chrome_path2, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags)
+            subprocess.Popen([chrome_path2, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags, creationflags=NO_WINDOW)
         elif os.path.exists(edge_path):
-            subprocess.Popen([edge_path, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags)
+            subprocess.Popen([edge_path, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags, creationflags=NO_WINDOW)
         else:
             import webbrowser
             webbrowser.open(url)

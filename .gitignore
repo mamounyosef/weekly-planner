@@ -50,7 +50,9 @@ Thumbs.db
 
 # Local database and cache profiles
 .chrome-profile/
+.chrome-profile*/
 database/
+database/ota/
 # Automated snapshots written by the dev server (see vite.config.ts)
 backups/
 my-made-main-icon.png
@@ -67,4 +69,7 @@ __pycache__/
 firmware/.pio/
 firmware/src/secrets.h
 .agents
-database/ota/
+
+# Build artifacts
+*.exe
+test.js

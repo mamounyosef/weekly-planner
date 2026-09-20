@@ -15,7 +15,19 @@
  * passed through untouched — intercepting an SSE stream would break the live
  * sync between the phone, the desktop window and the widget.
  */
-const VERSION = 'planner-v8';
+// Bumped 2026-09-20 (v8 -> v9) to evict a poisoned cache.
+//
+// Repeated rebuilds left a client holding a CACHED SHELL from an older build,
+// whose <script> tags pointed at content-hashed chunks that no longer existed
+// in dist. The server answers a missing /assets/* with index.html, so the
+// browser refused it ("Expected a JavaScript-or-Wasm module script but the
+// server responded with a MIME type of text/html") and rendered nothing: a
+// black window that survived restarts, because the bad shell was cached.
+//
+// `activate` deletes every cache whose key does not start with VERSION, so
+// bumping this is the escape hatch whenever the cache is suspected. Bump it
+// when changing this file, AND whenever a stale shell needs evicting.
+const VERSION = 'planner-v9';
 const SHELL_CACHE = `${VERSION}-shell`;
 const ASSET_CACHE = `${VERSION}-assets`;
 const SHELL_URL = '/index.html';

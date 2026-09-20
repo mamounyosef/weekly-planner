@@ -19,7 +19,20 @@ import sys
 import time
 import urllib.request
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+def _root():
+    """The repo folder, whether running as a .pyw or as the frozen .exe.
+
+    Frozen, `__file__` points inside PyInstaller's temporary extraction folder,
+    which contains none of the things this launcher needs (the venv, the widget,
+    node_modules). `sys.executable` is the .exe itself, and the .exe is built to
+    sit in the repo root, so that is the anchor.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+ROOT = _root()
 URL = "http://127.0.0.1:5173"
 APP_URL = "http://localhost:5173"
 PROFILE = os.path.join(ROOT, ".chrome-profile")
@@ -56,6 +69,11 @@ AWAKE_FLAGS = [
     "--disable-session-crashed-bubble",
     "--no-first-run",
     "--no-default-browser-check",
+    # DO NOT add memory flags here. On 2026-09-20 --renderer-process-limit=1,
+    # --process-per-site and friends were tried: they saved about 30 MB out of
+    # 838 (noise) and left the app window rendering BLANK. The memory is in the
+    # Chrome browser process, the GPU process and the service worker, none of
+    # which those flags touch. It is not a trade worth making.
 ]
 
 BROWSERS = [
@@ -201,11 +219,69 @@ def sanitize_chrome_profile(profile_path):
 
 
 def pythonw():
-    # Avast quarantined the real pythonw.exe, and the venv proxy pythonw.exe 
-    # unintentionally spawns python.exe with a visible console window.
-    # To fix this, we directly return the base python.exe and rely strictly on
-    # subprocess.Popen's CREATE_NO_WINDOW flag to keep it invisible.
-    return r"C:\ProgramData\anaconda3\python.exe"
+    """The interpreter that runs the widget and the focus hotkey.
+
+    python.exe, not pythonw.exe: Avast quarantined the real pythonw.exe once,
+    and the venv's proxy pythonw.exe spawns python.exe with a VISIBLE console.
+    Every spawn here passes CREATE_NO_WINDOW, which suppresses the console
+    outright, so the console-mode binary is both safer and quieter.
+
+    Resolved in order of preference rather than hardcoded. This used to return
+    an absolute Anaconda path, which made a second-party install that the
+    planner does not own into a hard dependency: if Anaconda were moved or
+    uninstalled, the side widget and the focus hotkey would silently never
+    start, with no error anywhere. The project's own venv is tried first, so the
+    planner depends on something it ships and controls.
+    """
+    candidates = [venv_base_python()]
+    # The venv's own python.exe is a REDIRECTOR, not an interpreter: it spawns
+    # the base interpreter as a child process. That costs a second process per
+    # window and, worse, the child is created by the stub rather than by us, so
+    # it does not inherit CREATE_NO_WINDOW and can flash a console. It is kept
+    # only as a fallback, because a console flash still beats no widget.
+    candidates.append(os.path.join(ROOT, ".venv-launcher", "Scripts", "python.exe"))
+    # Not when frozen: sys.executable is then the launcher .exe itself, which
+    # would re-run the launcher instead of the widget.
+    if not getattr(sys, "frozen", False):
+        candidates.append(sys.executable)
+    for exe in candidates:
+        if exe and os.path.exists(exe):
+            return exe
+    # Last resort: whatever PATH offers. Better a console flash than no widget.
+    return "python.exe"
+
+
+def venv_base_python():
+    """The real interpreter behind .venv-launcher, read from its own config.
+
+    The venv is built with --system-site-packages precisely because pywebview
+    (which the side widget needs) lives in the base installation, so running the
+    base interpreter directly still sees everything the widget imports.
+
+    Read rather than hardcoded. This path used to be written out in full, which
+    silently tied the side widget and the focus hotkey to an Anaconda install
+    the planner does not own: move or uninstall it and both would stop starting
+    with no error anywhere.
+    """
+    cfg = os.path.join(ROOT, ".venv-launcher", "pyvenv.cfg")
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition("=")
+                if key.strip() == "executable":
+                    return value.strip()
+    except Exception:
+        pass
+    # Older venvs record only `home`, the folder holding the interpreter.
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition("=")
+                if key.strip() == "home":
+                    return os.path.join(value.strip(), "python.exe")
+    except Exception:
+        pass
+    return None
 
 
 def spawn(args):

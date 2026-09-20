@@ -1,0 +1,82 @@
+Avast exceptions for the Daily Planner
+======================================
+
+Add these in Avast:  Menu > Settings > General > Exceptions > Add Exception
+
+WHY THIS FILE EXISTS
+--------------------
+Avast has already quarantined this project once. It took out the original
+start-planner.vbs / .bat launcher chain and also blocked those exact paths from
+ever being recreated, which is why the launcher was rewritten in Python. The
+new "Daily Planner.exe" is a PyInstaller one-file binary: it unpacks a Python
+runtime into a temp folder and runs it, which is close enough to real malware
+behaviour that heuristic scanners flag it on sight.
+
+If the planner ever stops starting, or the .exe silently vanishes, this is the
+first thing to check.
+
+
+THE ONE THAT MATTERS MOST (add this and you are almost certainly done)
+----------------------------------------------------------------------
+D:\My Projects\weekly-planner\
+
+Adding the whole repo folder covers the .exe, the launcher, the widget, the
+focus hotkey, the watchdog and everything they spawn. Everything below is
+already inside this folder and is listed only so you know what is being trusted
+and why.
+
+
+INDIVIDUAL FILES, IF YOU PREFER TO BE NARROW
+--------------------------------------------
+D:\My Projects\weekly-planner\Daily Planner.exe
+    The one-click launcher. Highest false-positive risk of anything here.
+
+D:\My Projects\weekly-planner\planner-launcher.pyw
+    What the .exe runs. Starts the dev server, the app window, the side widget
+    and the focus hotkey.
+
+D:\My Projects\weekly-planner\widget-window.py
+    The side pop-out widget.
+
+D:\My Projects\weekly-planner\focus-hotkey.py
+    The global focus-timer hotkey. Reads keyboard input, which scanners dislike.
+
+D:\My Projects\weekly-planner\tools\link-watchdog.pyw
+    Runs every 5 minutes, repairs the public link. Restarts a Windows service
+    on its last repair step, which is another common heuristic trigger.
+
+D:\My Projects\weekly-planner\tools\notify-action.pyw
+    Handles the buttons on Windows notifications.
+
+D:\My Projects\weekly-planner\.venv-launcher\
+    The Python interpreter everything above runs on.
+
+
+THE TEMP FOLDER THE .EXE UNPACKS INTO
+-------------------------------------
+A PyInstaller one-file binary extracts itself to a new folder under:
+
+C:\Users\mamou\AppData\Local\Temp\
+
+named _MEIxxxxxx, where xxxxxx changes on every single run. There is no stable
+path to whitelist, so if Avast keeps interfering even after the repo folder is
+excluded, the fix is to exclude the .exe by name rather than chasing the temp
+folder, or to rebuild without one-file packaging.
+
+
+SCHEDULED TASKS (not Avast, but the other thing that can silently stop)
+-----------------------------------------------------------------------
+  Daily Planner Autostart       starts everything at logon and on unlock
+  Daily Planner Link Watchdog   keeps the public link alive, every 5 minutes
+
+Check both with:
+  schtasks /query /tn "Daily Planner Autostart"
+  schtasks /query /tn "Daily Planner Link Watchdog"
+
+Reinstall either with:
+  powershell -ExecutionPolicy Bypass -File tools\install-autostart.ps1
+  powershell -ExecutionPolicy Bypass -File tools\install-link-watchdog.ps1
+
+The dev server also re-registers the watchdog task on startup if it has gone
+missing, because on 2026-09-20 it was found simply deleted, which is half the
+reason the public link stayed broken for eleven days.

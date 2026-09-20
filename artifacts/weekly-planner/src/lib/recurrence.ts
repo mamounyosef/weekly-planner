@@ -84,7 +84,23 @@ export function getEventWeekOverlap(
   ev: RecurFields,
   weekStart: Date,
   range?: { from: number; to: number },
-): { dayIndex: number; daysSpan: number } | null {
+): {
+  dayIndex: number;
+  daysSpan: number;
+  /**
+   * True when the item really starts BEFORE the visible window and the bar
+   * drawn here is only the tail of it (respectively, continues past the end).
+   *
+   * The caller cannot work this out from `dayIndex`/`daysSpan`, because those
+   * are already clamped to the window: a bar starting on Monday because the
+   * event starts on Monday, and one starting on Monday because the event
+   * started last Thursday, are indistinguishable afterwards. The month view
+   * needs the difference to know which ends are real ends, so a drag handle is
+   * offered only where dragging means something.
+   */
+  isContinuationLeft: boolean;
+  isContinuationRight: boolean;
+} | null {
   const fromOff = range ? range.from : 0;
   const toOff = range ? range.to : 7;
   const evWeekStart = parseDate(ev.weekKey || '0000-01-01');
@@ -107,7 +123,11 @@ export function getEventWeekOverlap(
 
   return {
     dayIndex: visibleDayIndex,
-    daysSpan: visibleDaysSpan
+    daysSpan: visibleDaysSpan,
+    // Compared against the RAW diffs, before clamping: that is exactly the
+    // information clamping throws away.
+    isContinuationLeft: startDiff < fromOff,
+    isContinuationRight: endDiff > toOff,
   };
 }
 

@@ -166,6 +166,98 @@ def ensure_funnel():
     return ok
 
 
+# --- 2b. the repair ladder -----------------------------------------------------
+#
+# Re-asserting the funnel, which is all this used to do, did NOT fix the
+# 2026-09-09 outage. tailscaled kept reporting a perfectly good funnel while the
+# public DNS record stayed unpublished for eleven days. What finally fixed it
+# was resetting the serve config and restarting the Tailscale service.
+#
+# So repair escalates with the number of CONSECUTIVE failed runs, which is
+# carried in the state file because every run is a fresh process. Gentlest
+# first: the harsh rungs drop the tailnet for a few seconds and must never be
+# the answer to a single blip.
+
+def repair_reassert():
+    run([TAILSCALE, "funnel", "--bg", PORT], timeout=60)
+
+
+def repair_reset():
+    run([TAILSCALE, "funnel", "reset"], timeout=60)
+    run([TAILSCALE, "serve", "reset"], timeout=60)
+    run([TAILSCALE, "funnel", "--bg", PORT], timeout=60)
+
+
+def repair_backend():
+    run([TAILSCALE, "up"], timeout=120)
+    run([TAILSCALE, "funnel", "reset"], timeout=60)
+    run([TAILSCALE, "funnel", "--bg", PORT], timeout=60)
+
+
+def repair_service():
+    rc, out = run(["net", "stop", "Tailscale"], timeout=120)
+    if rc != 0:
+        log("  could not stop the service (needs admin): " + out.replace("\n", " ")[:200])
+    run(["net", "start", "Tailscale"], timeout=120)
+    run([TAILSCALE, "up"], timeout=120)
+    run([TAILSCALE, "funnel", "reset"], timeout=60)
+    run([TAILSCALE, "funnel", "--bg", PORT], timeout=60)
+
+
+REPAIR_LADDER = [
+    ("re-assert the funnel", repair_reassert),
+    ("reset the serve config and re-assert", repair_reset),
+    ("bring the backend up, then re-assert", repair_backend),
+    ("restart the Tailscale service, then re-assert", repair_service),
+]
+
+# After a repair the public DNS record can take minutes to appear. Probing once
+# immediately reports failure for a repair that actually worked, which would
+# escalate the ladder and restart a service that did not need restarting.
+GRACE_SECONDS = 240
+GRACE_PROBE_EVERY = 30
+
+# Consecutive failed runs before the user is told. Eleven silent days is the bug
+# being fixed; an alert every five minutes would be the same bug, ignored.
+ALERT_AFTER_STRIKES = 2
+
+
+def alert(title, body, critical):
+    """Raise a Windows toast. Best effort: never let this break the watchdog."""
+    script = os.path.join(ROOT, "tools", "notify-toast.ps1")
+    if not os.path.exists(script):
+        return
+    args = [
+        "powershell.exe", "-NoProfile", "-NonInteractive",
+        "-ExecutionPolicy", "Bypass", "-File", script,
+        "-Tag", "planner-public-link", "-Kind", "system",
+        "-Title", title, "-Body", body,
+        "-Priority", "critical" if critical else "normal",
+    ]
+    if critical:
+        args.append("-Critical")
+    try:
+        subprocess.Popen(
+            args,
+            creationflags=NO_WINDOW,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def wait_for_recovery(host):
+    """Re-probe patiently after a repair. A slow fix is still a fix."""
+    deadline = time.time() + GRACE_SECONDS
+    ok, detail = public_ok(host)
+    while not ok and time.time() < deadline:
+        time.sleep(GRACE_PROBE_EVERY)
+        ok, detail = public_ok(host)
+    return ok, detail
+
+
 # --- 3. the dev server --------------------------------------------------------
 
 def server_up():
@@ -277,17 +369,44 @@ def main():
 
     if host:
         ok, detail = public_ok(host)
-        if not ok:
-            log("public check failed for %s (%s), repairing" % (host, detail))
-            run([TAILSCALE, "up"], timeout=120)
-            run([TAILSCALE, "funnel", "--bg", PORT], timeout=60)
-            ok, detail = public_ok(host)
-            log("  after repair: %s (%s)" % (ok, detail))
-            state["public_fail_streak"] = 0 if ok else state.get("public_fail_streak", 0) + 1
-        else:
+        if ok:
             if state.get("public_fail_streak"):
                 log("public link healthy again (%s)" % detail)
+                if state.get("alerted"):
+                    alert("Planner link is back",
+                          "The public link is working again (%s)." % detail, False)
             state["public_fail_streak"] = 0
+            state["alerted"] = False
+        else:
+            streak = state.get("public_fail_streak", 0) + 1
+            state["public_fail_streak"] = streak
+            log("public link DOWN for %s (%s), failure %d" % (host, detail, streak))
+
+            name, fix = REPAIR_LADDER[min(streak, len(REPAIR_LADDER)) - 1]
+            log("  repair step %d: %s" % (streak, name))
+            try:
+                fix()
+            except Exception as e:
+                log("  repair step failed: %s" % e)
+
+            ok, detail = wait_for_recovery(host)
+            if ok:
+                log("  repaired: public link healthy again (%s)" % detail)
+                state["public_fail_streak"] = 0
+                if state.get("alerted"):
+                    alert("Planner link is back",
+                          "The public link is working again (%s)." % detail, False)
+                state["alerted"] = False
+            else:
+                log("  still down after repair (%s)" % detail)
+                if streak >= ALERT_AFTER_STRIKES and not state.get("alerted"):
+                    state["alerted"] = True
+                    alert(
+                        "Planner link is down",
+                        "The phone cannot reach this PC (%s). Self-repair has "
+                        "failed %d times running." % (detail, streak),
+                        True,
+                    )
         state["last_public"] = detail
     state["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save_state(state)

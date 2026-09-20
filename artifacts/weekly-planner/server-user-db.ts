@@ -289,3 +289,76 @@ export function autoBackupPaths(rootDir: string, username: string) {
     outDir:       path.resolve(userDir, 'backups'),
   };
 }
+
+/**
+ * Delete orphaned atomic-write temp files under database/.
+ *
+ * Every durable write here is "write a temp file, then rename it over the real
+ * one", which is what makes a crash mid-write unable to corrupt the store. The
+ * cost is that a process killed BETWEEN those two steps leaves its temp behind
+ * forever, because the rename that would have consumed it never ran.
+ *
+ * That happens routinely: the dev server is killed by a shutdown, by the
+ * watchdog restarting it, or by hand. On 2026-09-20 one account had 198
+ * orphans from three long-dead process ids, several megabytes of them, plus a
+ * stale `database.json.sync.tmp`. Nothing was wrong with the data (the real
+ * files were untouched, which is the whole point of the pattern) but debris
+ * that only ever grows is how a disk fills up quietly.
+ *
+ * Deliberately conservative, because a temp file belonging to a write that is
+ * happening RIGHT NOW must never be deleted:
+ *
+ *   - only names matching the two shapes this codebase actually produces
+ *   - only files older than `minAgeMs`, well beyond any real write
+ *   - failures are ignored: a file that vanished under us, or one still held
+ *     open by a live writer, is not a problem worth failing a startup over
+ */
+export async function sweepOrphanedTemps(
+  rootDir: string,
+  opts: { minAgeMs?: number; now?: number } = {},
+): Promise<string[]> {
+  // An hour. A real atomic write completes in milliseconds, so anything this
+  // old is certainly abandoned, and the margin costs nothing.
+  const minAgeMs = opts.minAgeMs ?? 60 * 60 * 1000;
+  const now = opts.now ?? Date.now();
+  const removed: string[] = [];
+
+  // `.<name>.<pid>.<random>.tmp` from write-file-atomic, and `<name>.sync.tmp`
+  // from the sync service's own rebuild path.
+  const isTemp = (name: string) =>
+    (name.startsWith('.') && name.endsWith('.tmp')) || name.endsWith('.sync.tmp');
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    // The tree is database/users/<user>/, so three levels is already generous.
+    // Bounded so a symlink loop cannot turn a startup into an infinite walk.
+    if (depth > 3) return;
+    let entries: Awaited<ReturnType<typeof fsp.readdir>>;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // Never descend into backups: those are the user's restorable copies,
+        // and nothing in here should be able to touch them.
+        if (entry.name === 'backups') continue;
+        await walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !isTemp(entry.name)) continue;
+      try {
+        const stat = await fsp.stat(full);
+        if (now - stat.mtimeMs < minAgeMs) continue;
+        await fsp.unlink(full);
+        removed.push(full);
+      } catch {
+        // Gone already, or still locked. Either way, not our problem.
+      }
+    }
+  };
+
+  await walk(path.resolve(rootDir, 'database'), 0);
+  return removed;
+}

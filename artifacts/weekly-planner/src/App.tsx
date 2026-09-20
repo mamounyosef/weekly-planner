@@ -36,8 +36,20 @@ function AuthenticatedApp() {
 }
 
 function Router() {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const { isPhone } = useViewport();
+
+  useEffect(() => {
+    const onAppBack = (e: Event) => {
+      if (e.defaultPrevented) return;
+      if (location !== '/') {
+        setLocation('/');
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('app-back', onAppBack, { capture: true });
+    return () => window.removeEventListener('app-back', onAppBack, { capture: true });
+  }, [location, setLocation]);
 
   if (location === '/widget') {
     return (
@@ -141,6 +153,27 @@ function App() {
     sync();
     document.addEventListener('visibilitychange', sync);
     return () => document.removeEventListener('visibilitychange', sync);
+  }, []);
+
+  useEffect(() => {
+    const handleMouseNavDown = (e: MouseEvent) => {
+      // 3 = Back, 4 = Forward
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+      }
+    };
+    const handleMouseNavUp = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(e.button === 3 ? 'app-back' : 'app-forward'));
+      }
+    };
+    window.addEventListener('mousedown', handleMouseNavDown, { capture: true });
+    window.addEventListener('mouseup', handleMouseNavUp, { capture: true });
+    return () => {
+      window.removeEventListener('mousedown', handleMouseNavDown, { capture: true });
+      window.removeEventListener('mouseup', handleMouseNavUp, { capture: true });
+    };
   }, []);
 
   return (

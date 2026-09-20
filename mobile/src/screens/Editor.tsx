@@ -518,13 +518,19 @@ function Sheet({ target, onClose, closeSafelyRef }: {
               <Field label="Category">
                 <CategoryPicker
                   value={draft.categoryId}
-                  onChange={id => setDraft(d => (
-                    // Defaults only when composing. On an edit, choosing a
-                    // category must not snap a 90-minute meeting back to 60.
-                    isNew
-                      ? applyCategoryDefaults(d, categories.find((c: any) => c.id === id))
-                      : { ...d, categoryId: id }
-                  ))}
+                  onChange={id => setDraft(d => {
+                    const cat = categories.find((c: any) => c.id === id);
+                    if (!cat) return { ...d, categoryId: undefined };
+                    if (isNew) return applyCategoryDefaults(d, cat);
+                    // On an edit, choosing a category must not snap a 90-minute meeting back to 60,
+                    // but we should still apply the checkbox and all-day behaviors the user expects.
+                    return {
+                      ...d,
+                      categoryId: cat.id,
+                      noCheckbox: typeof cat.defaultNoCheckbox === 'boolean' ? cat.defaultNoCheckbox : d.noCheckbox,
+                      allDay: d.allDay ? true : (typeof cat.defaultAllDay === 'boolean' ? cat.defaultAllDay : d.allDay),
+                    };
+                  })}
                   categories={categories as any}
                 />
               </Field>

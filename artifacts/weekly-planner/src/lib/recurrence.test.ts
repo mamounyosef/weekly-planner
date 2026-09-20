@@ -313,12 +313,12 @@ function testEventWeekOverlapAndCustomRanges() {
   // 1. Event fully within week (Wed Aug 26, 2-day span -> Wed & Thu)
   const ev1: RecurFields = { id: 'ev1', weekKey: '2026-08-24', dayIndex: 2, daysSpan: 2 };
   const overlap1 = getEventWeekOverlap(ev1, weekStart);
-  assert.deepEqual(overlap1, { dayIndex: 2, daysSpan: 2 });
+  assert.deepEqual(overlap1, { dayIndex: 2, daysSpan: 2, isContinuationLeft: false, isContinuationRight: false });
 
   // 2. Event spanning across week start (started Fri before, span 5 days -> Fri, Sat, Sun, Mon, Tue)
   const ev2: RecurFields = { id: 'ev2', weekKey: '2026-08-17', dayIndex: 4, daysSpan: 5 };
   const overlap2 = getEventWeekOverlap(ev2, weekStart);
-  assert.deepEqual(overlap2, { dayIndex: 0, daysSpan: 2 }, 'Clips to visible week start with daysSpan 2');
+  assert.deepEqual(overlap2, { dayIndex: 0, daysSpan: 2, isContinuationLeft: true, isContinuationRight: false }, 'Clips to visible week start with daysSpan 2');
 
   // 3. Event completely outside week
   const ev3: RecurFields = { id: 'ev3', weekKey: '2026-08-17', dayIndex: 0, daysSpan: 2 };
@@ -330,6 +330,80 @@ function testEventWeekOverlapAndCustomRanges() {
   assert.ok(overlapCustom !== null);
   assert.equal(overlapCustom?.dayIndex, -2, 'Starts on Saturday in custom view');
   assert.equal(overlapCustom?.daysSpan, 4, 'Spans 4 visible days (Sat, Sun, Mon, Tue)');
+
+  // ─── Continuation flags ──────────────────────────────────────────────────
+  //
+  // dayIndex/daysSpan are CLAMPED to the window, which destroys the very thing
+  // the month view needs: whether each end of the drawn bar is the real end of
+  // the item. A bar starting Monday because the event starts Monday and one
+  // starting Monday because the event started last Thursday are identical
+  // afterwards. These flags are what tell them apart, and the month view offers
+  // a resize handle only on a real end.
+
+  // 5. Fully inside the week: both ends are real, neither is a continuation.
+  assert.equal(overlap1?.isContinuationLeft, false);
+  assert.equal(overlap1?.isContinuationRight, false);
+
+  // 6. Started before the window: the left end is a continuation, the right is real.
+  assert.equal(overlap2?.isContinuationLeft, true, 'ev2 really began the previous Friday');
+  assert.equal(overlap2?.isContinuationRight, false, 'ev2 really ends inside this week');
+
+  // 7. Runs off the end of the week: the mirror image of case 6.
+  const evTrailing: RecurFields = { id: 'evTrailing', weekKey: '2026-08-24', dayIndex: 5, daysSpan: 4 };
+  const overlapTrailing = getEventWeekOverlap(evTrailing, weekStart);
+  assert.equal(overlapTrailing?.dayIndex, 5);
+  assert.equal(overlapTrailing?.daysSpan, 2, 'clipped at the end of the week');
+  assert.equal(overlapTrailing?.isContinuationLeft, false);
+  assert.equal(overlapTrailing?.isContinuationRight, true);
+
+  // 8. Straddles the WHOLE week: both ends are continuations, so the bar has no
+  //    draggable end at all in this row.
+  const evStraddle: RecurFields = { id: 'evStraddle', weekKey: '2026-08-17', dayIndex: 0, daysSpan: 21 };
+  const overlapStraddle = getEventWeekOverlap(evStraddle, weekStart);
+  assert.equal(overlapStraddle?.dayIndex, 0);
+  assert.equal(overlapStraddle?.daysSpan, 7, 'fills the week');
+  assert.equal(overlapStraddle?.isContinuationLeft, true);
+  assert.equal(overlapStraddle?.isContinuationRight, true);
+
+  // 9. Exactly filling the week is NOT a continuation at either end. An
+  //    off-by-one here would hide both handles on a legitimately week-long item.
+  const evExact: RecurFields = { id: 'evExact', weekKey: '2026-08-24', dayIndex: 0, daysSpan: 7 };
+  const overlapExact = getEventWeekOverlap(evExact, weekStart);
+  assert.equal(overlapExact?.daysSpan, 7);
+  assert.equal(overlapExact?.isContinuationLeft, false, 'starts exactly on the boundary');
+  assert.equal(overlapExact?.isContinuationRight, false, 'ends exactly on the boundary');
+
+  // 10. A single day at each boundary: the tightest off-by-one check there is.
+  const evFirstDay: RecurFields = { id: 'evFirstDay', weekKey: '2026-08-24', dayIndex: 0, daysSpan: 1 };
+  const overlapFirst = getEventWeekOverlap(evFirstDay, weekStart);
+  assert.equal(overlapFirst?.isContinuationLeft, false);
+  assert.equal(overlapFirst?.isContinuationRight, false);
+
+  const evLastDay: RecurFields = { id: 'evLastDay', weekKey: '2026-08-24', dayIndex: 6, daysSpan: 1 };
+  const overlapLast = getEventWeekOverlap(evLastDay, weekStart);
+  assert.equal(overlapLast?.isContinuationLeft, false);
+  assert.equal(overlapLast?.isContinuationRight, false);
+
+  // 11. The flags follow the CUSTOM window, not the calendar week. Widening the
+  //     window by two days exposes more of ev2 but still not its real start:
+  //     it begins Fri Aug 21, at offset -3, and the window opens at offset -2.
+  //     So it stays clipped, and stays a continuation.
+  assert.equal(overlapCustom?.isContinuationLeft, true, 'Aug 21 is still left of the widened window');
+  assert.equal(overlapCustom?.isContinuationRight, false, 'ev2 really ends inside the window');
+
+  // 11b. Widen by one more day and the real start finally comes into view, at
+  //      which point the left end becomes draggable. This is the boundary that
+  //      decides whether a handle is shown, so it is pinned from both sides.
+  const wideEnough = getEventWeekOverlap(ev2, weekStart, { from: -3, to: 5 });
+  assert.equal(wideEnough?.dayIndex, -3, 'starts exactly at the window edge');
+  assert.equal(wideEnough?.isContinuationLeft, false, 'the real start is now visible');
+
+  // 12. And narrowing the window turns a real end back into a continuation.
+  const narrow = getEventWeekOverlap(ev1, weekStart, { from: 0, to: 3 });
+  assert.equal(narrow?.dayIndex, 2);
+  assert.equal(narrow?.daysSpan, 1, 'only Wednesday is visible');
+  assert.equal(narrow?.isContinuationLeft, false);
+  assert.equal(narrow?.isContinuationRight, true, 'Thursday is outside the narrowed window');
 
   console.log('✓ Event week overlap tests passed');
 }
