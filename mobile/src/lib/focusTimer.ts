@@ -260,10 +260,11 @@ export function stoppedSessionId(sessionStartedAt: string | null, _durationSecon
  * Build the record for a session that ended at `endedMs` having run `ran`
  * seconds.
  *
- * `startedAt` is the real start of the session unless a manual day edit already
- * banked part of it, in which case the record covers only the un-banked tail and
- * has to start where that tail did. Returns null when there is nothing worth
- * writing down, which is the honest answer for a mis-tap.
+ * The record always carries the session's FULL length from its real start. If
+ * a day-total edit banked part of it while it ran, that part rides along as
+ * `creditedSeconds`, which only the day TOTAL subtracts: a day edit must never
+ * change how long a session was. Returns null when nothing beyond the banked
+ * part was run, which is the honest answer for a mis-tap too.
  */
 function buildSession(
   state: FocusTimerState,
@@ -271,9 +272,10 @@ function buildSession(
   endedMs: number,
   id: string,
 ): FocusSessionRecord | null {
-  const duration = Math.max(0, Math.floor(ran) - state.creditedSeconds);
-  if (duration <= 0) return null;
-  const startedMs = state.sessionStartedAt !== null && state.creditedSeconds === 0
+  const duration = Math.max(0, Math.floor(ran));
+  const credited = Math.min(duration, Math.max(0, Math.floor(state.creditedSeconds)));
+  if (duration - credited <= 0) return null;
+  const startedMs = state.sessionStartedAt !== null
     ? Date.parse(state.sessionStartedAt)
     : endedMs - duration * 1000;
   return {
@@ -282,6 +284,7 @@ function buildSession(
     endedAt: iso(endedMs),
     durationSeconds: duration,
     plannedSeconds: state.plannedSeconds,
+    ...(credited > 0 ? { creditedSeconds: credited } : {}),
   };
 }
 

@@ -144,6 +144,7 @@ export function NotificationPanel({
   onClearAll,
   onOpenItem,
   highlightKey,
+  topInset = 0,
 }: {
   open: boolean;
   onClose: () => void;
@@ -161,6 +162,8 @@ export function NotificationPanel({
   onClearAll: () => void;
   onOpenItem?: (rec: NotificationRecord) => void;
   highlightKey?: string | null;
+  /** Height of the PC window's own title bar, which the panel starts below. */
+  topInset?: number;
 }) {
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
   const [snoozeFor, setSnoozeFor] = useState<string | null>(null);
@@ -206,7 +209,7 @@ export function NotificationPanel({
       <aside
         className="fixed z-[87] flex flex-col shadow-2xl gpu-layer touch-scroll"
         style={{
-          top: 0,
+          top: topInset,
           right: 0,
           bottom: 0,
           width: 'min(420px, 100vw)',
@@ -554,6 +557,7 @@ export function NotificationBanner({
   onAcknowledge,
   onComplete,
   onOpen,
+  topInset = 0,
 }: {
   rec: NotificationRecord | null;
   theme: NotifyTheme;
@@ -564,6 +568,8 @@ export function NotificationBanner({
   onAcknowledge: (keys: string[]) => void;
   onComplete: (keys: string[]) => void;
   onOpen?: (rec: NotificationRecord) => void;
+  /** Height of the PC window's own title bar, which the banner drops below. */
+  topInset?: number;
 }) {
   const critical = rec?.priority === 'critical';
 
@@ -581,7 +587,7 @@ export function NotificationBanner({
     <div
       className="fixed z-[90] flex gap-3 rounded-xl p-3 shadow-2xl"
       style={{
-        top: 16,
+        top: 16 + topInset,
         right: 16,
         width: 'min(380px, calc(100vw - 32px))',
         background: theme.bg,

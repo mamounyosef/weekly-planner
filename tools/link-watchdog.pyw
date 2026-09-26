@@ -382,7 +382,14 @@ def main():
             state["public_fail_streak"] = streak
             log("public link DOWN for %s (%s), failure %d" % (host, detail, streak))
 
-            name, fix = REPAIR_LADDER[min(streak, len(REPAIR_LADDER)) - 1]
+            rung = min(streak, len(REPAIR_LADDER))
+            # A missing public DNS record that survived a re-assert is the
+            # control plane no longer publishing us. Only a service restart has
+            # ever fixed that (2026-09-20, 2026-09-26), so skip the rungs that
+            # just burn 10 more minutes of outage.
+            if streak >= 2 and detail == "no public DNS record":
+                rung = len(REPAIR_LADDER)
+            name, fix = REPAIR_LADDER[rung - 1]
             log("  repair step %d: %s" % (streak, name))
             try:
                 fix()

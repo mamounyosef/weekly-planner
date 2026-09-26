@@ -19,6 +19,14 @@ export interface FocusSessionRecord {
   endedAt?: string;
   durationSeconds: number;
   plannedSeconds?: number;
+  /**
+   * Seconds of THIS session that a day-total edit already counted, because the
+   * edit was made while the session was running. The session keeps its full
+   * `durationSeconds` (it really did run that long, and that is what its row
+   * shows); only the day TOTAL subtracts this, so the banked part is not
+   * counted twice. Absent on almost every row.
+   */
+  creditedSeconds?: number;
 }
 
 /**
@@ -143,16 +151,45 @@ export function isCountable(s: FocusSessionRecord): boolean {
 // of the list, which means the charts stop lying immediately, before any repair
 // is run and without either machine having to agree to it first.
 
+// ─── Two kinds of typed day total ───────────────────────────────────────────
+//
+//   manual-<day>-<stamp>-<seconds>   LEGACY. Written by builds before
+//       2026-09-22, which DELETED the day's sessions and put this one row in
+//       their place. So a day of eight sessions became "1 session" after any
+//       correction. Old rows keep their old meaning: the sessions they replaced
+//       are gone from the database anyway, and the row still counts as one.
+//
+//   adjust-<day>-<stamp>-<seconds>   CURRENT. The day's TOTAL is overridden,
+//       and nothing else is touched: every session stays, with its own length,
+//       and the day still has as many sessions as were actually done. The row
+//       is not a session, is never counted as one and is never listed as one.
+//
+// Both mean the same thing for the TOTAL: the day was this long up to the
+// moment it was typed, plus any work logged after that moment.
+
+const TYPED_RE = /^(manual|adjust)-(\d{4}-\d{2}-\d{2})-(\d+)-/;
+const TYPED_DAY_RE = /^(manual|adjust)-(\d{4}-\d{2}-\d{2})-/;
+
 /** The last of these wins when the same day was typed in more than once. */
 function manualStampOf(id: string): number | null {
-  const m = /^manual-(\d{4}-\d{2}-\d{2})-(\d+)-/.exec(id);
-  return m ? Number(m[2]) : null;
+  const m = TYPED_RE.exec(id);
+  return m ? Number(m[3]) : null;
 }
 
-/** The day a typed total was typed FOR, taken from its own id. */
+/** The day a typed total (either kind) was typed FOR, taken from its own id. */
 function manualDayOf(id: string): string | null {
-  const m = /^manual-(\d{4}-\d{2}-\d{2})-/.exec(id);
-  return m ? m[1] : null;
+  const m = TYPED_DAY_RE.exec(id);
+  return m ? m[2] : null;
+}
+
+/** A current-style day-total override: not a session, just the day's total. */
+export function isDayAdjustment(s: { id?: unknown } | null | undefined): boolean {
+  return !!s && typeof s.id === 'string' && s.id.startsWith('adjust-');
+}
+
+/** Either kind of typed day total (legacy `manual-` or current `adjust-`). */
+export function isTypedDayTotal(s: { id?: unknown } | null | undefined): boolean {
+  return !!s && typeof s.id === 'string' && TYPED_DAY_RE.test(s.id);
 }
 
 /**
@@ -212,8 +249,13 @@ export function dedupeFocusHistory<T extends FocusSessionRecord>(
 
     const day = manualDayOf(s.id);
     // A typed total is keyed by the DAY it was typed for, so a second edit of
-    // the same day replaces the first instead of adding to it.
-    const key = day !== null ? `manual:${day}` : normaliseFocusSessionId(s.id);
+    // the same day replaces the first instead of adding to it. Kept per KIND:
+    // a legacy row and a current one mean different things for the session
+    // count (see above), and which one rules the total is decided by stamp in
+    // `applyTypedDayTotals`.
+    const key = day !== null
+      ? `${isDayAdjustment(s) ? 'adjust' : 'manual'}:${day}`
+      : normaliseFocusSessionId(s.id);
 
     const existing = chosen.get(key);
     if (!existing) {
@@ -254,7 +296,7 @@ export function mergeContiguousFocusSession<T extends FocusSessionRecord>(
   let mostRecent: T | null = null;
   let maxStart = -Infinity;
   for (const s of history) {
-    if (s.id.startsWith('manual-')) continue;
+    if (isTypedDayTotal(s)) continue;
     const start = Date.parse(s.startedAt);
     if (Number.isFinite(start) && start > maxStart) {
       maxStart = start;
@@ -270,11 +312,14 @@ export function mergeContiguousFocusSession<T extends FocusSessionRecord>(
   if (Number.isFinite(lastEnd) && Number.isFinite(thisStart)) {
     const diff = (thisStart - lastEnd) / 1000;
     if (Math.abs(diff) <= 60) {
+      const credited = (Number(mostRecent.creditedSeconds) || 0) + (Number(newSession.creditedSeconds) || 0);
       const mergedSession = {
         ...mostRecent,
         endedAt: newSession.endedAt,
         durationSeconds: mostRecent.durationSeconds + newSession.durationSeconds,
-        plannedSeconds: (mostRecent.plannedSeconds || 0) + (newSession.plannedSeconds || 0)
+        plannedSeconds: (mostRecent.plannedSeconds || 0) + (newSession.plannedSeconds || 0),
+        // Both halves' banked parts stay banked, or the day total would grow.
+        ...(credited > 0 ? { creditedSeconds: credited } : {}),
       };
       return { merged: true, session: mergedSession };
     }
@@ -348,24 +393,13 @@ export function summariseFocus(
 ): FocusSummary {
   const dayStartHour = opts.dayStartHour ?? 0;
   const excluded = new Set(opts.excludedDates ?? []);
-  const totals = new Map<string, { seconds: number; sessions: number }>();
-
-  // Collapsed FIRST, then corrections applied. Two records of one session, two
-  // typed totals for one day, and a typed total sitting on top of the sessions
-  // it was meant to replace are the three ways a day came to report thirty
-  // hours; all three are answered before anything is added up.
-  for (const s of applyTypedDayTotals(dedupeFocusHistory(sessions ?? []), dayStartHour)) {
-    if (!isCountable(s)) continue;
-    // Bucketed by when it ENDED. A session that starts before the cutoff and
-    // ends after it belongs to the day it was finished in, which is how the PC
-    // credits it and how a person remembers it.
-    const key = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
-    if (!key || key < opts.from || key > opts.to) continue;
-    const entry = totals.get(key) ?? { seconds: 0, sessions: 0 };
-    entry.seconds += s.durationSeconds;
-    entry.sessions += 1;
-    totals.set(key, entry);
-  }
+  // Collapsed FIRST, then corrections applied (see `tallyFocusDays`). Sessions
+  // are bucketed by when they ENDED: one that starts before the cutoff and ends
+  // after it belongs to the day it was finished in.
+  const totals = tallyFocusDays(sessions ?? [], dayStartHour, {
+    countsAsSession: isCountable,
+    countsTowardTotal: isCountable,
+  });
 
   const days: FocusDay[] = dateRange(opts.from, opts.to).map(date => {
     const entry = totals.get(date);
@@ -413,15 +447,13 @@ export function computeAllTimeStreaks(
   const dayStartHour = opts.dayStartHour ?? 0;
   const excluded = new Set(opts.excludedDates ?? []);
   
-  const byDaySeconds = new Map<string, number>();
-  // The same two rules the week totals apply. A chart that disagrees with the
+  // The same rules the week totals apply. A chart that disagrees with the
   // number beside it is worse than either being wrong on its own.
-  for (const s of applyTypedDayTotals(dedupeFocusHistory(sessions ?? []), dayStartHour)) {
-    if (!isCountable(s)) continue;
-    const key = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
-    if (!key) continue;
-    byDaySeconds.set(key, (byDaySeconds.get(key) ?? 0) + s.durationSeconds);
-  }
+  const byDaySeconds = new Map<string, number>();
+  for (const [key, t] of tallyFocusDays(sessions ?? [], dayStartHour, {
+    countsAsSession: isCountable,
+    countsTowardTotal: isCountable,
+  })) byDaySeconds.set(key, t.seconds);
 
   const activeDayKeys = new Set(
     Array.from(byDaySeconds.entries())
@@ -571,22 +603,152 @@ export function applyTypedDayTotals<T extends FocusSessionRecord>(
     const stamp = manualStampOf(s.id) ?? 0;
     if (stamp >= (typedAt.get(day) ?? -1)) typedAt.set(day, stamp);
   }
-  if (typedAt.size === 0) return rows as T[];
-
-  return rows.filter(s => {
-    if (!s || typeof s.id !== 'string') return false;
-    // A typed total is never dropped by this rule; duplicates between two of
-    // them are `dedupeFocusHistory`'s business, not this one's.
-    if (manualDayOf(s.id) !== null) return true;
+  const out: T[] = [];
+  for (const s of rows) {
+    if (!s || typeof s.id !== 'string') continue;
+    const typedDay = manualDayOf(s.id);
+    if (typedDay !== null) {
+      // Only the NEWEST typed total of a day rules it. Two of the same kind are
+      // already collapsed by `dedupeFocusHistory`; this settles a legacy row
+      // against a newer current one (or the other way round).
+      if ((manualStampOf(s.id) ?? 0) >= (typedAt.get(typedDay) ?? -1)) out.push(s);
+      continue;
+    }
 
     const day = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
     const stamp = typedAt.get(day);
-    if (stamp === undefined) return true; // no correction for this day
+    if (stamp !== undefined) {
+      // Logged after the correction was made, so it is work the correction
+      // could not have known about. Anything earlier is inside the typed total.
+      const endedMs = Date.parse(s.endedAt ?? s.startedAt ?? '');
+      if (!Number.isFinite(endedMs) || endedMs <= stamp) continue;
+    }
+    out.push(withoutCredited(s));
+  }
+  return out;
+}
 
-    // Logged after the correction was made, so it is work the correction could
-    // not have known about.
-    const endedMs = Date.parse(s.endedAt ?? s.startedAt ?? '');
-    if (!Number.isFinite(endedMs)) return false;
-    return endedMs > stamp;
-  });
+/**
+ * The row as it counts toward a day TOTAL: minus the part a day-total edit
+ * already banked while it was running. Same object when there is nothing to
+ * take off, so the common case allocates nothing.
+ */
+function withoutCredited<T extends FocusSessionRecord>(s: T): T {
+  const credited = Number(s.creditedSeconds);
+  if (!Number.isFinite(credited) || credited <= 0) return s;
+  return { ...s, durationSeconds: Math.max(0, s.durationSeconds - credited) };
+}
+
+export interface FocusDayTally {
+  /** The day's total, typed override included. What the day "was". */
+  seconds: number;
+  /** How many sessions the day had. A typed total never changes this. */
+  sessions: number;
+  /** Full length of those sessions, added up. Differs from `seconds` when adjusted. */
+  sessionSeconds: number;
+  /** True when a current-style typed total (`adjust-`) rules the day's total. */
+  adjusted: boolean;
+}
+
+/**
+ * Total and session count for every focus-day in a history.
+ *
+ * THE ONE PLACE BOTH NUMBERS COME FROM, so every screen and both machines agree.
+ * The two are deliberately computed from different views of the same history:
+ *
+ *   • the TOTAL honours typed day totals (`applyTypedDayTotals`);
+ *   • the COUNT honours only what really happened. A current typed total
+ *     (`adjust-`) leaves every session in place and in the count. A legacy one
+ *     (`manual-`) keeps its old meaning: it counts as one row, and sessions
+ *     logged before it are the ones it replaced.
+ *
+ * `countsAsSession` decides what length of session is worth counting (the
+ * desktop counts only completed ones, the summaries anything over a minute);
+ * `countsTowardTotal` does the same for a real session's seconds, and never
+ * filters a typed total out.
+ */
+export function tallyFocusDays<T extends FocusSessionRecord>(
+  sessions: readonly T[],
+  dayStartHour = 0,
+  opts: {
+    countsAsSession?: (s: T) => boolean;
+    countsTowardTotal?: (s: T) => boolean;
+  } = {},
+): Map<string, FocusDayTally> {
+  const countsAsSession = opts.countsAsSession ?? ((s: T) => isCountable(s));
+  const countsTowardTotal = opts.countsTowardTotal ?? (() => true);
+  const rows = dedupeFocusHistory(sessions ?? []);
+  const out = new Map<string, FocusDayTally>();
+  const entry = (day: string): FocusDayTally => {
+    let e = out.get(day);
+    if (!e) { e = { seconds: 0, sessions: 0, sessionSeconds: 0, adjusted: false }; out.set(day, e); }
+    return e;
+  };
+
+  // TOTALS.
+  for (const s of applyTypedDayTotals(rows, dayStartHour)) {
+    const typed = isTypedDayTotal(s);
+    if (!typed && !countsTowardTotal(s)) continue;
+    const day = typed
+      ? manualDayOf(s.id)!
+      : focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
+    if (!day) continue;
+    const seconds = Number(s.durationSeconds);
+    if (!Number.isFinite(seconds) || seconds < 0) continue;
+    const e = entry(day);
+    e.seconds += seconds;
+    if (isDayAdjustment(s)) e.adjusted = true;
+  }
+
+  // COUNTS. Legacy typed rows still hide the sessions they replaced.
+  const legacyAt = new Map<string, number>();
+  for (const s of rows) {
+    if (!isTypedDayTotal(s) || isDayAdjustment(s)) continue;
+    const day = manualDayOf(s.id)!;
+    legacyAt.set(day, Math.max(legacyAt.get(day) ?? -1, manualStampOf(s.id) ?? 0));
+  }
+  for (const s of rows) {
+    if (isDayAdjustment(s)) continue;
+    if (!countsAsSession(s)) continue;
+    const legacy = isTypedDayTotal(s);
+    const day = legacy ? manualDayOf(s.id)! : focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
+    if (!day) continue;
+    if (!legacy) {
+      const stamp = legacyAt.get(day);
+      const endedMs = Date.parse(s.endedAt ?? s.startedAt ?? '');
+      if (stamp !== undefined && (!Number.isFinite(endedMs) || endedMs <= stamp)) continue;
+    }
+    const e = entry(day);
+    e.sessions += 1;
+    e.sessionSeconds += Math.max(0, Number(s.durationSeconds) || 0);
+  }
+  return out;
+}
+
+/** The record a typed day total becomes: overrides the TOTAL, keeps every session. */
+export function createDayAdjustment(
+  dayKey: string,
+  totalSeconds: number,
+  dayStartHour = 0,
+  now: number = Date.now(),
+  maxSeconds = 24 * 60 * 60 - 60,
+): FocusSessionRecord & { endedAt: string; plannedSeconds: number } {
+  const parts = dayKey.split('-').map(Number);
+  const y = parts[0] || new Date(now).getFullYear();
+  const m = (parts[1] || 1) - 1;
+  const d = parts[2] || 1;
+  const asked = Math.floor(Number(totalSeconds));
+  const seconds = Number.isFinite(asked) ? Math.max(0, Math.min(maxSeconds, asked)) : 0;
+  const hour = Math.min(23, Math.max(0, Math.floor(dayStartHour)));
+  // Both endpoints inside the focus day it is for (see createManualFocusSession
+  // on the PC for why that matters to every other reader of the row).
+  const start = new Date(y, m, d, hour, 0, 0, 0);
+  const end = new Date(start.getTime() + seconds * 1000);
+  return {
+    id: `adjust-${dayKey}-${Math.floor(now)}-${seconds}`,
+    startedAt: start.toISOString(),
+    endedAt: end.toISOString(),
+    durationSeconds: seconds,
+    plannedSeconds: seconds,
+  };
 }

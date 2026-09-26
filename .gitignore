@@ -73,3 +73,9 @@ firmware/src/secrets.h
 # Build artifacts
 *.exe
 test.js
+# PyInstaller leftovers (tools/build-exe.ps1 builds in %TEMP%, these are strays)
+/build/
+*.spec
+
+# WebView2 browser profile of the app windows (cookies, cache)
+.webview-profile/

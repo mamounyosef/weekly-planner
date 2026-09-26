@@ -21,9 +21,17 @@
 //   configurable day-start hour as every other screen, so a session ending at
 //   2 AM with a 4 AM day start appears on yesterday's page.
 
+//   A TYPED DAY TOTAL IS NOT A SESSION. Since 2026-09-22 editing a day's total
+//   writes an `adjust-` override and leaves every session alone, so it is kept
+//   out of the list entirely; the day's total still honours it, and
+//   `adjusted` tells the page to say so next to the number. (Older `manual-`
+//   rows replaced the sessions outright and are still listed as before.)
+
 import {
   MIN_COMPLETED_SESSION_SECONDS,
   focusDayKey,
+  isDayAdjustment,
+  tallyFocusDays,
   type FocusSession,
 } from './focusSessions';
 
@@ -59,7 +67,20 @@ export interface SessionDetailMatch {
 export interface SessionDetailGroup {
   key: string;
   matches: SessionDetailMatch[];
+  /** The day's total, a typed override included (what the day total shows). */
   seconds: number;
+  /** The day's total was typed in; its sessions add up to `sessionSeconds`. */
+  adjusted: boolean;
+  sessionSeconds: number;
+}
+
+/** A day in the range whose total was typed in rather than added up. */
+export interface SessionDetailAdjustment {
+  key: string;
+  /** What the day's total now says. */
+  totalSeconds: number;
+  /** What its listed sessions add up to. */
+  sessionSeconds: number;
 }
 
 export interface SessionDetailResult {
@@ -67,8 +88,10 @@ export interface SessionDetailResult {
   matches: SessionDetailMatch[];
   /** Week mode only: per-day groups in day order, days with nothing omitted. */
   groups: SessionDetailGroup[];
-  /** All seconds, manual included — matches what the day total shows. */
+  /** All seconds, typed totals included — matches what the day total shows. */
   totalSeconds: number;
+  /** Days whose total was typed in (empty when none). */
+  adjustments: SessionDetailAdjustment[];
   /** Seconds from real (timed) sessions only. */
   realSeconds: number;
   /** Seconds from manual entries only. */
@@ -110,6 +133,7 @@ export function buildSessionDetail(
   type Row = { session: FocusSession; startMs: number; endMs: number; actual: number };
   const rows: Row[] = [];
   for (const s of sessions) {
+    if (isDayAdjustment(s)) continue; // a day's total, not a session
     const actual = Math.floor(Number(s.durationSeconds));
     // A zero/negative/NaN duration (or unparsable stamp) is corrupt data from
     // an old import — dropped rather than shown as a 0-minute session.
@@ -154,29 +178,56 @@ export function buildSessionDetail(
   }
 
   const realMatches = matches.filter(m => !m.isManual);
-  const totalSeconds = matches.reduce((sum, m) => sum + m.actual, 0);
+  const listedSeconds = matches.reduce((sum, m) => sum + m.actual, 0);
   const realSeconds = realMatches.reduce((sum, m) => sum + m.actual, 0);
-  const manualSeconds = totalSeconds - realSeconds;
+  const manualSeconds = listedSeconds - realSeconds;
+
+  // Days whose total was typed in: the total is the typed value (plus anything
+  // logged after it), the list is every session as it really was.
+  const tally = tallyFocusDays(sessions, dayStartHour);
+  const adjustments: SessionDetailAdjustment[] = [];
+  const dayTotal = new Map<string, number>();
+  for (const key of days) {
+    const t = tally.get(key);
+    if (!t?.adjusted) continue;
+    const sessionSeconds = matches
+      .filter(m => focusDayKey(m.session.endedAt, dayStartHour) === key)
+      .reduce((s, m) => s + m.actual, 0);
+    adjustments.push({ key, totalSeconds: t.seconds, sessionSeconds });
+    dayTotal.set(key, t.seconds);
+  }
+  const totalSeconds = listedSeconds
+    + adjustments.reduce((s, a) => s + (a.totalSeconds - a.sessionSeconds), 0);
 
   const groups: SessionDetailGroup[] = days.length > 1
     ? days
         .map(key => {
           const dayMatches = matches.filter(m => focusDayKey(m.session.endedAt, dayStartHour) === key);
-          return { key, matches: dayMatches, seconds: dayMatches.reduce((s, m) => s + m.actual, 0) };
+          const sessionSeconds = dayMatches.reduce((s, m) => s + m.actual, 0);
+          const adjusted = dayTotal.has(key);
+          return {
+            key,
+            matches: dayMatches,
+            seconds: adjusted ? dayTotal.get(key)! : sessionSeconds,
+            adjusted,
+            sessionSeconds,
+          };
         })
-        .filter(g => g.matches.length > 0)
+        .filter(g => g.matches.length > 0 || g.adjusted)
     : [];
 
   return {
     matches,
     groups,
     totalSeconds,
+    adjustments,
     realSeconds,
     manualSeconds,
     manualCount: matches.length - realMatches.length,
     totalPlannedSeconds: realMatches.reduce((sum, m) => sum + m.planned, 0),
     longestSeconds: matches.reduce((b, m) => Math.max(b, m.actual), 0),
-    avgSeconds: matches.length > 0 ? Math.round(totalSeconds / matches.length) : 0,
+    // Over the sessions' own lengths: a typed total is not a longer session.
+    avgSeconds: matches.length > 0 ? Math.round(listedSeconds / matches.length) : 0,
     firstStartMs: realMatches.length > 0 ? realMatches[0].startMs : null,
     lastEndMs: realMatches.length > 0 ? realMatches[realMatches.length - 1].endMs : null,
   };

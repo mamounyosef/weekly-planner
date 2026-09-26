@@ -628,3 +628,25 @@ body {
   }
 }
 
+
+/* ── PC app title bar ─────────────────────────────────────────────────────────
+   In the desktop window the native caption is gone (see lib/desktopFrame.ts).
+   A top bar marked .app-drag becomes the caption instead: WebView2 turns
+   `app-region: drag` into real window dragging, double-click to maximize and
+   Snap. Anything clickable inside it, and anything that pops out of it, has to
+   opt back out or it would drag the window instead of receiving the click. */
+.app-drag {
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+.app-drag :is(button, a, input, select, textarea, label, [role], [contenteditable], .absolute, .fixed),
+.no-drag {
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+html[data-titlebar] body {
+  box-sizing: border-box;
+  height: 100dvh;
+  padding-top: var(--titlebar-h);
+  overflow: hidden;
+}

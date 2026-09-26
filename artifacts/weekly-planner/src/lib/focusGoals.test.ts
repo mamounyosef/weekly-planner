@@ -86,13 +86,15 @@ function main() {
 
   console.log('--- 9. DUPLICATE SESSION IDS ---');
   {
-    // The pure function just adds them up. Deduplication is handled upstream in focusTimer.ts.
+    // Totals go through the shared tally now, which collapses one session
+    // recorded twice exactly as every other screen does. The goal bar used to
+    // add both copies and disagree with the number beside it.
     const sessions = [
       s('1', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z', 3600),
       s('1', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z', 3600)
     ];
     const stats = computeGoalStats(sessions, { now: '2026-08-31T12:00:00Z', goalSeconds: 3600 });
-    assert.equal(stats.todayTotal, 7200);
+    assert.equal(stats.todayTotal, 3600);
   }
 
   console.log('--- 10. STREAK BROKEN BY EXACTLY ONE DAY ---');

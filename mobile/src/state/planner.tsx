@@ -67,7 +67,7 @@ import {
 } from '../lib/focusTimer';
 import {
   EMPTY_CENTRE_STATE, EMPTY_CENTRE_VIEW, buildCentre, centreStateFromServer, clearEntries,
-  coerceCentreState, desiredAlarms, dismiss as dismissKeys, handledKeys,
+  coerceCentreState, dismiss as dismissKeys,
   markAllRead, markCompleted, markRead, markSynced, markUnread, mergeCentreState,
   pendingSync, pruneCentreState, recordFired, snooze as snoozeKeys,
   type CentreView, type NotifyCentreState,
@@ -84,7 +84,6 @@ import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
   buildPrayerDay,
   coercePrayerSettings,
-  prayerMonthsFromCache,
   prayerQueryKey,
   prayerOccId,
   type PrayerOccurrence,
@@ -121,8 +120,10 @@ import {
   type NotificationSettings,
 } from '../lib/notifications';
 import { DEFAULT_CATEGORIES } from '../lib/categories';
-import { collectMissed, prepareNotifications, syncAlarms } from '../lib/notify';
+import { collectMissed, prepareNotifications } from '../lib/notify';
 import { applyUpdateIfAny } from '../lib/updates';
+import { replanPhoneAlarms } from '../lib/phoneAlarms';
+import { setForegroundSyncer } from '../background/backgroundSync';
 import type { SyncConflict, SyncStore } from '../lib/sync';
 
 /**
@@ -615,77 +616,15 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
    */
   const replanAlarmsNow = useCallback(async (current: ClientData) => {
     try {
-      const events = readClientStore(current, 'events');
-      const tasks = readClientStore(current, 'tasks');
-      const now = Date.now();
-      // Read from the data being planned against, not from the render's copy:
-      // this runs straight after a sync, when `shared` is still a render behind.
-      const currentShared = ((readClientStore(current, 'settings') as any)?.[SETTINGS_ENTITY]
-        ?? {}) as Partial<SharedSettings>;
-      // Read from the same snapshot for the same reason the rest is.
-      const currentPrayerSettings = coercePrayerSettings((currentShared as any).prayer);
-      const told = (currentShared as any).weekStartsOn;
-      const currentWeekStart = (typeof told === 'number' && told >= 0 && told <= 6)
-        ? (told as 0 | 1 | 2 | 3 | 4 | 5 | 6)
-        : inferWeekStartsOn(events as any, tasks as any);
-
-      // The window is deliberately wider than the alarm horizon: planAlarms
-      // trims it back, and asking for slightly more costs nothing while making
-      // sure nothing falls between the two ranges.
-      // The user's OWN rules, not the defaults. Reminders fired from default
-      // settings are worse than none: they arrive at times nobody chose, for
-      // categories the user had switched off.
-      const schedule = computeSchedule({
-        events: events as any,
-        tasks: tasks as any,
-        categories: (currentShared.categories as any) ?? DEFAULT_CATEGORIES,
-        // THIS PHONE'S rules, which are the shared ones unless sharing is off.
-        settings: resolveNotificationSettings({
-          shared: (currentShared as any).notifications,
-          local: notificationsLocalRef.current,
-          share: (currentShared as any).shareNotificationSettings !== false,
-        }),
-        weekStartsOn: currentWeekStart,
-        // PRAYERS ARE REMINDERS TOO.
-        //
-        // These three were not passed at all, and the prayer branch of
-        // `computeSchedule` is gated on `prayerMonths` being present. So this
-        // phone drew prayer times with no signal at all and would never once
-        // buzz for one, and prayers were missing from its notification centre
-        // while the PC's showed them -- with the PC asleep, they simply did not
-        // arrive. Everything needed was already synced and already on disk.
-        prayerSettings: currentPrayerSettings,
-        prayerMonths: prayerMonthsFromCache(
-          readClientStore(current, 'prayerTimes') as Record<string, unknown>,
-          currentPrayerSettings,
-        ),
-        prayerDone: readClientStore(current, 'prayerDone') as Record<string, any>,
-        from: now,
-        to: now + 48 * 60 * 60 * 1000,
-      });
-
-      scheduleRef.current = schedule as any[];
-
-      // The alarms and the list must agree about when something will actually
-      // arrive, so both go through `desiredAlarms`, which applies quiet hours,
-      // and both skip anything already dealt with on any device.
-      const marks = notifyStateRef.current;
-      const plan = await syncAlarms(
-        desiredAlarms(schedule as any, marks, {
-          now,
-          // THIS PHONE'S rules, which are the shared ones unless sharing is off.
-        settings: resolveNotificationSettings({
-          shared: (currentShared as any).notifications,
-          local: notificationsLocalRef.current,
-          share: (currentShared as any).shareNotificationSettings !== false,
-        }),
-        }),
-        { now, handledKeys: handledKeys(marks, now) },
+      // Shared with the background sync task, so both arm identical alarms.
+      const { schedule, armed } = await replanPhoneAlarms(
+        current, notificationsLocalRef.current, notifyStateRef.current,
       );
+      scheduleRef.current = schedule;
       setAlarmSummary(
-        plan.keep.length + plan.schedule.length === 0
+        armed === 0
           ? 'Nothing to remind you about yet'
-          : `${plan.keep.length + plan.schedule.length} reminders armed on this phone`,
+          : `${armed} reminders armed on this phone`,
       );
     } catch {
       // Alarm planning must never take the app down; the next sync retries it.
@@ -912,6 +851,18 @@ export function PlannerProvider({ children }: { children: React.ReactNode }) {
     const sub = AppState.addEventListener('change', handler);
     return () => sub.remove();
   }, [syncNow, replanAlarms, statePersister, alarmPlanner]);
+
+  // While the app is alive, the background task syncs THROUGH it rather than
+  // opening its own copy of the database: two copies syncing side by side
+  // would each hold a different idea of the data.
+  useEffect(() => {
+    setForegroundSyncer(async () => {
+      await syncNow();
+      await alarmPlanner.flush();
+      await statePersister.flush();
+    });
+    return () => setForegroundSyncer(null);
+  }, [syncNow, alarmPlanner, statePersister]);
 
   // ── Editing ──
   const persistEdit = useCallback(async (next: ClientData, previous: ClientData) => {

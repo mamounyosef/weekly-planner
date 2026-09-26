@@ -5,6 +5,7 @@ import Home from '@/pages/home';
 import { AnimatePresence, motion } from 'framer-motion';
 import { lazy, Suspense, useEffect } from 'react';
 import { useViewport } from '@/hooks/use-mobile';
+import { TitleBar } from '@/components/TitleBar';
 
 // Split out of the main bundle. The calendar is what every launch shows first,
 // and it was waiting on the settings screen and the side widget to download,
@@ -116,7 +117,8 @@ function Router() {
             animate={{ opacity: 1, transform: 'translate3d(0, 0px, 0)' }}
             exit={{ opacity: 0, transform: 'translate3d(0, 4px, 0)' }}
             transition={{ duration: 0.10, ease: [0.16, 1, 0.3, 1] }}
-            className="fixed inset-0 z-[100] overflow-y-auto overscroll-contain bg-background gpu-layer"
+            className="fixed inset-x-0 bottom-0 z-[100] overflow-y-auto overscroll-contain bg-background gpu-layer"
+            style={{ top: 'var(--titlebar-h, 0px)' }}
           >
             <Suspense fallback={null}>
               <Settings />
@@ -183,6 +185,7 @@ function App() {
           <AuthenticatedApp />
         </WouterRouter>
         <Toaster />
+        <TitleBar />
       </AuthProvider>
     </TooltipProvider>
   );

@@ -42,7 +42,8 @@
           "defaultChannel": "reminders"
         }
       ],
-      "./plugins/with-release-signing"
+      "./plugins/with-release-signing",
+      "expo-background-task"
     ],
     "updates": {
       "enabled": true,
@@ -50,7 +51,7 @@
       "fallbackToCacheTimeout": 0,
       "url": "https://mamoun.tail27d0a5.ts.net/api/ota/manifest"
     },
-    "runtimeVersion": "1.0.0",
+    "runtimeVersion": "1.1.0",
     "extra": {
       "plannerServerUrl": "https://mamoun.tail27d0a5.ts.net"
     }

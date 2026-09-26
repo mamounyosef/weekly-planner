@@ -1,8 +1,14 @@
-import { applyTypedDayTotals, dedupeFocusHistory, focusSessionId } from './focusStats';
+import {
+  applyTypedDayTotals, createDayAdjustment, dedupeFocusHistory, focusSessionId,
+  isDayAdjustment, isTypedDayTotal, tallyFocusDays, type FocusDayTally,
+} from './focusStats';
 
 // Re-exported so the two pages take a session's identity from the module they
 // already use for everything else about a session.
-export { focusSessionId, applyTypedDayTotals };
+export {
+  focusSessionId, applyTypedDayTotals, createDayAdjustment, isDayAdjustment,
+  isTypedDayTotal, tallyFocusDays, type FocusDayTally,
+};
 
 export interface FocusSession {
   id: string;
@@ -10,6 +16,8 @@ export interface FocusSession {
   endedAt: string;
   durationSeconds: number;
   plannedSeconds: number;
+  /** See `FocusSessionRecord.creditedSeconds`: banked into a typed day total. */
+  creditedSeconds?: number;
 }
 
 export interface FocusTimerState {
@@ -346,6 +354,8 @@ export function recoveredSessionId(sessionStartedAt: string | null): string {
 }
 
 export function isCompletedFocusSession(session: FocusSession): boolean {
+  // A day-total override is not a session, however long the day was.
+  if (isDayAdjustment(session)) return false;
   return session.durationSeconds >= MIN_COMPLETED_SESSION_SECONDS;
 }
 
@@ -1373,7 +1383,10 @@ export function safeFocusSessions(value: unknown): FocusSession[] {
       typeof item.startedAt === 'string' &&
       typeof item.endedAt === 'string' &&
       typeof item.durationSeconds === 'number' &&
-      item.durationSeconds > 0
+      Number.isFinite(item.durationSeconds) &&
+      // A session of zero is noise, but a day total typed as zero is a real
+      // instruction ("this day was nothing") and must survive loading.
+      (item.durationSeconds > 0 || (item.durationSeconds === 0 && isDayAdjustment(item)))
     );
   });
   return dedupeFocusHistory(clean) as FocusSession[];
@@ -1534,9 +1547,19 @@ export function getFocusTimerUncreditedSeconds(timer: FocusTimerState, now = Dat
  * The duration to log when a session ends: whatever it ran, minus the part a
  * manual day edit already banked. Without this, editing today's total and then
  * finishing the session counted the pre-edit time twice.
+ *
+ * Only for "is there anything worth logging". The logged row itself keeps the
+ * FULL duration and carries the banked part as `creditedSeconds` (see
+ * `sessionCredit`), so a day edit never changes a session's own length.
  */
 export function loggableSessionSeconds(timer: FocusTimerState, rawSeconds: number): number {
   return Math.max(0, Math.floor(rawSeconds) - Math.max(0, timer.creditedSeconds ?? 0));
+}
+
+/** `creditedSeconds` for a row logging `duration` seconds of this timer's session. */
+export function sessionCredit(timer: FocusTimerState, duration: number): number | undefined {
+  const credited = Math.min(Math.max(0, Math.floor(timer.creditedSeconds ?? 0)), Math.max(0, Math.floor(duration)));
+  return credited > 0 ? credited : undefined;
 }
 
 /**
@@ -1592,10 +1615,15 @@ export function formatCountdown(seconds: number): string {
 }
 
 export function sumFocusSecondsForDay(sessions: FocusSession[], day: Date, dayStartHour = 0): number {
-  const key = dateKey(day);
-  return sessions
-    .filter(session => focusDayKey(session.endedAt, dayStartHour) === key)
-    .reduce((sum, session) => sum + session.durationSeconds, 0);
+  // Through the shared tally so a typed day total rules here exactly as it
+  // does on the Focus screen, instead of being added on top of the sessions.
+  return tallyFocusDays(sessions, dayStartHour).get(dateKey(day))?.seconds ?? 0;
+}
+
+/** Sessions completed on a focus-day. A typed day total never changes this. */
+export function countCompletedSessionsForDay(sessions: FocusSession[], day: Date, dayStartHour = 0): number {
+  return tallyFocusDays(sessions, dayStartHour, { countsAsSession: isCompletedFocusSession })
+    .get(dateKey(day))?.sessions ?? 0;
 }
 
 export function parseDurationInput(str: string): number {

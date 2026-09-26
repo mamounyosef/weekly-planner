@@ -12,6 +12,7 @@ const rootDir = path.resolve(__dirname, '..');
 const testFiles = [
   'src/lib/recurrence.test.ts',
   'src/lib/focusSessions.test.ts',
+  'src/lib/focusDayAdjust.test.ts',
   'src/lib/sensorFilter.test.ts',
   'src/lib/hardwareBridge.test.ts',
   'src/lib/hardwareController.test.ts',

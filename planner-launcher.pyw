@@ -12,12 +12,19 @@ Run with pythonw.exe so nothing appears on screen.
 
 import ctypes
 import ctypes.wintypes
-import json
 import os
 import subprocess
 import sys
 import time
 import urllib.request
+
+# Static imports to ensure PyInstaller bundles dependencies for widget-window.py
+import secrets
+import threading
+try:
+    import webview
+except ImportError:
+    pass
 
 def _root():
     """The repo folder, whether running as a .pyw or as the frozen .exe.
@@ -71,8 +78,6 @@ def _attach_stdio():
 _attach_stdio()
 
 URL = "http://127.0.0.1:5173"
-APP_URL = "http://localhost:5173"
-PROFILE = os.path.join(ROOT, ".chrome-profile")
 
 # Keeps every child process from flashing a console window.
 NO_WINDOW = 0x08000000
@@ -82,42 +87,6 @@ NO_WINDOW = 0x08000000
 SERVER_FLAGS = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
 
 SERVER_LOG = os.path.join(os.environ.get("TEMP", "."), "planner-server.log")
-
-# Chrome puts a window nobody is looking at to sleep: timers in a minimised or
-# fully-covered page are throttled to roughly once a minute. This is not a
-# background tab in a normal browser — it is the planner itself, and being asleep
-# means the clock stops, the desk controller stops publishing to the LCD, and a
-# pending countdown or away-timeout freezes until the window is clicked. These
-# flags only take effect because the app runs from its own --user-data-dir, and
-# so is a fresh Chrome instance rather than a window joining an existing one.
-AWAKE_FLAGS = [
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
-    # The above three predate "intensive throttling", which is the one that
-    # imposes the once-a-minute ceiling after five minutes hidden.
-    "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore,"
-    # Chrome downloads its on-device language model into whatever profile it
-    # is running from. In this one it is 4 GB of a repo folder, spent so a
-    # kiosk window showing a calendar can do nothing with it.
-    "OptimizationGuideOnDeviceModel,OptimizationGuideModelDownloading,"
-    "OptimizationHints,TextSafetyClassifier",
-    "--hide-crash-restore-bubble",
-    "--disable-session-crashed-bubble",
-    "--no-first-run",
-    "--no-default-browser-check",
-    # DO NOT add memory flags here. On 2026-09-20 --renderer-process-limit=1,
-    # --process-per-site and friends were tried: they saved about 30 MB out of
-    # 838 (noise) and left the app window rendering BLANK. The memory is in the
-    # Chrome browser process, the GPU process and the service worker, none of
-    # which those flags touch. It is not a trade worth making.
-]
-
-BROWSERS = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-]
 
 # Avast also quarantined C:\ProgramData\anaconda3\pythonw.exe and blocks that
 # path, so .venv-launcher holds our own windowless interpreter. It is a venv
@@ -143,17 +112,30 @@ def acquire_launcher_mutex():
 
 
 def find_planner_windows():
-    """Find all top-level desktop windows with title 'Daily Planner'."""
+    """Find the top-level 'Daily Planner' windows, INCLUDING a hidden one.
+
+    Closing the main window only hides it (see on_main_closing in
+    widget-window.py), so a hidden planner window is the normal "closed" state
+    and must still be found to be shown again. Hidden windows are only counted
+    when they are the WinForms form pywebview creates, so an unrelated hidden
+    window that happens to share the title is never picked up.
+    """
     hwnds = []
 
     def enum_proc(hwnd, lparam):
-        if user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+        if user32.IsWindow(hwnd):
             length = user32.GetWindowTextLengthW(hwnd)
             if length > 0:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buff, length + 1)
                 if buff.value == "Daily Planner":
-                    hwnds.append(hwnd)
+                    if user32.IsWindowVisible(hwnd):
+                        hwnds.append(hwnd)
+                    else:
+                        cls = ctypes.create_unicode_buffer(256)
+                        user32.GetClassNameW(hwnd, cls, 256)
+                        if cls.value.startswith("WindowsForms"):
+                            hwnds.append(hwnd)
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
@@ -178,6 +160,14 @@ def bring_window_to_front(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
         else:
             user32.ShowWindow(hwnd, SW_SHOW)
+            # WebView2 can come back blank white after its host window was
+            # hidden; a one-pixel size nudge forces it to lay out and redraw.
+            rect = ctypes.wintypes.RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                w, h = rect.right - rect.left, rect.bottom - rect.top
+                flags = 0x0002 | 0x0004 | 0x0010  # NOMOVE | NOZORDER | NOACTIVATE
+                user32.SetWindowPos(hwnd, 0, 0, 0, w, h + 1, flags)
+                user32.SetWindowPos(hwnd, 0, 0, 0, w, h, flags)
 
         fore_hwnd = user32.GetForegroundWindow()
         fore_thread = user32.GetWindowThreadProcessId(fore_hwnd, None) if fore_hwnd else 0
@@ -206,55 +196,6 @@ def close_excess_windows(hwnds):
                 pass
 
 
-def sanitize_chrome_profile(profile_path):
-    """Clean up crashed session flags and stale session files so Chrome doesn't
-    restore the previous session in addition to opening the --app URL."""
-    try:
-        default_dir = os.path.join(profile_path, "Default")
-        pref_path = os.path.join(default_dir, "Preferences")
-        if os.path.exists(pref_path):
-            try:
-                with open(pref_path, "r", encoding="utf-8-sig") as f:
-                    data = json.load(f)
-
-                modified = False
-                if not isinstance(data.get("profile"), dict):
-                    data["profile"] = {}
-                
-                if data["profile"].get("exit_type") != "Normal":
-                    data["profile"]["exit_type"] = "Normal"
-                    modified = True
-                if data["profile"].get("exited_cleanly") is not True:
-                    data["profile"]["exited_cleanly"] = True
-                    modified = True
-
-                if not isinstance(data.get("session"), dict):
-                    data["session"] = {}
-
-                if data["session"].get("restore_on_startup") != 1:
-                    data["session"]["restore_on_startup"] = 1
-                    modified = True
-
-                if modified:
-                    with open(pref_path, "w", encoding="utf-8") as f:
-                        json.dump(data, f)
-            except Exception as e:
-                print("Failed to update preferences:", e)
-
-        # Clear stale Sessions files so Chrome doesn't revive previous session windows
-        sessions_dir = os.path.join(default_dir, "Sessions")
-        if os.path.exists(sessions_dir):
-            for fname in os.listdir(sessions_dir):
-                fpath = os.path.join(sessions_dir, fname)
-                try:
-                    if os.path.isfile(fpath):
-                        os.remove(fpath)
-                except Exception:
-                    pass
-    except Exception as e:
-        print("Failed to sanitize chrome profile:", e)
-
-
 def pythonw():
     """The interpreter that runs the widget and the focus hotkey.
 
@@ -280,7 +221,7 @@ def pythonw():
     # Kept second so the base install stays the primary path either way.
     candidates.append(os.path.join(ROOT, ".venv-launcher", "Scripts", "python.exe"))
     # Not when frozen: sys.executable is then the launcher .exe itself, which
-    # would re-run the launcher instead of the widget.
+    # would re-run the launcher instead of the hotkey or the toast handler.
     if not getattr(sys, "frozen", False):
         candidates.append(sys.executable)
     for exe in candidates:
@@ -417,23 +358,29 @@ def main():
 
     wait_for_server()
 
-    # Check if a Daily Planner window is already open (e.g. from Windows App Restart)
+    # A widget started on its own by the server already hosts a (hidden) main
+    # window; show that one instead of opening a second pair.
     existing_windows = find_planner_windows()
     if existing_windows:
         bring_window_to_front(existing_windows[0])
         close_excess_windows(existing_windows)
-    else:
-        sanitize_chrome_profile(PROFILE)
-        for exe in BROWSERS:
-            if os.path.exists(exe):
-                spawn([exe, "--app=" + APP_URL, "--user-data-dir=" + PROFILE] + AWAKE_FLAGS)
-                break
-        else:
-            os.startfile(APP_URL)
 
+    # Spawn the hotkey process using local python (no window, no taskbar icon)
     py = pythonw()
-    spawn([py, os.path.join(ROOT, "widget-window.py")])
     spawn([py, os.path.join(ROOT, "focus-hotkey.py")])
+
+    if existing_windows:
+        return
+
+    # The main window and the widget both run in THIS process, on one WebView2
+    # environment (they used to be a Chrome window plus a separate widget
+    # process), so they share one taskbar group and one set of browser processes.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("widget_window", os.path.join(ROOT, "widget-window.py"))
+    widget_module = importlib.util.module_from_spec(spec)
+    sys.modules["widget_window"] = widget_module
+    spec.loader.exec_module(widget_module)
+    widget_module.run_windows()
 
 
 if __name__ == "__main__":

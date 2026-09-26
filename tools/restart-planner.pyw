@@ -11,8 +11,8 @@ shutting down its own process tree mid-request, and nothing would be left to
 start it up again.
 
 ORDER MATTERS
-  1. Close the windows first, gracefully, so Chrome writes a clean session and
-     does not offer to restore tabs on the way back up.
+  1. Close the windows first, gracefully, so WebView2 flushes its profile
+     (login cookie, storage) to disk before anything is killed.
   2. Then the server -- by pid, NEVER as a tree. This script is spawned BY the
      server, so it is inside that tree: `taskkill /T` killed the killer, the
      server stayed down and nothing came back. Its wrapper processes exit on
@@ -157,6 +157,30 @@ def kill_helpers():
             run(["taskkill", "/PID", pid, "/T", "/F"])
 
 
+def kill_window_host():
+    """The launcher process, which now hosts both windows itself.
+
+    Closing the windows normally ends it (closing the widget while the main
+    window is hidden quits the app). If it is still alive it would keep holding
+    the launcher mutex and the relaunch would do nothing, so it goes by pid.
+    NO /T: the dev server is its child, and this script is the server's child.
+    """
+    out = run([
+        "powershell", "-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process "
+        "| Where-Object { $_.Name -eq 'Daily Planner.exe' "
+        "-or $_.CommandLine -like '*planner-launcher.pyw*' } "
+        "| ForEach-Object { $_.ProcessId }",
+    ])
+    if not out or not out.stdout:
+        return
+    for line in out.stdout.decode("utf-8", "ignore").splitlines():
+        pid = line.strip()
+        if pid.isdigit() and int(pid) != os.getpid():
+            log(f"killing window host {pid}")
+            run(["taskkill", "/PID", pid, "/F"])
+
+
 def own_process_chain():
     """This process and every ancestor of it, as strings.
 
@@ -246,6 +270,7 @@ def main():
 
     close_windows()
     kill_helpers()
+    kill_window_host()
     freed = stop_server()
     log(f"port free before relaunch: {freed}")
 

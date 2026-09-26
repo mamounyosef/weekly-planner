@@ -30,18 +30,32 @@ if (-not (Test-Path $entry))  { throw "missing $entry" }
 $work = Join-Path $env:TEMP 'planner-exe-build'
 $distDir = Join-Path $work 'dist'
 
+$webviewLib = & $python -c "import os, webview; print(os.path.join(os.path.dirname(webview.__file__), 'lib'))"
+if (-not $webviewLib) {
+    throw "Could not find webview lib folder."
+}
+$clrLoaderDir = & $python -c "import os, clr_loader; print(os.path.dirname(clr_loader.__file__))"
+if (-not $clrLoaderDir) {
+    throw "Could not find clr_loader folder."
+}
+
 $pyiArgs = @(
   '-m', 'PyInstaller',
   '--onefile',
-  # No console window, ever. This is the whole reason the launcher is a .pyw.
   '--windowed',
   '--name', $name,
+  '--icon', $icon,
   '--distpath', $distDir,
   '--workpath', (Join-Path $work 'build'),
   '--specpath', $work,
+  '--add-binary', "$webviewLib\*;.",
+  '--add-binary', "$clrLoaderDir\ffi\dlls\amd64\ClrLoader.dll;clr_loader\ffi\dlls\amd64",
+  '--add-binary', "$clrLoaderDir\ffi\dlls\x86\ClrLoader.dll;clr_loader\ffi\dlls\x86",
+  '--collect-all', 'clr_loader',
+  '--collect-all', 'pythonnet',
+  '--collect-all', 'webview',
   '--noconfirm'
 )
-if (Test-Path $icon) { $pyiArgs += @('--icon', $icon) }
 $pyiArgs += $entry
 
 Write-Output "Building '$name.exe' ..."

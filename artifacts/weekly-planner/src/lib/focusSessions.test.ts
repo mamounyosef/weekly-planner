@@ -558,14 +558,25 @@ console.log('\n--- LAYER D: EXHAUSTIVE SCENARIO MATRIX ---');
 {
   const d1 = new Date(2026, 7, 17, 12, 0, 0);
   const d2 = new Date(2026, 7, 18, 12, 0, 0);
+  const real = (id: string, start: Date, seconds: number): FocusSession => ({
+    id, startedAt: start.toISOString(),
+    endedAt: new Date(start.getTime() + seconds * 1000).toISOString(),
+    durationSeconds: seconds, plannedSeconds: seconds,
+  });
   const sampleSessions: FocusSession[] = [
-    createManualFocusSession('2026-08-17', 3600, 0),
-    createManualFocusSession('2026-08-17', 1800, 0),
+    real('session-a', new Date(2026, 7, 17, 9, 0, 0), 3600),
+    real('session-b', new Date(2026, 7, 17, 14, 0, 0), 1800),
     createManualFocusSession('2026-08-18', 2400, 0),
   ];
 
   assertEqual(sumFocusSecondsForDay(sampleSessions, d1, 0), 5400, 'day 1 total is 5400s (1.5h)');
   assertEqual(sumFocusSecondsForDay(sampleSessions, d2, 0), 2400, 'day 2 total is 2400s (40m)');
+  // Two typed totals for one day: the newer one IS the day, never their sum.
+  const typedTwice = [
+    { ...createManualFocusSession('2026-08-17', 3600, 0), id: 'manual-2026-08-17-1000-3600' },
+    { ...createManualFocusSession('2026-08-17', 1800, 0), id: 'manual-2026-08-17-2000-1800' },
+  ];
+  assertEqual(sumFocusSecondsForDay(typedTwice, d1, 0), 1800, 'newest typed total wins, not the sum');
 }
 
 // --- D.10: Cross-window chime claim coordination & cue keys ---

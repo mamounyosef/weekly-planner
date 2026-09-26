@@ -1,12 +1,24 @@
 # Registers the scheduled task that keeps the public link alive.
 # Idempotent: run it again to update the task after editing the watchdog.
-# Needs no admin: the task runs as the logged-on user, like the planner itself.
+# Registering an elevated task needs admin, so this re-launches itself elevated
+# (one UAC prompt). The task still runs as the logged-on user.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\install-link-watchdog.ps1
 #
 # Remove with:  schtasks /delete /tn "Daily Planner Link Watchdog" /f
 
 $ErrorActionPreference = 'Stop'
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Start-Process powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    $t = Get-ScheduledTask -TaskName 'Daily Planner Link Watchdog' -ErrorAction SilentlyContinue
+    if (-not $t -or $t.Principal.RunLevel -ne 'Highest') { throw 'elevated registration did not complete' }
+    Write-Output "Registered 'Daily Planner Link Watchdog' (elevated, every 5 minutes, and at logon)."
+    return
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $root 'tools\link-watchdog.pyw'
@@ -63,7 +75,11 @@ $xml = @"
     <Principal id="Author">
       <UserId>$env:USERDOMAIN\$env:USERNAME</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
+      <!-- Elevated, because the last repair rung restarts the Tailscale
+           service, and that is the ONLY fix for an unpublished public DNS
+           record. Unelevated, the rung silently failed and the link stayed
+           down until someone restarted it by hand (2026-09-26). -->
+      <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
   <Settings>

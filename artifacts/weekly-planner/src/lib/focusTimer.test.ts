@@ -532,16 +532,23 @@ function main() {
     assert.equal(focusUncreditedSeconds(credited.state, start + 25 * MIN), 15 * 60,
       'only the time run since the edit');
 
-    // Stopping logs the tail only, and the record starts where the tail did.
+    // Stopping logs the WHOLE session (a day edit never changes how long a
+    // session was), and carries the banked part so the day total can skip it.
     const out = reduceFocusTimer(credited.state, { kind: 'stop' }, start + 30 * MIN);
-    assert.equal(out.session!.durationSeconds, 20 * 60, 'the banked ten minutes are not logged twice');
+    assert.equal(out.session!.durationSeconds, 30 * 60, 'the session keeps its full length');
+    assert.equal(out.session!.creditedSeconds, 10 * 60, 'the banked ten minutes ride along, not logged twice');
     assert.equal(out.session!.endedAt, iso(start + 30 * MIN));
-    assert.equal(out.session!.startedAt, iso(start + 10 * MIN), 'the tail, not the whole session');
+    assert.equal(out.session!.startedAt, iso(start), 'from the real start');
     assert.equal(out.state.creditedSeconds, 0, 'and the next session starts clean');
 
     // Auto-completion obeys the same rule.
     const auto = reduceFocusTimer(credited.state, { kind: 'settle' }, start + 3 * HOUR);
-    assert.equal(auto.session!.durationSeconds, 3600 - 600);
+    assert.equal(auto.session!.durationSeconds, 3600);
+    assert.equal(auto.session!.creditedSeconds, 600);
+
+    // A session with nothing banked carries no credit field at all.
+    const plain = reduceFocusTimer(live, { kind: 'stop' }, start + 30 * MIN);
+    assert.equal(plain.session!.creditedSeconds, undefined);
 
     // Crediting the whole session leaves nothing to log at all.
     const all = reduceFocusTimer(live, { kind: 'credit', seconds: 30 * 60 }, start + 30 * MIN);

@@ -47,6 +47,9 @@ import {
   focusTimerTransitionKey,
   safeFocusSessions,
   sumFocusSecondsForDay,
+  countCompletedSessionsForDay,
+  sessionCredit,
+  tallyFocusDays,
   uid,
   playFocusChime,
   primeFocusAudio,
@@ -681,7 +684,12 @@ export default function Widget() {
       ? Math.max(0, focusSessionTruth(focusTimer, lastBeatRef.current, nowTick).seconds
           - Math.max(0, focusTimer.creditedSeconds ?? 0))
       : 0);
-  const todayFocusSessions = focusSessions.filter(session => focusDayKey(session.endedAt, focusDayStartHour) === focusTodayKey && isCompletedFocusSession(session)).length;
+  // Shared tally: a typed day total never changes how many sessions there were.
+  // Memoised: this component re-renders every second for the clock.
+  const { todayFocusSessions, todayFocusEdited } = useMemo(() => ({
+    todayFocusSessions: countCompletedSessionsForDay(focusSessions, new Date(`${focusTodayKey}T00:00:00`), focusDayStartHour),
+    todayFocusEdited: tallyFocusDays(focusSessions, focusDayStartHour).get(focusTodayKey)?.adjusted ?? false,
+  }), [focusSessions, focusDayStartHour, focusTodayKey]);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
 
@@ -851,6 +859,7 @@ export default function Widget() {
     if (!container || slots.length === 0) return;
     
     let attempts = 0;
+    let frameId = 0;
     const scrollInitial = () => {
       if (container.clientHeight > 0) {
         if (isTrackingLive.current) {
@@ -858,10 +867,14 @@ export default function Widget() {
         }
       } else if (attempts < 10) {
         attempts++;
-        requestAnimationFrame(scrollInitial);
+        frameId = requestAnimationFrame(scrollInitial);
       }
     };
-    requestAnimationFrame(scrollInitial);
+    frameId = requestAnimationFrame(scrollInitial);
+    // Cancelled on every re-run. A page the browser treats as hidden runs no
+    // frames at all, and un-cancelled requests from each re-render then queued
+    // up forever, each holding this render's closures (a ~1 GB/day leak).
+    return () => cancelAnimationFrame(frameId);
   }, [slots, dayStartH, interval, centerScrollOnLive]);
 
   const scrollToLive = useCallback(() => {
@@ -953,18 +966,20 @@ export default function Widget() {
   }, []);
 
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false, opts?: { endedAt?: Date; id?: string }) => {
-    // Seconds already banked by a manual day edit are logged; don't log them twice.
-    const credited = Math.max(0, focusTimer.creditedSeconds ?? 0);
-    const duration = loggableSessionSeconds(focusTimer, durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
-    if (duration <= 0) {
+    // Full length on the row; the part a day-total edit already banked rides
+    // along as `creditedSeconds` (same rule as the main window).
+    const ran = Math.max(0, Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer)));
+    if (loggableSessionSeconds(focusTimer, ran) <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
     }
+    const duration = ran;
+    const creditedSeconds = sessionCredit(focusTimer, duration);
 
     // `opts.endedAt` is for a session recovered after the machine was switched
     // off: it ended when the PC did, not when we noticed on the next launch.
     const endedAt = opts?.endedAt ?? new Date();
-    const startedAt = focusTimer.sessionStartedAt && credited === 0
+    const startedAt = focusTimer.sessionStartedAt
       ? new Date(focusTimer.sessionStartedAt)
       : new Date(endedAt.getTime() - duration * 1000);
 
@@ -982,6 +997,7 @@ export default function Widget() {
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
       plannedSeconds: focusTimer.plannedSeconds,
+      ...(creditedSeconds ? { creditedSeconds } : {}),
     };
 
     setFocusSessions(prev => {
@@ -1564,7 +1580,7 @@ export default function Widget() {
               <div className="min-w-0">
                 <div className="text-[11px] font-bold uppercase tracking-widest" style={{ color: menuSub }}>Focus Session</div>
                 <div className="text-[10px] tabular-nums truncate" style={{ color: menuSub }}>
-                  Today {formatFocusDuration(todayFocusSeconds)} - {todayFocusSessions} done
+                  Today {formatFocusDuration(todayFocusSeconds)}{todayFocusEdited ? ' (edited)' : ''} - {todayFocusSessions} done
                 </div>
               </div>
             </div>

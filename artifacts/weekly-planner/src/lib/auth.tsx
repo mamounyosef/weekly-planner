@@ -31,6 +31,12 @@ function widgetPairingId(): string | null {
 
 const AUTH_USER_STORAGE_KEY = 'planner_auth_user_cache';
 
+function sameUser(a: AuthUser | null, b: AuthUser | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.username === b.username && a.name === b.name;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const pairingId = widgetPairingId();
   const [user, setUser] = useState<AuthUser | null>(() => {
@@ -101,7 +107,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // back to a regular browser cookie here would let a stale WebView session
       // outlive the main desktop app's selected account.
       if (pairingId) {
-        setUser(await claimWidgetSession());
+        // Same identity -> keep the SAME object. A fresh object on every check
+        // re-rendered the entire widget every poll, forever, for no change.
+        const claimed = await claimWidgetSession();
+        setUser(prev => sameUser(prev, claimed) ? prev : claimed);
         return;
       }
       const res = await fetch('/api/auth/me', {
@@ -135,11 +144,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // The widget may start before Chrome has completed its authenticated boot.
   // Keep its pairing registration alive and claim the session shortly after the
   // main window appears, without ever showing a password prompt.
+  // Fast only until paired. Once it has an account the poll just notices a
+  // sign-out or account switch in the main window, which does not need to be
+  // noticed within two seconds.
+  const paired = !!user;
   useEffect(() => {
     if (!pairingId) return;
-    const id = window.setInterval(() => { void checkAuth(); }, 2_000);
+    const id = window.setInterval(() => { void checkAuth(); }, paired ? 15_000 : 2_000);
     return () => window.clearInterval(id);
-  }, [checkAuth, pairingId]);
+  }, [checkAuth, pairingId, paired]);
 
   // Do not flash an unnecessary username/password form while the two desktop
   // windows are starting at the same time. If the main app genuinely is not

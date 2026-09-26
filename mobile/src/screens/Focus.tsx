@@ -47,6 +47,8 @@ import {
   focusDayKey,
   summariseFocus,
   computeAllTimeStreaks,
+  isDayAdjustment,
+  tallyFocusDays,
   type FocusSessionRecord,
 } from '../lib/focusStats';
 import {
@@ -1045,11 +1047,18 @@ function DayDetail({
 }) {
   const p = useTheme();
   
+  // A typed day total (`adjust-`) is not a session: it is never listed, only
+  // honoured by the total. Every session keeps its own length.
   const daySessions = sessions
-    .filter(s => s && focusDayKey(s.endedAt ?? s.startedAt, dayStartHour) === date && s.durationSeconds >= 60)
+    .filter(s => s && !isDayAdjustment(s)
+      && focusDayKey(s.endedAt ?? s.startedAt, dayStartHour) === date && s.durationSeconds >= 60)
     .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
-    
-  const total = daySessions.reduce((sum, s) => sum + s.durationSeconds, 0);
+
+  // The same tally every other screen and the PC use, so a typed total rules.
+  const tally = tallyFocusDays(sessions, dayStartHour).get(date);
+  const total = tally?.seconds ?? 0;
+  const edited = tally?.adjusted ?? false;
+  const sessionsSum = daySessions.reduce((sum, s) => sum + s.durationSeconds, 0);
 
   const [editingTotal, setEditingTotal] = useState(false);
   const [totalMins, setTotalMins] = useState(Math.round(total / 60));
@@ -1097,7 +1106,12 @@ function DayDetail({
         </View>
       ) : (
         <Row style={{ justifyContent: 'space-between', marginBottom: space.lg, paddingBottom: space.sm, borderBottomWidth: 1, borderBottomColor: p.line }}>
-          <Text variant="bodyStrong">{describeDuration(total)}</Text>
+          <View>
+            <Text variant="bodyStrong">{describeDuration(total)}</Text>
+            {edited ? (
+              <Text variant="caption" tone="soft">Edited total, sessions add up to {describeDuration(sessionsSum)}</Text>
+            ) : null}
+          </View>
           <Pressable
         unstable_pressDelay={PRESS_DELAY}
       style={({ pressed }) => (pressed ? PRESSED : null)} onPress={() => { setTotalMins(Math.round(total / 60)); setEditingTotal(true); }}>

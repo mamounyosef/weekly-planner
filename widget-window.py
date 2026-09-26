@@ -45,7 +45,16 @@ os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = " ".join([
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion",
-])
+    # Any UI Automation client on the PC (Windows tools, window managers) turns
+    # on Chromium's accessibility tree, and its pending updates were measured
+    # piling up in the widget's memory without end. Nothing here needs it.
+    "--disable-renderer-accessibility",
+] + (
+    # Opt-in DevTools port for measuring memory in the real windows (heap
+    # snapshots over CDP). Off unless the variable is set; loopback only.
+    ["--remote-debugging-port=" + os.environ["PLANNER_WEBVIEW_DEBUG_PORT"]]
+    if os.environ.get("PLANNER_WEBVIEW_DEBUG_PORT", "").isdigit() else []
+))
 
 import webview
 import ctypes
@@ -58,17 +67,17 @@ _old_wndproc = None
 _new_wndproc = None
 _always_on_top_enabled = True
 
-# WebView2 and the Chrome-based main app have separate cookie stores. This is a
-# random pairing capability for this *window*, not an authentication token: the
-# local server will only attach it to an account after the signed-in main app
-# explicitly approves it. Keeping the real session out of this command line and
-# URL avoids duplicating credentials between the two browser engines.
-# Keeps any child process from flashing a console window. The browser is a
-# GUI app and shows none today, but every other spawn in this project carries
-# the flag and an exception is how a console flash gets reintroduced.
-NO_WINDOW = 0x08000000
-
+# A random pairing capability for the widget *window*, not an authentication
+# token: the local server only attaches it to an account after the signed-in
+# main app explicitly approves it. It predates the main window moving into
+# WebView2 (the two used to have separate cookie stores) and is kept because
+# the pairing flow still keys on it.
 WIDGET_PAIRING_ID = secrets.token_hex(32)
+
+# Both windows. Module-level because the Win32 helpers above and below reach
+# the widget through `window`; run_windows() assigns them.
+window = None
+main_window = None
 
 
 class MONITORINFO(ctypes.Structure):
@@ -299,6 +308,9 @@ user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
 user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
 user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
 
+user32.IsZoomed.argtypes = [ctypes.c_void_p]
+user32.IsZoomed.restype = ctypes.wintypes.BOOL
+
 
 
 VK_LBUTTON = 0x01
@@ -377,115 +389,9 @@ class Api:
         except Exception as e:
             print("Failed to move window relatively:", e)
     def open_browser(self):
-        # If the main app window is already open, bring it to the front rather than opening another copy
-        hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
-        hwnds = []
-        def enum_proc(hwnd, lparam):
-            if user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length > 0:
-                    buff = ctypes.create_unicode_buffer(length + 1)
-                    user32.GetWindowTextW(hwnd, buff, length + 1)
-                    if buff.value == 'Daily Planner':
-                        hwnds.append(hwnd)
-            return True
-        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-        if hdesk:
-            try:
-                user32.EnumDesktopWindows(hdesk, WNDENUMPROC(enum_proc), 0)
-            finally:
-                user32.CloseDesktop(hdesk)
-        else:
-            user32.EnumWindows(WNDENUMPROC(enum_proc), 0)
-
-        if hwnds:
-            SW_RESTORE = 9
-            SW_SHOW = 5
-            try:
-                main_hwnd = hwnds[0]
-                if user32.IsIconic(main_hwnd):
-                    user32.ShowWindow(main_hwnd, SW_RESTORE)
-                else:
-                    user32.ShowWindow(main_hwnd, SW_SHOW)
-                user32.BringWindowToTop(main_hwnd)
-                user32.SetForegroundWindow(main_hwnd)
-                if len(hwnds) > 1:
-                    for extra in hwnds[1:]:
-                        user32.PostMessageW(extra, 0x0010, 0, 0)
-                return
-            except Exception as e:
-                print("Failed to focus existing planner window:", e)
-
-        import os
-        import json
-        import subprocess
-        chrome_path1 = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-        chrome_path2 = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-        edge_path = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-        # This opens the main browser app. Keep it on its canonical hostname so
-        # Chrome reuses the persistent planner_session cookie from the launcher.
-        url = "http://localhost:5173"
-        user_data = r"D:\My Projects\weekly-planner\.chrome-profile"
-        awake_flags = [
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion,SessionRestore,"
-    # Chrome downloads its on-device language model into whatever profile it
-    # is running from. In this one it is 4 GB of a repo folder, spent so a
-    # kiosk window showing a calendar can do nothing with it.
-    "OptimizationGuideOnDeviceModel,OptimizationGuideModelDownloading,"
-    "OptimizationHints,TextSafetyClassifier",
-            "--hide-crash-restore-bubble",
-            "--disable-session-crashed-bubble",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ]
-
-        try:
-            default_dir = os.path.join(user_data, "Default")
-            pref_path = os.path.join(default_dir, "Preferences")
-            if os.path.exists(pref_path):
-                with open(pref_path, "r", encoding="utf-8-sig") as f:
-                    pref_data = json.load(f)
-                mod = False
-                if not isinstance(pref_data.get("profile"), dict):
-                    pref_data["profile"] = {}
-                if pref_data["profile"].get("exit_type") != "Normal":
-                    pref_data["profile"]["exit_type"] = "Normal"
-                    mod = True
-                if pref_data["profile"].get("exited_cleanly") is not True:
-                    pref_data["profile"]["exited_cleanly"] = True
-                    mod = True
-                if not isinstance(pref_data.get("session"), dict):
-                    pref_data["session"] = {}
-                if pref_data["session"].get("restore_on_startup") != 1:
-                    pref_data["session"]["restore_on_startup"] = 1
-                    mod = True
-                if mod:
-                    with open(pref_path, "w", encoding="utf-8") as f:
-                        json.dump(pref_data, f)
-            sessions_dir = os.path.join(default_dir, "Sessions")
-            if os.path.exists(sessions_dir):
-                for fname in os.listdir(sessions_dir):
-                    fpath = os.path.join(sessions_dir, fname)
-                    if os.path.isfile(fpath):
-                        try:
-                            os.remove(fpath)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        
-        if os.path.exists(chrome_path1):
-            subprocess.Popen([chrome_path1, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags, creationflags=NO_WINDOW)
-        elif os.path.exists(chrome_path2):
-            subprocess.Popen([chrome_path2, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags, creationflags=NO_WINDOW)
-        elif os.path.exists(edge_path):
-            subprocess.Popen([edge_path, f"--app={url}", f"--user-data-dir={user_data}"] + awake_flags, creationflags=NO_WINDOW)
-        else:
-            import webbrowser
-            webbrowser.open(url)
+        """Show the main planner window. It lives in this same process (see
+        run_windows), so there is nothing to launch: closing it only hid it."""
+        show_main_window()
 
     def set_always_on_top(self, on_top):
         global _always_on_top_enabled
@@ -609,6 +515,33 @@ def apply_taskbar_presence(hwnd):
     except Exception as e:
         print("Failed to force taskbar presence:", e)
 
+    refresh_webview_visibility()
+
+
+def refresh_webview_visibility():
+    """Tell WebView2 the widget is on screen again after the hide/show above.
+
+    THE LEAK THIS FIXES: the Win32 SW_HIDE left WebView2 believing the page was
+    hidden for good (document.visibilityState 'hidden'), and the SW_SHOW never
+    told it otherwise. A hidden page gets no animation frames, so every
+    requestAnimationFrame the widget asked for (about one a second) was queued
+    and never run, each holding its closures. That grew by roughly 1 GB a day
+    until the process was killed. Toggling the control's own Visible property
+    re-syncs the controller, and has to happen on the WinForms GUI thread.
+    """
+    try:
+        from System import Action
+        form = window.native
+
+        def toggle():
+            control = form.browser.webview
+            control.Visible = False
+            control.Visible = True
+
+        form.Invoke(Action(toggle))
+    except Exception as e:
+        print("Failed to refresh WebView2 visibility:", e)
+
     try:
         for size, which in ((16, ICON_SMALL), (32, ICON_BIG)):
             hicon = user32.LoadImageW(None, ICON_PATH, IMAGE_ICON, size, size, LR_LOADFROMFILE)
@@ -657,6 +590,165 @@ def on_shown():
     except Exception as e:
         print("Failed to apply native Win32 style:", e)
 
+# ── Main window: custom title bar ─────────────────────────────────────────────
+# The main window keeps its full native frame (WS_CAPTION + WS_THICKFRAME), so
+# Snap, Aero Shake, the maximize animation, the drop shadow and the side and
+# bottom resize edges all stay Windows' own. Only the caption strip is removed,
+# by claiming it as client area in WM_NCCALCSIZE. The page then draws its own
+# min/max/close buttons, and marks its toolbar `app-region: drag`, which
+# WebView2 turns into a real caption (drag, double-click to maximize, Win+Arrow).
+#
+# It only switches on after the page says it has drawn its controls
+# (MainApi.enable_custom_frame), so an error page or a page that failed to load
+# never leaves a window with no way to move or close it.
+
+class NCCALCSIZE_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ('rgrc', ctypes.wintypes.RECT * 3),
+        ('lppos', ctypes.c_void_p),
+    ]
+
+
+WM_NCCALCSIZE = 0x0083
+WM_CLOSE = 0x0010
+SW_MINIMIZE = 6
+SW_MAXIMIZE = 3
+SW_RESTORE = 9
+
+_main_custom_frame = False
+_main_old_wndproc = None
+_main_new_wndproc = None
+
+
+def _main_hwnd():
+    try:
+        return int(main_window.native.Handle.ToInt64())
+    except Exception:
+        return 0
+
+
+def main_wndproc(hwnd, msg, wparam, lparam):
+    if msg == WM_NCCALCSIZE and wparam and _main_custom_frame:
+        params = ctypes.cast(lparam, ctypes.POINTER(NCCALCSIZE_PARAMS)).contents
+        top_before = params.rgrc[0].top
+        left_before = params.rgrc[0].left
+        user32.CallWindowProcW(_main_old_wndproc, hwnd, msg, wparam, lparam)
+        # Undo only the top inset (caption + top border). A maximized window
+        # hangs its frame off the screen edges, so there the top has to keep the
+        # same inset as the sides or the toolbar would start above the monitor.
+        if user32.IsZoomed(hwnd):
+            params.rgrc[0].top = top_before + (params.rgrc[0].left - left_before)
+        else:
+            params.rgrc[0].top = top_before
+        return 0
+    return user32.CallWindowProcW(_main_old_wndproc, hwnd, msg, wparam, lparam)
+
+
+def _refresh_main_frame(hwnd):
+    SWP_FRAMECHANGED = 0x0020
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOZORDER = 0x0004
+    SWP_NOACTIVATE = 0x0010
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+
+
+def set_main_custom_frame(on):
+    global _main_custom_frame, _main_old_wndproc, _main_new_wndproc
+    try:
+        hwnd = _main_hwnd()
+        if not hwnd or bool(on) == _main_custom_frame:
+            return
+        if _main_new_wndproc is None:
+            _main_new_wndproc = WNDPROC(main_wndproc)
+            if IS_64BIT:
+                _main_old_wndproc = user32.GetWindowLongPtrW(hwnd, GWL_WNDPROC)
+                user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC, _main_new_wndproc)
+            else:
+                _main_old_wndproc = user32.GetWindowLongW(hwnd, GWL_WNDPROC)
+                user32.SetWindowLongW(hwnd, GWL_WNDPROC, _main_new_wndproc)
+        _main_custom_frame = bool(on)
+        _refresh_main_frame(hwnd)
+    except Exception as e:
+        print("Failed to switch the main window frame:", e)
+
+
+class MainApi:
+    """Window controls for the main window's own title bar (window.pywebview.api)."""
+
+    def enable_custom_frame(self):
+        set_main_custom_frame(True)
+        return self.window_state()
+
+    def window_state(self):
+        hwnd = _main_hwnd()
+        return {'custom': _main_custom_frame, 'maximized': bool(hwnd and user32.IsZoomed(hwnd))}
+
+    def minimize(self):
+        hwnd = _main_hwnd()
+        if hwnd:
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
+
+    def toggle_maximize(self):
+        hwnd = _main_hwnd()
+        if hwnd:
+            user32.ShowWindow(hwnd, SW_RESTORE if user32.IsZoomed(hwnd) else SW_MAXIMIZE)
+        return self.window_state()
+
+    def close(self):
+        # Exactly what the old X button did: WM_CLOSE, which on_main_closing
+        # turns into a hide while the widget is up.
+        hwnd = _main_hwnd()
+        if hwnd:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+
+
+def _check_main_frame_after_load():
+    """Put the native title bar back if the loaded page has no controls of its
+    own (the WebView2 error page while the server is down, for one)."""
+    if not _main_custom_frame:
+        return
+    try:
+        has_controls = main_window.evaluate_js(
+            "!!document.querySelector('[data-window-controls]')")
+    except Exception:
+        has_controls = False
+    if not has_controls:
+        set_main_custom_frame(False)
+
+
+def on_main_loaded():
+    detach_network_hooks(main_window)
+    # Give the page time to mount (and to call enable_custom_frame itself).
+    threading.Timer(4.0, _check_main_frame_after_load).start()
+
+
+def enable_webview_app_region():
+    """Let the main window's page use `app-region: drag` (WebView2 1.0.2420+).
+
+    The setting has to be on before the first navigation, and pywebview gives
+    no hook there, so wrap its ready handler: turn it on, then let pywebview
+    carry on and navigate as usual. Only the main window gets it; the widget
+    drags itself (see Api.start_drag)."""
+    try:
+        from webview.platforms.edgechromium import EdgeChrome
+    except Exception as e:
+        print("Could not load pywebview's WebView2 backend:", e)
+        return
+    original = EdgeChrome.on_webview_ready
+
+    def on_webview_ready(self, sender, args):
+        try:
+            if args.IsSuccess and self.pywebview_window is main_window:
+                sender.CoreWebView2.Settings.IsNonClientRegionSupportEnabled = True
+        except Exception as e:
+            print("Failed to enable app-region support:", e)
+        return original(self, sender, args)
+
+    EdgeChrome.on_webview_ready = on_webview_ready
+
+
 def already_running():
     """True if a widget window is already open — launching the app twice used to
     stack up duplicate widgets, each syncing and sounding independently."""
@@ -666,12 +758,127 @@ def already_running():
     return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
 
 
-if __name__ == '__main__':
+def detach_network_hooks(win):
+    """Stop pywebview from watching every request and response.
+
+    THE OTHER LEAK. pywebview always subscribes to WebView2's
+    WebResourceResponseReceived and WebResourceRequested (for its optional
+    request_sent / response_received events, which this app never uses).
+    Subscribing makes WebView2 turn on its DevTools network tracking, which keeps
+    a record of every response for as long as the page lives. The planner polls
+    the server several times a second, so that alone grew each window by about
+    2 MB every few minutes, forever. It also marshalled every request through
+    .NET into Python for nothing.
+
+    Runs on the WinForms GUI thread once the page has loaded (CoreWebView2
+    exists by then). Removing a handler pythonnet does not find is harmless.
+    """
+    try:
+        from System import Action
+        form = win.native
+        browser = form.browser
+
+        def detach():
+            core = browser.webview.CoreWebView2
+            if core is None:
+                return
+            try:
+                core.WebResourceResponseReceived -= browser.on_web_resource_response
+            except Exception as e:
+                print("Failed to detach response hook:", e)
+            try:
+                core.WebResourceRequested -= browser.on_web_resource_request
+            except Exception as e:
+                print("Failed to detach request hook:", e)
+            try:
+                from Microsoft.Web.WebView2.Core import CoreWebView2WebResourceContext
+                core.RemoveWebResourceRequestedFilter('*', CoreWebView2WebResourceContext.All)
+            except Exception as e:
+                print("Failed to remove request filter:", e)
+
+        form.Invoke(Action(detach))
+    except Exception as e:
+        print("Failed to detach WebView2 network hooks:", e)
+
+
+def show_main_window():
+    """Bring the main planner window back, from hidden or minimized."""
+    if main_window is None:
+        return
+    try:
+        main_window.show()
+        main_window.restore()
+        hwnd = int(main_window.native.Handle.ToInt64())
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    except Exception as e:
+        print("Failed to show main window:", e)
+
+
+def _main_is_hidden():
+    try:
+        hwnd = int(main_window.native.Handle.ToInt64())
+        return not user32.IsWindowVisible(hwnd)
+    except Exception:
+        return True
+
+
+def on_main_closing():
+    """Closing the main window HIDES it while the widget is still up.
+
+    Both windows live in one process, which holds the launcher mutex for as long
+    as it runs. A destroyed main window could then never come back: a toast
+    click starts a second launcher, which sees the mutex and can only focus an
+    EXISTING window. Hidden, the window is still there to be shown again (by the
+    widget's open button, a toast, or the Daily Planner shortcut). The closing
+    event runs on the GUI thread and waits for this handler, so the hide itself
+    has to happen off it.
+    """
+    if window is not None and window in webview.windows:
+        threading.Thread(target=main_window.hide, daemon=True).start()
+        return False
+    return True
+
+
+def on_widget_closing():
+    """Closing the widget while the main window is hidden quits the app.
+
+    Otherwise an invisible main window would keep the process (and its memory,
+    and the launcher mutex) alive with nothing on screen to close. This is also
+    what lets a restart finish: it posts WM_CLOSE to both windows, the main one
+    hides, and this then takes everything down so the relaunch is not blocked.
+    """
+    if main_window is not None and main_window in webview.windows and _main_is_hidden():
+        threading.Thread(target=main_window.destroy, daemon=True).start()
+    return True
+
+
+def run_windows(show_main=True):
+    """Open the main planner window and the widget in THIS process, both on one
+    WebView2 environment. `show_main=False` (the widget launched on its own by
+    the server) still creates the main window, hidden, so the widget's open
+    button has something to show."""
+    global window, main_window
     if already_running():
         import sys as _sys
         _sys.exit(0)
     api = Api()
-    # Create a standard window (not frameless), which we then border-strip in on_shown
+    enable_webview_app_region()
+
+    main_window = webview.create_window(
+        title="Daily Planner",
+        url='http://127.0.0.1:5173',
+        width=1280,
+        height=800,
+        frameless=False,
+        resizable=True,
+        hidden=not show_main,
+        js_api=MainApi(),
+    )
+    main_window.events.closing += on_main_closing
+    main_window.events.loaded += on_main_loaded
+
+    # Create the widget window (not frameless), which we then border-strip in on_shown
     window = webview.create_window(
         title="Today's Schedule",
         url=f'http://127.0.0.1:5173/widget?widgetSession={WIDGET_PAIRING_ID}',
@@ -684,6 +891,19 @@ if __name__ == '__main__':
     )
     # Bind events
     window.events.shown += on_shown
-    
-    # Start the webview window loop with custom application icon
-    webview.start(icon='D:\\My Projects\\weekly-planner\\app-icon.ico')
+    window.events.closing += on_widget_closing
+    window.events.loaded += lambda: detach_network_hooks(window)
+
+    # Start the webview window loop with custom application icon. A persistent
+    # profile (not private mode) keeps the login cookie across restarts.
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    webview.start(
+        icon=os.path.join(base_dir, 'app-icon.ico'),
+        private_mode=False,
+        storage_path=os.path.join(base_dir, '.webview-profile')
+    )
+
+if __name__ == '__main__':
+    # Run directly (the server's "open widget" route): the widget is what was
+    # asked for, so the main window starts hidden.
+    run_windows(show_main=False)

@@ -1,4 +1,7 @@
-import { type FocusSessionRecord, focusDayKey, dateRange, dateKey } from './focusStats';
+import {
+  type FocusSessionRecord, focusDayKey, dateRange, dateKey,
+  createDayAdjustment, isDayAdjustment, tallyFocusDays,
+} from './focusStats';
 
 export interface FocusGoalStats {
   currentStreak: number;
@@ -41,11 +44,11 @@ export function computeGoalStats(
   const totals = new Map<string, number>();
   const excludedSet = new Set(excludedDates);
 
-  for (const s of sessions) {
-    if (!s || typeof s.durationSeconds !== 'number' || Number.isNaN(s.durationSeconds) || s.durationSeconds < 0) continue;
-    const key = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
-    totals.set(key, (totals.get(key) ?? 0) + s.durationSeconds);
-  }
+  // Through the shared tally, so a typed day total REPLACES the day's sum
+  // instead of being added on top of the sessions it corrected.
+  const clean = (sessions ?? []).filter(s =>
+    s && typeof s.durationSeconds === 'number' && !Number.isNaN(s.durationSeconds) && s.durationSeconds >= 0);
+  for (const [key, t] of tallyFocusDays(clean, dayStartHour)) totals.set(key, t.seconds);
 
   const today = focusDayKey(now, dayStartHour);
   let earliest = today;
@@ -106,78 +109,35 @@ export interface FocusDayDelta {
 }
 
 /**
- * Adjusts a single day's total focus time.
- * Returns only the changes to make.
+ * Set a single day's TOTAL focus time, and nothing else.
+ *
+ * Every session stays exactly as it was, with its own length, and the day
+ * keeps its session count. The typed value is written as one `adjust-` day
+ * override, which is what the totals honour (see `tallyFocusDays`). This used
+ * to trim and delete sessions to make the numbers add up (and add a fake
+ * `adj-` session to make them bigger), so correcting a day destroyed the
+ * record of what was actually done on it. Same model as the PC.
+ *
+ * Returns only the changes to make: the new override, and the day's previous
+ * override (if any) to delete.
  */
 export function adjustDayTotal(
   sessions: readonly FocusSessionRecord[],
-  opts: { dateKeyVal: string; newTotalSeconds: number; dayStartHour?: number }
+  opts: { dateKeyVal: string; newTotalSeconds: number; dayStartHour?: number; now?: number }
 ): FocusDayDelta {
-  const { dateKeyVal, newTotalSeconds, dayStartHour = 0 } = opts;
+  const { dateKeyVal, newTotalSeconds, dayStartHour = 0, now = Date.now() } = opts;
   const want = Math.max(0, Math.floor(newTotalSeconds) || 0);
 
-  const daySessions: FocusSessionRecord[] = [];
-  let currentTotal = 0;
+  const current = tallyFocusDays(sessions ?? [], dayStartHour).get(dateKeyVal)?.seconds ?? 0;
+  if (want === current) return { mutated: [], deletedIds: [] };
 
-  for (const s of sessions) {
-    if (!s || typeof s.durationSeconds !== 'number' || Number.isNaN(s.durationSeconds) || s.durationSeconds < 0) continue;
-    const key = focusDayKey(s.endedAt ?? s.startedAt, dayStartHour);
-    if (key === dateKeyVal) {
-      daySessions.push(s);
-      currentTotal += s.durationSeconds;
-    }
-  }
-
-  if (want === currentTotal) return { mutated: [], deletedIds: [] };
-
-  if (want === 0) {
-    return { mutated: [], deletedIds: daySessions.map(s => s.id) };
-  }
-
-  daySessions.sort((a, b) => {
-    const ta = Date.parse(a.startedAt);
-    const tb = Date.parse(b.startedAt);
-    if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
-    return ta - tb;
-  });
-
-  const mutated: FocusSessionRecord[] = [];
-  const deletedIds: string[] = [];
-
-  if (want > currentTotal) {
-    const diff = want - currentTotal;
-    const last = daySessions.length > 0 ? daySessions[daySessions.length - 1] : null;
-    const anchor = last ? (last.endedAt ?? last.startedAt) : `${dateKeyVal}T12:00:00.000Z`;
-    mutated.push({
-      id: `adj-${dateKeyVal}-${want}-${diff}`,
-      startedAt: anchor,
-      endedAt: anchor,
-      durationSeconds: diff,
-      plannedSeconds: diff
-    });
-  } else {
-    let accumulated = 0;
-    for (const s of daySessions) {
-      if (accumulated >= want) {
-        deletedIds.push(s.id);
-        continue;
-      }
-      const space = want - accumulated;
-      if (s.durationSeconds <= space) {
-        accumulated += s.durationSeconds;
-      } else {
-        mutated.push({
-          ...s,
-          durationSeconds: space,
-          plannedSeconds: Math.min(s.plannedSeconds ?? space, space),
-          id: s.id
-        });
-        accumulated += space;
-      }
-    }
-  }
-
-  return { mutated, deletedIds };
+  const previous = (sessions ?? [])
+    .filter(s => isDayAdjustment(s) && s.id.startsWith(`adjust-${dateKeyVal}-`))
+    .map(s => s.id);
+  return {
+    mutated: [createDayAdjustment(dateKeyVal, want, dayStartHour, now)],
+    deletedIds: previous,
+  };
 }
 
 /**

@@ -3,6 +3,11 @@ import './src/lib/polyfills';
 
 import { registerRootComponent } from 'expo';
 
+// Defines the background sync task at module scope, which a headless wake-up
+// needs (see the file), then makes sure Android has it scheduled.
+import { registerBackgroundSync } from './src/background/backgroundSync';
+void registerBackgroundSync();
+
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

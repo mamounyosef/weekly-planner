@@ -84,7 +84,12 @@ import {
   claimFocusCompletion,
   autoSessionId,
   focusSessionId,
-  applyTypedDayTotals,
+  tallyFocusDays,
+  createDayAdjustment,
+  isDayAdjustment,
+  isTypedDayTotal,
+  sessionCredit,
+  MAX_MANUAL_DAY_SECONDS,
   dedupeFocusSessions,
   FOCUS_HEARTBEAT_INTERVAL_MS,
   MIN_RECOVERED_SESSION_SECONDS,
@@ -166,6 +171,7 @@ import {
 } from '@/lib/notifications';
 import { primeNotificationAudio, useNotifications } from '@/lib/notificationClient';
 import { NotificationBanner, NotificationBell, NotificationPanel } from '@/components/NotificationCenter';
+import { useDesktopFrame, TITLE_BAR_HEIGHT } from '@/lib/desktopFrame';
 import { NotifyEditor, type NotifyTheme } from '@/components/NotifyEditor';
 import {
   type Task,
@@ -1019,6 +1025,12 @@ export default function DailyPlanner() {
   // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
   // it's applied as CSS `zoom` on the root so layout reflows instead of blurring.
   const [appZoom, setAppZoom] = useState(1);
+  // PC window with its own title bar (components/TitleBar.tsx): it sits above
+  // this page, outside the zoomed root, so the page is that much shorter and
+  // fixed panels start below it. Divided by the zoom to stay the same on screen.
+  const desktopFrame = useDesktopFrame();
+  const titleBarH = desktopFrame.active ? TITLE_BAR_HEIGHT : 0;
+  const titleBarTop = titleBarH / appZoom;
   const [mobileContentZoom, setMobileContentZoom] = useState(1);
   const [mobileUiZoom, setMobileUiZoom] = useState(1);
   const [zoomDraft, setZoomDraft] = useState('100');
@@ -4152,16 +4164,38 @@ export default function DailyPlanner() {
   const focusLoggedByDay = useMemo(() => {
     const seconds = new Map<string, number>();
     const sessions = new Map<string, number>();
-    // The same two rules `summariseFocus` applies, because this screen buckets
-    // the history itself rather than going through it: collapse a session
-    // logged twice, and let a typed day total stand in for the day it corrected.
-    for (const s of applyTypedDayTotals(focusSessions, focusDayStartHour)) {
-      const k = focusDayKey(s.endedAt, focusDayStartHour);
-      seconds.set(k, (seconds.get(k) ?? 0) + s.durationSeconds);
-      if (isCompletedFocusSession(s)) sessions.set(k, (sessions.get(k) ?? 0) + 1);
+    const adjusted = new Map<string, number>();
+    // The shared tally: a typed day total rules the day's TOTAL and never its
+    // session count. `adjusted` holds the sessions' own sum for days whose
+    // total was typed, so the screen can say so beside it.
+    for (const [k, t] of tallyFocusDays(focusSessions, focusDayStartHour, {
+      countsAsSession: isCompletedFocusSession,
+    })) {
+      seconds.set(k, t.seconds);
+      sessions.set(k, t.sessions);
+      if (t.adjusted) adjusted.set(k, t.sessionSeconds);
     }
-    return { seconds, sessions };
+    return { seconds, sessions, adjusted };
   }, [focusSessions, focusDayStartHour]);
+
+  /**
+   * The small "edited" mark beside a day total that was typed in by hand. The
+   * sessions keep their own lengths, so the total and the sessions can differ;
+   * this says so instead of leaving the difference unexplained.
+   */
+  const focusAdjustedMark = (dayKey: string, size = 9) => {
+    const sessionSeconds = focusLoggedByDay.adjusted.get(dayKey);
+    if (sessionSeconds === undefined) return null;
+    return (
+      <span
+        className="inline-flex items-center align-middle ml-1 opacity-70"
+        title={`Total edited by hand. The sessions themselves add up to ${formatFocusDuration(sessionSeconds)}.`}
+        aria-label="Total edited by hand"
+      >
+        <Pencil size={size} />
+      </span>
+    );
+  };
 
   const focusLoggedWeek = useMemo(() => days.map(day => {
     const key = dateKey(day);
@@ -4213,16 +4247,18 @@ export default function DailyPlanner() {
   const focusAnalysis = useMemo(() => {
     const byDaySeconds = new Map<string, number>();
     const byDaySessions = new Map<string, number>();
-    // The same two rules `summariseFocus` applies, because this screen buckets
-    // the history itself rather than going through it: collapse a session
-    // logged twice, and let a typed day total stand in for the day it corrected.
-    const corrected = applyTypedDayTotals(focusSessions, focusDayStartHour);
-    for (const s of corrected) {
-      const k = focusDayKey(s.endedAt, focusDayStartHour);
-      byDaySeconds.set(k, (byDaySeconds.get(k) ?? 0) + s.durationSeconds);
-      if (isCompletedFocusSession(s)) byDaySessions.set(k, (byDaySessions.get(k) ?? 0) + 1);
+    const byDaySessionSeconds = new Map<string, number>();
+    // The shared tally: a typed day total rules the TOTAL, never the count.
+    for (const [k, t] of tallyFocusDays(focusSessions, focusDayStartHour, {
+      countsAsSession: isCompletedFocusSession,
+    })) {
+      byDaySeconds.set(k, t.seconds);
+      byDaySessions.set(k, t.sessions);
+      byDaySessionSeconds.set(k, t.sessionSeconds);
     }
-    const completedSessions = corrected.filter(isCompletedFocusSession);
+    // What the month/year summaries and streaks are handed: completed sessions,
+    // plus every typed day total so they apply the same corrections themselves.
+    const completedSessions = focusSessions.filter(s => isTypedDayTotal(s) || isCompletedFocusSession(s));
 
     // Week view — every day of the cursored week with its exact logged time.
     //
@@ -4326,10 +4362,17 @@ export default function DailyPlanner() {
     const allTimeSeconds = Array.from(byDaySeconds.entries())
       .filter(([k]) => !focusExcludedSet.has(k))
       .reduce((a, [, b]) => a + b, 0);
-    const nonExcludedCompletedSessions = completedSessions.filter(s => !focusExcludedSet.has(focusDayKey(s.endedAt, focusDayStartHour)));
-    const allTimeSessions = nonExcludedCompletedSessions.length;
+    // Counted and averaged over the sessions' OWN lengths: a typed day total is
+    // not a session and does not change how long any session was.
+    let allTimeSessions = 0;
+    let allTimeSessionSeconds = 0;
+    for (const [k, n] of byDaySessions) {
+      if (focusExcludedSet.has(k)) continue;
+      allTimeSessions += n;
+      allTimeSessionSeconds += byDaySessionSeconds.get(k) ?? 0;
+    }
     const avgSessionLength = allTimeSessions > 0
-      ? Math.floor(nonExcludedCompletedSessions.reduce((s, x) => s + x.durationSeconds, 0) / allTimeSessions)
+      ? Math.floor(allTimeSessionSeconds / allTimeSessions)
       : 0;
 
     return {
@@ -4848,18 +4891,20 @@ export default function DailyPlanner() {
       }
     }
 
+    // THE SESSIONS ARE NOT TOUCHED. This used to delete the day's sessions and
+    // put one typed row in their place, so correcting a day of eight sessions
+    // left it showing one. Now the typed value is a day-total override
+    // (`adjust-`): the total becomes exactly what was typed, while every
+    // session keeps its own length and the day keeps its session count.
+    // Typing 0 is an override of 0 too, never a deletion of the work.
     setFocusSessions(prev => {
-      const replaced = prev.filter(s => focusDayKey(s.endedAt, focusDayStartHour) === dateKeyVal);
-      const remaining = prev.filter(s => focusDayKey(s.endedAt, focusDayStartHour) !== dateKeyVal);
-      const updated = [...remaining];
-
-      if (manualDuration > 0) {
-        const newSession = createManualFocusSession(dateKeyVal, manualDuration, focusDayStartHour);
-        updated.push(newSession);
-      }
-
-      // The rows this edit REPLACES, named so the server drops them instead of
-      // handing them back on the next save from any other window.
+      // Only this day's previous override is replaced; the newest one rules
+      // anyway, so this is housekeeping rather than correctness.
+      const replaced = prev.filter(s => isDayAdjustment(s) && s.id.startsWith(`adjust-${dateKeyVal}-`));
+      const updated = [
+        ...prev.filter(s => !replaced.includes(s)),
+        createDayAdjustment(dateKeyVal, manualDuration, focusDayStartHour, Date.now(), MAX_MANUAL_DAY_SECONDS) as FocusSession,
+      ];
       persistFocusSessions(updated, { removedIds: replaced.map(s => s.id) });
       return updated;
     });
@@ -4978,17 +5023,21 @@ export default function DailyPlanner() {
   const completeFocusSession = useCallback((durationSeconds?: number, auto = false, opts?: { endedAt?: Date; id?: string }) => {
     // Time a manual day edit already banked has been logged once already — it
     // must not be logged again when the session it was taken from finishes.
-    const credited = Math.max(0, focusTimer.creditedSeconds ?? 0);
-    const duration = loggableSessionSeconds(focusTimer, durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer));
-    if (duration <= 0) {
+    // The row keeps the session's FULL length; the part a day-total edit
+    // already banked rides along as `creditedSeconds`, which only the day
+    // total subtracts. So a day edit never shortens a session.
+    const ran = Math.max(0, Math.floor(durationSeconds ?? getFocusTimerElapsedSeconds(focusTimer)));
+    if (loggableSessionSeconds(focusTimer, ran) <= 0) {
       setFocusTimer(prev => ({ ...DEFAULT_FOCUS_TIMER, plannedSeconds: prev.plannedSeconds, lastPausedAt: new Date().toISOString() }));
       return;
     }
+    const duration = ran;
+    const creditedSeconds = sessionCredit(focusTimer, duration);
 
     // `opts.endedAt` is for a session recovered after the machine was switched
     // off: it ended when the PC did, not when we noticed on the next launch.
     const endedAt = opts?.endedAt ?? new Date();
-    const startedAt = focusTimer.sessionStartedAt && credited === 0
+    const startedAt = focusTimer.sessionStartedAt
       ? new Date(focusTimer.sessionStartedAt)
       : new Date(endedAt.getTime() - duration * 1000);
 
@@ -5006,6 +5055,7 @@ export default function DailyPlanner() {
       endedAt: endedAt.toISOString(),
       durationSeconds: duration,
       plannedSeconds: focusTimer.plannedSeconds,
+      ...(creditedSeconds ? { creditedSeconds } : {}),
     };
 
     setFocusSessions(prev => {
@@ -7669,8 +7719,8 @@ export default function DailyPlanner() {
         // dvh, not vh: on a phone `100vh` is the height the window WOULD have
         // with the URL bar hidden, so the last ~60px of the planner sits under
         // the browser chrome until you scroll. dvh tracks the real viewport.
-        height: isPhone ? '100dvh' : `${100 / appZoom}dvh`,
-        minHeight: isPhone ? '100dvh' : `${100 / appZoom}dvh`,
+        height: isPhone ? '100dvh' : `calc((100dvh - ${titleBarH}px) / ${appZoom})`,
+        minHeight: isPhone ? '100dvh' : `calc((100dvh - ${titleBarH}px) / ${appZoom})`,
         // Landscape notches eat into the sides; the ambient glow can still bleed
         // under them, but nothing interactive is allowed to.
         paddingLeft: 'var(--safe-left)',
@@ -8385,6 +8435,7 @@ export default function DailyPlanner() {
         onAcknowledge={notify.acknowledge}
         onComplete={notify.complete}
         onOpen={openNotificationTarget}
+        topInset={titleBarTop}
       />
       <NotificationPanel
         open={notifyPanelOpen}
@@ -8403,6 +8454,7 @@ export default function DailyPlanner() {
         onClearAll={notify.clearAll}
         onOpenItem={openNotificationTarget}
         highlightKey={notifyHighlight}
+        topInset={titleBarTop}
       />
 
       {/* ── Grid ────────────────────────────────────────────────────────── */}
@@ -8556,6 +8608,7 @@ export default function DailyPlanner() {
                         title={editable ? "Double-click to edit today's focus time" : undefined}
                       >
                         {value}
+                        {editable && focusAdjustedMark(todayFocusKey)}
                       </div>
                     )}
                   </div>
@@ -8662,6 +8715,7 @@ export default function DailyPlanner() {
                             title="Double-click to edit focus time"
                           >
                             {day.seconds > 0 ? formatFocusDuration(day.seconds) : '0m'}
+                            {focusAdjustedMark(day.key, 8)}
                           </span>
                         )}
                       </div>
@@ -11715,6 +11769,11 @@ export default function DailyPlanner() {
                         </div>
                         <div className="text-[10px] truncate" style={{ color: menuSub }}>
                           {sd.matches.length} session{sd.matches.length === 1 ? '' : 's'} · {formatFocusDuration(sd.totalSeconds)} focused
+                          {sd.adjustments.length > 0 && (
+                            <span title="The total was edited by hand. Each session keeps its own length.">
+                              {' '}(total edited, sessions add up to {formatFocusDuration(sd.realSeconds + sd.manualSeconds)})
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -12061,7 +12120,9 @@ export default function DailyPlanner() {
                               {isSameDay(g.date, nowDate) && <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: '#60a5fa' }}>Today</span>}
                             </span>
                             <span className="text-[11px] tabular-nums" style={{ color: menuSub }}>
-                              {formatFocusDuration(g.seconds)} · {g.sessions.length} session{g.sessions.length === 1 ? '' : 's'}
+                              {formatFocusDuration(g.seconds)}
+                              {g.adjusted && ` (edited, sessions ${formatFocusDuration(g.sessionSeconds)})`}
+                              {' · '}{g.sessions.length} session{g.sessions.length === 1 ? '' : 's'}
                             </span>
                           </div>
                           {[...g.sessions].reverse().map((m, idx) => card(m, idx === 0))}
@@ -12342,6 +12403,7 @@ export default function DailyPlanner() {
                               ) : (
                                 <>
                                   <span className={`font-semibold ${d.isExcluded ? 'line-through opacity-75' : ''}`}>{formatFocusDuration(d.seconds)}</span>
+                                  {focusAdjustedMark(d.key)}
                                   {d.sessions > 0 ? (
                                     <button
                                       onClick={(e) => {
@@ -12602,7 +12664,7 @@ export default function DailyPlanner() {
                                   onClick={e => e.stopPropagation()}
                                 />
                               ) : (
-                                <span>{secs > 0 ? formatFocusDuration(secs) : '0m'}</span>
+                                <span>{secs > 0 ? formatFocusDuration(secs) : '0m'}{focusAdjustedMark(key, isPhone ? 7 : 9)}</span>
                               )}
                             </span>
                             {isExcluded ? (
