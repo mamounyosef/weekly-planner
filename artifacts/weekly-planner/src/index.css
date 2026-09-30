@@ -650,3 +650,28 @@ html[data-titlebar] body {
   padding-top: var(--titlebar-h);
   overflow: hidden;
 }
+
+/* Horizontal rows (task lists, task filters): a slim scrollbar that only
+   shows its thumb while the pointer is over the row. Mouse devices only. */
+@media (hover: hover) and (pointer: fine) {
+  .hover-scrollbar-x::-webkit-scrollbar {
+    height: 5px;
+    width: 0;
+  }
+  .hover-scrollbar-x::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .hover-scrollbar-x::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border-radius: 10px;
+  }
+  .hover-scrollbar-x:hover::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.45);
+  }
+  .hover-scrollbar-x:hover::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.8);
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .hover-scrollbar-x { padding-bottom: 0.5rem !important; }
+}

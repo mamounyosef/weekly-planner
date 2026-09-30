@@ -79,3 +79,6 @@ test.js
 
 # WebView2 browser profile of the app windows (cookies, cache)
 .webview-profile/
+# Secrets (Ollama Cloud key for the planner agent)
+.env
+.env.*

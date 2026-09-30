@@ -23,6 +23,7 @@ import {
 } from '@/lib/taskLists';
 import { useReorder } from '@/lib/useReorder';
 import { useViewport } from '@/hooks/use-mobile';
+import { useWheelScrollX } from '@/lib/useWheelScrollX';
 
 /** What the panel's composer hands back; home.tsx turns it into a real Task. */
 export interface NewTaskInput {
@@ -515,6 +516,9 @@ function TasksPanel({
     axis: 'x',
     ignore: '[data-no-drag]',
   });
+  const filterRowRef = useRef<HTMLDivElement | null>(null);
+  useWheelScrollX(rail.containerRef);
+  useWheelScrollX(filterRowRef);
 
   /** Drop a dragged task onto a list pill. */
   const dropTaskOnList = useCallback((occId: string, listId: string) => {
@@ -851,7 +855,7 @@ function TasksPanel({
         <div className="flex-shrink-0 relative border-b" style={{ borderColor: theme.surfaceBdr }}>
           <div
             ref={rail.containerRef}
-            className="flex gap-1.5 px-3 py-2 overflow-x-auto overflow-y-hidden no-scrollbar touch-scroll-x"
+            className="flex gap-1.5 px-3 pt-2 pb-1 overflow-x-auto overflow-y-hidden hover-scrollbar-x touch-scroll-x"
             style={{ background: theme.surfaceBg }}
           >
             <ListPill
@@ -923,7 +927,8 @@ function TasksPanel({
 
         {/* Filter chips */}
         <div
-          className="flex-shrink-0 px-3 py-2 flex gap-1.5 border-b overflow-x-auto overflow-y-hidden no-scrollbar touch-scroll-x"
+          ref={filterRowRef}
+          className="flex-shrink-0 px-3 pt-2 pb-1 flex gap-1.5 border-b overflow-x-auto overflow-y-hidden hover-scrollbar-x touch-scroll-x"
           style={{ borderColor: theme.surfaceBdr, background: theme.menuBg }}
         >
           <FilterChip

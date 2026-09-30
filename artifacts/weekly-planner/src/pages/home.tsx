@@ -142,10 +142,12 @@ import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
 import { FocusLiveCountdown, FocusLiveProgress, FocusLiveStartingLabel } from '@/components/FocusLiveBits';
 import { publishLiveClock } from '@/lib/liveClock';
-import { liveScrollTarget } from '@/lib/liveScroll';
+import { liveScrollTarget, liveColumnOffset, liveColumnDate, liveLineVisible } from '@/lib/liveScroll';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
+import AgentPanel, { type AgentTheme } from '@/components/agent/AgentPanel';
+import AgentOrb, { AgentOrbIcon } from '@/components/agent/AgentOrb';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -890,7 +892,7 @@ export default function DailyPlanner() {
   const navRef = useRef({
     prev: () => {}, next: () => {}, today: () => {}, goToLive: () => {},
     toggleView: () => {}, customView: () => {}, monthView: () => {}, toggleAnalysis: () => {}, toggleSettings: () => {},
-    openWidget: () => {}, newEvent: () => {}, toggleTimer: () => {}, toggleHelp: () => {},
+    openWidget: () => {}, newEvent: () => {}, toggleTimer: () => {}, toggleHelp: () => {}, toggleAgent: () => {},
   });
   // Lightweight toasts — replaces blocking window.alert() for import/export/sync
   // feedback so nothing ever freezes the UI mid-action.
@@ -1073,6 +1075,12 @@ export default function DailyPlanner() {
   // ── Tasks ──────────────────────────────────────────────────────────────────
   const [tasksPanelOpen, setTasksPanelOpen]   = useState<boolean>(initialSettings.tasksPanelOpen);
   const [tasksPanelWidth, setTasksPanelWidth] = useState<number>(initialSettings.tasksPanelWidth);
+  // The assistant panel. Per device on purpose: open on the PC says nothing
+  // about whether it should cover the calendar on a phone.
+  const [agentOpen, setAgentOpen] = useState<boolean>(() => { try { return localStorage.getItem('planner-agent-open') === '1'; } catch { return false; } });
+  const [agentWidth, setAgentWidth] = useState<number>(() => { try { const w = Number(localStorage.getItem('planner-agent-width')); return w >= 340 && w <= 760 ? w : 440; } catch { return 440; } });
+  useEffect(() => { try { localStorage.setItem('planner-agent-open', agentOpen ? '1' : '0'); } catch { /* not remembered */ } }, [agentOpen]);
+  useEffect(() => { try { localStorage.setItem('planner-agent-width', String(agentWidth)); } catch { /* not remembered */ } }, [agentWidth]);
   const [showTaskRow, setShowTaskRow]         = useState<boolean>(initialSettings.showTaskRow);
   const [stickyAllDayMain, setStickyAllDayMain] = useState<boolean>(initialSettings.stickyAllDayMain ?? true);
   const [stickyTasksMain, setStickyTasksMain]   = useState<boolean>(initialSettings.stickyTasksMain ?? true);
@@ -3988,15 +3996,12 @@ export default function DailyPlanner() {
   const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;
-  // A day column spans dayStartH -> dayStartH+24 (e.g. 7am -> 7am). So between
-  // midnight and the day-start hour, "now" belongs to the PREVIOUS calendar day's
-  // column, not today's — otherwise the red line lands a whole day too far right.
-  const nowLineColumnDate = nowMin < dayStartMin ? subDays(nowDate, 1) : nowDate;
-  // As a column OFFSET from the week start, so the custom view's out-of-week
-  // columns can host the now-line too; -1 when "now" isn't on screen at all.
-  const nowOffset = differenceInDays(startOfDay(nowLineColumnDate), weekStart);
-  const nowColIdx = visibleCols.includes(nowOffset) ? nowOffset : -1;
-  const liveLineOnScreen = nowColIdx >= 0 && nowInView;
+  // The column OFFSET (from the week start) holding the live line, or null when
+  // it is not on screen. Never -1: the custom view's out-of-week columns are
+  // addressed by negative offsets, and a -1 sentinel once drew "now" on the day
+  // before the anchor of every week (see liveColumnOffset in lib/liveScroll).
+  const nowColIdx = liveColumnOffset({ now: nowDate, weekStart, visibleCols, dayStartH });
+  const liveLineOnScreen = nowColIdx !== null && nowInView;
 
   // Show a "Go to Live" pill whenever the red now-line has scrolled out of the
   // visible area (mirrors the widget). Clicking it scrolls the line back into view.
@@ -4010,11 +4015,21 @@ export default function DailyPlanner() {
       return;
     }
     const lineRect = line.getBoundingClientRect();
-    // Fixed viewport bounds: below the sticky app header (~56px), above the bottom (including mobile nav bar).
-    const topBound = 96;
-    const bottomNavH = isPhoneRef.current ? 90 : 36;
-    const bottomBound = window.innerHeight - bottomNavH;
-    const visible = lineRect.top >= topBound && lineRect.top <= bottomBound;
+    // Visible means inside the main scroller AND below the sticky bands painted
+    // over its top (day headers, all-day row, task row). A line tucked under
+    // those bands used to count as "on screen", so the pill never appeared.
+    const scroller = mainRef.current;
+    const sRect = scroller?.getBoundingClientRect();
+    const occluders = scroller
+      ? Array.from(scroller.querySelectorAll<HTMLElement>('[data-live-occluder]'), el => el.getBoundingClientRect().bottom)
+      : [];
+    const visible = liveLineVisible({
+      lineTop: lineRect.top,
+      scrollerTop: sRect ? Math.max(0, sRect.top) : 0,
+      scrollerBottom: sRect ? Math.min(window.innerHeight, sRect.bottom) : window.innerHeight,
+      occluderBottoms: occluders,
+      bottomInset: isPhoneRef.current ? 90 : 0,
+    });
     const nextShow = !visible;
     if (showLiveBtnRef.current !== nextShow) {
       showLiveBtnRef.current = nextShow;
@@ -4023,11 +4038,10 @@ export default function DailyPlanner() {
   }, []);
 
   // Away from "now" entirely -> the pill is the way back, so it should always be
-  // offered (there's no now-line on screen to scroll to at all). Day view is away
-  // whenever the shown day isn't today; week view whenever the week differs.
-  const viewingAnotherWeek = calendarView === 'day'
-    ? !isSameDay(currentDate, nowDate)
-    : viewedWeekKey !== currentRealWeekKey;
+  // offered. "Away" is simply: the column that holds now is not painted. That
+  // is right for every timeline view, including a custom range whose extra
+  // columns show today while the anchor week is a different one.
+  const viewingAnotherWeek = nowColIdx === null;
 
   useEffect(() => {
     if (viewingAnotherWeek) {
@@ -4097,16 +4111,21 @@ export default function DailyPlanner() {
 
   const scrollToLive = useCallback(() => {
     if (scrollMainToLive()) {
+      // The ref must move with the state: recomputeLiveBtn only sets state when
+      // the ref disagrees, so a stale `true` here hid the pill for good.
+      showLiveBtnRef.current = false;
       setShowLiveBtn(false);
       return;
     }
     // No line on screen (other week / month view / analysis) ─ jump to now first.
     pendingLiveScrollRef.current = true;
     setDirection(0);
-    setCurrentDate(new Date());
+    // The date whose COLUMN holds the line: before the day-start hour that is
+    // yesterday, so landing on "today" would show a day with no line in it.
+    setCurrentDate(liveColumnDate(new Date(), dayStartH));
     setShowFocusAnalysis(false);
     setSessionDetail(null);
-  }, [scrollMainToLive]);
+  }, [scrollMainToLive, dayStartH]);
 
   // Finish a pending jump: the week slider animates the new week in, so the line
   // isn't mounted on the next tick — poll a few frames until it appears.
@@ -4119,6 +4138,7 @@ export default function DailyPlanner() {
       const line = nowLineRef.current;
       if (line && scrollMainToLive()) {
         pendingLiveScrollRef.current = false;
+        showLiveBtnRef.current = false;
         setShowLiveBtn(false);
         return;
       }
@@ -6091,6 +6111,7 @@ export default function DailyPlanner() {
           ['newEvent',      () => navRef.current.newEvent()],
           ['toggleTimer',   () => navRef.current.toggleTimer()],
           ['help',          () => navRef.current.toggleHelp()],
+          ['openAgent',     () => navRef.current.toggleAgent()],
         ];
         for (const [action, run] of nav) {
           if (hit(action)) { e.preventDefault(); run(); return; }
@@ -7295,6 +7316,7 @@ export default function DailyPlanner() {
     newEvent: () => { setShowFocusAnalysis(false); handleHeaderCreateClick(); },
     toggleTimer: toggleFocus,
     toggleHelp: () => setShowShortcutHelp(v => !v),
+    toggleAgent: () => setAgentOpen(v => !v),
   };
 
   // ── Ctrl+wheel = calendar zoom, Ctrl +/− = app zoom ─────────────────────────
@@ -7344,7 +7366,7 @@ export default function DailyPlanner() {
   useEffect(() => {
     if (!scrollsSideways) return;
     const card = gridCardRef.current;
-    if (!card) return;
+    if (!card || nowColIdx === null) return;
     const target = card.querySelector<HTMLElement>(`[data-col-index="${nowColIdx}"]`);
     if (!target) return;
     const id = requestAnimationFrame(() => {
@@ -7667,6 +7689,17 @@ export default function DailyPlanner() {
     surface: surfaceBg,
     hover: hoverBg,
     accent: darkMode ? '#60a5fa' : '#2563eb',
+  }), [darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, hoverBg]);
+
+  const agentTheme: AgentTheme = useMemo(() => ({
+    darkMode,
+    text: menuText,
+    sub: menuSub,
+    bg: menuBg,
+    bdr: menuBdr,
+    surface: surfaceBg,
+    hover: hoverBg,
+    accent: darkMode ? '#38bdf8' : '#0284c7',
   }), [darkMode, menuText, menuSub, menuBg, menuBdr, surfaceBg, hoverBg]);
 
   /** Jump the calendar to whatever a notification was about. */
@@ -8368,6 +8401,19 @@ export default function DailyPlanner() {
             >
               <BarChart3 size={15}/>
               Analysis
+            </button>
+            <button
+              onClick={() => setAgentOpen(v => !v)}
+              title={`${agentOpen ? 'Hide the assistant' : 'Assistant: add or change things by chatting, with screenshots'} (${formatCombo(shortcuts.openAgent)})`}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shadow-sm"
+              style={{
+                background: agentOpen ? (darkMode ? 'rgba(56,189,248,0.18)' : 'rgba(2,132,199,0.10)') : surfaceBg,
+                border: `1px solid ${agentOpen ? 'rgba(56,189,248,0.55)' : surfaceBdr}`,
+                color: agentOpen ? (darkMode ? '#7dd3fc' : '#0284c7') : menuText,
+              }}
+            >
+              <AgentOrb size={14} still />
+              Assistant
             </button>
             <button
               onClick={() => setTasksPanelOpen(v => !v)}
@@ -9142,11 +9188,15 @@ export default function DailyPlanner() {
                     : (darkMode ? 'rgba(0,0,0,0.20)' : 'rgba(255,255,255,0.40)'),
                 }}
               >
+                {/* data-live-occluder: the Go to Live pill treats the line as
+                    hidden while it is under any of these sticky bands. */}
                 <div
+                  data-live-occluder
                   style={{ height: stickyHeaderH, top: focusMiniBarH, background: darkMode ? currentDarkTheme.cardBg : '#ffffff', transition: 'height 0.15s ease' }}
                   className="border-b border-border/50 sticky z-40"
                 />
                 <div
+                  data-live-occluder
                   style={{
                     height: stickyAllDayH,
                     top: stickyAllDayMain ? focusMiniBarH + stickyHeaderH : undefined,
@@ -9162,6 +9212,7 @@ export default function DailyPlanner() {
                 </div>
                 {showTaskBand && (
                   <div
+                    data-live-occluder
                     style={{
                       height: stickyTasksH,
                       top: stickyTasksMain ? focusMiniBarH + stickyHeaderH + (stickyAllDayMain ? stickyAllDayH : 0) : undefined,
@@ -12850,6 +12901,27 @@ export default function DailyPlanner() {
           onResize={handleTasksPanelResize}
           onClose={isPhone ? () => setMobileTab('calendar') : closeTasksPanel}
         />
+
+        <AgentPanel
+          open={agentOpen}
+          onClose={() => setAgentOpen(false)}
+          theme={agentTheme}
+          timeFormat={timeFormat === '24h' ? '24h' : '12h'}
+          fullscreen={isPhone}
+          // Too narrow to share the row: float over the calendar rather than
+          // crushing it (the toolbar overflowed into the panel when squeezed).
+          floating={!isPhone && vp.width - agentWidth - (tasksPanelOpen && !showFocusAnalysis ? tasksPanelWidth : 0) < 1050}
+          width={agentWidth}
+          onResize={setAgentWidth}
+          onOpenDate={(date) => {
+            const [y, m, d] = date.split('-').map(Number);
+            if (!y || !m || !d) return;
+            setShowFocusAnalysis(false);
+            setDirection(0);
+            setCurrentDate(new Date(y, m - 1, d));
+            if (isPhone || vp.width - agentWidth < 1050) setAgentOpen(false);
+          }}
+        />
       </div>
 
       {/* Focus Day Edit Confirmation Modal */}
@@ -15515,11 +15587,13 @@ export default function DailyPlanner() {
             {([
               { id: 'calendar' as const, label: 'Calendar', icon: CalendarIcon, badge: 0 },
               { id: 'tasks' as const, label: 'Tasks', icon: ListTodo, badge: openTaskCount },
+              { id: 'assistant' as const, label: 'Assistant', icon: AgentOrbIcon, badge: 0 },
               { id: 'focus' as const, label: 'Focus', icon: BarChart3, badge: 0 },
               { id: 'settings' as const, label: 'Settings', icon: Settings, badge: 0 },
             ]).map(item => {
               const active =
                 item.id === 'settings' ? false
+                : item.id === 'assistant' ? agentOpen
                 : item.id === 'focus' ? (mobileTab === 'focus' || showFocusAnalysis)
                 : mobileTab === item.id && !showFocusAnalysis;
               const Icon = item.icon;
@@ -15529,6 +15603,8 @@ export default function DailyPlanner() {
                   onClick={() => {
                     haptic(6);
                     if (item.id === 'settings') { navigateToSettings(); return; }
+                    // Full screen over everything; its own close button comes back.
+                    if (item.id === 'assistant') { setAgentOpen(true); return; }
                     if (item.id === 'focus') { setMobileTab('calendar'); setShowFocusAnalysis(true); return; }
                     setShowFocusAnalysis(false);
                     setMobileTab(item.id);

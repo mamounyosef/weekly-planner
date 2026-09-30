@@ -67,6 +67,7 @@ import {
   safeRuntimeVersion,
 } from './ota-server';
 import { createFunnelWatchdog } from './funnel-watchdog';
+import { registerAgentRoutes } from './agent-service';
 
 /**
  * The interpreter to run a windowless helper .pyw with.
@@ -1908,6 +1909,23 @@ export default defineConfig({
                 }
               }
 
+              // Remembered for the planner agent, which runs outside this sync
+              // and must know which Google events it may edit (only the owned
+              // calendar's) and what the other calendars are called.
+              try {
+                await fsp.writeFile(
+                  path.join(path.dirname(dbPath), 'google-calendars.json'),
+                  JSON.stringify({
+                    ownedCalendarId: targetCalendarId,
+                    calendars: calendars.map((c: any) => ({ id: c.id, summary: c.summary || c.id })),
+                    at: Date.now(),
+                  }),
+                  'utf-8',
+                );
+              } catch (err) {
+                console.error('[agent] could not record calendar list:', err);
+              }
+
               // 3. Define sync window (from 60 days ago to 180 days in the future).
               const timeMinMs = Date.now() - 60 * 24 * 60 * 60 * 1000;
               const timeMaxMs = Date.now() + 180 * 24 * 60 * 60 * 1000;
@@ -3256,6 +3274,34 @@ ${body}
                 }
               });
             }
+          });
+
+          // ── Planner agent (Ollama Cloud) ─────────────────────────────────────
+          // Writes go through the same safe write + sync ingest as the app's own
+          // saves, awaited, so the agent can read back and verify what landed.
+          registerAgentRoutes(server.middlewares, {
+            rootDir,
+            requireAuth: async (req, res) => {
+              const auth = await requireAuth(req, res);
+              return auth ? { user: auth.user, userPaths: auth.userPaths } : null;
+            },
+            writeStore: async (username, userPaths, store, snapshot, baseId) => {
+              const body = JSON.stringify(snapshot);
+              const result = await safeWriteJsonFile({
+                filePath: store === 'events' ? userPaths.dbPath : userPaths.tasksPath,
+                backupDir: userPaths.backupDir,
+                baseName: store === 'events' ? 'database' : 'tasks',
+                body,
+                kind: 'object',
+                force: false,
+              });
+              if (!result.ok) throw new Error(result.error);
+              trace(`AGENT SAVE ${store} bytes=${body.length}`);
+              await syncService.ingestFile(username, syncPathsOf(userPaths), store, snapshot as any, baseId);
+            },
+            noteBase: (username, store, snapshot) => syncService.noteBase(username, store, snapshot as any),
+            isLoopback: isLocalDesktopRequest,
+            log: trace,
           });
 
         // ── Prayer times ──────────────────────────────────────────────────────
@@ -4745,9 +4791,27 @@ ${body}
               return;
             }
 
-            res.setHeader('Content-Length', String(stat.size));
-            if (req.method === 'HEAD') { res.end(); return; }
-            res.end(await fs.readFile(body));
+            if (req.method === 'HEAD') { res.setHeader('Content-Length', String(stat.size)); res.end(); return; }
+            // The file can vanish between the stat above and this read: a
+            // rebuild empties dist/ while requests are in flight. An unhandled
+            // rejection here used to KILL the whole server (2026-09-27, after a
+            // rebuild hit a locked file), taking the phone sync and the public
+            // link down with it. A missing file is one failed request, nothing more.
+            let data: Buffer;
+            try {
+              data = await fs.readFile(body);
+            } catch {
+              res.removeHeader('Content-Encoding');
+              res.removeHeader('ETag');
+              res.statusCode = 503;
+              res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+              res.setHeader('Cache-Control', 'no-store');
+              res.setHeader('Retry-After', '3');
+              res.end('The planner is updating. Reload in a few seconds.');
+              return;
+            }
+            res.setHeader('Content-Length', String(data.length));
+            res.end(data);
           });
         }
       }

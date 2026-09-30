@@ -43,6 +43,8 @@ import { Notifications } from './src/screens/Notifications';
 import { QuickAdd } from './src/screens/QuickAdd';
 import { Diagnostics } from './src/screens/Diagnostics';
 import { ViewFilter } from './src/screens/ViewFilter';
+import { Assistant, type SharedToAssistant } from './src/screens/Assistant';
+import { useShareIntent } from 'expo-share-intent';
 import { space } from './src/theme';
 
 export default function App() {
@@ -104,7 +106,7 @@ function NotificationsScreen({ onClose, onOpenSettings, onOpenDate }: {
 
 function Shell() {
   const p = useTheme();
-  const { ready, signedIn, conflicts } = usePlanner();
+  const { ready, signedIn, conflicts, timeFormat } = usePlanner();
   /**
    * Which tab the CONTENT is on, and which one the BAR is showing.
    *
@@ -138,6 +140,29 @@ function Shell() {
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showViewFilter, setShowViewFilter] = useState(false);
+
+  // Anything shared to the app from another app's share menu (a screenshot,
+  // a photo, some text) goes straight to the assistant.
+  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent();
+  const [shared, setShared] = useState<SharedToAssistant | null>(null);
+  useEffect(() => {
+    if (!hasShareIntent || !shareIntent) return;
+    const images = (shareIntent.files ?? [])
+      .filter(f => (f.mimeType ?? '').startsWith('image/'))
+      .map(f => ({
+        uri: f.path.startsWith('file://') || f.path.startsWith('content://') ? f.path : `file://${f.path}`,
+        width: f.width ?? undefined,
+        height: f.height ?? undefined,
+        name: f.fileName ?? undefined,
+      }));
+    const text = shareIntent.text || shareIntent.webUrl || undefined;
+    if (images.length || text) {
+      setShared({ key: `${Date.now()}`, images, text: text ?? undefined });
+      setPressedTab('assistant');
+      setTab('assistant');
+    }
+    resetShareIntent();
+  }, [hasShareIntent, shareIntent, resetShareIntent]);
   /** A result tapped in search, handed to the calendar to open. */
   /**
    * Something to show on the calendar: a day, or a day AND the item on it.
@@ -280,6 +305,19 @@ function Shell() {
               <KeepAlive visible={tab === 'tasks'}>
                 <ErrorBoundary resetKey="tasks" where="the tasks screen">
                   <Tasks />
+                </ErrorBoundary>
+              </KeepAlive>
+
+              <KeepAlive visible={tab === 'assistant'}>
+                <ErrorBoundary resetKey="assistant" where="the assistant">
+                  <Assistant
+                    visible={tab === 'assistant' && overlay === null}
+                    onTab={tab === 'assistant'}
+                    timeFormat={timeFormat === '24h' ? '24h' : '12h'}
+                    shared={shared}
+                    onSharedHandled={() => setShared(null)}
+                    onOpenDate={date => { setPendingOpen({ date }); goToTab('calendar'); }}
+                  />
                 </ErrorBoundary>
               </KeepAlive>
 

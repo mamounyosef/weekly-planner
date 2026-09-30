@@ -12,6 +12,7 @@ export type ShortcutAction =
   | 'customView'
   | 'monthView'
   | 'goToLive'
+  | 'openAgent'
   | 'newEvent'
   | 'toggleTimer'
   | 'focusAnalysis'
@@ -47,6 +48,7 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
   { action: 'focusAnalysis', label: 'Focus analysis',    hint: 'Open or close the analysis screen',      group: 'View',       blockedInTextFields: true },
   { action: 'openSettings',  label: 'Settings',          hint: 'Open or close the settings drawer',      group: 'View',       blockedInTextFields: true },
   { action: 'openWidget',    label: 'Open widget',       hint: 'Launch the floating side widget',        group: 'View',       blockedInTextFields: true },
+  { action: 'openAgent',     label: 'Assistant',         hint: 'Open or close the planning assistant',   group: 'View',       blockedInTextFields: true },
   { action: 'help',          label: 'Shortcut help',     hint: 'Show this shortcut list',                group: 'View',       blockedInTextFields: true },
   { action: 'newEvent',      label: 'New item',          hint: 'Start creating an item',                 group: 'Editing',    blockedInTextFields: true },
   { action: 'undo',          label: 'Undo',              hint: 'Undo the last change',                   group: 'Editing',    blockedInTextFields: true },
@@ -89,6 +91,7 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   focusAnalysis: 'Alt+A',
   openSettings:  'Alt+S',
   openWidget:    'Alt+W',
+  openAgent:     'Alt+I',
   help:          'Alt+/',
   newEvent:      'Alt+N',
   undo:          'Ctrl+Z',

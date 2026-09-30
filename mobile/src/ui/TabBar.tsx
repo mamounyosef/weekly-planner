@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text, useTheme } from './kit';
 import { space } from '../theme';
 import { ICONS } from './icons';
+import { AgentOrb } from './AgentOrb';
 
 /**
  * THE GESTURE BAR IS THE TAB BAR'S JOB, AND ONLY THE TAB BAR'S.
@@ -36,7 +37,7 @@ import { ICONS } from './icons';
  */
 export const TAB_STACK_BOTTOM_INSET = 0;
 
-export type TabId = 'calendar' | 'tasks' | 'focus' | 'settings';
+export type TabId = 'calendar' | 'tasks' | 'assistant' | 'focus' | 'settings';
 
 export interface TabDef {
   id: TabId;
@@ -52,6 +53,8 @@ export interface TabDef {
 export const TABS: readonly TabDef[] = [
   { id: 'calendar', label: 'Calendar', iconName: 'calendar' },
   { id: 'tasks', label: 'Tasks', iconName: 'check-square' },
+  // The assistant sits in the middle: it is how most things now get IN.
+  { id: 'assistant', label: 'Assistant', iconName: 'sparkles' },
   { id: 'focus', label: 'Focus', iconName: 'target' },
   { id: 'settings', label: 'Settings', iconName: 'settings' },
 ];
@@ -97,15 +100,22 @@ export function TabBar({ active, onChange, badges }: {
             }}
           >
             <View>
-              <Image
-                source={{ uri: ICONS[tab.iconName] }}
-                style={{
-                  width: 22,
-                  height: 22,
-                  tintColor: on ? p.accent : p.inkFaint,
-                  marginBottom: 2,
-                }}
-              />
+              {tab.id === 'assistant' ? (
+                // The assistant's own mark, not a tinted glyph: the same orb as the PC.
+                <View style={{ width: 22, height: 22, marginBottom: 2, alignItems: 'center', justifyContent: 'center' }}>
+                  <AgentOrb size={20} still dim={!on} />
+                </View>
+              ) : (
+                <Image
+                  source={{ uri: ICONS[tab.iconName] }}
+                  style={{
+                    width: 22,
+                    height: 22,
+                    tintColor: on ? p.accent : p.inkFaint,
+                    marginBottom: 2,
+                  }}
+                />
+              )}
               {badge ? (
                 <View style={{
                   position: 'absolute',

@@ -43,7 +43,37 @@
         }
       ],
       "./plugins/with-release-signing",
-      "expo-background-task"
+      "expo-background-task",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Pick screenshots and photos to send to the planning assistant.",
+          "cameraPermission": "Take a photo of a schedule or a poster to send to the planning assistant."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Speak to the planning assistant instead of typing.",
+          "speechRecognitionPermission": "Turn what you say to the planning assistant into text.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox",
+            "com.google.android.tts"
+          ]
+        }
+      ],
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": [
+            "text/*",
+            "image/*"
+          ],
+          "androidMultiIntentFilters": [
+            "image/*"
+          ]
+        }
+      ]
     ],
     "updates": {
       "enabled": true,
@@ -51,7 +81,7 @@
       "fallbackToCacheTimeout": 0,
       "url": "https://mamoun.tail27d0a5.ts.net/api/ota/manifest"
     },
-    "runtimeVersion": "1.1.0",
+    "runtimeVersion": "1.2.0",
     "extra": {
       "plannerServerUrl": "https://mamoun.tail27d0a5.ts.net"
     }
