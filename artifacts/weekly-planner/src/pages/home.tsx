@@ -145,6 +145,7 @@ import { publishLiveClock } from '@/lib/liveClock';
 import { liveScrollTarget, liveColumnOffset, liveColumnDate, liveLineVisible } from '@/lib/liveScroll';
 import { placeBeside, pickAnchor } from '@/lib/popoverPlacement';
 import { ownedRef } from '@/lib/ownedRef';
+import { grabOffset, dragTo, groupDragTo } from '@/lib/timelineDrag';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
@@ -6495,38 +6496,22 @@ export default function DailyPlanner() {
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
         br.curDay = coords.dayIndex;
-        const dayDelta = coords.dayIndex - br.origDay;
-        const rawDelta = snapMin(coords.snappedMin - br.baseMouseMin, POSITION_SNAP);
-
-        // ONE delta for the whole set, clamped so that every member stays in
-        // range — clamping each item separately let the one that hit the edge
-        // stop while the others kept going, which silently pulled a linked pair
-        // (or a multi-selection) apart. Relative spacing is the whole point of
-        // both features, so the group moves as far as its most constrained
-        // member allows, and no further.
-        const cols   = visibleColsRef.current;
-        const colLo  = cols.length ? cols[0] : 0;
-        const colHi  = cols.length ? cols[cols.length - 1] : 6;
-        let minDelta = -Infinity;
-        let maxDelta = Infinity;
-        let minDayDelta = -Infinity;
-        let maxDayDelta = Infinity;
+        // One absolute delta for the whole group: spacing is exact, and members
+        // cross midnight and day boundaries together instead of being clamped
+        // apart at the edge of the visible window.
+        const items: Record<string, { day: number; startMin: number }> = {};
         for (const id of br.eventIds) {
-          const base = br.baseStartMins[id];
-          minDelta = Math.max(minDelta, dayStartMin - base);
-          maxDelta = Math.min(maxDelta, (dayEndMin - POSITION_SNAP) - base);
-          minDayDelta = Math.max(minDayDelta, colLo - br.baseDays[id]);
-          maxDayDelta = Math.min(maxDayDelta, colHi - br.baseDays[id]);
+          if (br.baseStartMins[id] === undefined) continue;
+          items[id] = { day: br.baseDays[id], startMin: br.baseStartMins[id] };
         }
-        const deltaMin = clamp(rawDelta, minDelta, maxDelta);
-        const dayShift = clamp(dayDelta, minDayDelta, maxDayDelta);
-
+        const landed = groupDragTo({
+          items, grabDay: br.origDay, grabMin: br.baseMouseMin,
+          pointerDay: coords.dayIndex, pointerMin: coords.snappedMin,
+          dayStartMin, snap: POSITION_SNAP,
+        });
         const newBatchDisp: { [id: string]: { dayIndex: number; startMin: number } } = {};
-        for (const id of br.eventIds) {
-          newBatchDisp[id] = {
-            dayIndex: br.baseDays[id] + dayShift,
-            startMin: br.baseStartMins[id] + deltaMin,
-          };
+        for (const [id, t] of Object.entries(landed)) {
+          newBatchDisp[id] = { dayIndex: t.day, startMin: t.startMin };
         }
         setBatchDisp(newBatchDisp);
         batchDispRef.current = newBatchDisp;
@@ -6584,22 +6569,15 @@ export default function DailyPlanner() {
         }
         const coords = getGridCoords(e.clientX, e.clientY);
         if (!coords) return;
-        let targetDay = coords.dayIndex;
-        let rawStart = coords.snappedMin - dr.offsetMin;
-        if (dr.isHeadClick) {
-          targetDay = coords.dayIndex - 1;
-          rawStart = coords.snappedMin + 1440 - dr.offsetMin;
-        }
-        // Pin, never wrap. The cursor's minute is already clamped to the window,
-        // so subtracting the grab offset near the top edge would push the start
-        // below it — wrapping that around threw the block to the BOTTOM of the
-        // previous column, which reads as the item teleporting away mid-drag.
-        const folded = foldToGrid(
-          targetDay, snapMin(rawStart, POSITION_SNAP),
-          visibleColsRef.current, dayStartMin, dayEndMin,
-        );
-        targetDay = folded.day;
-        const newStart = folded.startMin;
+        // Absolute time: the item follows the cursor across columns and past
+        // midnight, and a morning-part grab can no longer be pinned at the
+        // bottom of the window or thrown into the wrong day.
+        const landed = dragTo({
+          pointerDay: coords.dayIndex, pointerMin: coords.snappedMin, offsetMin: dr.offsetMin,
+          dayStartMin, snap: POSITION_SNAP,
+        });
+        const targetDay = landed.day;
+        const newStart = landed.startMin;
         dr.curDay = targetDay; dr.curStartMin = newStart;
         setDragDisp({ id: dr.eventId, day: targetDay, startMin: newStart });
         setDragDelta(gridDelta(e, dr.initGX, dr.initGY, dr.initX, dr.initY));
@@ -6832,9 +6810,8 @@ export default function DailyPlanner() {
               const ev = weekEventsRef.current[id] ?? eventsRef.current[id];
               if (!ev || !bd) continue;
               const dur = br.durations[id] ?? timeToMin(ev.endTime) - timeToMin(ev.startTime);
-              const { day: d, startMin: s } = foldToGrid(
-                bd.dayIndex, bd.startMin, visibleColsRef.current, dayStartMin, dayEndMin,
-              );
+              const d = bd.dayIndex;
+              const s = bd.startMin;
               const start24 = s >= 1440 ? s - 1440 : s;
               const end24 = (start24 + dur) % 1440;
               patches[id] = { dayIndex: d, startTime: minToTime(start24), endTime: minToTime(end24) };
@@ -6890,9 +6867,8 @@ export default function DailyPlanner() {
         if (dr.active) {
           const ev = weekEventsRef.current[dr.eventId] ?? eventsRef.current[dr.eventId];
           if (ev) {
-            const { day: d, startMin: s } = foldToGrid(
-              dr.curDay, dr.curStartMin, visibleColsRef.current, dayStartMin, dayEndMin,
-            );
+            const d = dr.curDay;
+            const s = dr.curStartMin;
             const start24 = s >= 1440 ? s - 1440 : s;
             const end24 = (start24 + dr.durationMin) % 1440;
             applyEditRef.current(dr.eventId, {
@@ -7115,7 +7091,11 @@ export default function DailyPlanner() {
       const gr = daysGridRef.current?.getBoundingClientRect();
       batchDragRef.current = {
         eventIds: dragIds, baseStartMins, baseDays, durations,
-        origDay: ev.dayIndex, curDay: ev.dayIndex,
+        // The column under the pointer, NOT the item's own day: grabbing an
+        // overnight item by its morning part puts the pointer one column later,
+        // and measuring from ev.dayIndex shifted the whole train a day forward
+        // on the first move.
+        origDay: coords.dayIndex, curDay: coords.dayIndex,
         baseMouseMin: coords.snappedMin,
         active: false, initX: e.clientX, initY: e.clientY,
         initGX: e.clientX - (gr?.left ?? 0), initGY: e.clientY - (gr?.top ?? 0),
@@ -7133,10 +7113,13 @@ export default function DailyPlanner() {
     const duration = endMin - startMin;
 
     const isHead = segKind === 'head';
-    let offsetMin = clamp(coords.snappedMin - startMin, 0, duration);
-    if (isHead) {
-      offsetMin = clamp(coords.snappedMin + 1440 - startMin, 0, duration);
-    }
+    // Measured on the absolute time line (see lib/timelineDrag), so grabbing
+    // the morning part of an overnight item in the NEXT column is the same
+    // maths as grabbing its evening part.
+    const offsetMin = grabOffset({
+      pointerDay: coords.dayIndex, pointerMin: coords.snappedMin,
+      itemDay: ev.dayIndex, itemStartMin: startMin, durationMin: duration,
+    });
 
     const gridRect = daysGridRef.current?.getBoundingClientRect();
     dragRef.current = {
