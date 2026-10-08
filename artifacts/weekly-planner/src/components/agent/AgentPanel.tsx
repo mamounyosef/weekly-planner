@@ -7,9 +7,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowDown, ArrowUp, Brain, CalendarSearch, Camera, Check, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
+  ArrowDown, ArrowUp, BarChart3, Brain, CalendarSearch, Camera, Check, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
   Clock, FileText, History, ImagePlus, ListChecks, Loader2, Mic, MicOff, Paperclip, Pencil, Plus, Search,
-  Square, Trash2, Wand2, X,
+  Square, Timer, Trash2, Wand2, X,
 } from 'lucide-react';
 
 import type { AgentConversation, AgentMessage, AgentToolTrace } from '@/lib/agent/agentTypes';
@@ -21,6 +21,7 @@ import {
 import AgentMarkdown from './AgentMarkdown';
 import AgentOrb from './AgentOrb';
 import { ApprovalCard, ErrorNote, QuestionCard, ReportCard, type AgentTheme } from './AgentCards';
+import { ImagePreviewModal, type PreviewImageItem } from './ImagePreviewModal';
 
 export type { AgentTheme } from './AgentCards';
 
@@ -55,6 +56,9 @@ const TOOL_ICON: Record<string, React.ComponentType<{ size?: number; className?:
   create_tasks: ListChecks,
   update_tasks: ListChecks,
   delete_items: Trash2,
+  list_focus_sessions: Timer,
+  get_focus_stats: BarChart3,
+  delete_focus_sessions: Trash2,
   ask_user: CircleHelp,
 };
 
@@ -86,6 +90,7 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
 
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState<PendingAttachment[]>([]);
+  const [previewState, setPreviewState] = useState<{ items: PreviewImageItem[]; initialIndex: number } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [sending, setSending] = useState(false);
@@ -125,17 +130,18 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
     if (open && !fullscreen) setTimeout(() => inputRef.current?.focus(), 60);
   }, [open, fullscreen, agent.activeId]);
 
-  // Esc closes the chat list, then the panel.
+  // Esc closes image preview, chat list, then the panel.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      if (previewState) { setPreviewState(null); e.stopPropagation(); return; }
       if (historyOpen) { setHistoryOpen(false); e.stopPropagation(); return; }
       if (floating || fullscreen) onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, historyOpen, floating, fullscreen, onClose]);
+  }, [open, previewState, historyOpen, floating, fullscreen, onClose]);
 
   // ── Attachments ──
   const addFiles = useCallback((list: FileList | File[]) => {
@@ -155,11 +161,34 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
     }
     inputRef.current?.focus();
   }, []);
-  const removeFile = (localId: string) => setFiles(f => {
-    const it = f.find(x => x.localId === localId);
-    if (it?.previewUrl) URL.revokeObjectURL(it.previewUrl);
-    return f.filter(x => x.localId !== localId);
-  });
+  const removeFile = useCallback((localId: string) => {
+    setFiles(f => {
+      const it = f.find(x => x.localId === localId);
+      if (it?.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      return f.filter(x => x.localId !== localId);
+    });
+    setPreviewState(prev => {
+      if (!prev) return null;
+      const filtered = prev.items.filter(it => it.localId !== localId);
+      if (filtered.length === 0) return null;
+      const nextIndex = Math.min(prev.initialIndex, filtered.length - 1);
+      return { items: filtered, initialIndex: nextIndex };
+    });
+  }, []);
+
+  const openComposerPreview = useCallback((localId: string) => {
+    const imageFiles = files.filter(f => f.previewUrl);
+    const targetIdx = imageFiles.findIndex(f => f.localId === localId);
+    if (targetIdx === -1) return;
+    setPreviewState({
+      items: imageFiles.map(f => ({
+        url: f.previewUrl!,
+        name: f.name,
+        localId: f.localId,
+      })),
+      initialIndex: targetIdx,
+    });
+  }, [files]);
 
   const onPaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.files ?? []);
@@ -339,7 +368,14 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
           )}
           {conv?.messages.map(m => (
             m.role === 'user'
-              ? <UserBubble key={m.id} m={m} theme={theme} />
+              ? (
+                <UserBubble
+                  key={m.id}
+                  m={m}
+                  theme={theme}
+                  onPreviewImage={(items, initialIndex) => setPreviewState({ items, initialIndex })}
+                />
+              )
               : (
                 <AssistantBlock
                   key={m.id}
@@ -387,14 +423,41 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
               {files.length > 0 && (
                 <div className="flex gap-2 overflow-x-auto px-2.5 pt-2.5">
                   {files.map(f => (
-                    <div key={f.localId} className="relative flex-shrink-0 rounded-xl overflow-hidden" style={{ border: `1px solid ${f.status === 'error' ? '#ef4444' : theme.bdr}`, width: 60, height: 60 }} title={f.error ?? f.name}>
-                      {f.previewUrl
-                        ? <img src={f.previewUrl} alt={f.name} className="w-full h-full object-cover" />
-                        : <div className="w-full h-full flex flex-col items-center justify-center gap-1 px-1" style={{ color: theme.sub }}><FileText size={16} /><span className="text-[9px] truncate w-full text-center">{f.name}</span></div>}
-                      {f.status === 'uploading' && <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.4)' }}><Loader2 size={16} className="animate-spin text-white" /></div>}
-                      {f.status === 'error' && <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(239,68,68,0.4)' }}><CircleAlert size={16} className="text-white" /></div>}
-                      {f.status === 'ready' && <div className="absolute bottom-0.5 left-0.5 rounded-full p-0.5" style={{ background: '#22c55e' }}><Check size={8} className="text-white" strokeWidth={4} /></div>}
-                      <button type="button" onClick={() => removeFile(f.localId)} className="absolute top-0.5 right-0.5 rounded-full p-0.5" style={{ background: 'rgba(0,0,0,0.65)' }} title="Remove">
+                    <div
+                      key={f.localId}
+                      className="relative flex-shrink-0 rounded-xl overflow-hidden group/thumb"
+                      style={{ border: `1px solid ${f.status === 'error' ? '#ef4444' : theme.bdr}`, width: 60, height: 60 }}
+                      title={f.error ?? f.name}
+                    >
+                      {f.previewUrl ? (
+                        <button
+                          type="button"
+                          onClick={() => openComposerPreview(f.localId)}
+                          className="w-full h-full p-0 border-0 bg-transparent block cursor-zoom-in focus:outline-none"
+                          title={`Click to preview ${f.name}`}
+                        >
+                          <img
+                            src={f.previewUrl}
+                            alt={f.name}
+                            className="w-full h-full object-cover transition-transform group-hover/thumb:scale-105"
+                          />
+                        </button>
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center gap-1 px-1" style={{ color: theme.sub }}>
+                          <FileText size={16} />
+                          <span className="text-[9px] truncate w-full text-center">{f.name}</span>
+                        </div>
+                      )}
+                      {f.status === 'uploading' && <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(0,0,0,0.4)' }}><Loader2 size={16} className="animate-spin text-white" /></div>}
+                      {f.status === 'error' && <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(239,68,68,0.4)' }}><CircleAlert size={16} className="text-white" /></div>}
+                      {f.status === 'ready' && <div className="absolute bottom-0.5 left-0.5 rounded-full p-0.5 pointer-events-none" style={{ background: '#22c55e' }}><Check size={8} className="text-white" strokeWidth={4} /></div>}
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); removeFile(f.localId); }}
+                        className="absolute top-0.5 right-0.5 rounded-full p-0.5 hover:scale-110 transition-transform z-10"
+                        style={{ background: 'rgba(0,0,0,0.65)' }}
+                        title="Remove"
+                      >
                         <X size={11} className="text-white" />
                       </button>
                     </div>
@@ -461,9 +524,20 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
       </div>
     </aside>
   );
-  // Full screen on a phone: rendered at the top of the page, or the bottom bar
-  // and the add button (in the shell's own stacking context) draw over it.
-  return fullscreen && typeof document !== 'undefined' ? createPortal(panel, document.body) : panel;
+  return (
+    <>
+      {fullscreen && typeof document !== 'undefined' ? createPortal(panel, document.body) : panel}
+      {previewState && (
+        <ImagePreviewModal
+          items={previewState.items}
+          initialIndex={previewState.initialIndex}
+          onClose={() => setPreviewState(null)}
+          onRemove={removeFile}
+          theme={theme}
+        />
+      )}
+    </>
+  );
 }
 
 // ─── Pieces ──────────────────────────────────────────────────────────────────
@@ -543,7 +617,17 @@ function timeOf(at: number): string {
   return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-function UserBubble({ m, theme }: { m: AgentMessage; theme: AgentTheme }) {
+function UserBubble({
+  m,
+  theme,
+  onPreviewImage,
+}: {
+  m: AgentMessage;
+  theme: AgentTheme;
+  onPreviewImage?: (items: PreviewImageItem[], initialIndex: number) => void;
+}) {
+  const imageAttachments = useMemo(() => (m.attachments ?? []).filter(a => a.kind === 'image'), [m.attachments]);
+
   return (
     <div className="flex flex-col items-end gap-1.5 agent-in group">
       {m.attachments && m.attachments.length > 0 && (
@@ -551,9 +635,26 @@ function UserBubble({ m, theme }: { m: AgentMessage; theme: AgentTheme }) {
           {m.attachments.map(a => (
             a.kind === 'image'
               ? (
-                <a key={a.id} href={`/api/agent/uploads/${a.id}`} target="_blank" rel="noreferrer" className="block rounded-xl overflow-hidden shadow-sm transition-transform hover:scale-[1.02]" style={{ border: `1px solid ${theme.bdr}` }}>
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={() => {
+                    const imgIdx = imageAttachments.findIndex(x => x.id === a.id);
+                    onPreviewImage?.(
+                      imageAttachments.map(img => ({
+                        url: `/api/agent/uploads/${img.id}`,
+                        name: img.name,
+                        id: img.id,
+                      })),
+                      Math.max(0, imgIdx)
+                    );
+                  }}
+                  title={`Click to preview ${a.name}`}
+                  className="block rounded-xl overflow-hidden shadow-sm transition-transform hover:scale-[1.02] cursor-zoom-in text-left p-0 border-0 bg-transparent focus:outline-none"
+                  style={{ border: `1px solid ${theme.bdr}` }}
+                >
                   <img src={`/api/agent/uploads/${a.id}`} alt={a.name} className="block object-cover" style={{ maxWidth: m.attachments!.length > 1 ? 150 : 240, maxHeight: 170 }} loading="lazy" />
-                </a>
+                </button>
               )
               : (
                 <div key={a.id} className="rounded-xl px-2.5 py-2 flex items-center gap-1.5 text-[11.5px]" style={{ border: `1px solid ${theme.bdr}`, color: theme.sub, background: theme.surface }}>

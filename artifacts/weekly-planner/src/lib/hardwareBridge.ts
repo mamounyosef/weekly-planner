@@ -83,6 +83,8 @@ export class HardwareBridge {
 
   hwEvents: HardwareEvent[] = [];
   hwEventSeq = 0;
+  /** `<boot>:<seq>` of recent button presses, so a retried press counts once. */
+  hwSeenPresses: string[] = [];
 
   // What the ESP32's LCD should show. Pushed by whichever window owns the
   // controller, so the LCD renders the app's own numbers rather than a
@@ -238,8 +240,32 @@ export class HardwareBridge {
           uiMode: String(parsed?.uiMode ?? ''),
           uiValid: Boolean(parsed?.uiValid),
         };
+        // Link health as the board sees it. Only present on firmware that
+        // reports it; absent fields are simply left out.
+        for (const k of ['rssi', 'uptimeS', 'netFails', 'wifiReconnects', 'freeHeap', 'rttMs', 'conns', 'resetReason']) {
+          const v = Number(parsed?.[k]);
+          if (parsed?.[k] !== undefined && Number.isFinite(v)) this.hwLiveDiag[k] = v;
+        }
         this.hwLiveAt = now;
-        return { status: 200, body: { success: true } };
+        // The display state rides back on the same response. The board used to
+        // make a second request for it on its own connection, which doubled the
+        // traffic and the number of ways one cycle could stall.
+        return { status: 200, body: { success: true, state: this.getState(now).body } };
+      }
+
+      // A button press is retried by the board until it is acknowledged, so a
+      // reply lost on the way back would otherwise deliver the same press twice
+      // (start, then immediately pause). Each press carries the board's boot id
+      // and a sequence number; a repeat is acknowledged and dropped.
+      const boot = typeof parsed.boot === 'string' ? parsed.boot : '';
+      const seq = Number(parsed.seq);
+      if (boot && Number.isFinite(seq)) {
+        const key = `${boot}:${seq}`;
+        if (this.hwSeenPresses.includes(key)) {
+          return { status: 200, body: { success: true, duplicate: true } };
+        }
+        this.hwSeenPresses.push(key);
+        while (this.hwSeenPresses.length > 64) this.hwSeenPresses.shift();
       }
 
       const evt: HardwareEvent = { id: ++this.hwEventSeq, type, at: now };

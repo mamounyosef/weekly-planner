@@ -62,19 +62,44 @@
 // ---------------------------------------------------------------------------
 // Networking
 // ---------------------------------------------------------------------------
-// Polled twice a second, matching the app's publish rate. The firmware does no
-// local extrapolation between polls -- the app owns every number -- so this
-// interval is what bounds how stale the display can look.
-#define STATE_POLL_INTERVAL_MS 500
-#define HTTP_TIMEOUT_MS 3000
+// The display state comes back on the reply to every sample batch, so
+// SAMPLE_BATCH_MS is also the display refresh rate. All of this runs in the
+// network task; none of these timeouts can freeze the display any more.
+//
+// Connect is kept short: on a LAN a healthy connect takes a few ms, so 1.5s
+// means the address is wrong or the PC is gone, and the next candidate address
+// should be tried rather than waited on.
+#define HTTP_CONNECT_TIMEOUT_MS 1500
+#define HTTP_TIMEOUT_MS 2000
 
-// The carrier's AP logs a spurious AUTH_FAIL on first join (WPA2/WPA3 mixed
-// mode), so the join timeout has to be generous enough to survive one retry.
-#define WIFI_JOIN_TIMEOUT_MS 20000
+// Consecutive failed requests before the board stops trusting the current
+// server address and tries the next one (mDNS, last good, compiled-in).
+#define FAILURES_BEFORE_RERESOLVE 4
+#define MDNS_TIMEOUT_MS 1500
 
 // How long the server can go unreachable before we call the link down and show
-// the "not working" colour.
-#define SERVER_STALE_MS 5000
+// "No connection". Long enough to ride through a dev-server hiccup; the clock
+// keeps moving in the meantime (MAX_EXTRAPOLATE_S).
+#define SERVER_STALE_MS 8000
+
+// How far a running clock may be carried forward locally when an update is
+// late. The next update always overwrites it.
+#define MAX_EXTRAPOLATE_S 10
+
+// A button press that cannot reach the server within this long is dropped
+// rather than delivered late.
+#define BUTTON_RETRY_MS 8000
+
+// WiFi self-repair. Down this long: restart the association. Up but the server
+// silent this long: rejoin anyway, in case the association is a zombie.
+#define WIFI_RESTART_MS 20000
+#define WIFI_REJOIN_SILENT_MS 90000
+
+// Watchdogs. The loop (display) reboots the board if it hangs this long; it
+// also reboots if the network task stops going round for NET_TASK_STUCK_MS
+// (stuck in the IP stack, which nothing else can recover).
+#define LOOP_WDT_TIMEOUT_S 30
+#define NET_TASK_STUCK_MS 120000
 
 // ---------------------------------------------------------------------------
 // Diagnostics

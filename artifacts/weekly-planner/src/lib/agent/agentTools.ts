@@ -41,6 +41,12 @@ import type {
   ItemFacts,
   PendingDeletion,
 } from './agentTypes';
+import {
+  dedupeFocusHistory, applyTypedDayTotals, isTypedDayTotal,
+  focusDayKey, summariseFocus, computeAllTimeStreaks,
+  type FocusSessionRecord,
+} from '../focusStats';
+import { focusElapsedSeconds, type FocusTimerState } from '../focusTimer';
 
 // ─── The world a tool sees ───────────────────────────────────────────────────
 
@@ -83,6 +89,16 @@ export interface AgentWorld {
   prayersFor?: (date: string) => PrayerDay | null;
   /** Injected for deterministic tests. */
   newId?: () => string;
+  /** Focus session history (all completed sessions, including day adjustments). */
+  focusSessions: FocusSessionRecord[];
+  /** The currently running/paused focus timer, or null when there is no timer file. */
+  focusTimer: FocusTimerState | null;
+  /** Daily focus goal in seconds, 0 means no goal set. */
+  focusDailyGoalSeconds: number;
+  /** Dates excluded from streaks. */
+  focusExcludedDates: string[];
+  /** Focus day start hour (sessions ending before this hour count to the previous day). */
+  focusDayStartHour: number;
 }
 
 /** One reversible write, kept by the server so Undo can put things back. */
@@ -115,6 +131,8 @@ export interface ToolOutcome {
 
 export interface DeletionPlan {
   items: Array<{ id: string; kind: 'event' | 'task'; scope: OccurrenceScope }>;
+  /** Focus session ids to delete (approval-gated, like items). */
+  focusSessionIds?: string[];
 }
 
 // ─── Small helpers ───────────────────────────────────────────────────────────
@@ -776,12 +794,57 @@ export const TOOL_DEFS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_focus_sessions',
+      description: 'List completed focus sessions in a date range. Shows each session\'s start/end time, duration, and which day it counts toward. Use this to answer questions about focus history, peak focus times, specific sessions, or daily totals.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from: { type: 'string', description: 'YYYY-MM-DD' },
+          to: { type: 'string', description: 'YYYY-MM-DD, inclusive. At most 366 days.' },
+        },
+        required: ['from', 'to'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_focus_stats',
+      description: 'Get focus statistics and streaks: total hours, session count, daily average, best day, current/longest streak, and daily goal progress. Also reports the current timer state (running/paused/idle, elapsed time, planned duration). Use this for questions about focus trends, productivity, goals, and streaks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from: { type: 'string', description: 'YYYY-MM-DD. Start of the stats range.' },
+          to: { type: 'string', description: 'YYYY-MM-DD, inclusive. End of the stats range.' },
+        },
+        required: ['from', 'to'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_focus_sessions',
+      description: 'Delete focus sessions by their ids. This does NOT delete immediately: the user sees exactly what will be removed and must press Approve. Use this when the user asks to remove specific sessions from their history.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sessionIds: { type: 'array', items: { type: 'string' }, description: 'Session ids from list_focus_sessions.' },
+          reason: { type: 'string', description: 'One short sentence shown on the approval card.' },
+        },
+        required: ['sessionIds', 'reason'],
+      },
+    },
+  },
 ] as const;
 
 export const TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_DEFS.map(t => t.function.name));
 
 /** Tools that change nothing and may run without any bookkeeping. */
-export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['list_items', 'search_items', 'find_free_time']);
+export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['list_items', 'search_items', 'find_free_time', 'list_focus_sessions', 'get_focus_stats']);
 
 // ─── Tool dispatch ───────────────────────────────────────────────────────────
 
@@ -809,6 +872,9 @@ export function runTool(name: string, rawArgs: unknown, world: AgentWorld): Tool
       case 'create_tasks': return createTasks(args, world);
       case 'update_tasks': return updateTasks(args, world);
       case 'delete_items': return prepareDeletion(args, world);
+      case 'list_focus_sessions': return listFocusSessions(args, world);
+      case 'get_focus_stats': return getFocusStats(args, world);
+      case 'delete_focus_sessions': return prepareFocusDeletion(args, world);
       case 'ask_user': return askUser(args, world);
     }
   } catch (err) {
@@ -1683,6 +1749,212 @@ export function applyDeletion(plan: DeletionPlan, world: AgentWorld): ToolOutcom
     result: { approved: true, deleted, items: results },
     label: `Deleted ${deleted} item${deleted === 1 ? '' : 's'}`,
   };
+}
+
+// ─── Focus sessions ─────────────────────────────────────────────────────────
+
+function timePeriod(d: Date): string {
+  const h = d.getHours();
+  if (h < 6) return 'Night';
+  if (h < 12) return 'Morning';
+  if (h < 17) return 'Afternoon';
+  if (h < 21) return 'Evening';
+  return 'Night';
+}
+
+function listFocusSessions(args: Record<string, unknown>, world: AgentWorld): ToolOutcome {
+  const from = parseYmdStrict(args.from, 'from');
+  const to = parseYmdStrict(args.to, 'to');
+  if (to < from) fail('"to" is before "from".');
+  if (differenceInCalendarDays(parseDate(to), parseDate(from)) > 366) fail('At most 367 days at a time.');
+
+  const dayStart = world.focusDayStartHour;
+  const deduped = dedupeFocusHistory(world.focusSessions);
+  const sessions = applyTypedDayTotals(deduped, dayStart)
+    .filter(s => {
+      if (isTypedDayTotal(s)) return false; // only real sessions
+      const day = focusDayKey(s.endedAt ?? s.startedAt, dayStart);
+      return day >= from && day <= to;
+    })
+    .map(s => {
+      const day = focusDayKey(s.endedAt ?? s.startedAt, dayStart);
+      const started = new Date(s.startedAt);
+      const ended = s.endedAt ? new Date(s.endedAt) : null;
+      return {
+        id: s.id,
+        date: day,
+        day: format(parseDate(day), 'EEEE'),
+        startedAt: s.startedAt,
+        startTime: format(started, world.timeFormat === '24h' ? 'HH:mm' : 'h:mm a'),
+        endTime: ended ? format(ended, world.timeFormat === '24h' ? 'HH:mm' : 'h:mm a') : null,
+        durationMinutes: Math.round(s.durationSeconds / 60),
+        plannedMinutes: s.plannedSeconds ? Math.round(s.plannedSeconds / 60) : null,
+        period: timePeriod(started),
+      };
+    });
+
+  return {
+    result: { from, to, count: sessions.length, sessions: sessions.slice(0, 200) },
+    label: `Checked focus sessions ${dayLabel(from)} to ${dayLabel(to)} (${sessions.length} session${sessions.length === 1 ? '' : 's'})`,
+  };
+}
+
+function getFocusStats(args: Record<string, unknown>, world: AgentWorld): ToolOutcome {
+  const from = parseYmdStrict(args.from, 'from');
+  const to = parseYmdStrict(args.to, 'to');
+  if (to < from) fail('"to" is before "from".');
+
+  const dayStart = world.focusDayStartHour;
+  const summary = summariseFocus(world.focusSessions, {
+    from, to, dayStartHour: dayStart, excludedDates: world.focusExcludedDates,
+  });
+  const allTimeStreaks = computeAllTimeStreaks(world.focusSessions, {
+    anchorDate: world.now, dayStartHour: dayStart, excludedDates: world.focusExcludedDates,
+  });
+
+  // Timer state
+  let timerInfo: Record<string, unknown> = { status: 'no timer' };
+  if (world.focusTimer) {
+    const t = world.focusTimer;
+    if (t.isRunning && t.lastStartedAt) {
+      const elapsed = focusElapsedSeconds(t, world.now.getTime());
+      const remaining = Math.max(0, t.plannedSeconds - elapsed);
+      timerInfo = {
+        status: 'running',
+        elapsedMinutes: Math.round(elapsed / 60),
+        remainingMinutes: Math.round(remaining / 60),
+        plannedMinutes: Math.round(t.plannedSeconds / 60),
+      };
+    } else if (t.sessionStartedAt) {
+      timerInfo = {
+        status: 'paused',
+        accumulatedMinutes: Math.round(t.accumulatedSeconds / 60),
+        plannedMinutes: Math.round(t.plannedSeconds / 60),
+      };
+    } else {
+      timerInfo = { status: 'idle', plannedMinutes: Math.round(t.plannedSeconds / 60) };
+    }
+  }
+
+  const result: Record<string, unknown> = {
+    range: { from, to },
+    totalHours: +(summary.totalSeconds / 3600).toFixed(1),
+    sessions: summary.sessions,
+    averageMinutesPerDay: Math.round(summary.averageSeconds / 60),
+    bestDay: summary.bestDay ? {
+      date: summary.bestDay.date,
+      day: format(parseDate(summary.bestDay.date), 'EEEE'),
+      hours: +(summary.bestDay.seconds / 3600).toFixed(1),
+    } : null,
+    streakInRange: summary.streak,
+    allTimeCurrentStreak: allTimeStreaks.currentStreak,
+    allTimeLongestStreak: allTimeStreaks.longestStreak,
+    timer: timerInfo,
+  };
+  if (world.focusDailyGoalSeconds > 0) {
+    result.dailyGoalMinutes = Math.round(world.focusDailyGoalSeconds / 60);
+  }
+
+  return {
+    result,
+    label: `Checked focus stats ${dayLabel(from)} to ${dayLabel(to)}`,
+  };
+}
+
+function prepareFocusDeletion(args: Record<string, unknown>, world: AgentWorld): ToolOutcome {
+  if (!Array.isArray(args.sessionIds) || !args.sessionIds.length)
+    fail('sessionIds must be a non-empty list of focus session ids.');
+  if ((args.sessionIds as unknown[]).length > 50)
+    fail('At most 50 deletions per request.');
+  const reason = typeof args.reason === 'string' && args.reason.trim()
+    ? args.reason.trim() : 'Delete these focus sessions';
+
+  const dayStart = world.focusDayStartHour;
+  const deduped = dedupeFocusHistory(world.focusSessions);
+  const byId = new Map(deduped.map(s => [s.id, s]));
+  const deletions: PendingDeletion[] = [];
+  const plan: DeletionPlan = { items: [], focusSessionIds: [] };
+
+  for (const rawId of args.sessionIds as unknown[]) {
+    const id = String(rawId);
+    const session = byId.get(id);
+    if (!session) return fail(`No focus session with id "${id}". Use list_focus_sessions to get current ids.`);
+    const day = focusDayKey(session.endedAt ?? session.startedAt, dayStart);
+    const started = new Date(session.startedAt);
+    const ended = session.endedAt ? new Date(session.endedAt) : null;
+    const mins = Math.round(session.durationSeconds / 60);
+    const tf = world.timeFormat === '24h' ? 'HH:mm' : 'h:mm a';
+
+    deletions.push({
+      id,
+      kind: 'focus_session',
+      title: `${mins}-minute focus session`,
+      scopeLabel: 'This session',
+      when: `${dayLabel(day)}, ${format(started, tf)}${ended ? ` to ${format(ended, tf)}` : ''}`,
+    });
+    plan.focusSessionIds!.push(id);
+  }
+
+  const approval: AgentApproval = {
+    id: (world.newId ?? uuid)(),
+    reason,
+    deletions,
+  };
+  return {
+    pause: { kind: 'approval', approval, plan },
+    result: { status: 'waiting_for_user_approval', items: deletions.length },
+    label: `Asked to delete ${deletions.length} focus session${deletions.length === 1 ? '' : 's'}`,
+  };
+}
+
+/**
+ * Perform an approved focus session deletion against the data AS IT IS NOW.
+ */
+export function applyFocusDeletion(
+  sessionIds: string[],
+  focusSessions: FocusSessionRecord[],
+  world: AgentWorld,
+): { sessions: FocusSessionRecord[]; deleted: number; entries: ChangeEntry[] } {
+  const toDelete = new Set(sessionIds);
+  const entries: ChangeEntry[] = [];
+  const kept: FocusSessionRecord[] = [];
+  const dayStart = world.focusDayStartHour;
+  const tf = world.timeFormat === '24h' ? 'HH:mm' : 'h:mm a';
+
+  for (const s of focusSessions) {
+    if (toDelete.has(s.id)) {
+      const day = focusDayKey(s.endedAt ?? s.startedAt, dayStart);
+      entries.push({
+        action: 'deleted',
+        kind: 'focus_session',
+        id: s.id,
+        before: {
+          title: `${Math.round(s.durationSeconds / 60)}-minute focus session`,
+          kind: 'focus_session',
+          date: day,
+          startTime: format(new Date(s.startedAt), tf),
+          endTime: s.endedAt ? format(new Date(s.endedAt), tf) : undefined,
+        },
+        verified: true,
+      });
+      toDelete.delete(s.id);
+    } else {
+      kept.push(s);
+    }
+  }
+
+  // Any ids that weren't found
+  for (const id of toDelete) {
+    entries.push({
+      action: 'failed',
+      kind: 'focus_session',
+      id,
+      note: 'Session was already gone.',
+      verified: true,
+    });
+  }
+
+  return { sessions: kept, deleted: entries.filter(e => e.action === 'deleted').length, entries };
 }
 
 // ─── Questions ───────────────────────────────────────────────────────────────

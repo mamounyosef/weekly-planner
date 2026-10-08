@@ -731,7 +731,7 @@ export function WeekView({
       // without this the block underneath can never be picked up at all.
       const w = colW / pl.columns;
       const left = w * pl.column;
-      if (inCol < left || inCol > left + w) continue;
+      if (inCol < left || inCol > left + w * (pl.span ?? 1)) continue;
       hit = { item: pl.item.item, placed: pl, onGrip: y > pl.top + pl.height - GRIP_ZONE };
     }
     return { col, date, hit, minutes: minuteAtY(y, g.shown, g.pxPerHour) };
@@ -1185,6 +1185,16 @@ export function WeekView({
           <View style={{ width: RAIL }}>
             {slots.map(m => {
               const onHour = m % 60 === 0;
+              // A slot label under the red "now" pill (or a dragged time) used
+              // to print through it ("1:00pm" behind "1:09pm"). Give the pill
+              // the space instead.
+              const y = yAt(m);
+              const pills = [
+                nowMin !== null ? yAt(inWindow(nowMin)) : null,
+                drag ? yAt(drag.startMin) : null,
+                drag ? yAt(drag.endMin ?? drag.startMin) : null,
+              ];
+              if (pills.some(py => py !== null && Math.abs(py - y) < 13)) return null;
               return (
                 <Text
                   key={m}
@@ -1553,7 +1563,7 @@ function DayColumn({
 
       {placed.map(pl => {
         const item = pl.item.item;
-        const width = `${100 / pl.columns}%`;
+        const width = `${(100 / pl.columns) * (pl.span ?? 1)}%`;
         const isLifted = item.id === liftedId;
         const isBeingDragged = item.id === draggingId;
         // The fill, and the one ink that can be read on it. Worked out once
@@ -1851,6 +1861,11 @@ function DayColumn({
         if (!isMinuteVisible(normM, shown)) return null;
         const top = yAt(normM);
         const named = chipMode !== 'dot' && prayerLabels !== false;
+        // A marker that lands on an item used to be drawn OVER it, printing a
+        // ring across the item's title. There it goes underneath instead; the
+        // prayer can still be ticked anywhere it is visible, and from Today.
+        const underItem = placed.some(pl => top >= pl.top && top <= pl.top + pl.height);
+        const prayerZ = underItem ? 0 : 3;
 
         const glyph = (
           <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
@@ -1897,7 +1912,7 @@ function DayColumn({
                 // are the things with actual duration.
                 backgroundColor: `${colour}26`,
                 opacity: done ? 0.5 : 1,
-                zIndex: 3,
+                zIndex: prayerZ,
               }}
             >
               {glyph}
@@ -1921,7 +1936,7 @@ function DayColumn({
               top: top - 8,
               left: 0, right: 0, height: 16,
               flexDirection: 'row', alignItems: 'center',
-              zIndex: 3,
+              zIndex: prayerZ,
               opacity: done ? 0.55 : 1,
             }}
           >

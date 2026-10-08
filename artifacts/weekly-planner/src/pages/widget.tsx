@@ -2376,14 +2376,18 @@ export default function Widget() {
       {showLiveBtn && (
         <button
           onClick={scrollToLive}
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg backdrop-blur-md transition-smooth duration-300 active:scale-95 animate-in fade-in slide-in-from-bottom-2"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-1.5 pl-3 pr-2 py-2 rounded-full text-xs font-semibold whitespace-nowrap backdrop-blur-md transition-smooth duration-300 active:scale-95 animate-in fade-in slide-in-from-bottom-2"
           style={{
-            background: darkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.70)',
-            border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.20)' : 'rgba(0, 0, 0, 0.10)'}`,
+            background: darkMode ? 'rgba(28, 30, 36, 0.92)' : 'rgba(17, 19, 24, 0.88)',
+            border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.12)'}`,
             color: '#ffffff',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
           }}
         >
-          <Clock size={12} />
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-60 animate-ping" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
+          </span>
           <span>Go to Live</span>
           <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
             {formatCombo(shortcuts.goToLive)}

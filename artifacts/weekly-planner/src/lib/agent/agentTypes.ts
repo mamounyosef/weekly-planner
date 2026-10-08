@@ -50,7 +50,7 @@ export interface AgentQuestionAnswer {
 export interface PendingDeletion {
   /** The id the model passed (may be an occurrence id "<master>::<date>"). */
   id: string;
-  kind: 'event' | 'task';
+  kind: 'event' | 'task' | 'focus_session';
   title: string;
   /** Human description of the scope, e.g. "Only Tue 29 Sep" or "The whole series". */
   scopeLabel: string;
@@ -72,7 +72,7 @@ export type ChangeAction = 'added' | 'updated' | 'deleted' | 'completed' | 'reop
 /** A plain, display-ready snapshot of one calendar item at one moment. */
 export interface ItemFacts {
   title: string;
-  kind: 'event' | 'task';
+  kind: 'event' | 'task' | 'focus_session';
   /** 'yyyy-MM-dd' of the (first) occurrence; absent for a task with no date. */
   date?: string;
   /** Last day of a multi-day all-day event, inclusive. */
@@ -95,7 +95,7 @@ export interface ItemFacts {
 
 export interface ChangeEntry {
   action: ChangeAction;
-  kind: 'event' | 'task';
+  kind: 'event' | 'task' | 'focus_session';
   /** The stored record id (never an occurrence id). */
   id: string;
   /** What it looks like now (absent for a delete). */

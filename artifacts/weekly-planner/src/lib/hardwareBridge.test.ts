@@ -476,5 +476,92 @@ section('11. cancelArming Functionality');
     finalCtrl.armingUntil === null && finalCtrl.sessionActive === false);
 }
 
+// ---------------------------------------------------------------------------
+// 12. Samples reply carries the display state (one request per cycle)
+// ---------------------------------------------------------------------------
+section('12. Samples reply carries the display state');
+{
+  const clk = new Clock();
+  const bridge = createHardwareBridge({ now: clk.now });
+
+  const offline = bridge.handleEvent({ type: 'samples', dt: 100, cm: [50] }).body as Record<string, any>;
+  check('samples reply has success', offline.success === true);
+  check('samples reply has state with mode offline before any window publishes',
+    offline.state?.mode === 'offline', JSON.stringify(offline));
+
+  bridge.postState({ mode: 'running', remainingSeconds: 1234, todaySeconds: 5000, sessionsToday: 3, armSeconds: 0 });
+  const live = bridge.handleEvent({ type: 'samples', dt: 100, cm: [] }).body as Record<string, any>;
+  check('samples reply mirrors the published state',
+    live.state?.mode === 'running' && live.state?.remainingSeconds === 1234 &&
+    live.state?.todaySeconds === 5000 && live.state?.sessionsToday === 3 && live.state?.armSeconds === 0,
+    JSON.stringify(live));
+  check('samples reply state equals GET /state exactly',
+    JSON.stringify(live.state) === JSON.stringify(bridge.getState().body));
+
+  // Empty batch (heartbeat) still answers with state.
+  const beat = bridge.handleEvent({ type: 'samples', dt: 100 }).body as Record<string, any>;
+  check('heartbeat batch with no cm still returns state', beat.state?.mode === 'running');
+
+  clk.advance(HW_LEASE_MS + 1);
+  const stale = bridge.handleEvent({ type: 'samples', dt: 100, cm: [50] }).body as Record<string, any>;
+  check('samples reply goes offline once the window stops publishing', stale.state?.mode === 'offline');
+
+  // The firmware's flat key search must find "mode" inside the nested object.
+  const text = JSON.stringify(live);
+  check('serialised reply contains "mode":"running" for the firmware parser', text.includes('"mode":"running"'));
+  check('serialised reply contains "remainingSeconds":1234', text.includes('"remainingSeconds":1234'));
+}
+
+// ---------------------------------------------------------------------------
+// 13. Retried button presses are delivered once
+// ---------------------------------------------------------------------------
+section('13. Retried button presses are delivered once');
+{
+  const bridge = createHardwareBridge();
+  const count = () => (bridge.getEvents(0, true).body.events as HardwareEvent[])
+    .filter(e => e.type === 'button_a' || e.type === 'button_b').length;
+
+  const first = bridge.handleEvent({ type: 'button_a', boot: 'b1', seq: 1 });
+  check('first press accepted with an id', first.status === 200 && typeof first.body.id === 'number');
+  const retry = bridge.handleEvent({ type: 'button_a', boot: 'b1', seq: 1 });
+  check('retry of the same press is acknowledged', retry.status === 200 && retry.body.success === true);
+  check('retry is flagged duplicate', retry.body.duplicate === true);
+  check('retry does not queue a second event', count() === 1, `count=${count()}`);
+
+  bridge.handleEvent({ type: 'button_a', boot: 'b1', seq: 2 });
+  check('next sequence number is a new press', count() === 2);
+
+  bridge.handleEvent({ type: 'button_a', boot: 'b2', seq: 1 });
+  check('same seq after a reboot (new boot id) is a new press', count() === 3);
+
+  bridge.handleEvent({ type: 'button_b', boot: 'b2', seq: 2 });
+  bridge.handleEvent({ type: 'button_b', boot: 'b2', seq: 2 });
+  check('button_b retry deduped too', count() === 4);
+
+  bridge.handleEvent({ type: 'button_a' });
+  bridge.handleEvent({ type: 'button_a' });
+  check('presses without boot/seq (old firmware) are never deduped', count() === 6);
+
+  bridge.handleEvent({ type: 'button_a', boot: 'b3' });
+  bridge.handleEvent({ type: 'button_a', boot: 'b3' });
+  check('boot without seq is not deduped', count() === 8);
+
+  bridge.handleEvent({ type: 'button_a', boot: 'b3', seq: 'x' });
+  bridge.handleEvent({ type: 'button_a', boot: 'b3', seq: 'x' });
+  check('non-numeric seq is not deduped', count() === 10);
+
+  // Memory is bounded: after 64 newer presses the oldest key is forgotten.
+  const b = createHardwareBridge();
+  for (let i = 0; i < 100; i++) b.handleEvent({ type: 'button_a', boot: 'm', seq: i });
+  check('dedupe memory is bounded to 64 keys', b.hwSeenPresses.length === 64, `len=${b.hwSeenPresses.length}`);
+  const dup = b.handleEvent({ type: 'button_a', boot: 'm', seq: 99 });
+  check('recent key still deduped after many presses', dup.body.duplicate === true);
+
+  const bad = bridge.handleEvent({ boot: 'b9', seq: 1 });
+  check('missing type still rejected even with boot/seq', bad.status === 400);
+  const ok = bridge.handleEvent({ type: 'button_a', boot: 'b9', seq: 1 });
+  check('a rejected malformed event does not consume the seq', ok.body.duplicate !== true);
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
 if (failures > 0) process.exitCode = 1;

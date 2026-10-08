@@ -302,6 +302,79 @@ function main() {
       'a five-minute event is drawn at the floor, not at five');
   }
 
+  console.log('--- 12. A BLOCK WIDENS INTO FREE COLUMNS (span) ---');
+  {
+    const get = (placed: ReturnType<typeof layoutDay>, id: string) => placed.find(x => x.item.id === id)!;
+    // Long event beside two short ones that never meet: 2 columns, and the
+    // short ones each take column 1 only (the long one is in column 0).
+    {
+      const p = layoutDay([at('long', 9, 12), at('s1', 9, 10), at('s2', 11, 12)], { pxPerHour: 60 });
+      assert.equal(get(p, 'long').span, 1, 'long is blocked by s1 in column 1');
+      assert.equal(get(p, 's1').span, 1);
+      assert.equal(get(p, 's2').span, 1);
+    }
+    // Three-way pile-up at 9, then a later block in column 1 whose right
+    // neighbour (column 2) is free by then: it spreads to the edge.
+    {
+      const p = layoutDay([at('a', 9, 13), at('b', 9, 10), at('c', 9, 10), at('d', 11, 12)], { pxPerHour: 60 });
+      // Shorter blocks sort first at a tie, so b=0, c=1, a=2.
+      assert.equal(get(p, 'a').columns, 3);
+      assert.equal(get(p, 'a').column, 2);
+      assert.equal(get(p, 'd').column, 0, 'd reuses the first free column');
+      assert.equal(get(p, 'd').span, 2, 'and widens over the now-empty column 1, stopping at a');
+      assert.equal(get(p, 'b').span, 1, 'b is blocked by c');
+      assert.equal(get(p, 'c').span, 1, 'c is blocked by a');
+      assert.equal(get(p, 'a').span, 1, 'a is already the last column');
+    }
+    // Never widens LEFT, and never past the run's column count.
+    {
+      const p = layoutDay([at('a', 9, 10), at('b', 9, 11), at('c', 10, 11)], { pxPerHour: 60 });
+      for (const pl of p) {
+        assert.ok(pl.span >= 1, 'span is at least 1');
+        assert.ok(pl.column + pl.span <= pl.columns, `${pl.item.id} stays inside its run`);
+      }
+      assert.equal(get(p, 'c').column, 0, 'c drops into column 0 once a finishes');
+      assert.equal(get(p, 'c').span, 1, 'b still occupies column 1 at 10:00');
+    }
+    // A lone event spans its single column; separate runs are independent.
+    {
+      assert.equal(layoutDay([at('x', 9, 10)], { pxPerHour: 60 })[0].span, 1);
+      const p = layoutDay([at('a', 9, 10), at('b', 9, 10), at('c', 15, 16)], { pxPerHour: 60 });
+      assert.equal(get(p, 'c').columns, 1);
+      assert.equal(get(p, 'c').span, 1);
+    }
+    // Touching end-to-start is NOT overlap: a block ending at 10 does not
+    // block one starting at 10 in the next column.
+    {
+      const p = layoutDay([at('a', 9, 11), at('b', 9, 10), at('c', 10, 11)], { pxPerHour: 60 });
+      // b (shorter) is column 0, a column 1; c starts as b ends.
+      assert.equal(get(p, 'c').column, 0, 'c takes b\'s column the moment b ends');
+      assert.equal(get(p, 'c').span, 1, 'a still runs in column 1');
+      assert.equal(get(p, 'b').span, 1);
+    }
+    // Invariant over many random days: no widened block covers another block
+    // that overlaps it in time.
+    {
+      let seed = 7;
+      const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+      for (let n = 0; n < 300; n++) {
+        const items = Array.from({ length: 1 + Math.floor(rnd() * 9) }, (_, i) => {
+          const s = 8 + Math.floor(rnd() * 20) / 2;
+          return at(`e${i}`, s, s + 0.25 + Math.floor(rnd() * 8) / 4);
+        });
+        const p = layoutDay(items, { pxPerHour: 60 });
+        for (const x of p) {
+          for (const y of p) {
+            if (x === y || x.columns !== y.columns) continue;
+            const timeOverlap = x.item.startMin < blockEnd(y.item) && y.item.startMin < blockEnd(x.item);
+            const colOverlap = x.column < y.column + y.span && y.column < x.column + x.span;
+            assert.ok(!(timeOverlap && colOverlap), `case ${n}: ${x.item.id} and ${y.item.id} collide`);
+          }
+        }
+      }
+    }
+  }
+
   console.log('\nALL PASS (grid: overlap columns, positions, month shape)');
 }
 

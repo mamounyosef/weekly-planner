@@ -21,8 +21,15 @@ export interface Placed<T> {
   item: T;
   /** Which column of its overlap group, from zero. */
   column: number;
-  /** How many columns that group needs. Width is 1/columns of the day. */
+  /** How many columns that group needs. */
   columns: number;
+  /**
+   * How many columns this block may cover, starting at `column`: it widens into
+   * every column to its right that is free for its whole duration. Width is
+   * span/columns of the day. Without this a short meeting beside a long event
+   * stayed a sliver even when the space next to it was empty.
+   */
+  span: number;
   top: number;
   height: number;
 }
@@ -98,10 +105,19 @@ export function layoutDay<T extends Placeable>(
     const columns = columnEnds.length;
     for (const { item, column } of placed) {
       const end = blockEnd(item);
+      // Widen right while the next column has nothing overlapping this block.
+      let span = 1;
+      for (let c = column + 1; c < columns; c++) {
+        const blocked = placed.some(p => p.column === c
+          && p.item.startMin < end && blockEnd(p.item) > item.startMin);
+        if (blocked) break;
+        span++;
+      }
       out.push({
         item,
         column,
         columns,
+        span,
         top: (item.startMin - dayStart) * perMinute,
         height: Math.max(1, (end - item.startMin) * perMinute),
       });

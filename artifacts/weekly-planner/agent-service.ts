@@ -18,11 +18,13 @@ import path from 'path';
 import crypto from 'crypto';
 
 import {
-  runTool, applyDeletion, planUndo, verifyAgainst, answersToResult,
+  runTool, applyDeletion, applyFocusDeletion, planUndo, verifyAgainst, answersToResult,
   TOOL_DEFS, READ_ONLY_TOOLS,
   type AgentWorld, type ToolOutcome, type UndoRecord, type DeletionPlan, type EventData, type PrayerDay,
 } from './src/lib/agent/agentTools';
 import { buildSystemPrompt } from './src/lib/agent/agentPrompt';
+import type { FocusSessionRecord } from './src/lib/focusStats';
+import type { FocusTimerState } from './src/lib/focusTimer';
 import {
   AGENT_LIMITS,
   type AgentAttachment, type AgentConversation, type AgentConversationSummary, type AgentMessage,
@@ -260,16 +262,19 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
   // ── The planner snapshot a tool sees ──
   async function loadWorld(auth: AgentAuth): Promise<AgentWorld> {
     const p = auth.userPaths;
-    const [events, tasksRaw, settings, gcals, prayerCache] = await Promise.all([
+    const [events, tasksRaw, settings, gcals, prayerCache, focusRaw, timerRaw] = await Promise.all([
       readJson<EventData>(p.dbPath, {}),
       readJson<unknown>(p.tasksPath, {}),
       readJson<Record<string, any>>(p.settingsPath, {}),
       readJson<{ ownedCalendarId?: string; calendars?: Array<{ id: string; summary: string }> }>(path.join(p.dbDir, 'google-calendars.json'), {}),
       readJson<Record<string, unknown>>(path.join(rootDir, 'database', 'prayer-times.json'), {}),
+      readJson<unknown[]>(path.join(p.dbDir, 'focus-sessions.json'), []),
+      readJson<unknown>(path.join(p.dbDir, 'focus-timer.json'), null),
     ]);
     const prayerSettings = coercePrayerSettings(settings.prayer);
     const months = prayerMonthsFromCache(prayerCache, prayerSettings);
     const ws = Number(settings.weekStartsOn);
+    const dayStartH = Number.isFinite(Number(settings.dayStartH)) ? Number(settings.dayStartH) : 0;
     return {
       now: new Date(),
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'local',
@@ -278,13 +283,18 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       categories: coerceCategories(settings.categories),
       taskLists: coerceTaskLists(settings.taskLists),
       weekStartsOn: (Number.isInteger(ws) && ws >= 0 && ws <= 6 ? ws : 0) as WeekStartsOn,
-      dayStartH: Number.isFinite(Number(settings.dayStartH)) ? Number(settings.dayStartH) : 0,
+      dayStartH,
       dayEndH: Number.isFinite(Number(settings.dayEndH)) ? Number(settings.dayEndH) : 24,
       timeFormat: settings.timeFormat === '24h' ? '24h' : '12h',
       notificationDefaults: coerceNotificationSettings(settings.notifications),
       ownedCalendarId: gcals.ownedCalendarId,
       calendars: Array.isArray(gcals.calendars) ? gcals.calendars : [],
       prayersFor: (date: string) => (months[date.slice(0, 7)]?.[date] as PrayerDay | undefined) ?? null,
+      focusSessions: Array.isArray(focusRaw) ? focusRaw.filter(s => s && typeof s === 'object') as FocusSessionRecord[] : [],
+      focusTimer: timerRaw && typeof timerRaw === 'object' ? timerRaw as FocusTimerState : null,
+      focusDailyGoalSeconds: Number(settings.focusDailyGoalSeconds) || 0,
+      focusExcludedDates: Array.isArray(settings.focusExcludedDates) ? settings.focusExcludedDates : [],
+      focusDayStartHour: Number.isFinite(Number(settings.focusDayStartHour)) ? Number(settings.focusDayStartHour) : dayStartH,
     };
   }
 
@@ -587,6 +597,9 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       case 'create_tasks': return 'Adding tasks';
       case 'update_tasks': return 'Updating tasks';
       case 'delete_items': return 'Preparing a deletion for your approval';
+      case 'list_focus_sessions': return 'Checking your focus sessions';
+      case 'get_focus_stats': return 'Looking at your focus stats';
+      case 'delete_focus_sessions': return 'Preparing to delete focus sessions';
       case 'ask_user': return 'Asking you';
       default: return `Unknown tool "${name}"`;
     }
@@ -785,11 +798,27 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
           const approved = body.approved === true;
           const m = conv.messages.find(x => x.id === pending.messageId);
           let result: unknown;
+          const isFocusDeletion = !!(pending.plan.focusSessionIds?.length);
+          const toolName = isFocusDeletion ? 'delete_focus_sessions' : 'delete_items';
           if (approved) {
             const { outcome, cs } = await withLock(username, async () => {
               const fresh = await loadWorld(auth);
-              const o = applyDeletion(pending.plan, fresh);
-              const c = await commit(auth, fresh, o, 'delete_items');
+              let o: ToolOutcome;
+              if (isFocusDeletion) {
+                // Focus session deletion: write directly to focus-sessions.json
+                const focusResult = applyFocusDeletion(pending.plan.focusSessionIds!, fresh.focusSessions, fresh);
+                if (focusResult.deleted > 0) {
+                  await writeJsonAtomic(path.join(auth.userPaths.dbDir, 'focus-sessions.json'), focusResult.sessions);
+                }
+                o = {
+                  entries: focusResult.entries,
+                  result: { approved: true, deleted: focusResult.deleted, items: pending.plan.focusSessionIds },
+                  label: `Deleted ${focusResult.deleted} focus session${focusResult.deleted === 1 ? '' : 's'}`,
+                };
+              } else {
+                o = applyDeletion(pending.plan, fresh);
+              }
+              const c = await commit(auth, fresh, o, toolName);
               return { outcome: o, cs: c };
             });
             result = outcome.result;
@@ -801,7 +830,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
             result = { approved: false, deleted: 0, note: 'The user pressed Deny. Nothing was deleted. Do not ask again unless they bring it up.' };
           }
           if (m) m.approvalDecision = { approved, at: Date.now() };
-          llm.messages.push({ role: 'tool', tool_name: 'delete_items', content: JSON.stringify(result) });
+          llm.messages.push({ role: 'tool', tool_name: toolName, content: JSON.stringify(result) });
           llm.messages.push(...pending.after);
           llm.pending = undefined;
           await saveLlm(p, id, llm);

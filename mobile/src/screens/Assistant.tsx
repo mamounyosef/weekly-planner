@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Image, KeyboardAvoidingView, Pressable, ScrollView, TextInput, View,
+  ActivityIndicator, Image, KeyboardAvoidingView, Modal, Pressable, ScrollView, TextInput, View, useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
@@ -32,6 +32,7 @@ import type {
 } from '../lib/agent/agentTypes';
 import { AGENT_LIMITS } from '../lib/agent/agentTypes';
 import { buildReport, summarize, type Tone } from '../lib/agent/agentReport';
+import { PhoneImagePreviewModal, type PreviewItem } from './AssistantImagePreview';
 
 export interface SharedToAssistant {
   /** Changes whenever something new is shared, so the same file twice still lands. */
@@ -101,12 +102,27 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
 
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState<PendingFile[]>([]);
+  const [previewState, setPreviewState] = useState<{
+    items: PreviewItem[];
+    index: number;
+    isPending?: boolean;
+  } | null>(null);
   const [sending, setSending] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [clipHasImage, setClipHasImage] = useState(false);
   const [listening, setListening] = useState(false);
   const baseDraftRef = useRef('');
   const scrollRef = useRef<ScrollView>(null);
+
+  const removeFile = useCallback((localId: string) => {
+    setFiles(f => f.filter(x => x.localId !== localId));
+    setPreviewState(prev => {
+      if (!prev || !prev.isPending) return prev;
+      const nextItems = prev.items.filter(x => x.localId !== localId);
+      if (nextItems.length === 0) return null;
+      return { ...prev, items: nextItems, index: Math.min(prev.index, nextItems.length - 1) };
+    });
+  }, []);
 
   // ── Attachments ──
   const addImages = useCallback((imgs: LocalImage[]) => {
@@ -245,7 +261,7 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
         >
           {!conv?.messages.length && <EmptyState p={p} onPick={t => setDraft(t)} />}
           {conv?.messages.map(m => (m.role === 'user'
-            ? <UserBubble key={m.id} m={m} p={p} />
+            ? <UserBubble key={m.id} m={m} p={p} onPreview={(items, index) => setPreviewState({ items, index, isPending: false })} />
             : (
               <AssistantBlock
                 key={m.id}
@@ -271,16 +287,31 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
         <View style={{ margin: space.sm, marginTop: 0, borderRadius: 22, borderWidth: 1, borderColor: listening ? p.danger : p.line, backgroundColor: p.surface, paddingHorizontal: space.sm, paddingTop: space.sm, paddingBottom: 4, elevation: 6 }}>
           {files.length > 0 && (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm, paddingBottom: space.sm }}>
-              {files.map(f => (
+              {files.map((f, idx) => (
                 <View key={f.localId} style={{ width: 64, height: 64, borderRadius: radius.sm, overflow: 'hidden', borderWidth: 1, borderColor: f.status === 'error' ? p.danger : p.line }}>
-                  <Image source={{ uri: f.preview }} style={{ width: '100%', height: '100%' }} />
+                  <Pressable
+                    onPress={() => setPreviewState({
+                      items: files.map(x => ({ uri: x.preview, localId: x.localId, name: 'Attachment' })),
+                      index: idx,
+                      isPending: true,
+                    })}
+                    style={{ width: '100%', height: '100%' }}
+                    accessibilityLabel="Preview image"
+                  >
+                    <Image source={{ uri: f.preview }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                  </Pressable>
                   {f.status === 'uploading' && (
-                    <View style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' }}>
+                    <View style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' }} pointerEvents="none">
                       <ActivityIndicator color="#fff" />
                     </View>
                   )}
+                  {f.status === 'ready' && (
+                    <View style={{ position: 'absolute', bottom: 2, left: 2, width: 14, height: 14, borderRadius: 7, backgroundColor: '#22c55e', alignItems: 'center', justifyContent: 'center' }} pointerEvents="none">
+                      <Icon name="check" size={9} color="#fff" />
+                    </View>
+                  )}
                   <Pressable
-                    onPress={() => setFiles(x => x.filter(y => y.localId !== f.localId))}
+                    onPress={() => removeFile(f.localId)}
                     hitSlop={8}
                     style={{ position: 'absolute', top: 2, right: 2, width: 20, height: 20, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' }}
                   >
@@ -332,6 +363,17 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
           </View>
         </View>
       )}
+
+      {previewState && (
+        <PhoneImagePreviewModal
+          visible={!!previewState}
+          items={previewState.items}
+          initialIndex={previewState.index}
+          onClose={() => setPreviewState(null)}
+          onRemove={previewState.isPending ? removeFile : undefined}
+          p={p}
+        />
+      )}
     </KeyboardAvoidingView>
   );
 }
@@ -382,13 +424,42 @@ function AuthedImage({ id, style }: { id: string; style: object }) {
   return <Image source={src} style={style} resizeMode="cover" />;
 }
 
-function UserBubble({ m, p }: { m: AgentMessage; p: Palette }) {
+function UserBubble({
+  m,
+  p,
+  onPreview,
+}: {
+  m: AgentMessage;
+  p: Palette;
+  onPreview?: (items: PreviewItem[], index: number) => void;
+}) {
+  const imageAttachments = useMemo(() => (m.attachments ?? []).filter(a => a.kind === 'image'), [m.attachments]);
+
   return (
     <View style={{ alignItems: 'flex-end', gap: space.xs }}>
       {m.attachments?.length ? (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: space.xs, maxWidth: '88%' }}>
           {m.attachments.map(a => (a.kind === 'image'
-            ? <AuthedImage key={a.id} id={a.id} style={{ width: 120, height: 120, borderRadius: radius.sm, backgroundColor: p.surfaceAlt }} />
+            ? (
+              <Pressable
+                key={a.id}
+                onPress={() => {
+                  const idx = imageAttachments.findIndex(x => x.id === a.id);
+                  onPreview?.(
+                    imageAttachments.map(x => ({ id: x.id, name: x.name })),
+                    Math.max(0, idx)
+                  );
+                }}
+                accessibilityLabel={`Preview ${a.name}`}
+                style={({ pressed }) => ({
+                  borderRadius: radius.sm,
+                  overflow: 'hidden',
+                  opacity: pressed ? 0.8 : 1,
+                })}
+              >
+                <AuthedImage id={a.id} style={{ width: 120, height: 120, borderRadius: radius.sm, backgroundColor: p.surfaceAlt }} />
+              </Pressable>
+            )
             : <View key={a.id} style={{ padding: space.sm, borderRadius: radius.sm, borderWidth: 1, borderColor: p.line }}><Text variant="caption" tone="soft">{a.name}</Text></View>))}
         </View>
       ) : null}

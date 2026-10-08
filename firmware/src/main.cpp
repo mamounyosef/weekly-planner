@@ -9,6 +9,13 @@
 // the whole point: the hardware buttons and the on-screen buttons must never
 // be able to disagree.
 //
+// TWO TASKS. All networking runs in its own FreeRTOS task on core 0; the
+// display, LEDs, sensor and buttons run in loop() on core 1. They used to share
+// one loop, so every HTTP request blocked the screen: a single slow connect
+// (up to 5s each, several requests per cycle) froze the clock mid-second and
+// then tripped "No connection" while the server was perfectly fine. Now the
+// network can stall for as long as it likes and the display keeps ticking.
+//
 // Tunables live in config.h; WiFi and server address in secrets.h.
 // ---------------------------------------------------------------------------
 
@@ -17,11 +24,37 @@
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <LiquidCrystal_I2C.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <Wire.h>
+#include <esp_task_wdt.h>
 
 #include "config.h"
 #include "secrets.h"
+
+// ---------------------------------------------------------------------------
+// Shared state between the UI loop (core 1) and the network task (core 0).
+// Everything below marked "locked" is only touched while holding gLock.
+// ---------------------------------------------------------------------------
+
+static SemaphoreHandle_t gLock = nullptr;
+
+struct Locked {
+  Locked() { xSemaphoreTake(gLock, portMAX_DELAY); }
+  ~Locked() { xSemaphoreGive(gLock); }
+};
+
+// Set while an OTA upload is running: the network task goes quiet so the
+// upload has the radio to itself.
+static volatile bool otaActive = false;
+
+// When the network task last went round its loop. The UI loop restarts the
+// board if this stops moving, since a task wedged inside the IP stack can
+// never recover on its own.
+static volatile unsigned long netAliveAt = 0;
+
+// Set once the network task has started the mDNS responder.
+static volatile bool mdnsReady = false;
 
 // ---------------------------------------------------------------------------
 // Display
@@ -40,6 +73,7 @@ static LiquidCrystal_I2C *lcd = nullptr;
 
 // The LCD is slow (~40ms for a full repaint) and redrawing identical text makes
 // it visibly flicker, so each line is only pushed when it actually changes.
+// Only ever touched from core 1 (loop and the OTA callbacks, which run in it).
 static String lcdLine0Shown = "";
 static String lcdLine1Shown = "";
 static bool lcdNeedsResync = false;
@@ -216,97 +250,278 @@ static float pingOnce() {
 
 // The one number the board still needs of its own: how often to ping. Replaced
 // by whatever the app's settings say; the value here is only what gets used in
-// the seconds before the first config fetch succeeds.
-struct SensorConfig {
-  long sampleIntervalMs = SAMPLE_INTERVAL_MS;
-};
-static SensorConfig cfg;
+// the seconds before the first config fetch succeeds. Written by the network
+// task, read by the loop; a 32-bit store is atomic on this core.
+static volatile long sampleIntervalMs = SAMPLE_INTERVAL_MS;
 
-// Raw pings waiting to be posted. Sized well past what one batch interval can
-// produce at the fastest allowed rate, so a slow or retried POST cannot make
-// the board drop readings the filter is counting on.
+// Raw pings waiting to be posted (locked). If the server is unreachable for a
+// while the oldest are dropped rather than the newest: the filter only cares
+// about the recent past, and a backlog would arrive with reconstructed
+// timestamps that no longer describe anything.
 static float sampleBatch[SAMPLE_BATCH_MAX];
 static int sampleBatchCount = 0;
 
 static void pushSample(float cm) {
-  if (sampleBatchCount < SAMPLE_BATCH_MAX) sampleBatch[sampleBatchCount++] = cm;
-}
-
-// ---------------------------------------------------------------------------
-// Server link
-// ---------------------------------------------------------------------------
-
-// Resolved once per connection and cached. mDNS is tried first so the PC can
-// change DHCP address without stranding the board; the compiled-in IP is only
-// the fallback for when mDNS is unavailable (some routers block it).
-static String resolvedHost = "";
-
-static void resolveServerHost() {
-  IPAddress ip = MDNS.queryHost(SERVER_MDNS, 3000);
-  // A resolved address is only preferred over the compiled-in one if it is
-  // actually plausible. A resolver answering with something off-network would
-  // otherwise be latched in permanently.
-  if (ip != IPAddress((uint32_t)0) && ip[0] == WiFi.localIP()[0] && ip[1] == WiFi.localIP()[1]) {
-    resolvedHost = ip.toString();
-    Serial.printf("[mdns] %s.local -> %s\n", SERVER_MDNS, resolvedHost.c_str());
-  } else {
-    resolvedHost = SERVER_HOST;
-    Serial.printf("[mdns] no usable answer, using %s\n", SERVER_HOST);
+  Locked l;
+  if (sampleBatchCount >= SAMPLE_BATCH_MAX) {
+    memmove(sampleBatch, sampleBatch + 1, sizeof(float) * (SAMPLE_BATCH_MAX - 1));
+    sampleBatchCount = SAMPLE_BATCH_MAX - 1;
   }
+  sampleBatch[sampleBatchCount++] = cm;
 }
 
-static String serverBase() {
-  return String("http://") + (resolvedHost.length() ? resolvedHost : SERVER_HOST) + ":" + String(SERVER_PORT);
-}
+// ---------------------------------------------------------------------------
+// What the display shows (locked)
+// ---------------------------------------------------------------------------
 
-static unsigned long lastServerOkAt = 0;
-
-// Resolving the server once at boot is not enough. The board is normally
-// powered before the PC, so the first lookup happens while nothing is there to
-// answer it, and a wrong or stale answer would then stick forever -- which is
-// exactly how it ended up posting into the void after a reboot. Repeated
-// failures trigger a fresh lookup instead.
-static int consecutiveFailures = 0;
-static const int FAILURES_BEFORE_RERESOLVE = 5;
-static int lastPollCode = 0;
-
-// Fire-and-forget event POST. The server decides what it means.
-static bool postEvent(const String &json) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(serverBase() + "/api/hardware/event")) return false;
-  http.addHeader("Content-Type", "application/json");
-
-  int code = http.POST(json);
-  http.end();
-
-  bool ok = code > 0 && code < 400;
-  if (ok) lastServerOkAt = millis();
-  Serial.printf("[event] %s -> %d\n", json.c_str(), code);
-  return ok;
-}
-
-// Everything the display needs, as last reported by the server.
+// Everything the display needs, as last reported by the server. Plain chars
+// rather than String so a copy taken under the lock never touches the heap.
 struct UiState {
-  String mode = "idle";  // idle | arming | running | paused
+  char mode[12] = "idle";  // idle | arming | running | paused | offline
   long remainingSeconds = 0;
   long todaySeconds = 0;
   long sessionsToday = 0;
   long armSeconds = 0;
   bool valid = false;
+  unsigned long receivedAt = 0;  // millis() when these numbers arrived
 };
 static UiState ui;
+static unsigned long lastServerOkAt = 0;
 
-// Every number on this display is computed by the app and read verbatim. The
-// firmware deliberately does no arithmetic on the timer or the daily totals --
-// if it did, its idea of "3 sessions today" could drift from the app's, and
-// there would be two competing definitions of the same fact. Latency is dealt
-// with by polling often, not by extrapolating locally.
+// Diagnostics, reported back to the server with every batch.
+static String resolvedHost = "";
+static int lastPollCode = 0;
+static unsigned long netFails = 0;
+static unsigned long wifiReconnects = 0;
+static unsigned long lastRttMs = 0;
+static unsigned long netConnects = 0;  // new TCP connections; should barely move
+
+// ---------------------------------------------------------------------------
+// Buttons
+// ---------------------------------------------------------------------------
+
+// Active-LOW via INPUT_PULLUP, captured by interrupt rather than polled.
+//
+// Polling cannot catch a quick tap here: pulseIn() blocks for up to 30ms per
+// sensor reading, so a press that begins and ends between two digitalRead()
+// calls is simply never seen. An interrupt latches the press the instant it
+// happens, whatever the main loop is busy with, and the loop drains the latch
+// when it gets around to it. Presses are identified by how long the line is
+// actually held down, measured entirely inside the interrupt.
+//
+// The buttons here run on long parallel wires with only the weak internal
+// pull-up holding them high, so pressing one couples a spike into the other:
+// every press of A produced a phantom B about 80ms later, which terminated the
+// session. A finger holds a line down for tens of milliseconds; induced
+// coupling lasts microseconds. Timing the pulse tells them apart with no
+// ambiguity and no extra hardware.
+static const unsigned long BTN_MIN_PRESS_US = 15000;   // 15ms: far longer than any spike
+static const unsigned long BTN_MAX_PRESS_US = 5000000; // 5s: beyond this it is stuck, not pressed
+static const unsigned long BTN_CROSS_LOCKOUT_MS = 250;
+
+static volatile bool btnAPressed = false;
+static volatile bool btnBPressed = false;
+static volatile unsigned long btnAFellAt = 0;
+static volatile unsigned long btnBFellAt = 0;
+static volatile unsigned long btnARejectedUs = 0;  // width of the last spike, for diagnosis
+static volatile unsigned long btnBRejectedUs = 0;
+
+// Raw trace of the last few edges, so a button that produces neither a press
+// nor a rejection can be diagnosed without a cable.
+struct EdgeTrace { unsigned long us; int pin; int level; unsigned long width; };
+static volatile EdgeTrace edgeTrace[12];
+static volatile int edgeTraceHead = 0;
+static volatile int edgeTracePending = 0;
+static portMUX_TYPE edgeMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR traceEdge(int pin, int level, unsigned long us, unsigned long width) {
+  portENTER_CRITICAL_ISR(&edgeMux);
+  const int i = edgeTraceHead;
+  edgeTrace[i].us = us;
+  edgeTrace[i].pin = pin;
+  edgeTrace[i].level = level;
+  edgeTrace[i].width = width;
+  edgeTraceHead = (i + 1) % 12;
+  if (edgeTracePending < 12) edgeTracePending++;
+  portEXIT_CRITICAL_ISR(&edgeMux);
+}
+
+static void IRAM_ATTR onBtnEdge(int pin, volatile unsigned long &fellAt,
+                                volatile bool &pressed, volatile unsigned long &rejectedUs) {
+  const unsigned long us = micros();
+  if (pin == PIN_BTN_A) btnAEdges++; else btnBEdges++;
+  traceEdge(pin, digitalRead(pin), us, fellAt ? us - fellAt : 0);
+  if (digitalRead(pin) == LOW) {
+    if (fellAt == 0) fellAt = us;   // press begins; a re-trigger mid-press is bounce
+    return;
+  }
+  if (fellAt == 0) return;          // a rising edge with no matching fall
+  const unsigned long width = us - fellAt;
+  fellAt = 0;
+  if (width >= BTN_MIN_PRESS_US && width <= BTN_MAX_PRESS_US) pressed = true;
+  else rejectedUs = width;          // too brief to be a finger
+}
+
+static void IRAM_ATTR onBtnA() { onBtnEdge(PIN_BTN_A, btnAFellAt, btnAPressed, btnARejectedUs); }
+static void IRAM_ATTR onBtnB() { onBtnEdge(PIN_BTN_B, btnBFellAt, btnBPressed, btnBRejectedUs); }
+
+// Accepted presses waiting to reach the server (locked). A press is retried
+// until the server acknowledges it, and carries a sequence number so a retry
+// whose first attempt did get through is not counted twice. One that cannot be
+// delivered within BUTTON_RETRY_MS is dropped: acting on it later would start
+// or stop a session at a moment nobody chose.
+struct PendingPress { uint32_t seq; uint8_t isB; unsigned long at; };
+static PendingPress pressQueue[8];
+static int pressCount = 0;
+static uint32_t pressSeq = 0;
+static char bootId[9] = "";
+
+// Rejected pulses waiting to be logged (locked), same reasoning: the board has
+// no cable attached, so the app's log is the only place these can be seen.
+struct Rejection { uint8_t isB; unsigned long widthUs; };
+static Rejection rejectQueue[4];
+static int rejectCount = 0;
+
+static unsigned long lastAcceptedAt = 0;
+static int lastAcceptedPin = -1;
+
+static void acceptButton(int pin, unsigned long now) {
+  const bool isB = pin == PIN_BTN_B;
+  // Belt and braces on top of the pulse-width test: two different buttons a
+  // fraction of a second apart is not something a hand does.
+  if (lastAcceptedPin != -1 && lastAcceptedPin != pin && now - lastAcceptedAt < BTN_CROSS_LOCKOUT_MS) {
+    Serial.printf("[btn] %s rejected: %lums after the other button\n", isB ? "B" : "A", now - lastAcceptedAt);
+    return;
+  }
+  lastAcceptedAt = now;
+  lastAcceptedPin = pin;
+  Serial.printf("[btn] %s\n", isB ? "B" : "A");
+  Locked l;
+  if (pressCount >= 8) {
+    memmove(pressQueue, pressQueue + 1, sizeof(PendingPress) * 7);
+    pressCount = 7;
+  }
+  pressQueue[pressCount++] = { ++pressSeq, static_cast<uint8_t>(isB ? 1 : 0), now };
+}
+
+static void queueRejection(bool isB, unsigned long widthUs) {
+  Serial.printf("[btn] %s rejected: %luus pulse\n", isB ? "B" : "A", widthUs);
+  Locked l;
+  if (rejectCount < 4) rejectQueue[rejectCount++] = { static_cast<uint8_t>(isB ? 1 : 0), widthUs };
+}
+
+static void drainButtons(unsigned long now) {
+  if (btnAPressed) { btnAPressed = false; acceptButton(PIN_BTN_A, now); }
+  if (btnBPressed) { btnBPressed = false; acceptButton(PIN_BTN_B, now); }
+  if (btnARejectedUs) { const unsigned long w = btnARejectedUs; btnARejectedUs = 0; queueRejection(false, w); }
+  if (btnBRejectedUs) { const unsigned long w = btnBRejectedUs; btnBRejectedUs = 0; queueRejection(true, w); }
+}
+
+// ---------------------------------------------------------------------------
+// Server link (network task only, except where noted)
+// ---------------------------------------------------------------------------
+
+// Where the server is. Tried in order whenever the current one stops
+// answering: a fresh mDNS lookup, the last address that actually worked
+// (kept across reboots), then the compiled-in fallback. The fallback alone is
+// not enough -- the PC's DHCP address changes, and a stale fallback used to
+// strand the board until the next lucky mDNS answer.
+static Preferences prefs;
+static String lastGoodHost = "";
+static int hostCandidate = 0;  // 0 = mDNS, 1 = last good, 2 = compiled-in
+
+static String mdnsLookup() {
+  IPAddress ip = MDNS.queryHost(SERVER_MDNS, MDNS_TIMEOUT_MS);
+  // A resolved address is only accepted if it is actually plausible. A
+  // resolver answering with something off-network would otherwise be latched
+  // in permanently.
+  const IPAddress me = WiFi.localIP();
+  if (ip != IPAddress((uint32_t)0) && ip[0] == me[0] && ip[1] == me[1] && ip[2] == me[2]) return ip.toString();
+  return "";
+}
+
+static void chooseHost() {
+  String next = "";
+  for (int tries = 0; tries < 3 && next.isEmpty(); tries++) {
+    const int c = hostCandidate;
+    hostCandidate = (hostCandidate + 1) % 3;
+    if (c == 0) next = mdnsLookup();
+    else if (c == 1) next = lastGoodHost;
+    else next = SERVER_HOST;
+    Serial.printf("[host] candidate %d -> %s\n", c, next.length() ? next.c_str() : "(none)");
+  }
+  if (next.isEmpty()) next = SERVER_HOST;
+  Locked l;
+  resolvedHost = next;
+}
+
+static void rememberGoodHost(const String &host) {
+  if (host == lastGoodHost) return;
+  lastGoodHost = host;
+  prefs.putString("host", host);
+  Serial.printf("[host] remembered %s\n", host.c_str());
+}
+
+// One persistent keep-alive connection for everything. Opening a fresh TCP
+// connection per request (five a second) was the old design; each one was a
+// chance for a lost SYN to cost a multi-second retransmit, and every one of
+// those stalls landed on the display.
+static WiFiClient netClient;
+static HTTPClient http;
+static String connectedHost = "";
+
+// Returns the HTTP status, or a negative HTTPClient error. `out` receives the
+// body. The body is always read in full: bytes left unread on a reused
+// connection would be taken as the start of the next response.
+static int request(const char *method, const char *path, const String &body, String *out) {
+  String host;
+  {
+    Locked l;
+    host = resolvedHost;
+  }
+  if (host != connectedHost) {
+    netClient.stop();
+    connectedHost = host;
+  }
+
+  // A reused connection the server has just closed fails instantly, which is
+  // not an outage; one retry on a fresh connection tells the two apart.
+  for (int attempt = 0; attempt < 2; attempt++) {
+    const bool reused = netClient.connected();
+    if (!reused) netConnects++;
+    // HTTPClient writes a POST's headers and body separately. With Nagle on,
+    // the body waits for the PC to ACK the headers, and Windows delays that
+    // ACK, which added ~50ms to every batch. Only settable on a live socket,
+    // so a fresh connection gets it from its second request on.
+    else netClient.setNoDelay(true);
+    const unsigned long t0 = millis();
+    if (!http.begin(netClient, String("http://") + host + ":" + String(SERVER_PORT) + path)) return -1;
+    http.setReuse(true);
+    http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    int code;
+    if (strcmp(method, "POST") == 0) {
+      http.addHeader("Content-Type", "application/json");
+      code = http.POST(body);
+    } else {
+      code = http.GET();
+    }
+    if (code > 0) {
+      String text = http.getString();
+      if (out) *out = text;
+      http.end();
+      lastRttMs = millis() - t0;
+      return code;
+    }
+    http.end();
+    netClient.stop();
+    if (!reused) return code;
+  }
+  return -1;
+}
 
 // Minimal field extraction. A JSON library would be overkill for a flat object
-// of four known keys that we generate ourselves on the server side.
+// of a few known keys that we generate ourselves on the server side.
 static bool jsonNumber(const String &src, const char *key, long &out) {
   String needle = String("\"") + key + "\":";
   int at = src.indexOf(needle);
@@ -332,110 +547,285 @@ static bool jsonString(const String &src, const char *key, String &out) {
   return true;
 }
 
-// Pulls the sensor tuning the app's settings page publishes. A failure just
-// leaves the previous values in force -- the board keeps working on whatever it
-// last knew rather than reverting to compiled-in defaults mid-session.
-static void pollConfig() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(serverBase() + "/api/hardware/config")) return;
-
-  if (http.GET() == 200) {
-    String body = http.getString();
-    long n = 0;
-    // Thresholds, dwell times and glitch handling are all read by the app's
-    // filter now, not here. The ping rate is the only setting that describes
-    // what the board physically does, so it is the only one it still reads.
-    if (jsonNumber(body, "sampleIntervalMs", n)) cfg.sampleIntervalMs = constrain(n, 40L, 2000L);
-  }
-  http.end();
+// Every number on this display is computed by the app and read verbatim. The
+// firmware does no arithmetic on the totals of its own; the only thing it
+// does locally is keep a running clock moving for a few seconds if an update
+// is late (see renderLcd), and the next update overwrites that.
+static bool applyState(const String &body) {
+  String mode;
+  if (!jsonString(body, "mode", mode)) return false;
+  UiState next;
+  strlcpy(next.mode, mode.c_str(), sizeof(next.mode));
+  jsonNumber(body, "remainingSeconds", next.remainingSeconds);
+  jsonNumber(body, "todaySeconds", next.todaySeconds);
+  jsonNumber(body, "sessionsToday", next.sessionsToday);
+  jsonNumber(body, "armSeconds", next.armSeconds);
+  next.valid = true;
+  next.receivedAt = millis();
+  Locked l;
+  ui = next;
+  lastServerOkAt = next.receivedAt;
+  return true;
 }
 
-// Ships the pings collected since the last batch.
-//
-// Batched rather than sent one at a time because each POST costs a TCP
-// connection: at a 100 ms ping rate, posting individually would mean ten round
-// trips a second and the board would spend most of its life inside HTTPClient.
-// A batch every few hundred milliseconds is one extra request per existing
-// poll cycle, and still lands every sample well inside the shortest dwell time
-// the filter uses.
+static void noteResult(int code) {
+  static int consecutiveFailures = 0;
+  {
+    Locked l;
+    lastPollCode = code;
+  }
+  if (code > 0 && code < 500) {
+    consecutiveFailures = 0;
+    String host;
+    {
+      Locked l;
+      host = resolvedHost;
+    }
+    rememberGoodHost(host);
+    return;
+  }
+  netFails++;
+  Serial.printf("[net] request failed: %d\n", code);
+  // Repeated failures mean the address may be wrong, not just that the server
+  // is busy. Move on to the next candidate rather than retrying a dead one.
+  if (++consecutiveFailures >= FAILURES_BEFORE_RERESOLVE) {
+    consecutiveFailures = 0;
+    chooseHost();
+  }
+}
+
+// Ships the pings collected since the last batch, and takes the display state
+// back on the same response.
 //
 // `dt` rather than timestamps: the board's millis() and the PC's clock share no
 // epoch, and millis() restarts on every reset, so the server reconstructs the
 // sample times backwards from the moment the batch arrived instead.
 static void postSamples() {
+  float local[SAMPLE_BATCH_MAX];
+  int n;
+  String host;
+  UiState shown;
+  int pollCode;
+  {
+    Locked l;
+    n = sampleBatchCount;
+    memcpy(local, sampleBatch, sizeof(float) * n);
+    sampleBatchCount = 0;
+    host = resolvedHost;
+    shown = ui;
+    pollCode = lastPollCode;
+  }
+
   String cmList = "[";
-  for (int i = 0; i < sampleBatchCount; i++) {
+  for (int i = 0; i < n; i++) {
     if (i) cmList += ",";
-    cmList += String(sampleBatch[i], 1);
+    cmList += String(local[i], 1);
   }
   cmList += "]";
-  sampleBatchCount = 0;
 
   // Raw button levels ride along: a button that produces no events at all is
   // otherwise indistinguishable from one that is never pressed, and the board
-  // has no cable attached to check with.
-  postEvent(String("{\"type\":\"samples\",\"dt\":") + String(cfg.sampleIntervalMs) +
-            ",\"cm\":" + cmList +
-            ",\"btnA\":" + String(digitalRead(PIN_BTN_A)) +
-            ",\"btnB\":" + String(digitalRead(PIN_BTN_B)) +
-            ",\"edgesA\":" + String(btnAEdges) +
-            ",\"edgesB\":" + String(btnBEdges) +
-            ",\"host\":\"" + resolvedHost + "\"" +
-            ",\"pollCode\":" + String(lastPollCode) +
-            ",\"uiMode\":\"" + ui.mode + "\"" +
-            ",\"uiValid\":" + (ui.valid ? "true" : "false") + "}");
+  // has no cable attached to check with. Link health rides along too, so a
+  // "No connection" can be diagnosed from the app's side after the fact.
+  const String json = String("{\"type\":\"samples\",\"dt\":") + String(sampleIntervalMs) +
+                      ",\"cm\":" + cmList +
+                      ",\"btnA\":" + String(digitalRead(PIN_BTN_A)) +
+                      ",\"btnB\":" + String(digitalRead(PIN_BTN_B)) +
+                      ",\"edgesA\":" + String(btnAEdges) +
+                      ",\"edgesB\":" + String(btnBEdges) +
+                      ",\"host\":\"" + host + "\"" +
+                      ",\"pollCode\":" + String(pollCode) +
+                      ",\"uiMode\":\"" + shown.mode + "\"" +
+                      ",\"uiValid\":" + (shown.valid ? "true" : "false") +
+                      ",\"rssi\":" + String(WiFi.RSSI()) +
+                      ",\"uptimeS\":" + String(millis() / 1000) +
+                      ",\"netFails\":" + String(netFails) +
+                      ",\"wifiReconnects\":" + String(wifiReconnects) +
+                      ",\"freeHeap\":" + String(ESP.getFreeHeap()) +
+                      ",\"rttMs\":" + String(lastRttMs) +
+                      ",\"conns\":" + String(netConnects) +
+                      ",\"resetReason\":" + String(static_cast<int>(esp_reset_reason())) + "}";
+
+  String reply;
+  const int code = request("POST", "/api/hardware/event", json, &reply);
+  noteResult(code);
+  if (code != 200) return;
+
+  // A server too old to send the state back is asked for it separately.
+  if (!applyState(reply)) {
+    String state;
+    const int c2 = request("GET", "/api/hardware/state", "", &state);
+    if (c2 == 200) applyState(state);
+  }
 }
 
-static void pollState() {
-  if (WiFi.status() != WL_CONNECTED) {
-    ui.valid = false;
-    return;
-  }
-
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(serverBase() + "/api/hardware/state")) {
-    ui.valid = false;
-    return;
-  }
-
-  int code = http.GET();
-  lastPollCode = code;
-  if (code == 200) {
-    String body = http.getString();
-    String mode;
-    if (jsonString(body, "mode", mode)) ui.mode = mode;
-    jsonNumber(body, "remainingSeconds", ui.remainingSeconds);
-    jsonNumber(body, "todaySeconds", ui.todaySeconds);
-    jsonNumber(body, "sessionsToday", ui.sessionsToday);
-    jsonNumber(body, "armSeconds", ui.armSeconds);
-    ui.valid = true;
-    consecutiveFailures = 0;
-    lastServerOkAt = millis();
-
-    // Re-announcing presence to a window that has just appeared used to be
-    // done from here, because the board was the thing that knew when the link
-    // came back. It is now the server's job: it holds the presence filter, so
-    // it already knows the answer without being told, and it can see a window
-    // opening directly (see /api/hardware/events).
-  }
-  else {
-    Serial.printf("[poll] failed: %d (host %s)\n", code, resolvedHost.c_str());
-    if (++consecutiveFailures >= FAILURES_BEFORE_RERESOLVE) {
-      consecutiveFailures = 0;
-      http.end();
-      resolveServerHost();
-      return;
+static void sendPresses() {
+  for (;;) {
+    PendingPress p;
+    {
+      Locked l;
+      // Drop presses too old to act on.
+      while (pressCount > 0 && millis() - pressQueue[0].at > BUTTON_RETRY_MS) {
+        Serial.printf("[btn] press %u expired undelivered\n", pressQueue[0].seq);
+        memmove(pressQueue, pressQueue + 1, sizeof(PendingPress) * (pressCount - 1));
+        pressCount--;
+      }
+      if (pressCount == 0) return;
+      p = pressQueue[0];
+    }
+    const String json = String("{\"type\":\"") + (p.isB ? "button_b" : "button_a") +
+                        "\",\"boot\":\"" + bootId + "\",\"seq\":" + String(p.seq) + "}";
+    const int code = request("POST", "/api/hardware/event", json, nullptr);
+    Serial.printf("[event] %s -> %d\n", json.c_str(), code);
+    noteResult(code);
+    // 4xx means the server understood and refused; retrying cannot change that.
+    if (code <= 0 || code >= 500) return;  // retried next pass
+    Locked l;
+    if (pressCount > 0 && pressQueue[0].seq == p.seq) {
+      memmove(pressQueue, pressQueue + 1, sizeof(PendingPress) * (pressCount - 1));
+      pressCount--;
     }
   }
-  // A failed poll deliberately leaves the last good values in place. One
-  // dropped request is normal and must not blank the screen -- the staleness
-  // window below is what decides the link is really down, and until it expires
-  // the locally-ticking clock carries the display.
-  http.end();
+}
+
+// Diagnostic log lines: at most one per pass, and only after the real traffic,
+// so a burst of electrical noise on the buttons can never delay the display.
+static void sendOneLogLine() {
+  Rejection r;
+  bool haveReject = false;
+  {
+    Locked l;
+    if (rejectCount > 0) {
+      r = rejectQueue[0];
+      memmove(rejectQueue, rejectQueue + 1, sizeof(Rejection) * (rejectCount - 1));
+      rejectCount--;
+      haveReject = true;
+    }
+  }
+  if (haveReject) {
+    request("POST", "/api/hardware/log",
+            String("{\"source\":\"firmware\",\"rejected\":\"") + (r.isB ? "button_b" : "button_a") +
+                "\",\"widthUs\":" + String(r.widthUs) + "}",
+            nullptr);
+    return;
+  }
+
+  EdgeTrace e;
+  portENTER_CRITICAL(&edgeMux);
+  const bool haveEdge = edgeTracePending > 0;
+  if (haveEdge) {
+    const int idx = (edgeTraceHead - edgeTracePending + 12) % 12;
+    e = { edgeTrace[idx].us, edgeTrace[idx].pin, edgeTrace[idx].level, edgeTrace[idx].width };
+    edgeTracePending--;
+  }
+  portEXIT_CRITICAL(&edgeMux);
+  if (haveEdge) {
+    request("POST", "/api/hardware/log",
+            String("{\"source\":\"edge\",\"pin\":") + e.pin + ",\"level\":" + e.level +
+                ",\"us\":" + e.us + ",\"width\":" + e.width + "}",
+            nullptr);
+  }
+}
+
+// Pulls the ping rate the app's settings page publishes. A failure just leaves
+// the previous value in force.
+static void pollConfig() {
+  String body;
+  if (request("GET", "/api/hardware/config", "", &body) != 200) return;
+  long n = 0;
+  if (jsonNumber(body, "sampleIntervalMs", n)) sampleIntervalMs = constrain(n, 40L, 2000L);
+}
+
+// Keeps the WiFi association alive. Auto-reconnect handles the common case,
+// but the driver can sit "disconnected" indefinitely after some AP restarts,
+// and can also report "connected" while nothing gets through. Both are
+// handled here by starting the association over.
+static void superviseWifi(unsigned long now) {
+  static unsigned long downSince = 0;
+  static unsigned long lastKick = 0;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (downSince) {
+      Serial.printf("[wifi] back, ip=%s rssi=%d\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      downSince = 0;
+      if (!mdnsReady) mdnsReady = MDNS.begin("planner-desk");
+      hostCandidate = 0;
+      chooseHost();
+    }
+    // Connected, but the server has not answered for a long time: the
+    // association itself may be dead. Rejoin, at most once per interval.
+    unsigned long okAt;
+    {
+      Locked l;
+      okAt = lastServerOkAt;
+    }
+    if (now - okAt > WIFI_REJOIN_SILENT_MS && now - lastKick > WIFI_REJOIN_SILENT_MS) {
+      lastKick = now;
+      wifiReconnects++;
+      Serial.println("[wifi] connected but server silent, rejoining");
+      netClient.stop();
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
+    return;
+  }
+
+  if (!downSince) {
+    downSince = now ? now : 1;
+    netClient.stop();
+    Serial.println("[wifi] lost");
+  }
+  if (now - downSince > WIFI_RESTART_MS && now - lastKick > WIFI_RESTART_MS) {
+    lastKick = now;
+    wifiReconnects++;
+    Serial.println("[wifi] still down, restarting the association");
+    WiFi.disconnect();
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+  }
+}
+
+static void netTask(void *) {
+  // Join here rather than in setup(): the join can take many seconds, and the
+  // display should be alive and saying so the whole time.
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  // sleep adds seconds of latency to the poll
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.printf("[wifi] joining %s\n", WIFI_SSID);
+
+  unsigned long lastBatch = 0;
+  unsigned long lastConfig = 0;
+  for (;;) {
+    const unsigned long now = millis();
+    netAliveAt = now;
+
+    if (otaActive) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    superviseWifi(now);
+    if (WiFi.status() != WL_CONNECTED) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // Presses first: they are the only thing a person is waiting on.
+    sendPresses();
+
+    if (now - lastBatch >= SAMPLE_BATCH_MS) {
+      lastBatch = now;
+      postSamples();
+    }
+
+    if (now - lastConfig >= CONFIG_POLL_INTERVAL_MS) {
+      lastConfig = now;
+      pollConfig();
+    }
+
+    sendOneLogLine();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +853,7 @@ static String hoursMinutes(long seconds) {
   return String(buf);
 }
 
-static void renderLcd(bool linkUp) {
+static void renderLcd(bool linkUp, const UiState &s, unsigned long now) {
   if (!linkUp) {
     lcdShow(0, "No connection");
     lcdShow(1, WiFi.status() == WL_CONNECTED ? "Server down" : "WiFi down");
@@ -472,21 +862,30 @@ static void renderLcd(bool linkUp) {
 
   // The server answers "offline" when it is up but no app window is driving the
   // controller -- which is the normal state for the first several seconds after
-  // the PC boots, since the board is already running by then. This used to fall
-  // through to the branch below and draw "Ready / 0m 0 done": not a delay but a
-  // flat lie, indistinguishable from a real day with no sessions in it.
-  if (ui.mode == "offline") {
+  // the PC boots, since the board is already running by then.
+  if (strcmp(s.mode, "offline") == 0) {
     lcdShow(0, "Waiting for app");
     lcdShow(1, "Planner not open");
     return;
   }
 
-  if (ui.mode == "arming") {
-    lcdShow(0, "Starting in " + String(ui.armSeconds) + "s");
-  } else if (ui.mode == "running") {
-    lcdShow(0, mmss(ui.remainingSeconds));
-  } else if (ui.mode == "paused") {
-    lcdShow(0, mmss(ui.remainingSeconds) + " PAUSED");
+  // A late update must not freeze a running clock. The numbers are the app's;
+  // between updates the clock keeps moving at one second per second, for a
+  // bounded time, and the next update replaces whatever it showed. Without
+  // this, any hiccup on the network read as the display hanging.
+  long ahead = now > s.receivedAt ? static_cast<long>((now - s.receivedAt) / 1000) : 0;
+  if (ahead > MAX_EXTRAPOLATE_S) ahead = MAX_EXTRAPOLATE_S;
+
+  long today = s.todaySeconds;
+  if (strcmp(s.mode, "arming") == 0) {
+    long arm = s.armSeconds - ahead;
+    if (arm < 0) arm = 0;
+    lcdShow(0, "Starting in " + String(arm) + "s");
+  } else if (strcmp(s.mode, "running") == 0) {
+    lcdShow(0, mmss(s.remainingSeconds - ahead));
+    today += ahead;
+  } else if (strcmp(s.mode, "paused") == 0) {
+    lcdShow(0, mmss(s.remainingSeconds) + " PAUSED");
   } else {
     lcdShow(0, "Ready");
   }
@@ -494,174 +893,28 @@ static void renderLcd(bool linkUp) {
   // Second line mirrors the widget's "Today 2h 30m - 3 done", squeezed to fit
   // 16 cells: the leading "Today" is dropped since the numbers speak for
   // themselves and the worst case ("12h 30m  10 done") is exactly 16.
-  lcdShow(1, hoursMinutes(ui.todaySeconds) + "  " + String(ui.sessionsToday) + " done");
+  lcdShow(1, hoursMinutes(today) + "  " + String(s.sessionsToday) + " done");
 }
 
 // ---------------------------------------------------------------------------
-// Buttons
-// ---------------------------------------------------------------------------
-
-// Active-LOW via INPUT_PULLUP, captured by interrupt rather than polled.
-//
-// Polling cannot catch a quick tap here: pulseIn() blocks for up to 30ms per
-// sensor reading and an HTTP request blocks for far longer, so a press that
-// begins and ends between two digitalRead() calls is simply never seen. An
-// interrupt latches the press the instant it happens, whatever the main loop
-// is busy with, and the loop drains the latch when it gets around to it.
-// Presses are identified by how long the line is actually held down, measured
-// entirely inside the interrupt.
-//
-// The buttons here run on long parallel wires with only the weak internal
-// pull-up holding them high, so pressing one couples a spike into the other:
-// every press of A produced a phantom B about 80ms later, which terminated the
-// session. A finger holds a line down for tens of milliseconds; induced
-// coupling lasts microseconds. Timing the pulse tells them apart with no
-// ambiguity and no extra hardware.
-//
-// It has to be done in the ISR, not the main loop: the loop blocks for 50-100ms
-// on HTTP requests, so anything that samples the pin "shortly after" the edge
-// is really sampling whenever the loop next gets a turn -- long after a quick
-// tap has been released, which threw away real presses.
-static const unsigned long BTN_MIN_PRESS_US = 15000;   // 15ms: far longer than any spike
-static const unsigned long BTN_MAX_PRESS_US = 5000000; // 5s: beyond this it is stuck, not pressed
-static const unsigned long BTN_CROSS_LOCKOUT_MS = 250;
-
-static volatile bool btnAPressed = false;
-static volatile bool btnBPressed = false;
-static volatile unsigned long btnAFellAt = 0;
-static volatile unsigned long btnBFellAt = 0;
-static volatile unsigned long btnARejectedUs = 0;  // width of the last spike, for diagnosis
-static volatile unsigned long btnBRejectedUs = 0;
-
-// Raw trace of the last few edges, so a button that produces neither a press
-// nor a rejection can be diagnosed without a cable.
-struct EdgeTrace { unsigned long us; int pin; int level; unsigned long width; };
-static volatile EdgeTrace edgeTrace[12];
-static volatile int edgeTraceHead = 0;
-static volatile int edgeTracePending = 0;
-
-static void IRAM_ATTR traceEdge(int pin, int level, unsigned long us, unsigned long width) {
-  const int i = edgeTraceHead;
-  edgeTrace[i].us = us;
-  edgeTrace[i].pin = pin;
-  edgeTrace[i].level = level;
-  edgeTrace[i].width = width;
-  edgeTraceHead = (i + 1) % 12;
-  if (edgeTracePending < 12) edgeTracePending++;
-}
-
-static void IRAM_ATTR onBtnEdge(int pin, volatile unsigned long &fellAt,
-                                volatile bool &pressed, volatile unsigned long &rejectedUs) {
-  const unsigned long us = micros();
-  if (pin == PIN_BTN_A) btnAEdges++; else btnBEdges++;
-  traceEdge(pin, digitalRead(pin), us, fellAt ? us - fellAt : 0);
-  if (digitalRead(pin) == LOW) {
-    if (fellAt == 0) fellAt = us;   // press begins; a re-trigger mid-press is bounce
-    return;
-  }
-  if (fellAt == 0) return;          // a rising edge with no matching fall
-  const unsigned long width = us - fellAt;
-  fellAt = 0;
-  if (width >= BTN_MIN_PRESS_US && width <= BTN_MAX_PRESS_US) pressed = true;
-  else rejectedUs = width;          // too brief to be a finger
-}
-
-static void IRAM_ATTR onBtnA() { onBtnEdge(PIN_BTN_A, btnAFellAt, btnAPressed, btnARejectedUs); }
-static void IRAM_ATTR onBtnB() { onBtnEdge(PIN_BTN_B, btnBFellAt, btnBPressed, btnBRejectedUs); }
-
-static unsigned long lastAcceptedAt = 0;
-static int lastAcceptedPin = -1;
-
-// Rejections are reported to the app's log as well as the serial monitor: the
-// board normally runs on a phone charger with no cable attached, and a button
-// that silently does nothing is impossible to diagnose from the desk.
-static void reportRejected(const char *event, unsigned long widthUs) {
-  Serial.printf("[btn] %s rejected: %luus pulse\n", event, widthUs);
-  if (WiFi.status() != WL_CONNECTED) return;
-  HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  if (!http.begin(serverBase() + "/api/hardware/log")) return;
-  http.addHeader("Content-Type", "application/json");
-  http.POST(String("{\"source\":\"firmware\",\"rejected\":\"") + event + "\",\"widthUs\":" + String(widthUs) + "}");
-  http.end();
-}
-
-static void acceptButton(int pin, const char *event, unsigned long now) {
-  // Belt and braces on top of the pulse-width test: two different buttons a
-  // fraction of a second apart is not something a hand does.
-  if (lastAcceptedPin != -1 && lastAcceptedPin != pin && now - lastAcceptedAt < BTN_CROSS_LOCKOUT_MS) {
-    Serial.printf("[btn] %s rejected: %lums after the other button\n", event, now - lastAcceptedAt);
-    return;
-  }
-  lastAcceptedAt = now;
-  lastAcceptedPin = pin;
-  Serial.printf("[btn] %s\n", event);
-  postEvent(String("{\"type\":\"") + event + "\"}");
-}
-
-static void drainButtons(unsigned long now) {
-  if (btnAPressed) { btnAPressed = false; acceptButton(PIN_BTN_A, "button_a", now); }
-  if (btnBPressed) { btnBPressed = false; acceptButton(PIN_BTN_B, "button_b", now); }
-
-  if (btnARejectedUs) { const unsigned long w = btnARejectedUs; btnARejectedUs = 0; reportRejected("button_a", w); }
-  if (btnBRejectedUs) { const unsigned long w = btnBRejectedUs; btnBRejectedUs = 0; reportRejected("button_b", w); }
-
-  // Flush the raw edge trace, one entry per pass so a burst cannot stall the
-  // loop with a queue of HTTP posts.
-  if (edgeTracePending > 0 && WiFi.status() == WL_CONNECTED) {
-    noInterrupts();
-    const int idx = (edgeTraceHead - edgeTracePending + 12) % 12;
-    const EdgeTrace e = { edgeTrace[idx].us, edgeTrace[idx].pin, edgeTrace[idx].level, edgeTrace[idx].width };
-    edgeTracePending--;
-    interrupts();
-
-    HTTPClient http;
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    if (http.begin(serverBase() + "/api/hardware/log")) {
-      http.addHeader("Content-Type", "application/json");
-      http.POST(String("{\"source\":\"edge\",\"pin\":") + e.pin + ",\"level\":" + e.level +
-                ",\"us\":" + e.us + ",\"width\":" + e.width + "}");
-      http.end();
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-
-static void connectWifi() {
-  Serial.printf("[wifi] joining %s\n", WIFI_SSID);
-  lcdShow(0, "WiFi...");
-  lcdShow(1, WIFI_SSID);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);  // sleep adds seconds of latency to the 1s poll
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_JOIN_TIMEOUT_MS) {
-    delay(250);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[wifi] connected, ip=%s\n", WiFi.localIP().toString().c_str());
-
-    // Own hostname, so the board itself is reachable as planner-desk.local for
-    // OTA without having to hunt for its address.
-    MDNS.begin("planner-desk");
-    resolveServerHost();
-  } else {
-    Serial.println("[wifi] join failed -- will keep retrying");
-  }
-}
 
 // Over-the-air updates, so firmware changes no longer need the board carried
 // to the PC and plugged in. The display says what is happening -- an update
 // that appears to hang is otherwise indistinguishable from a crash.
+//
+// ArduinoOTA.handle() runs the whole upload inside loop(), so the watchdog is
+// fed from the progress callback; otherwise every update would reboot the
+// board halfway through.
 static void setupOta() {
   ArduinoOTA.setHostname("planner-desk");
   ArduinoOTA.setPassword(OTA_PASSWORD);
+  // mDNS is owned by the network task (it also does the server lookups), so
+  // OTA only adds its service record instead of starting a second responder.
+  ArduinoOTA.setMdnsEnabled(false);
+  MDNS.enableArduino(3232, true);
 
   ArduinoOTA.onStart([]() {
+    otaActive = true;
     lcdLine0Shown = "";  // force a full repaint over whatever was there
     lcdLine1Shown = "";
     lcdShow(0, "OTA update");
@@ -669,6 +922,8 @@ static void setupOta() {
     Serial.println("[ota] start");
   });
   ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+    esp_task_wdt_reset();
+    netAliveAt = millis();
     if (!total) return;
     lcdShow(1, String((done * 100) / total) + "%");
   });
@@ -678,6 +933,7 @@ static void setupOta() {
     Serial.println("[ota] done");
   });
   ArduinoOTA.onError([](ota_error_t err) {
+    otaActive = false;
     lcdShow(0, "OTA failed");
     lcdShow(1, String("err ") + err);
     Serial.printf("[ota] error %u\n", err);
@@ -691,6 +947,9 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== planner focus controller ===");
+
+  gLock = xSemaphoreCreateMutex();
+  snprintf(bootId, sizeof(bootId), "%08lx", static_cast<unsigned long>(esp_random()));
 
   ledApply(LED_OFFLINE, true);
 
@@ -729,24 +988,59 @@ void setup() {
   // Diagnostic mode: no radio, no LED, just a clock ticking on the display.
   WiFi.mode(WIFI_OFF);
   Serial.println("[diag] WiFi + LED disabled, free-running clock");
-  ui.mode = "running";
+  strlcpy(ui.mode, "running", sizeof(ui.mode));
   ui.remainingSeconds = 3600;
   ui.todaySeconds = 9000;
   ui.valid = true;
+  ui.receivedAt = millis();
   lastServerOkAt = millis();
 #else
-  // WiFi auto-reconnects in the background; the loop tolerates it being down.
-  WiFi.setAutoReconnect(true);
-  connectWifi();
-  setupOta();
+  lcdShow(0, "WiFi...");
+  lcdShow(1, WIFI_SSID);
+
+  prefs.begin("planner", false);
+  lastGoodHost = prefs.getString("host", "");
+  {
+    Locked l;
+    resolvedHost = lastGoodHost.length() ? lastGoodHost : String(SERVER_HOST);
+  }
+  // First candidate tried once the current one fails: a fresh mDNS lookup.
+  hostCandidate = 0;
+
+  netAliveAt = millis();
+  // Core 0 is where the WiFi stack itself runs; loop() stays alone on core 1.
+  // OTA is set up from loop() once the network task has the radio up.
+  xTaskCreatePinnedToCore(netTask, "net", 8192, nullptr, 1, nullptr, 0);
 #endif
+
+  // A hung loop is worse than a reboot: the board would sit showing a frozen
+  // clock forever. Generous timeout, since a wedged I2C bus can legitimately
+  // make a redraw slow.
+  esp_task_wdt_init(LOOP_WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(nullptr);
 }
 
 void loop() {
   unsigned long now = millis();
+  esp_task_wdt_reset();
 
 #if !DIAG_NO_WIFI
-  ArduinoOTA.handle();
+  // OTA starts once the network task has brought mDNS up, which is what lets
+  // the board be found as planner-desk.local.
+  static bool otaReady = false;
+  if (!otaReady && mdnsReady) {
+    setupOta();
+    otaReady = true;
+  }
+  if (otaReady) ArduinoOTA.handle();
+
+  // The network task has stopped going round: it is stuck inside the IP stack
+  // and nothing short of a reboot will free it.
+  if (!otaActive && now - netAliveAt > NET_TASK_STUCK_MS) {
+    Serial.println("[net] task stuck, rebooting");
+    delay(100);
+    ESP.restart();
+  }
 #endif
 
   drainButtons(now);
@@ -769,60 +1063,30 @@ void loop() {
   }
 
   // --- sensor ---
-  // Ping, remember, ship. No thresholds, no median, no state: the board has no
-  // opinion about what any of these numbers mean, which is the point. Deciding
-  // presence needs several seconds of context and a good deal of arithmetic,
-  // and doing it here would mean reflashing to change any of it.
+  // Ping and remember. The network task ships the batch.
   static unsigned long lastSample = 0;
-  if (now - lastSample >= (unsigned long)cfg.sampleIntervalMs) {
+  if (now - lastSample >= static_cast<unsigned long>(sampleIntervalMs)) {
     lastSample = now;
     pushSample(pingOnce());
   }
 
-  // A batch goes out on a fixed cadence rather than when the buffer fills, so
-  // the filter's dwell timers advance at a steady rate however the ping rate is
-  // tuned. The heartbeat interval keeps the button levels and link diagnostics
-  // flowing even at ping rates too slow to produce a sample every batch.
-  static unsigned long lastBatch = 0;
-  if (now - lastBatch >= SAMPLE_BATCH_MS
-      && (sampleBatchCount > 0 || now - lastBatch >= SAMPLE_HEARTBEAT_MS)) {
-    lastBatch = now;
-    postSamples();
-  }
-
-  // --- server poll ---
-  static unsigned long lastPoll = 0;
-  if (now - lastPoll >= STATE_POLL_INTERVAL_MS) {
-    lastPoll = now;
-    if (WiFi.status() != WL_CONNECTED) {
-      static unsigned long lastRetry = 0;
-      if (now - lastRetry > 10000) {
-        lastRetry = now;
-        WiFi.reconnect();
-      }
-    } else {
-      pollState();
-    }
-  }
-
-  // --- config poll ---
-  static unsigned long lastConfigPoll = 0;
-  if (now - lastConfigPoll >= CONFIG_POLL_INTERVAL_MS) {
-    lastConfigPoll = now;
-    pollConfig();
-  }
-
   // --- display + LED ---
-  // Re-read the clock: the poll above blocks for tens of milliseconds and
-  // stamps lastServerOkAt with a time later than the `now` captured
-  // at the top of the loop. Comparing against that stale value underflowed and
-  // flashed "No connection" once per poll.
   now = millis();
+  UiState s;
+  unsigned long okAt;
+  {
+    Locked l;
+    s = ui;
+    okAt = lastServerOkAt;
+  }
 
   // Judged purely on how long it has been since the server was last reached,
   // so transient request failures ride through instead of flashing an error.
-  const long sinceOk = static_cast<long>(now - lastServerOkAt);
-  bool linkUp = ui.valid && sinceOk < static_cast<long>(SERVER_STALE_MS);
+  // Unsigned subtraction, computed against a fresh millis(): the network task
+  // can stamp okAt after `now` was taken, which must read as zero, not as an
+  // enormous age.
+  const unsigned long sinceOk = okAt > now ? 0 : now - okAt;
+  const bool linkUp = s.valid && sinceOk < static_cast<unsigned long>(SERVER_STALE_MS);
 
   static bool lastLinkUp = true;
   if (linkUp != lastLinkUp) {
@@ -830,23 +1094,24 @@ void loop() {
     // Wipe line caches on state change so the new message is fully drawn
     lcdLine0Shown = "";
     lcdLine1Shown = "";
-    Serial.printf("[link] %s (valid=%d wifi=%d sinceOk=%ldms)\n", linkUp ? "UP" : "DOWN", ui.valid ? 1 : 0,
+    Serial.printf("[link] %s (valid=%d wifi=%d sinceOk=%lums)\n", linkUp ? "UP" : "DOWN", s.valid ? 1 : 0,
                   WiFi.status() == WL_CONNECTED ? 1 : 0, sinceOk);
   }
 
-  renderLcd(linkUp);
+  if (!otaActive) renderLcd(linkUp, s, now);
 
   // Green strictly tracks "a session is counting right now" -- arming does not
   // qualify, since nothing is being recorded yet.
-  externalLeds(linkUp && ui.mode == "running");
+  const bool running = strcmp(s.mode, "running") == 0;
+  externalLeds(linkUp && running);
 
   LedState led;
   // An app that is not there yet is as good as no link as far as the status
   // light is concerned -- it must not sit on the calm idle colour as though
   // everything were up and simply quiet.
-  if (!linkUp || ui.mode == "offline") led = LED_OFFLINE;
-  else if (ui.mode == "arming") led = LED_ARMING;
-  else if (ui.mode == "running") led = LED_RUNNING;
+  if (!linkUp || strcmp(s.mode, "offline") == 0) led = LED_OFFLINE;
+  else if (strcmp(s.mode, "arming") == 0) led = LED_ARMING;
+  else if (running) led = LED_RUNNING;
   else led = LED_IDLE;
   ledApply(led, (now / 400) % 2 == 0);
 

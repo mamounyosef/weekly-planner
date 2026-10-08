@@ -154,7 +154,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 export function summarize(sets: ChangeSet[]): ReportSummary {
   const counts: Partial<Record<ChangeEntry['action'], number>> = {};
-  const kinds: Record<string, Set<'event' | 'task'>> = {};
+  const kinds: Record<string, Set<'event' | 'task' | 'focus_session'>> = {};
   let unverified = 0;
   for (const s of sets) for (const e of s.entries) {
     counts[e.action] = (counts[e.action] ?? 0) + 1;

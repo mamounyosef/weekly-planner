@@ -143,6 +143,8 @@ import { CanvasAmbient } from '@/components/CanvasAmbient';
 import { FocusLiveCountdown, FocusLiveProgress, FocusLiveStartingLabel } from '@/components/FocusLiveBits';
 import { publishLiveClock } from '@/lib/liveClock';
 import { liveScrollTarget, liveColumnOffset, liveColumnDate, liveLineVisible } from '@/lib/liveScroll';
+import { placeBeside, pickAnchor } from '@/lib/popoverPlacement';
+import { ownedRef } from '@/lib/ownedRef';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
@@ -1846,6 +1848,9 @@ export default function DailyPlanner() {
   const hoveredIdRef = useRef<string | null>(null);
   const menuIdRef    = useRef<string | null>(null);
   const menuPosRef   = useRef<{ x: number; y: number } | null>(null);
+  // The exact piece of the item that was clicked. An overnight item is several
+  // pieces sharing one id; the popup follows this one, never "the first".
+  const menuAnchorRef = useRef<{ id: string | null; el: HTMLElement | null; rect: DOMRect | null }>({ id: null, el: null, rect: null });
   const eventsRef    = useRef<PlannerData>({});
   const tasksRef     = useRef<TaskData>({});
   const tasksLoadedRef = useRef(false);
@@ -1926,7 +1931,20 @@ export default function DailyPlanner() {
     const margin = 8;
     const mw = menuSizeRef.current.width || menuEl.offsetWidth || DEFAULT_MENU_WIDTH;
     const mh = menuEl.offsetHeight || 300;
-    const anchor = document.querySelector(`[data-event-id="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`) as HTMLElement | null;
+    const vp = { width: window.innerWidth, height: window.innerHeight };
+    const held = menuAnchorRef.current;
+    // A hint left over from a different item must not steer this one.
+    if (held.id !== id) { held.el = null; held.rect = null; held.id = id; }
+    let anchor: HTMLElement | null = held.el && held.el.isConnected && held.el.getAttribute('data-event-id') === id ? held.el : null;
+    if (!anchor) {
+      // The clicked piece was re-rendered away: take the piece nearest to it.
+      const sel = `[data-event-id="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`;
+      const cands = Array.from(document.querySelectorAll<HTMLElement>(sel))
+        .filter(el => !menuEl.contains(el))
+        .map(el => ({ item: el, rect: el.getBoundingClientRect() }));
+      anchor = pickAnchor(cands, vp, held.rect);
+      held.el = anchor;
+    }
     let x: number, y: number;
     if (menuPinnedRef.current) {
       // Hand-placed (dragged or centered): keep where it is, only re-clamp into view.
@@ -1934,9 +1952,8 @@ export default function DailyPlanner() {
       y = menuEl.offsetTop;
     } else if (anchor) {
       const r = anchor.getBoundingClientRect();
-      x = r.right + 6;                                   // prefer right of the block
-      if (x + mw > window.innerWidth - margin) x = r.left - mw - 6; // flip left near edge
-      y = r.top;
+      menuAnchorRef.current.rect = r;
+      ({ x, y } = placeBeside(r, { width: mw, height: mh }, vp, { margin, gap: 6 }));
     } else {
       const p = menuPosRef.current;                      // fallback: last known point
       x = p?.x ?? margin;
@@ -2704,6 +2721,10 @@ export default function DailyPlanner() {
 
   const timeAxisRows = useMemo(() => slots.map((time, i) => {
     const isHour = time.endsWith(':00');
+    // The first label is nudged DOWN (it has no line above it) while every other
+    // one is centred on its line, so with short slots the second label printed
+    // on top of the first ("6am" over "6:05am"). Drop it when they would touch.
+    if (i === 1 && sh < 26) return null;
     return (
       <div
         key={time}
@@ -3990,6 +4011,19 @@ export default function DailyPlanner() {
   const finishEdit = useCallback(() => {
     setEditingId(null);
   }, []);
+
+  // The animated week shell is keyed on this. Each keyed copy gets its OWN
+  // callback refs (see lib/ownedRef): the copy fading out must not null the
+  // grid refs the new copy already filled, or drag, drag-to-create and the
+  // Go to Live pill silently die until a reload.
+  const weekShellKey = isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : isCustomView ? `c:${weekStart.toISOString()}:${customFrom}:${customTo}` : `w:${weekStart.toISOString()}`;
+  const shellRefs = useMemo(() => ({
+    gridCard: ownedRef(gridCardRef),
+    daysGrid: ownedRef(daysGridRef),
+    nowLine: ownedRef(nowLineRef),
+    monthGrid: ownedRef(monthGridRef),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [weekShellKey, calendarView]);
 
   // ── Live time indicator ────────────────────────────────────────────────────
   const nowDate = useMemo(() => new Date(nowTick), [nowTick]);
@@ -7172,16 +7206,13 @@ export default function DailyPlanner() {
   const openMenu = (e: React.MouseEvent, ev: PlannerEvent) => {
     e.stopPropagation();
     if (didDragRef.current) return;
-    // Position popover to the right of the event block; fall back to left if near right edge
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Beside the piece that was clicked (right, else left), never on top of it.
+    const target = e.currentTarget as HTMLElement;
+    const pieceEl = (target.closest('[data-event-id]') as HTMLElement | null) ?? target;
+    const rect = pieceEl.getBoundingClientRect();
+    menuAnchorRef.current = { id: ev.id, el: pieceEl, rect };
     const mw = menuSizeRef.current.width || DEFAULT_MENU_WIDTH;
-    const margin = 8;
-    let x = rect.right + 6;
-    if (x + mw > window.innerWidth - margin) x = rect.left - mw - 6;
-    x = Math.max(margin, Math.min(x, window.innerWidth - mw - margin));
-    let y = rect.top;
-    const mh = 440;
-    y = Math.max(margin, Math.min(y, window.innerHeight - mh - margin));
+    const { x, y } = placeBeside(rect, { width: mw, height: 440 }, { width: window.innerWidth, height: window.innerHeight });
     setMenuPinned(false);       // anchor to this event (until the user drags it)
     setMenuId(ev.id);
     setMenuPos({ x, y });
@@ -7984,7 +8015,7 @@ export default function DailyPlanner() {
         /* The toolbar spans the full content width (the grid below stays capped at
             1400 and centred) — capping it too wasted the side margins and forced the
             controls onto a second line. It still wraps if the window gets narrow. */
-        <div className="w-full px-6 min-h-14 py-1.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+        <div className="w-full min-w-0 px-6 min-h-14 py-1.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
           <div className="flex items-center gap-3.5 flex-shrink-0">
             {showFocusAnalysis ? (
               <button
@@ -8151,7 +8182,7 @@ export default function DailyPlanner() {
               </>
             )}
           </div>
-          <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+          <div className="flex flex-wrap items-center justify-end gap-2 ml-auto min-w-0 max-w-full">
             <button onClick={() => setDarkMode(d => !d)} title={darkMode ? 'Light mode' : 'Dark mode'} className="p-1 rounded-lg text-muted-foreground hover:text-foreground transition-colors" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
               {darkMode ? <Sun size={14}/> : <Moon size={14}/>}
             </button>
@@ -9126,8 +9157,8 @@ export default function DailyPlanner() {
               <div key="week-view-wrapper" className="w-full flex flex-col min-h-0">
             <ViewShell
               isPhone={isPhone}
-              ref={gridCardRef}
-              key={isDayView ? `d:${format(currentDate, 'yyyy-MM-dd')}` : isCustomView ? `c:${weekStart.toISOString()}:${customFrom}:${customTo}` : `w:${weekStart.toISOString()}`}
+              ref={shellRefs.gridCard}
+              key={weekShellKey}
               custom={direction}
               variants={{
                 enter: (d: number) => (d !== 0 ? { x: d > 0 ? 12 : -12, opacity: 0 } : { opacity: 0 }),
@@ -9250,7 +9281,7 @@ export default function DailyPlanner() {
 
               {/* Day columns */}
               <div
-                ref={daysGridRef}
+                ref={shellRefs.daysGrid}
                 className="flex-1 grid relative"
                 style={{
                   gridTemplateColumns: `repeat(${colCount}, minmax(${scrollsSideways ? `${MIN_TOUCH_COL_W}px` : '0'}, 1fr))`,
@@ -9492,8 +9523,8 @@ export default function DailyPlanner() {
                                 className="text-[13px] font-bold leading-none flex items-center justify-center rounded-full"
                                 style={{
                                   width: 20, height: 20,
-                                  color: '#fff',
-                                  background: darkMode ? 'rgb(88,168,104)' : 'rgb(63,138,80)',
+                                  color: darkMode ? 'rgb(36,92,48)' : 'rgb(40,100,54)',
+                                  background: '#fff',
                                 }}
                               >
                                 {format(day, 'd')}
@@ -9505,17 +9536,15 @@ export default function DailyPlanner() {
                         ) : (
                           /* Full expanded header */
                           <>
-                            <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-primary' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
+                            <span className={`text-[9px] font-bold uppercase tracking-widest mb-0.5 ${today ? 'text-white' : 'text-muted-foreground'}`}>{format(day, 'EEE')}</span>
                             {today ? (
                               <span
                                 className="text-lg font-bold leading-none flex items-center justify-center rounded-full"
                                 style={{
                                   width: 30, height: 30,
-                                  color: '#fff',
-                                  background: darkMode ? 'rgb(88,168,104)' : 'rgb(63,138,80)',
-                                  boxShadow: darkMode
-                                    ? '0 0 0 3px rgba(134,206,145,0.22)'
-                                    : '0 0 0 3px rgba(63,138,80,0.16)',
+                                  color: darkMode ? 'rgb(36,92,48)' : 'rgb(40,100,54)',
+                                  background: '#fff',
+                                  boxShadow: '0 1px 4px rgba(0,0,0,0.18)',
                                 }}
                               >
                                 {format(day, 'd')}
@@ -9691,6 +9720,10 @@ export default function DailyPlanner() {
                               </>
                             );
                           })()}
+                          {/* On a phone there is no hover, so a "+" pinned over a FULL
+                              cell sat permanently on top of the last chip. Only offer
+                              it there when the cell has room under its chips. */}
+                          {!(isPhone && (datedTasksByCol.get(colIdx)?.length ?? 0) >= maxTasksInAnyCol && maxTasksInAnyCol > 0) && (
                           <button
                             type="button"
                             onClick={(e) => {
@@ -9707,6 +9740,7 @@ export default function DailyPlanner() {
                           >
                             <Plus size={11} />
                           </button>
+                          )}
                         </div>
                       )}
 
@@ -9967,7 +10001,7 @@ export default function DailyPlanner() {
                         {isNowCol && nowInView && (() => {
                           const lineTop = minToY(nowMin, interval, dayStartH);
                           return (
-                            <div ref={nowLineRef} className="absolute left-0 right-0 z-[15] pointer-events-none" style={{ top: lineTop, height: 0 }}>
+                            <div ref={shellRefs.nowLine} className="absolute left-0 right-0 z-[15] pointer-events-none" style={{ top: lineTop, height: 0 }}>
                               {/* Soft glow behind the line so it reads without shouting */}
                               <div
                                 className="absolute left-0 right-0"
@@ -10461,7 +10495,7 @@ export default function DailyPlanner() {
                                                   {minutesLeft}m left
                                                 </span>
                                               ) : isNoDur ? null : (
-                                                <span>({durationLabel})</span>
+                                                <span className="whitespace-nowrap">({durationLabel})</span>
                                               )}
                                             </span>
                                           </div>
@@ -10473,7 +10507,7 @@ export default function DailyPlanner() {
                                         <>
                                           {/* Top time label */}
                                           {durationMin >= 60 && (
-                                            <span className="text-[9.5px] font-semibold tabular-nums flex-shrink-0 mb-0.5 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
+                                            <span className="text-[9.5px] font-semibold tabular-nums flex-shrink-0 mb-0.5 flex flex-wrap items-center justify-center w-full text-center gap-x-1 gap-y-0 leading-tight opacity-90" style={{ color: textMuted }}>
                                               {timeDisplayStr}
                                               {isLive ? (
                                                 <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
@@ -10481,7 +10515,7 @@ export default function DailyPlanner() {
                                                   {formatTimeLeft(minutesLeft)}
                                                 </span>
                                               ) : isNoDur ? null : (
-                                                <span>({durationLabel})</span>
+                                                <span className="whitespace-nowrap">({durationLabel})</span>
                                               )}
                                             </span>
                                           )}
@@ -10509,7 +10543,7 @@ export default function DailyPlanner() {
                                             </p>
                                           </div>
                                           {!tooShort && (
-                                            <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex items-center gap-1" style={{ color: textMuted }}>
+                                            <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex flex-wrap items-center gap-x-1 gap-y-0 leading-tight" style={{ color: textMuted }}>
                                               {timeDisplayStr}
                                               {isLive ? (
                                                 <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
@@ -10517,7 +10551,7 @@ export default function DailyPlanner() {
                                                   {minutesLeft}m left
                                                 </span>
                                               ) : isNoDur ? null : (
-                                                <span>({durationLabel})</span>
+                                                <span className="whitespace-nowrap">({durationLabel})</span>
                                               )}
                                             </span>
                                           )}
@@ -11098,7 +11132,7 @@ export default function DailyPlanner() {
 
           return (
             <div
-              ref={monthGridRef}
+              ref={shellRefs.monthGrid}
               key="month-view-wrapper"
               onTouchMove={(e) => {
                 handleMonthCellTouchMove(e);
@@ -12841,21 +12875,29 @@ export default function DailyPlanner() {
                 style={{
                   bottom: isPhone
                     ? 'calc(var(--bottom-nav-h) + 20px)'
-                    : '32px',
+                    : '64px',
                 }}
               >
-                <div className={`w-full mx-auto px-4 flex justify-center pointer-events-none ${isCompact ? '' : 'min-w-[900px] max-w-[1400px]'}`}>
+                <div className="w-full px-4 flex justify-center pointer-events-none">
                   <button
                     type="button"
                     onClick={scrollToLive}
-                    className="pointer-events-auto flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-semibold shadow-lg active:scale-95 cursor-pointer animate-fab-in"
+                    className="pointer-events-auto flex items-center gap-2 pl-3 pr-2 py-2 rounded-full text-xs font-semibold active:scale-95 hover:brightness-125 transition-[filter,transform] cursor-pointer animate-fab-in whitespace-nowrap"
                     style={{
-                      background: darkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.70)',
-                      border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.20)' : 'rgba(0, 0, 0, 0.10)'}`,
+                      // Opaque enough to read over a bright block; the old 15% white
+                      // vanished on top of blue items.
+                      background: darkMode ? 'rgba(28, 30, 36, 0.92)' : 'rgba(17, 19, 24, 0.88)',
+                      border: `1px solid ${darkMode ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.12)'}`,
                       color: '#ffffff',
+                      boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                      backdropFilter: 'blur(10px)',
+                      WebkitBackdropFilter: 'blur(10px)',
                     }}
                   >
-                    <Clock size={12} />
+                    <span className="relative flex h-2 w-2">
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-60 animate-ping" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
+                    </span>
                     <span>Go to Live</span>
                     {!isPhone && (
                       <kbd className="ml-1 px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-white/20 text-white/90 uppercase border border-white/20">
