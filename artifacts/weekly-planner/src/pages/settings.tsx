@@ -123,6 +123,7 @@ import {
   saveDeviceSettings,
   subscribeDeviceSettings,
 } from '@/lib/deviceSettings';
+import { CALENDAR_WIDTH_DEFAULT } from '@/lib/deviceSettings';
 import {
   broadcastSettingsChange,
   subscribeSettingsChange,
@@ -140,6 +141,7 @@ import {
   type SidebarStyle,
   type TaskCheckboxShape,
 } from '@/lib/settingsSync';
+import { coerceOverlapLayoutMode, type OverlapLayoutMode } from '@/lib/overlapLayout';
 import {
   DEFAULT_CATEGORIES,
   PRESET_CATEGORY_COLORS,
@@ -154,6 +156,12 @@ import {
 import { gcalChipColors } from '@/lib/gcalColor';
 import { CanvasAmbient, CanvasAmbientPreview } from '@/components/CanvasAmbient';
 import { EventCardPreviewPair } from '@/components/EventCardPreview';
+
+// Injected at build time from PLANNER_PUBLIC_URL in the repo-root `.env` (see
+// vite.config.ts), so the public link never sits in this public repository.
+declare const __PLANNER_PUBLIC_URL__: string;
+const PUBLIC_URL = (typeof __PLANNER_PUBLIC_URL__ === 'string' ? __PLANNER_PUBLIC_URL__ : '').replace(/\/*$/, '/');
+const HAS_PUBLIC_URL = PUBLIC_URL !== '/';
 
 type TimeFormat = '12h' | '24h';
 type IntervalMin = 5 | 15 | 30 | 60;
@@ -1280,6 +1288,7 @@ export default function SettingsPage() {
   const [stickyTasksMain, setStickyTasksMain] = useState<boolean>(initialSettings.stickyTasksMain ?? true);
   const [stickyAllDayWidget, setStickyAllDayWidget] = useState<boolean>(initialSettings.stickyAllDayWidget ?? true);
   const [stickyTasksWidget, setStickyTasksWidget] = useState<boolean>(initialSettings.stickyTasksWidget ?? true);
+  const [overlapLayout, setOverlapLayout] = useState<OverlapLayoutMode>(coerceOverlapLayoutMode(initialSettings.overlapLayout));
   const [gcalPushEnabled, setGcalPushEnabled] = useState<boolean>(initialSettings.gcalPushEnabled ?? true);
   const [gcalPushTarget, setGcalPushTarget] = useState<'daily' | 'primary'>(initialSettings.gcalPushTarget ?? 'daily');
   const [gcalPushOtherCalendars, setGcalPushOtherCalendars] = useState<boolean>(initialSettings.gcalPushOtherCalendars ?? true);
@@ -1660,7 +1669,7 @@ export default function SettingsPage() {
     setStickyAllDayMain(d.stickyAllDayMain);
     setStickyTasksMain(d.stickyTasksMain);
     deviceExtrasRef.current = {
-      appZoom: d.appZoom, analysisTab: d.analysisTab,
+      appZoom: d.appZoom, calendarMaxWidth: d.calendarMaxWidth, analysisTab: d.analysisTab,
       analysisRangeMode: d.analysisRangeMode ?? 'calendar', mobileTab: d.mobileTab,
       hiddenCategoryIds: d.hiddenCategoryIds ?? [],
       hiddenCategoriesByView: d.hiddenCategoriesByView ?? { day: [], week: [], month: [], year: [] },
@@ -1669,6 +1678,7 @@ export default function SettingsPage() {
   /** Device-only values this page has no control for, carried through untouched. */
   const deviceExtrasRef = useRef<{
     appZoom: number;
+    calendarMaxWidth: number;
     analysisTab: 'week' | 'month' | 'year';
     analysisRangeMode: 'calendar' | 'rolling';
     mobileTab: 'calendar' | 'tasks' | 'focus';
@@ -1676,6 +1686,7 @@ export default function SettingsPage() {
     hiddenCategoriesByView: Record<FilterViewKey, string[]>;
   }>({
     appZoom: 1,
+    calendarMaxWidth: CALENDAR_WIDTH_DEFAULT,
     analysisTab: 'week',
     analysisRangeMode: 'calendar',
     mobileTab: 'calendar',
@@ -1760,6 +1771,7 @@ export default function SettingsPage() {
       setGoogleTasksSync(s.googleTasksSync);
       if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
       if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
+      setOverlapLayout(coerceOverlapLayoutMode(s.overlapLayout));
       if (typeof s.gcalPushEnabled === 'boolean') setGcalPushEnabled(s.gcalPushEnabled);
       if (s.gcalPushTarget) setGcalPushTarget(s.gcalPushTarget);
       if (typeof s.gcalPushOtherCalendars === 'boolean') setGcalPushOtherCalendars(s.gcalPushOtherCalendars);
@@ -1811,6 +1823,7 @@ export default function SettingsPage() {
           setGoogleTasksSync(coerced.googleTasksSync);
           if (typeof coerced.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(coerced.stickyAllDayWidget);
           if (typeof coerced.stickyTasksWidget === 'boolean') setStickyTasksWidget(coerced.stickyTasksWidget);
+          setOverlapLayout(coerceOverlapLayoutMode(coerced.overlapLayout));
           if (typeof coerced.gcalPushEnabled === 'boolean') setGcalPushEnabled(coerced.gcalPushEnabled);
           if (coerced.gcalPushTarget) setGcalPushTarget(coerced.gcalPushTarget);
           if (typeof coerced.gcalPushOtherCalendars === 'boolean') setGcalPushOtherCalendars(coerced.gcalPushOtherCalendars);
@@ -1887,6 +1900,7 @@ export default function SettingsPage() {
       googleTasksSync,
       stickyAllDayWidget,
       stickyTasksWidget,
+      overlapLayout,
       gcalPushEnabled,
       gcalPushTarget,
       gcalPushOtherCalendars,
@@ -1924,7 +1938,7 @@ export default function SettingsPage() {
       broadcastSettingsChange(snapshot);
     }, 150);
   }, [hardware, prayer, notifications, shareNotificationSettings, focusDailyGoalSeconds, focusExcludedDates, categories, taskLists, interval, darkMode, darkPreset, lightPreset, widgetDarkPreset, widgetLightPreset, calendarView, customDaysBefore, customDaysAfter, customAnchor, eventColorStyle, sidebarStyle, timeFormat, weekStartsOn, dayStartH, dayEndH, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, tasksPanelOpen, tasksPanelWidth, taskFilters, autoRollRecurringTasks, showTaskRow, taskColor,
-      taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
+      taskCheckboxShape, googleSyncEnabled, googleTasksSync, stickyAllDayMain, stickyTasksMain, stickyAllDayWidget, stickyTasksWidget, overlapLayout, gcalPushEnabled, gcalPushTarget, gcalPushOtherCalendars, gcalPullDailyEdits, gcalPullDailyNew, gcalPullOtherCalendars, gcalMirrorLocalDeletions, gcalMirrorGoogleDeletions]);
 
   useEffect(() => {
     return () => {
@@ -2028,6 +2042,7 @@ export default function SettingsPage() {
     stickyTasksMain,
     stickyAllDayWidget,
     stickyTasksWidget,
+    overlapLayout,
     gcalPushEnabled,
     gcalPushTarget,
     gcalPushOtherCalendars,
@@ -2077,6 +2092,7 @@ export default function SettingsPage() {
     setTasksPanelWidth(restored.tasksPanelWidth);
     setTaskFilters(restored.taskFilters);
     if (typeof restored.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(restored.autoRollRecurringTasks);
+    setOverlapLayout(coerceOverlapLayoutMode(restored.overlapLayout));
     setShowTaskRow(restored.showTaskRow);
     setTaskColor(restored.taskColor);
     if (restored.taskCheckboxShape) setTaskCheckboxShape(restored.taskCheckboxShape);
@@ -3221,6 +3237,42 @@ export default function SettingsPage() {
                         return `Timeline: ${formatH(dayStartH)} to ${formatH(dayEndH)} (${span} hour${span === 1 ? '' : 's'} visible per day)`;
                       })()}
                     </p>
+                  </div>
+                </div>
+
+                {/* Overlapping items */}
+                <div className="p-4 sm:p-6 rounded-3xl border shadow-sm flex flex-col gap-4" style={{ background: cardBg, borderColor: cardBdr }}>
+                  <div>
+                    <h2 className="text-sm font-bold tracking-tight" style={{ color: textPrimary }}>
+                      Overlapping Items
+                    </h2>
+                    <p className="text-xs mt-0.5" style={{ color: textSecondary }}>
+                      How items that share time are drawn in a day. Applies to the main window and the sidebar widget.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {([
+                      ['fit', 'Split only where shared (recommended)', 'An item is full width wherever it is alone, and only narrows for the minutes it actually shares with another item.'],
+                      ['columns', 'Split the whole item', 'An item that overlaps anything is narrow for its whole length, even if it only touches the next item for a few minutes.'],
+                    ] as const).map(([mode, title, desc]) => {
+                      const selected = overlapLayout === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setOverlapLayout(mode)}
+                          aria-pressed={selected}
+                          className="text-left p-3 rounded-2xl border transition-colors flex flex-col gap-1"
+                          style={{
+                            borderColor: selected ? (darkMode ? '#38bdf8' : '#0284c7') : cardBdr,
+                            background: selected ? (darkMode ? 'rgba(56,189,248,0.10)' : 'rgba(2,132,199,0.07)') : 'transparent',
+                          }}
+                        >
+                          <span className="text-xs font-semibold" style={{ color: textPrimary }}>{title}</span>
+                          <span className="text-[11px]" style={{ color: textSecondary }}>{desc}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -6358,20 +6410,21 @@ export default function SettingsPage() {
 
                     <div className="flex flex-col gap-2.5">
                       {/* Public Tailscale link */}
+                      {HAS_PUBLIC_URL && (
                       <div className="p-3 rounded-xl border flex items-center justify-between gap-3" style={{ background: cardBg, borderColor: cardBdr }}>
                         <div className="flex items-center gap-2.5 min-w-0">
                           <Globe size={15} className="text-emerald-400 flex-shrink-0" />
                           <div className="min-w-0">
                             <span className="text-[10px] font-bold uppercase tracking-wider block text-emerald-400">Public Domain Link (Tailscale)</span>
                             <span className="text-xs font-mono truncate block" style={{ color: textPrimary }}>
-                              https://mamoun.tail27d0a5.ts.net/
+                              {PUBLIC_URL}
                             </span>
                           </div>
                         </div>
                         <button
                           type="button"
                           onClick={() => {
-                            navigator.clipboard.writeText('https://mamoun.tail27d0a5.ts.net/');
+                            navigator.clipboard.writeText(PUBLIC_URL);
                             showToast('Link copied to clipboard!', 'success');
                           }}
                           className="p-2 rounded-lg border hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex-shrink-0 cursor-pointer"
@@ -6381,6 +6434,7 @@ export default function SettingsPage() {
                           <Copy size={14} />
                         </button>
                       </div>
+                      )}
 
                       {/* Local Wi-Fi link */}
                       {(() => {

@@ -110,6 +110,7 @@ export interface SharedSettings {
   taskCheckboxShape?: string;
   taskFilters?: string[];
   autoRollRecurringTasks?: boolean;
+  overlapLayout?: string;
   focusDayStartHour?: number;
   focusDailyGoalSeconds?: number;
   focusChime?: string;

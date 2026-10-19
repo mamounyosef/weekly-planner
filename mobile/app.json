@@ -78,12 +78,9 @@
     "updates": {
       "enabled": true,
       "checkAutomatically": "ON_LOAD",
-      "fallbackToCacheTimeout": 0,
-      "url": "https://mamoun.tail27d0a5.ts.net/api/ota/manifest"
+      "fallbackToCacheTimeout": 0
     },
     "runtimeVersion": "1.2.0",
-    "extra": {
-      "plannerServerUrl": "https://mamoun.tail27d0a5.ts.net"
-    }
+    "extra": {}
   }
 }

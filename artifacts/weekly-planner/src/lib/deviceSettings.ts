@@ -127,6 +127,20 @@ export const APP_ZOOM_MIN  = 0.5;
 export const APP_ZOOM_MAX  = 2.0;
 export const APP_ZOOM_STEP = 0.05;
 
+/**
+ * How wide the Day/Week/Custom calendar may grow on a desktop, in CSS px. It is
+ * centred, so the sides are empty on a wide screen; dragging either edge of
+ * the calendar changes this. The maximum is effectively "as wide as the window".
+ */
+export const CALENDAR_WIDTH_MIN = 900;
+export const CALENDAR_WIDTH_MAX = 8000;
+export const CALENDAR_WIDTH_DEFAULT = 1400;
+
+export function clampCalendarWidth(v: unknown): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : CALENDAR_WIDTH_DEFAULT;
+  return clampNum(n, CALENDAR_WIDTH_MIN, CALENDAR_WIDTH_MAX);
+}
+
 export type FilterViewKey = 'day' | 'week' | 'month' | 'year';
 
 export function getFilterViewKey(view: string | undefined | null): FilterViewKey {
@@ -153,6 +167,8 @@ export interface DeviceSettings extends Pick<AppSettings, DeviceScopedKey> {
   notificationsLocal?: NotificationSettings;
   /** App zoom (not browser zoom). Has no shared counterpart — always per device. */
   appZoom: number;
+  /** Max width of the timeline calendar on this screen, in CSS px. */
+  calendarMaxWidth: number;
   /** Scale for inner app content on mobile (items, times, tasks, fonts). */
   mobileContentZoom: number;
   /** Scale for outer UI wrapper on mobile (top header and bottom nav bar). */
@@ -218,7 +234,7 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
       calendarView: 'day',
       interval: 30,
       tasksPanelOpen: false,
-      appZoom: 1,
+      appZoom: 1, calendarMaxWidth: CALENDAR_WIDTH_DEFAULT,
       mobileContentZoom: 1,
       mobileUiZoom: 1,
       analysisTab: 'week',
@@ -230,9 +246,9 @@ export function seedDeviceSettings(base: AppSettings, kind: DeviceKind = getDevi
     };
   }
   if (kind === 'tablet') {
-    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', analysisRangeMode: 'calendar', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
+    return { ...shared, calendarView: 'week', tasksPanelOpen: false, appZoom: 1, calendarMaxWidth: CALENDAR_WIDTH_DEFAULT, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', analysisRangeMode: 'calendar', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
   }
-  return { ...shared, appZoom: 1, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', analysisRangeMode: 'calendar', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
+  return { ...shared, appZoom: 1, calendarMaxWidth: CALENDAR_WIDTH_DEFAULT, mobileContentZoom: 1, mobileUiZoom: 1, analysisTab: 'week', analysisRangeMode: 'calendar', mobileTab: 'calendar', hiddenCategoryIds: [], hiddenCategoriesByView: { ...emptyFiltersByView }, prayerLanguage: 'english' };
 }
 
 /** Validate a stored/served blob, filling anything missing from `base`. */
@@ -278,6 +294,7 @@ export function coerceDeviceSettings(raw: unknown, base: AppSettings, kind: Devi
   if (typeof r.appZoom === 'number' && Number.isFinite(r.appZoom)) {
     s.appZoom = clampNum(Math.round(r.appZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
   }
+  if (r.calendarMaxWidth !== undefined) s.calendarMaxWidth = clampCalendarWidth(r.calendarMaxWidth);
   if (typeof r.mobileContentZoom === 'number' && Number.isFinite(r.mobileContentZoom)) {
     s.mobileContentZoom = clampNum(Math.round(r.mobileContentZoom / APP_ZOOM_STEP) * APP_ZOOM_STEP, APP_ZOOM_MIN, APP_ZOOM_MAX);
   }

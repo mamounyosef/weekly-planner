@@ -5,6 +5,7 @@ import { coercePrayerSettings, DEFAULT_PRAYER_SETTINGS, type PrayerSettings } fr
 import { coerceCategories, DEFAULT_CATEGORIES, type EventCategory } from './categories';
 import { coerceTaskLists, DEFAULT_TASK_LISTS, type TaskList } from './taskLists';
 import { coerceNotificationSettings, DEFAULT_NOTIFICATION_SETTINGS, type NotificationSettings } from './notifications';
+import { coerceOverlapLayoutMode, type OverlapLayoutMode } from './overlapLayout';
 
 export type TimeFormat = '12h' | '24h';
 export type IntervalMin = 5 | 15 | 30 | 60;
@@ -208,6 +209,12 @@ export interface AppSettings {
   stickyTasksMain: boolean;    // Sticky Tasks row in Main Window
   stickyAllDayWidget: boolean; // Sticky All-Day Events row in Sidebar Widget
   stickyTasksWidget: boolean;  // Sticky Tasks row in Sidebar Widget
+  /**
+   * How overlapping timed blocks share a day column. 'fit' (default): a block
+   * narrows only for the minutes it shares. 'columns': it narrows for its
+   * whole length.
+   */
+  overlapLayout: OverlapLayoutMode;
   // ── Google Calendar Sync Policies ──────────────────────────────────────────
   gcalPushEnabled: boolean;           // Master push toggle (app → Google)
   gcalPushTarget: 'daily' | 'primary'; // Destination calendar on Google ('daily' | 'primary')
@@ -283,6 +290,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   stickyTasksMain: true,
   stickyAllDayWidget: true,
   stickyTasksWidget: true,
+  overlapLayout: 'fit',
   gcalPushEnabled: true,
   gcalPushTarget: 'daily',
   gcalPushOtherCalendars: true,
@@ -403,6 +411,7 @@ export function coerceSettings(raw: unknown): AppSettings {
   if (typeof r.stickyTasksMain === 'boolean') s.stickyTasksMain = r.stickyTasksMain;
   if (typeof r.stickyAllDayWidget === 'boolean') s.stickyAllDayWidget = r.stickyAllDayWidget;
   if (typeof r.stickyTasksWidget === 'boolean') s.stickyTasksWidget = r.stickyTasksWidget;
+  if (r.overlapLayout !== undefined) s.overlapLayout = coerceOverlapLayoutMode(r.overlapLayout);
   if (typeof r.gcalPushEnabled === 'boolean') s.gcalPushEnabled = r.gcalPushEnabled;
   if (r.gcalPushTarget === 'daily' || r.gcalPushTarget === 'primary') s.gcalPushTarget = r.gcalPushTarget;
   if (typeof r.gcalPushOtherCalendars === 'boolean') s.gcalPushOtherCalendars = r.gcalPushOtherCalendars;

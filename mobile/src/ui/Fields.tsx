@@ -13,22 +13,33 @@
 // font.
 
 import React from 'react';
-import { Pressable, ScrollView, TextInput, View } from 'react-native';
+import { Image, Pressable, ScrollView, TextInput, View } from 'react-native';
 
 import { Row, Text, useTheme } from './kit';
+import { ICONS } from './icons';
 import { HIT, PRESSED, PRESS_DELAY, radius, space, type as typeScale } from '../theme';
 
 // ─── Layout ──────────────────────────────────────────────────────────────────
 
-export function Field({ label, hint, children }: {
-  label: string; hint?: string; children: React.ReactNode;
+export function Field({ label, hint, iconName, children }: {
+  label: string; hint?: string; iconName?: string; children: React.ReactNode;
 }) {
+  const p = useTheme();
   return (
     <View style={{ gap: space.sm }}>
       <Row style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <Text variant="label" tone="faint" style={{ letterSpacing: 1 }}>
-          {label.toUpperCase()}
-        </Text>
+        <Row gap={space.xs} style={{ alignItems: 'center' }}>
+          {iconName && ICONS[iconName] ? (
+            <Image
+              source={{ uri: ICONS[iconName] }}
+              style={{ width: 12, height: 12, tintColor: p.inkFaint }}
+              resizeMode="contain"
+            />
+          ) : null}
+          <Text variant="label" tone="faint" style={{ letterSpacing: 1 }}>
+            {label.toUpperCase()}
+          </Text>
+        </Row>
         {hint ? <Text variant="caption" tone="faint">{hint}</Text> : null}
       </Row>
       {children}

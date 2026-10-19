@@ -67,6 +67,7 @@ const testFiles = [
   'src/lib/sessionDetail.test.ts',
   'src/lib/yearStats.test.ts',
   'src/lib/grid.test.ts',
+  'src/lib/overlapLayout.test.ts',
   'src/lib/prayerSync.test.ts',
   'src/lib/prayerInteractions.test.ts',
   'src/lib/syncRobustness.test.ts',

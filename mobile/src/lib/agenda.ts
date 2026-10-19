@@ -40,6 +40,7 @@ export interface AgendaItem {
   /** True when this is one occurrence of a repeating item. */
   repeating: boolean;
   notes?: string;
+  description?: string;
 }
 
 export interface AgendaDay {
@@ -159,7 +160,8 @@ function toItem(
     colour: colourOf(raw, categories),
     completed: isDone(raw, date, store),
     repeating,
-    notes: str(raw.notes),
+    notes: str(raw.description) ?? str(raw.notes),
+    description: str(raw.description) ?? str(raw.notes),
   };
 }
 
@@ -569,8 +571,8 @@ export type BlockLabelPlacement = 'none' | 'bottom' | 'both';
 
 /** Below this, a block has room for its title and nothing else. */
 export const BLOCK_LABEL_MIN_PX = 30;
-/** At or above this, there is room for a line above the title and below it. */
-export const BLOCK_LABEL_BOTH_PX = 56;
+/** At or above this, there is room for a line above the title and below it (~2.5h on standard grid). */
+export const BLOCK_LABEL_BOTH_PX = 140;
 
 export function blockLabelPlacement(heightPx: number): BlockLabelPlacement {
   if (!Number.isFinite(heightPx) || heightPx < BLOCK_LABEL_MIN_PX) return 'none';

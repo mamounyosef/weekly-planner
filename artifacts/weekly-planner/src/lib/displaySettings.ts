@@ -28,6 +28,8 @@
 export type TimeFormat = '12h' | '24h';
 export type WeekStart = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export type CheckboxShape = 'circle' | 'square';
+/** Same values as `OverlapLayoutMode` in overlapLayout.ts, kept local so this file has no imports. */
+export type OverlapLayout = 'fit' | 'columns';
 
 export interface DisplaySettings {
   /** Which weekday a week begins on. Repeats expand against this. */
@@ -40,6 +42,11 @@ export interface DisplaySettings {
   taskCheckboxShape: CheckboxShape;
   /** Whether an overdue repeating task rolls forward to today on its own. */
   autoRollRecurringTasks: boolean;
+  /**
+   * How overlapping items share a day column: 'fit' narrows an item only for
+   * the minutes it shares, 'columns' narrows it for its whole length.
+   */
+  overlapLayout: OverlapLayout;
   /**
    * The hour a focus DAY rolls over.
    *
@@ -65,6 +72,7 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   taskColor: '#64748b',
   taskCheckboxShape: 'circle',
   autoRollRecurringTasks: true,
+  overlapLayout: 'fit',
   focusDayStartHour: 4,
   focusDailyGoalSeconds: 0,
   focusExcludedDates: [],
@@ -89,6 +97,15 @@ export const CHECKBOX_SHAPES: { id: CheckboxShape; label: string }[] = [
   { id: 'circle', label: 'Round' },
   { id: 'square', label: 'Square' },
 ];
+
+export const OVERLAP_LAYOUTS: { id: OverlapLayout; label: string; hint: string }[] = [
+  { id: 'fit', label: 'Split only where shared', hint: 'Full width wherever an item is alone.' },
+  { id: 'columns', label: 'Split the whole item', hint: 'Narrow for its whole length if it overlaps anything.' },
+];
+
+export function isOverlapLayout(raw: unknown): raw is OverlapLayout {
+  return raw === 'fit' || raw === 'columns';
+}
 
 /** The colours the desk offers for tasks. */
 export const TASK_COLOURS: readonly string[] = [
@@ -159,6 +176,7 @@ export function coerceDisplaySettings(raw: unknown): DisplaySettings {
   if (typeof r.autoRollRecurringTasks === 'boolean') {
     out.autoRollRecurringTasks = r.autoRollRecurringTasks;
   }
+  if (isOverlapLayout(r.overlapLayout)) out.overlapLayout = r.overlapLayout;
   if (isFocusDayStartHour(r.focusDayStartHour)) out.focusDayStartHour = r.focusDayStartHour;
   if (isFocusGoalSeconds(r.focusDailyGoalSeconds)) {
     out.focusDailyGoalSeconds = r.focusDailyGoalSeconds;

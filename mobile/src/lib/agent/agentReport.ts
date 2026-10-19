@@ -82,6 +82,7 @@ const FIELD_LABEL: Record<string, string> = {
   checkbox: 'Checkbox',
   done: 'Done',
   notes: 'Notes',
+  description: 'Description',
 };
 
 export interface FieldDiff { field: string; label: string; before: string; after: string }

@@ -569,8 +569,8 @@ export type BlockLabelPlacement = 'none' | 'bottom' | 'both';
 
 /** Below this, a block has room for its title and nothing else. */
 export const BLOCK_LABEL_MIN_PX = 30;
-/** At or above this, there is room for a line above the title and below it. */
-export const BLOCK_LABEL_BOTH_PX = 56;
+/** At or above this, there is room for a line above the title and below it (~2.5h on standard grid). */
+export const BLOCK_LABEL_BOTH_PX = 140;
 
 export function blockLabelPlacement(heightPx: number): BlockLabelPlacement {
   if (!Number.isFinite(heightPx) || heightPx < BLOCK_LABEL_MIN_PX) return 'none';

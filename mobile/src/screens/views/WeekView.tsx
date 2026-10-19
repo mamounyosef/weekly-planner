@@ -53,15 +53,20 @@
 // `../../lib/dragGrid`, tested on the PC side. Nothing here decides a time.
 
 import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react';
-import { Animated, PanResponder, Pressable, ScrollView, View } from 'react-native';
+import { Animated, Image, PanResponder, Pressable, ScrollView, View } from 'react-native';
 
 import { Text, useTheme } from '../../ui/kit';
+import { ICONS } from '../../ui/icons';
 import { PRESSED, PRESS_DELAY, TAP_DELAY, radius, space } from '../../theme';
 import {
   layoutDay, blockEnd, prayerChipMode,
   type Placeable, type Placed, type PrayerChipMode,
 } from '../../lib/grid';
 import type { PrayerDrawStyle } from '../../lib/viewPrefs';
+import {
+  layoutOverlaps, segmentRects, contentSegmentIndex, coerceOverlapLayoutMode,
+  type OverlapBox, type OverlapLayoutMode, type SegmentRect,
+} from '../../lib/overlapLayout';
 import {
   FULL_DAY, clipSpan, hourMarksIn, isMinuteVisible, minuteAtY, normaliseRanges, seamsIn,
   slotsIn,
@@ -71,7 +76,7 @@ import {
   columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
 } from '../../lib/dragGrid';
 import {
-  addDays, blockDurationMinutes, blockLabelPlacement, blockTiming, formatClock,
+  addDays, blockDurationMinutes, blockLabelPlacement, blockTiming, formatClock, formatClockShort,
   minutesLeftAt, type AgendaDay, type AgendaItem, type BlockTiming,
 } from '../../lib/agenda';
 import { inkOn, inkOpacityOn } from '../../lib/gcalColor';
@@ -138,6 +143,11 @@ interface OutsideEntry {
   onPress?: () => void;
 }
 
+const FULL_BOX: OverlapBox = { left: 0, width: 1, segments: [{ fromMin: 0, toMin: 1, left: 0, width: 1 }] };
+
+/** Horizontal placement attached to each laid-out block. */
+type Boxed = { box?: OverlapBox; rects?: SegmentRect[] };
+
 /** What `layoutDay` is given for each block, with the item carried along. */
 interface GridItem extends Placeable {
   id: string;
@@ -156,7 +166,10 @@ export function WeekView({
   prayersOn, visibleHours, dayWindow, onMenuItem,
   prayerColour, prayerLabels = true, prayerStyle = 'marker',
   isPrayerDone, onTogglePrayer, onOpenItem, onOpenDay, onCreateRange, onMoveItem,
+  overlapLayout,
 }: { dayWindow?: { start: number; end: number };
+  /** How overlapping blocks share a column (shared setting). Default 'fit'. */
+  overlapLayout?: OverlapLayoutMode;
   dates: string[];
   dayOf: (date: string) => AgendaDay;
   today: string;
@@ -210,6 +223,7 @@ export function WeekView({
 }) {
   const p = useTheme();
   const scroller = useRef<ScrollView>(null);
+  const overlapMode = coerceOverlapLayoutMode(overlapLayout);
 
   const days = useMemo(() => dates.map(date => {
     const agenda = dayOf(date);
@@ -349,7 +363,7 @@ export function WeekView({
       // it is, inside this column's own window. So the top and the height are
       // read straight off it: re-deriving them from the original event is what
       // put a head half a day above its own column.
-      return layoutDay<GridItem>(
+      const placedCol = layoutDay<GridItem>(
         clipped.filter(p => !p.clip.hidden).map(p => p.pl),
         { pxPerHour, dayStartHour: dayStartH },
       ).map(pl => {
@@ -378,10 +392,22 @@ export function WeekView({
           isHead,
         };
       });
+
+      // Horizontal placement comes from the shared overlap layout (the same
+      // code the PC runs), so a block is only narrowed for the minutes it
+      // actually shares when the setting says so.
+      const boxes = layoutOverlaps(
+        placedCol.map(pl => ({ id: pl.item.id, startMin: pl.item.startMin, endMin: blockEnd(pl.item) })),
+        { mode: overlapMode },
+      );
+      return placedCol.map(pl => {
+        const box = boxes.get(pl.item.id) ?? FULL_BOX;
+        return { ...pl, box, rects: segmentRects(box, yAt, pl.top, pl.height) };
+      });
     });
 
     return { laidOut, hiddenCols, drawnIds };
-  }, [allDays, dayStartH, pxPerHour, shown, yAt, days.length]);
+  }, [allDays, dayStartH, pxPerHour, shown, yAt, days.length, overlapMode]);
 
   const laidOutByDate = layout.laidOut;
   const hiddenByDate = layout.hiddenCols;
@@ -727,11 +753,20 @@ export function WeekView({
     let hit: { item: AgendaItem; placed: Placed<GridItem>; onGrip: boolean } | null = null;
     for (const pl of g.placedByDate[col] ?? []) {
       if (y < pl.top || y > pl.top + pl.height) continue;
-      // Overlapping blocks share a column, so the horizontal half matters too;
-      // without this the block underneath can never be picked up at all.
-      const w = colW / pl.columns;
-      const left = w * pl.column;
-      if (inCol < left || inCol > left + w * (pl.span ?? 1)) continue;
+      // Overlapping blocks share a column, so the horizontal part matters too,
+      // and in 'fit' it depends on HEIGHT: a block can be full width at the
+      // top and half width at the bottom. Test the rectangle under the finger.
+      const { box, rects } = pl as Placed<GridItem> & Boxed;
+      if (box && rects) {
+        const r = rects.find(rr => y >= pl.top + rr.top && y <= pl.top + rr.top + rr.height);
+        if (!r) continue;
+        const left = colW * (box.left + r.left * box.width);
+        if (inCol < left || inCol > left + colW * r.width * box.width) continue;
+      } else {
+        const w = colW / pl.columns;
+        const left = w * pl.column;
+        if (inCol < left || inCol > left + w * (pl.span ?? 1)) continue;
+      }
       hit = { item: pl.item.item, placed: pl, onGrip: y > pl.top + pl.height - GRIP_ZONE };
     }
     return { col, date, hit, minutes: minuteAtY(y, g.shown, g.pxPerHour) };
@@ -984,7 +1019,9 @@ export function WeekView({
                 // While a block is being carried, its destination day is called
                 // out up here as well, because in a seven column week the ghost
                 // itself is too narrow to be sure about.
-                backgroundColor: isTarget ? p.accentSoft : 'transparent',
+                backgroundColor: isTarget ? p.accentSoft : isToday ? p.accentSoft : 'transparent',
+                borderLeftWidth: isToday ? 2 : 1,
+                borderLeftColor: isToday ? p.accent : p.line,
               }}
             >
               <Text variant="caption" tone={isToday || isTarget || d.date === selectedDay ? 'accent' : 'faint'} style={{ fontSize: 10 }}>
@@ -1101,9 +1138,18 @@ export function WeekView({
                     opacity: item.completed ? 0.5 : 1,
                   }}
                 >
-                  <Text numberOfLines={1} style={{ color: '#fff', fontSize: 9, lineHeight: 12 }}>
-                    {item.title}
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                    <Text numberOfLines={1} style={{ color: '#fff', fontSize: 9, lineHeight: 12, flexShrink: 1 }}>
+                      {item.title}
+                    </Text>
+                    {Boolean((item.description || item.notes)?.trim()) ? (
+                      <Image
+                        source={{ uri: ICONS['align-left'] }}
+                        style={{ width: 8.5, height: 8.5, tintColor: '#fff', opacity: 0.85, flexShrink: 0 }}
+                        resizeMode="contain"
+                      />
+                    ) : null}
+                  </View>
                 </Pressable>
               ))}
               {d.allDay.length > 2 ? (
@@ -1523,11 +1569,27 @@ function DayColumn({
       style={{
         flex: 1,
         height,
-        borderLeftWidth: 1,
-        borderLeftColor: p.line,
+        borderLeftWidth: isToday ? 2 : 1,
+        borderLeftColor: isToday ? p.accent : p.line,
         backgroundColor: isDragTarget ? p.accentSoft : isToday ? p.accentSoft : 'transparent',
       }}
     >
+      {/* If today, an illuminating left spine running vertically down the whole day */}
+      {isToday && (
+        <View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 0,
+            left: 0,
+            width: 2.5,
+            backgroundColor: p.accent,
+            opacity: 0.85,
+            zIndex: 1,
+          }}
+        />
+      )}
       {/* Slot lines first, then the hours over them: the hour has to stay
           readable as the stronger line however fine the slots are.
 
@@ -1563,7 +1625,13 @@ function DayColumn({
 
       {placed.map(pl => {
         const item = pl.item.item;
-        const width = `${(100 / pl.columns) * (pl.span ?? 1)}%`;
+        const { box, rects } = pl as Placed<GridItem> & Boxed;
+        const leftPct = box ? box.left * 100 : (100 / pl.columns) * pl.column;
+        const width = box ? `${box.width * 100}%` : `${(100 / pl.columns) * (pl.span ?? 1)}%`;
+        // A block whose width changes along its length is drawn as one
+        // rectangle per stretch, with the text in its roomiest stretch.
+        const stepped = !!(rects && rects.length > 1 && box);
+        const textRect = stepped ? rects![contentSegmentIndex(box!)] : null;
         const isLifted = item.id === liftedId;
         const isBeingDragged = item.id === draggingId;
         // The fill, and the one ink that can be read on it. Worked out once
@@ -1602,11 +1670,15 @@ function DayColumn({
             timeFormat: clock,
             minutesLeft,
           });
-        let placement = blockLabelPlacement(pl.height);
+        const cardH = textRect ? textRect.height : pl.height;
         const duration = blockDurationMinutes(startMin ?? 0, item.endMin);
-        if (placement !== 'none') {
-          if (duration < 60) placement = 'none';
-          else if (duration < 120) placement = 'bottom';
+        let placement: 'none' | 'top' | 'both' = 'none';
+        if (cardH >= 24) {
+          if (duration >= 150 && cardH >= 130) {
+            placement = 'both';
+          } else {
+            placement = 'top';
+          }
         }
         const showTimes = placement !== 'none' && timing.range.length > 0;
 
@@ -1650,58 +1722,45 @@ function DayColumn({
         );
 
         /**
-         * The time line. Drawn at the foot of anything with room for it, and at
-         * the head as well once the block is tall enough that its two edges are
-         * far apart -- which is when you are looking at one end and comparing
-         * it against whatever is next to THAT end.
-         *
-         * The range is muted and the detail is not. While the block is running,
-         * the detail is the countdown, and the countdown is the only thing on
-         * the face of it that is urgent. Emphasis rather than a fixed red does
-         * that job on all ten category colours: a red that reads on the green
-         * block in the screenshot disappears on a red one.
+         * The time line. Drawn at the head for all blocks with room, and at the
+         * foot as well once the block is tall enough (>= 2.5h) that its two edges
+         * are far apart.
          */
         const timeFont = detailed ? 10 : 8;
         const timeLeading = detailed ? 13 : 10;
         const timeLine = (key: string) => (
-          // TWO SEPARATE TEXTS, not one with a span inside it. A nested `Text`
-          // here is the app's own, which applies a whole type style rather than
-          // just the bits named, so it reset to 15pt body copy and swamped the
-          // block. And `opacity` on a nested span is not honoured on Android
-          // anyway, so the muting had to be a real element to apply to.
           <View
             key={key}
             style={{
-              flexDirection: detailed ? 'row' : 'column',
-              alignItems: detailed ? 'center' : 'flex-start',
+              flexDirection: 'row',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 3,
+              marginBottom: key === 'top' ? 2 : 0,
+              marginTop: key === 'bottom' ? 'auto' : 0,
             }}
           >
             <Text
-              numberOfLines={detailed ? 1 : 2}
+              numberOfLines={1}
               style={{
                 color: ink,
                 opacity: inkOpacityOn(fill),
                 fontSize: timeFont,
                 lineHeight: timeLeading,
-                fontWeight: '500',
-                flexShrink: 1,
+                fontWeight: '600',
               }}
             >
               {timing.range}
             </Text>
-            {timing.detail ? (
+            {timing.detail && (key !== 'bottom' || timing.live || placement !== 'both') ? (
               <Text
                 numberOfLines={1}
                 style={{
                   color: ink,
                   fontSize: timeFont,
                   lineHeight: timeLeading,
-                  // Full strength beside the muted range, and heavier still
-                  // while it is counting down: on a block filled with the
-                  // category's own colour, emphasis is the only highlight that
-                  // works on all ten of them.
                   fontWeight: timing.live ? '800' : '500',
-                  marginLeft: detailed ? 4 : 0,
+                  opacity: timing.live ? 1 : inkOpacityOn(fill) * 0.9,
                 }}
               >
                 {timing.detail}
@@ -1727,28 +1786,107 @@ function DayColumn({
               position: 'absolute',
               top: pl.top,
               height: pl.height,
-              left: `${(100 / pl.columns) * pl.column}%`,
+              left: `${leftPct}%`,
               width: width as any,
-              paddingHorizontal: 1,
+              paddingHorizontal: stepped ? 0 : 1,
               // A lifted block is drawn above its neighbours, or the outline
               // that says it is lifted gets clipped by whatever overlaps it.
               zIndex: isLifted ? 2 : 1,
+              // Stepped: only the drawn stretches take touches, so a tap on the
+              // neighbour beside a narrow stretch reaches the neighbour.
+              pointerEvents: stepped ? 'box-none' : 'auto',
             }}
           >
-            <View style={{
-              flex: 1,
-              backgroundColor: fill,
-              borderRadius: radius.sm,
+            {stepped ? rects!.map((r, i) => {
+              const mainIdx = contentSegmentIndex(box!);
+              const isMain = i === mainIdx;
+              const touchesPrev = i > 0 && Math.abs(rects![i - 1].top + rects![i - 1].height - r.top) < 1.5;
+              const touchesNext = i < rects!.length - 1 && Math.abs(r.top + r.height - rects![i + 1].top) < 1.5;
+
+              return (
+                <Pressable
+                  key={`seg${i}`}
+                  onPress={() => {
+                    if (isLifted && onMenuItem) onMenuItem(item);
+                    else onOpenItem(item);
+                  }}
+                  style={{
+                    position: 'absolute',
+                    top: r.top,
+                    height: touchesNext ? r.height + 1 : r.height,
+                    left: `${r.left * 100}%`,
+                    width: `${r.width * 100}%`,
+                    paddingHorizontal: 1,
+                  }}
+                >
+                  <View style={{
+                    flex: 1,
+                    backgroundColor: fill,
+                    borderTopLeftRadius: touchesPrev ? 0 : radius.sm,
+                    borderTopRightRadius: touchesPrev ? 0 : radius.sm,
+                    borderBottomLeftRadius: touchesNext ? 0 : radius.sm,
+                    borderBottomRightRadius: touchesNext ? 0 : radius.sm,
+                    borderTopWidth: touchesPrev ? 0 : (isLifted && !isBeingDragged ? 1.5 : 0.5),
+                    borderBottomWidth: touchesNext ? 0 : (isLifted && !isBeingDragged ? 1.5 : 0.5),
+                    borderLeftWidth: isLifted && !isBeingDragged ? 1.5 : 0.5,
+                    borderRightWidth: isLifted && !isBeingDragged ? 1.5 : 0.5,
+                    borderColor: isLifted && !isBeingDragged ? ink : p.bg,
+                    opacity: isBeingDragged ? 0.2 : item.completed ? 0.45 : isLifted ? 1 : 0.92,
+                    overflow: 'hidden',
+                  }}>
+                    {/* If secondary segment, render continuation info so it is never an anonymous empty box */}
+                    {!isMain && r.height >= 16 ? (
+                      <View style={{ flex: 1, paddingHorizontal: detailed ? 6 : 4, paddingTop: 2, overflow: 'hidden' }}>
+                        {r.height >= 34 && (
+                          <Text numberOfLines={1} style={{ color: ink, opacity: 0.75, fontSize: detailed ? 9 : 7.5, fontWeight: '500', marginBottom: 1 }}>
+                            ↳ until {formatClockShort(item.endMin, clock)}
+                          </Text>
+                        )}
+                        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 2, flexShrink: 1 }}>
+                          <Text
+                            numberOfLines={Math.max(1, Math.floor((r.height - (r.height >= 34 ? 14 : 4)) / (detailed ? 13 : 10)))}
+                            style={{
+                              color: ink,
+                              fontSize: detailed ? 11 : 8.5,
+                              lineHeight: detailed ? 13 : 10.5,
+                              fontWeight: '600',
+                              flexShrink: 1,
+                            }}
+                          >
+                            {r.height < 34 ? `↳ ${item.title}` : item.title}
+                          </Text>
+                          {Boolean((item.description || item.notes)?.trim()) ? (
+                            <Image
+                              source={{ uri: ICONS['align-left'] }}
+                              style={{ width: detailed ? 10 : 8, height: detailed ? 10 : 8, tintColor: ink, opacity: 0.75, flexShrink: 0, marginTop: 1 }}
+                              resizeMode="contain"
+                            />
+                          ) : null}
+                        </View>
+                      </View>
+                    ) : null}
+                  </View>
+                </Pressable>
+              );
+            }) : null}
+            <View pointerEvents={stepped ? 'none' : 'auto'} style={{
+              ...(textRect ? {
+                position: 'absolute' as const,
+                top: textRect.top,
+                height: textRect.height,
+                left: `${textRect.left * 100}%` as any,
+                width: `${textRect.width * 100}%` as any,
+              } : { flex: 1 }),
+              backgroundColor: stepped ? 'transparent' : fill,
+              borderRadius: stepped ? 0 : radius.sm,
               paddingHorizontal: detailed ? 8 : 4,
-              paddingTop: 1,
-              borderWidth: 0.5,
+              paddingTop: 2,
+              paddingBottom: 2,
+              borderWidth: stepped ? 0 : 0.5,
               borderColor: p.bg,
-              // Three states, in order of how loud they should be: carried
-              // (faint, the ghost is doing the talking), lifted (raised and
-              // outlined), normal.
               opacity: isBeingDragged ? 0.2 : item.completed ? 0.45 : 0.92,
               overflow: 'hidden',
-              ...(isLifted && !isBeingDragged ? {
+              ...(isLifted && !isBeingDragged && !stepped ? {
                 borderWidth: 1.5,
                 borderColor: ink,
                 shadowColor: p.shadow,
@@ -1759,35 +1897,37 @@ function DayColumn({
                 opacity: 1,
               } : null),
             }}>
-              {/* INK CHOSEN FROM THE FILL, not fixed at white.
-                  The ten category swatches run from `#eab308` to `#6366f1`, and
-                  white on the brightest four sits at roughly 2:1, which is
-                  below every legibility floor there is. The month view already
-                  worked this out and kept the answer to itself, so the same
-                  event was readable there and not here. */}
               {canMark && continuesAbove ? mark('up') : null}
-              {showTimes && placement === 'both' ? timeLine('top') : null}
-              {/* `flex: 1` on the TITLE is what decides who loses when a block
-                  is too short for everything in it. The title takes whatever
-                  room is left over, so it is the thing that shrinks, and the
-                  time lines are always drawn. That is the right way round: the
-                  title is also on the row you tapped from and in the editor,
-                  whereas the times are only here. It also pins the bottom label
-                  to the bottom EDGE, which is the end time it is naming, rather
-                  than leaving it floating under the title. */}
-              <Text
-                numberOfLines={detailed || placement === 'both' ? 2 : 1}
-                style={{
-                  flex: 1,
-                  color: ink,
-                  fontSize: detailed ? 12 : 9,
-                  lineHeight: detailed ? 15 : 11,
-                  fontWeight: detailed ? '600' : '400',
-                }}
-              >
-                {item.title}
-              </Text>
-              {showTimes ? timeLine('bottom') : null}
+              {showTimes ? timeLine('top') : null}
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 3, flexShrink: 1 }}>
+                <Text
+                  numberOfLines={Math.max(1, Math.min(8, Math.floor((cardH - (showTimes ? (placement === 'both' ? 28 : 16) : 4)) / (detailed ? 15 : 11.5))))}
+                  style={{
+                    flexShrink: 1,
+                    color: ink,
+                    fontSize: detailed ? 12 : 9,
+                    lineHeight: detailed ? 15 : 11.5,
+                    fontWeight: detailed ? '600' : '500',
+                  }}
+                >
+                  {item.title}
+                </Text>
+                {Boolean((item.description || item.notes)?.trim()) ? (
+                  <Image
+                    source={{ uri: ICONS['align-left'] }}
+                    style={{
+                      width: detailed ? 11 : 8.5,
+                      height: detailed ? 11 : 8.5,
+                      tintColor: ink,
+                      opacity: 0.8,
+                      flexShrink: 0,
+                      marginTop: detailed ? 2 : 1.5,
+                    }}
+                    resizeMode="contain"
+                  />
+                ) : null}
+              </View>
+              {showTimes && placement === 'both' ? timeLine('bottom') : null}
               {canMark && continuesBelow ? mark('down') : null}
             </View>
 
@@ -1861,11 +2001,8 @@ function DayColumn({
         if (!isMinuteVisible(normM, shown)) return null;
         const top = yAt(normM);
         const named = chipMode !== 'dot' && prayerLabels !== false;
-        // A marker that lands on an item used to be drawn OVER it, printing a
-        // ring across the item's title. There it goes underneath instead; the
-        // prayer can still be ticked anywhere it is visible, and from Today.
-        const underItem = placed.some(pl => top >= pl.top && top <= pl.top + pl.height);
-        const prayerZ = underItem ? 0 : 3;
+        // Prayers sit prominently on top of items so they are always visible and actionable.
+        const prayerZ = 10;
 
         const glyph = (
           <Text style={{ color: colour, fontSize: 9, lineHeight: 10 }}>
@@ -1907,10 +2044,7 @@ function DayColumn({
                 borderRadius: radius.sm,
                 borderWidth: 1,
                 borderColor: colour,
-                // A wash of the colour rather than the colour itself: a solid
-                // bar at this size competes with the events around it, which
-                // are the things with actual duration.
-                backgroundColor: `${colour}26`,
+                backgroundColor: p.surface,
                 opacity: done ? 0.5 : 1,
                 zIndex: prayerZ,
               }}

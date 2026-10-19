@@ -33,7 +33,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut, Sunrise, Sunset, Activity } from 'lucide-react';
+import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, AlignLeft, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut, Sunrise, Sunset, Activity } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion';
 import {
@@ -167,6 +167,10 @@ import {
   TASK_PANEL_MAX_W,
 } from '@/lib/settingsSync';
 import {
+  layoutOverlaps, overlapBoxCss, overlapClipPath, overlapContentArea, coerceOverlapLayoutMode,
+  type OverlapBox, type OverlapLayoutMode,
+} from '@/lib/overlapLayout';
+import {
   DEFAULT_NOTIFICATION_SETTINGS,
   resolveNotificationSettings,
   resolveSpec,
@@ -223,6 +227,9 @@ import {
   getFilterViewKey,
   type FilterViewKey,
   type DeviceSettings,
+} from '@/lib/deviceSettings';
+import {
+  CALENDAR_WIDTH_DEFAULT, CALENDAR_WIDTH_MIN, CALENDAR_WIDTH_MAX, clampCalendarWidth,
 } from '@/lib/deviceSettings';
 
 /** Per-service sync health as reported by /api/google-auth/status. */
@@ -314,6 +321,7 @@ interface PlannerEvent {
   startTime: string;
   endTime: string;
   content: string;
+  description?: string;
   color: EventColor;
   categoryId?: string;
   // Reminders. Absent means "inherit the category, then the global default",
@@ -402,10 +410,77 @@ const MenuShell = React.forwardRef<HTMLDivElement, HTMLMotionProps<'div'> & { is
     return <motion.div ref={ref} className={className} style={style} {...rest}>{children}</motion.div>;
   },
 );
+/**
+ * Grab strips on both side edges of the timeline calendar. The calendar is
+ * centred, so dragging either edge grows or shrinks it symmetrically (twice the
+ * pointer movement). Dragging all the way out means "as wide as the window".
+ * Double-click resets to the default width.
+ */
+function CalendarWidthHandles({ width, zoom, onChange }: {
+  width: number;
+  zoom: number;
+  onChange: (w: number) => void;
+}) {
+  const [active, setActive] = useState<'left' | 'right' | null>(null);
+  const startDrag = (side: 'left' | 'right') => (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const shell = e.currentTarget.parentElement;
+    const host = shell?.parentElement;
+    if (!shell || !host) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const z = zoom > 0 ? zoom : 1;
+    const startX = e.clientX;
+    // Start from what is drawn, not the stored cap: a cap of 8000 on a 1600px
+    // window is drawn 1600 wide, and that is where the drag should begin.
+    const startW = shell.getBoundingClientRect().width / z;
+    const target = e.currentTarget;
+    try { target.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    setActive(side);
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / z;
+      const room = host.clientWidth;
+      let w = startW + (side === 'right' ? 2 * dx : -2 * dx);
+      w = Math.max(CALENDAR_WIDTH_MIN, w);
+      onChange(w >= room - 2 ? CALENDAR_WIDTH_MAX : Math.round(w));
+    };
+    const up = () => {
+      setActive(null);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  };
+  const strip = (side: 'left' | 'right') => (
+    <div
+      key={side}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Drag to resize the calendar width. Double-click to reset."
+      title="Drag to resize the calendar. Double-click to reset."
+      onPointerDown={startDrag(side)}
+      onDoubleClick={() => onChange(CALENDAR_WIDTH_DEFAULT)}
+      className="group absolute top-0 bottom-0 z-[46] flex justify-center"
+      style={{ [side]: -6, width: 18, cursor: 'ew-resize', touchAction: 'none' } as React.CSSProperties}
+    >
+      <div
+        className={`w-[3px] h-full rounded-full transition-opacity duration-150 ${active === side ? 'opacity-100' : 'opacity-0 group-hover:opacity-60'}`}
+        style={{ background: 'hsl(var(--primary))' }}
+      />
+    </div>
+  );
+  void width;
+  return <>{strip('left')}{strip('right')}</>;
+}
+
 const DRAG_THRESHOLD = 5;
 const POSITION_SNAP  = 5;
 const DEFAULT_EVENT_MIN = 30; // default duration for a newly created event
 const COL_GAP        = 2; // px gap between parallel events
+const FULL_BOX: OverlapBox = { left: 0, width: 1, segments: [{ fromMin: 0, toMin: 1, left: 0, width: 1 }] };
 
 const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
 
@@ -595,56 +670,8 @@ function layoutAllDay(
 
 
 // ─── Parallel layout ──────────────────────────────────────────────────────────
-// Returns a map of eventId ─ { col, numCols } for events within a single day column.
-// Uses a greedy sweep to assign sub-columns, then computes numCols per event based
-// on the maximum number of concurrent events during that event's span.  This way
-// a lone event elsewhere in the column never gets compressed by a crowded hour.
-function layoutParallel(
-  evs: Array<{ id: string; startMin: number; endMin: number }>,
-): Map<string, { col: number; numCols: number }> {
-  const sorted = [...evs].sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
-  const colEnds: number[] = [];      // end-time of last event placed in each sub-column
-  const colAssign: Record<string, number> = {};
-
-  for (const ev of sorted) {
-    let placed = false;
-    for (let c = 0; c < colEnds.length; c++) {
-      if (colEnds[c] <= ev.startMin) {
-        colAssign[ev.id] = c;
-        colEnds[c] = ev.endMin;
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      colAssign[ev.id] = colEnds.length;
-      colEnds.push(ev.endMin);
-    }
-  }
-
-  // Per-event numCols: find the max concurrency within each event's time span.
-  // Checking at every unique start/end boundary inside the span gives exact results.
-  const result = new Map<string, { col: number; numCols: number }>();
-  for (const ev of sorted) {
-    const points = new Set<number>();
-    points.add(ev.startMin);
-    for (const other of sorted) {
-      if (other.startMin > ev.startMin && other.startMin < ev.endMin) points.add(other.startMin);
-      if (other.endMin   > ev.startMin && other.endMin   < ev.endMin) points.add(other.endMin);
-    }
-
-    let maxConcurrent = 1;
-    for (const p of points) {
-      let count = 0;
-      for (const other of sorted) {
-        if (other.startMin <= p && other.endMin > p) count++;
-      }
-      if (count > maxConcurrent) maxConcurrent = count;
-    }
-    result.set(ev.id, { col: colAssign[ev.id] ?? 0, numCols: maxConcurrent });
-  }
-  return result;
-}
+// Overlap layout lives in lib/overlapLayout.ts (pure, tested): side by side for
+// blocks that start close together, stacked on top for one that starts later.
 
 // ─── Recurrence editor ───────────────────────────────────────────────────────
 // Google-style repeat controls: a preset row (Does not repeat / Daily / Weekly /
@@ -1030,6 +1057,8 @@ export default function DailyPlanner() {
   // App zoom (NOT browser zoom): Ctrl +/- and the header stepper drive this, and
   // it's applied as CSS `zoom` on the root so layout reflows instead of blurring.
   const [appZoom, setAppZoom] = useState(1);
+  // How wide the timeline calendar may grow (desktop). Drag either side edge.
+  const [calendarMaxWidth, setCalendarMaxWidth] = useState(CALENDAR_WIDTH_DEFAULT);
   // PC window with its own title bar (components/TitleBar.tsx): it sits above
   // this page, outside the zoomed root, so the page is that much shorter and
   // fixed panels start below it. Divided by the zoom to stay the same on screen.
@@ -1105,6 +1134,7 @@ export default function DailyPlanner() {
   // away on all but the first, and this page re-renders constantly.
   const [taskFilters, setTaskFilters]         = useState<TaskFilter[]>(() => canonicalFilters(initialSettings.taskFilters));
   const [autoRollRecurringTasks, setAutoRollRecurringTasks] = useState<boolean>(initialSettings.autoRollRecurringTasks ?? true);
+  const [overlapLayout, setOverlapLayout] = useState<OverlapLayoutMode>(coerceOverlapLayoutMode(initialSettings.overlapLayout));
   const [googleTasksSync, setGoogleTasksSync] = useState<boolean>(initialSettings.googleTasksSync);
   const [taskMenuId, setTaskMenuId]   = useState<string | null>(null);
   const [taskMenuPos, setTaskMenuPos] = useState<{ x: number; y: number } | null>(null);
@@ -3328,6 +3358,7 @@ export default function DailyPlanner() {
       autoBackup: true, tasksPanelOpen: true, tasksPanelWidth: true, showTaskRow: true,
       taskColor: true, taskCheckboxShape: true, taskFilters: true, autoRollRecurringTasks: true, googleSyncEnabled: true, googleTasksSync: true,
       stickyAllDayMain: true, stickyTasksMain: true, stickyAllDayWidget: true, stickyTasksWidget: true,
+      overlapLayout: true,
       gcalPushEnabled: true, gcalPushTarget: true, gcalPushOtherCalendars: true,
       gcalPullDailyEdits: true, gcalPullDailyNew: true, gcalPullOtherCalendars: true,
       gcalMirrorLocalDeletions: true, gcalMirrorGoogleDeletions: true,
@@ -3356,6 +3387,7 @@ export default function DailyPlanner() {
     setTaskFilters(canonicalFilters(s.taskFilters));
     setFocusExcludedDates(s.focusExcludedDates);
     if (typeof s.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(s.autoRollRecurringTasks);
+    setOverlapLayout(coerceOverlapLayoutMode(s.overlapLayout));
     setGoogleTasksSync(s.googleTasksSync);
     setPrayer(s.prayer);
     setHardware(s.hardware);
@@ -3409,6 +3441,7 @@ export default function DailyPlanner() {
       taskCheckboxShape,
       taskFilters,
       autoRollRecurringTasks,
+      overlapLayout,
       googleSyncEnabled: initialSettings.googleSyncEnabled,
       googleTasksSync,
       gcalPushEnabled: initialSettings.gcalPushEnabled,
@@ -3439,7 +3472,7 @@ export default function DailyPlanner() {
       taskLists,
       shortcutDefaultsVersion: SHORTCUT_DEFAULTS_VERSION,
     });
-  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, autoRollRecurringTasks, googleTasksSync, prayer, notificationSettings, shareNotificationSettings, hardware, categories, taskLists, initialSettings]);
+  }, [widgetDarkPreset, widgetLightPreset, timeFormat, weekStartsOn, focusDayStartHour, focusChime, focusCues, shortcuts, autoBackup, taskColor, taskCheckboxShape, taskFilters, autoRollRecurringTasks, overlapLayout, googleTasksSync, prayer, notificationSettings, shareNotificationSettings, hardware, categories, taskLists, initialSettings]);
 
   // ── This device's own settings ───────────────────────────────────────────
   // Everything the shared file no longer speaks for: which view fits this
@@ -3464,6 +3497,7 @@ export default function DailyPlanner() {
     dayStartH,
     dayEndH,
     appZoom,
+    calendarMaxWidth,
     mobileContentZoom,
     mobileUiZoom,
     analysisTab,
@@ -3476,7 +3510,7 @@ export default function DailyPlanner() {
   }), [calendarView, customDaysBefore, customDaysAfter, customAnchor, mobileSwipeViewSwitch, interval, tasksPanelOpen,
        tasksPanelWidth, showTaskRow, stickyAllDayMain, stickyTasksMain, darkMode,
        darkPreset, lightPreset, eventColorStyle, sidebarStyle, dayStartH, dayEndH,
-       appZoom, mobileContentZoom, mobileUiZoom, analysisTab, analysisRangeMode, mobileTab, hiddenCategoryIds, hiddenCategoriesByView,
+       appZoom, calendarMaxWidth, mobileContentZoom, mobileUiZoom, analysisTab, analysisRangeMode, mobileTab, hiddenCategoryIds, hiddenCategoriesByView,
        prayerLanguage, notificationsLocal]);
 
   /** Adopt a stored device snapshot into the live state. */
@@ -3500,6 +3534,7 @@ export default function DailyPlanner() {
     setDayStartH(d.dayStartH);
     setDayEndH(d.dayEndH);
     setAppZoom(clampZoom(d.appZoom));
+    setCalendarMaxWidth(clampCalendarWidth(d.calendarMaxWidth));
     if (typeof d.mobileContentZoom === 'number') setMobileContentZoom(clampZoom(d.mobileContentZoom));
     if (typeof d.mobileUiZoom === 'number') setMobileUiZoom(clampZoom(d.mobileUiZoom));
     setAnalysisTab(d.analysisTab);
@@ -8547,8 +8582,16 @@ export default function DailyPlanner() {
                 duration: 0.14,
                 ease: [0.16, 1, 0.3, 1],
               }}
-              className={isCompact ? 'w-full max-w-full px-2 py-2 flex flex-col min-h-0 flex-1' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] max-w-[1400px] mx-auto p-4'}
+              className={isCompact ? 'w-full max-w-full px-2 py-2 flex flex-col min-h-0 flex-1' : (calendarView === 'month' || calendarView === 'year') ? 'w-full px-2 py-2 flex flex-col min-h-0 flex-1' : 'min-w-[900px] mx-auto p-4 relative'}
+              style={isCompact || calendarView === 'month' || calendarView === 'year' ? undefined : { maxWidth: calendarMaxWidth }}
             >
+          {!isCompact && calendarView !== 'month' && calendarView !== 'year' && (
+            <CalendarWidthHandles
+              width={calendarMaxWidth}
+              zoom={appZoom}
+              onChange={setCalendarMaxWidth}
+            />
+          )}
           {/* ── Focus banner ────────────────────────────────────────────────
               Expanded it is ~200px — a quarter of a phone screen spent before
               the calendar even starts. So on a phone it collapses to a single
@@ -9256,6 +9299,26 @@ export default function DailyPlanner() {
                 )}
                 <div className="relative" style={{ height: totalH }}>
                   {timeAxisRows}
+                  {nowInView && (
+                    <div
+                      className="absolute left-0 right-0 z-20 pointer-events-none flex items-center justify-end pr-1 transition-transform"
+                      style={{ top: minToY(nowMin, interval, dayStartH) - 8, height: 16 }}
+                      title={`Current time: ${formatTimeLabel(nowMin, timeFormat)}`}
+                    >
+                      <span
+                        className="text-[8.5px] font-bold tabular-nums px-1.5 py-0.5 rounded-full flex items-center gap-1 shadow-sm"
+                        style={{
+                          background: darkMode ? 'rgba(34, 197, 94, 0.25)' : 'rgba(22, 163, 74, 0.18)',
+                          color: darkMode ? '#86efac' : '#15803d',
+                          border: `1px solid ${darkMode ? 'rgba(74, 222, 128, 0.55)' : 'rgba(34, 197, 94, 0.45)'}`,
+                          backdropFilter: 'blur(4px)',
+                        }}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        {formatTimeLabel(nowMin, timeFormat)}
+                      </span>
+                    </div>
+                  )}
                 </div>
                 {bottomOutsideHeight > 0 && (
                   <div style={{ height: bottomOutsideHeight }} className="border-t border-border/50 flex-shrink-0 bg-background/20" />
@@ -9451,10 +9514,10 @@ export default function DailyPlanner() {
                       .filter(item => !(item.ev as any).isPlaceholder)
                       .map(item => ({ id: item.key, startMin: item.startMin, endMin: item.endMin }))
                       .concat(visibleGridTasks.map(t => ({ id: t.key, startMin: t.startMin, endMin: t.endMin })));
-                    const layout = layoutParallel(layoutInput);
+                    const layout = layoutOverlaps(layoutInput, { mode: overlapLayout });
 
                   return (
-                    <div key={colIdx} data-col-index={colIdx} className="flex flex-col border-r border-border/50 last:border-r-0 relative"
+                    <div key={colIdx} data-col-index={colIdx} className={`flex flex-col border-r border-border/50 last:border-r-0 relative ${today ? 'z-[5]' : ''}`}
                       style={{
                         // Placed explicitly, and that is load-bearing. The
                         // all-day banner overlay below claims `1 / -1` of row 1,
@@ -9470,12 +9533,14 @@ export default function DailyPlanner() {
                         // Today gets a clearly stronger wash plus edge rails, so the column
                         // reads as "the current day" at a glance instead of a faint tint.
                         background: today
-                          ? (darkMode ? 'rgba(110,180,120,0.13)' : 'rgba(90,160,100,0.10)')
+                          ? (darkMode
+                              ? 'linear-gradient(180deg, rgba(74, 222, 128, 0.16) 0%, rgba(74, 222, 128, 0.08) 25%, rgba(74, 222, 128, 0.06) 70%, rgba(74, 222, 128, 0.11) 100%)'
+                              : 'linear-gradient(180deg, rgba(34, 197, 94, 0.14) 0%, rgba(34, 197, 94, 0.06) 25%, rgba(34, 197, 94, 0.05) 70%, rgba(34, 197, 94, 0.09) 100%)')
                           : 'transparent',
                         boxShadow: today
                           ? (darkMode
-                              ? 'inset 1px 0 0 rgba(130,200,140,0.45), inset -1px 0 0 rgba(130,200,140,0.45)'
-                              : 'inset 1px 0 0 rgba(70,140,85,0.35), inset -1px 0 0 rgba(70,140,85,0.35)')
+                              ? 'inset 2px 0 0 0 rgba(74, 222, 128, 0.75), inset -2px 0 0 0 rgba(74, 222, 128, 0.75), 0 0 24px -2px rgba(74, 222, 128, 0.18)'
+                              : 'inset 2px 0 0 0 rgba(34, 197, 94, 0.70), inset -2px 0 0 0 rgba(34, 197, 94, 0.70), 0 0 20px -2px rgba(34, 197, 94, 0.14)')
                           : undefined,
                       }}>
                       {/* Day header */}
@@ -9881,7 +9946,7 @@ export default function DailyPlanner() {
                                       borderColor: darkMode ? '#121316' : '#ffffff',
                                       opacity: isCompleted ? 0.5 : 1,
                                     }}
-                                    title={`${ev.content || 'Untitled'} · ${timeDisplay}`}
+                                    title={ev.description ? `${ev.content || 'Untitled'} · ${timeDisplay}\n\n${ev.description}` : `${ev.content || 'Untitled'} · ${timeDisplay}`}
                                   >
                                     {!ev.noCheckbox && (
                                       <span
@@ -9898,10 +9963,13 @@ export default function DailyPlanner() {
                                       </span>
                                     )}
                                     <span
-                                      className="text-[10px] font-semibold truncate flex-1 min-w-0"
+                                      className="text-[10px] font-semibold truncate flex-1 min-w-0 flex items-center gap-1"
                                       style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}
                                     >
-                                      {ev.content || 'Untitled'}
+                                      <span className="truncate">{ev.content || 'Untitled'}</span>
+                                      {Boolean(ev.description?.trim()) && (
+                                        <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={8.5} /></span>
+                                      )}
                                     </span>
                                     <span
                                       className="text-[8.5px] tabular-nums leading-none ml-auto opacity-80 whitespace-nowrap flex-shrink-0"
@@ -9979,6 +10047,32 @@ export default function DailyPlanner() {
                         }}
                       >
 
+                        {/* Vertical day indicator: Left luminous track spine & subtle Today watermark */}
+                        {today && (
+                          <>
+                            <div
+                              className="absolute left-0 top-0 bottom-0 pointer-events-none z-[12]"
+                              style={{
+                                width: 2.5,
+                                background: darkMode
+                                  ? 'linear-gradient(180deg, rgba(74,222,128,0.95) 0%, rgba(74,222,128,0.6) 50%, rgba(74,222,128,0.9) 100%)'
+                                  : 'linear-gradient(180deg, rgba(34,197,94,0.9) 0%, rgba(34,197,94,0.55) 50%, rgba(34,197,94,0.85) 100%)',
+                                boxShadow: darkMode
+                                  ? '0 0 10px 1px rgba(74,222,128,0.5)'
+                                  : '0 0 8px 1px rgba(34,197,94,0.4)',
+                              }}
+                            />
+                            <div
+                              className="absolute top-2 right-2 pointer-events-none select-none text-[9px] font-bold tracking-widest uppercase z-[1]"
+                              style={{
+                                color: darkMode ? 'rgba(74, 222, 128, 0.28)' : 'rgba(34, 197, 94, 0.32)',
+                                letterSpacing: '0.15em',
+                              }}
+                            >
+                              TODAY
+                            </div>
+                          </>
+                        )}
 
                         {/* Live time indicator */}
                         {isNowCol && nowInView && (() => {
@@ -10176,21 +10270,22 @@ export default function DailyPlanner() {
                             ? formatTimeLabel(activeStart24, timeFormat)
                             : `${formatTimeLabel(activeStart24, timeFormat)} to ${formatTimeLabel(activeEnd24, timeFormat)}`;
 
-                          const durationLabel = durationMin < 60
-                            ? `${durationMin} minute${durationMin === 1 ? '' : 's'}`
-                            : durationMin % 60 === 0
-                              ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
-                              : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
-
                           const layoutKey = isPlaceholder ? ev.id : itemKey;
-                          const { col, numCols } = layout.get(layoutKey) ?? { col: 0, numCols: 1 };
-                          const colW   = 100 / numCols;
-                          const leftPct  = col * colW;
-                          const rightPct = 100 - (col + 1) * colW;
-                          // Convert percent to pixel offsets accounting for gap
+                          const box = layout.get(layoutKey) ?? FULL_BOX;
                           const EDGE = 3; // px from column wall
-                          // left/right in %, gap between parallel events
-                          const gapOffset = numCols > 1 ? COL_GAP / 2 : 0;
+                          const boxCss = overlapBoxCss(box, EDGE, COL_GAP);
+                          const isNarrowBox = (box.width ?? 1) <= 0.6;
+
+                          const durationLabel = durationMin < 60
+                            ? `${durationMin}m`
+                            : durationMin % 60 === 0
+                              ? (isNarrowBox ? `${durationMin / 60}h` : `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`)
+                              : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
+                          // Stepped shape: full width where alone, split only
+                          // where it shares time. Off while dragging/resizing,
+                          // where the clip would cut the time tooltips.
+                          const clipPath = (isDrag || isResize) ? undefined : overlapClipPath(box, EDGE, COL_GAP);
+                          const contentArea = clipPath ? overlapContentArea(box, EDGE, COL_GAP) : undefined;
 
                           const showTopTime    = isResize && resizeRef.current?.edge === 'top';
                           const showBottomTime = isResize && resizeRef.current?.edge === 'bottom';
@@ -10202,8 +10297,8 @@ export default function DailyPlanner() {
                                 className={`absolute rounded-lg border-2 border-solid pointer-events-none z-0`}
                                 style={{
                                   top, height,
-                                  left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
-                                  right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
+                                  left: boxCss.left,
+                                  right: boxCss.right,
                                   borderColor: darkMode ? '#121316' : '#ffffff',
                                   backgroundColor: darkMode ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)',
                                   opacity: 0.45,
@@ -10226,7 +10321,7 @@ export default function DailyPlanner() {
                               key={itemKey}
                               data-event="1"
                               data-event-id={ev.id}
-                              title={ev.content}
+                              title={ev.description ? `${ev.content || 'Untitled'} · ${timeDisplayStr}\n\n${ev.description}` : ev.content}
                               className={`absolute border overflow-visible ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'} ${isDrag ? 'shadow-2xl z-50' : isEdit||isMenu ? 'z-40 shadow-md' : 'z-10 shadow-sm hover:shadow-md'}`}
                               style={{
                                 top, height,
@@ -10234,14 +10329,15 @@ export default function DailyPlanner() {
                                 willChange: isMoving || isTouchHolding ? 'transform, top, height' : undefined,
                                 transform,
                                 transformOrigin: 'center center',
-                                left:  `calc(${leftPct}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
-                                right: `calc(${rightPct}% + ${EDGE + (col < numCols-1 ? gapOffset : 0)}px)`,
+                                left: boxCss.left,
+                                right: boxCss.right,
                                 backgroundColor: bg,
                                 borderColor: darkMode ? '#121316' : '#ffffff',
                                 borderBottomStyle: 'solid',
                                 borderTopStyle: 'solid',
                                 color: text,
                                 zIndex: isDrag ? 60 : isTouchHolding ? 55 : isEdit||isMenu ? 40 : isSelected ? 30 : 10,
+                                clipPath,
                                 boxShadow: isDrag ? '0 14px 36px rgba(0,0,0,0.38)' : isTouchHolding ? '0 4px 16px rgba(0,0,0,0.24)' : (boxShadow || (lift ? '0 4px 14px rgba(0,0,0,0.18)' : undefined)),
                                 cursor: isDrag ? 'grabbing' : isEdit ? 'text' : 'pointer',
                                 opacity: isDrag ? 0.95 : isTouchHolding ? 0.88 : 1,
@@ -10325,19 +10421,23 @@ export default function DailyPlanner() {
                               )}
 
                               {/* Content */}
-                              {(() => {
+                              {((height: number) => {
                                 const isMicroCard   = height < 26;
                                 const isShortCard   = height >= 26 && height < 44;
                                 const isCompactCard = height >= 44 && height < 64;
                                 const isMediumCard  = height >= 64 && height < 104;
+                                const padTop = isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : isMediumCard ? 3 : 6;
+                                const padBottom = isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 4 : isMediumCard ? 3 : 8;
                                 return (
                                   <div
                                     className={`absolute inset-0 flex flex-col overflow-hidden ${
-                                      isMicroCard || isShortCard ? 'px-2 py-0' : isCompactCard || isMediumCard ? 'px-2 py-1' : 'px-2 pt-2.5 pb-2'
+                                      isMicroCard || isShortCard ? (isNarrowBox ? 'px-1 py-0' : 'px-2 py-0') : isCompactCard || isMediumCard ? (isNarrowBox ? 'px-1.5 py-1' : 'px-2 py-1') : (isNarrowBox ? 'px-1.5 pt-2 pb-1.5' : 'px-2 pt-2.5 pb-2')
                                     }`}
                                     style={{
-                                      top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : isMediumCard ? 3 : 6,
-                                      bottom: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 4 : isMediumCard ? 3 : 8,
+                                      top: contentArea ? `calc(${contentArea.top} + ${padTop}px)` : padTop,
+                                      bottom: contentArea ? `calc(${contentArea.bottom} + ${padBottom}px)` : padBottom,
+                                      left: contentArea?.left,
+                                      right: contentArea?.right,
                                       // Clear the left colour strip so the title never sits on it.
                                       paddingLeft: accentBar ? ACCENT_BAR_W + 5 : undefined,
                                     }}
@@ -10399,8 +10499,11 @@ export default function DailyPlanner() {
                                                 )}
                                               </button>
                                             )}
-                                            <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                              {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                                            <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                              <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}</span>
+                                              {Boolean(ev.description?.trim()) && (
+                                                <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={8.5} /></span>
+                                              )}
                                             </span>
                                             {isNoDur && (
                                               <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
@@ -10433,8 +10536,11 @@ export default function DailyPlanner() {
                                                 )}
                                               </button>
                                             )}
-                                            <span className={`font-semibold truncate min-w-0 flex-shrink ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                              {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                                            <span className={`font-semibold truncate min-w-0 flex-shrink flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                              <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}</span>
+                                              {Boolean(ev.description?.trim()) && (
+                                                <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9} /></span>
+                                              )}
                                             </span>
                                             <span className="text-[10px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
                                               · {timeDisplayStr}
@@ -10466,8 +10572,11 @@ export default function DailyPlanner() {
                                                   )}
                                                 </button>
                                               )}
-                                              <span className={`text-xs font-semibold truncate leading-tight min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                                {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                                              <span className={`text-xs font-semibold truncate leading-tight min-w-0 flex-1 flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                                <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}</span>
+                                                {Boolean(ev.description?.trim()) && (
+                                                  <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9.5} /></span>
+                                                )}
                                               </span>
                                             </div>
                                             <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-85 leading-none mt-auto flex items-center gap-1 whitespace-nowrap" style={{ color: textMuted }}>
@@ -10486,19 +10595,22 @@ export default function DailyPlanner() {
                                       }
 
                                       // Tier 4: Full Card (height >= 64px, e.g. 1h+)
+                                      // Threshold: Only repeat time at both top and bottom for long items (>= 2.5 hours / 150 min) with sufficient height.
+                                      // Items under 2.5 hours (e.g. 1 hour, 1.5 hours, 2 hours) display time once at the top without bottom repetition.
+                                      const showBothTimes = durationMin >= 150 && height >= 140;
                                       return (
                                         <>
                                           {/* Top time label */}
                                           {durationMin >= 60 && (
                                             <span className="text-[9.5px] font-semibold tabular-nums flex-shrink-0 mb-0.5 flex flex-wrap items-center justify-center w-full text-center gap-x-1 gap-y-0 leading-tight opacity-90" style={{ color: textMuted }}>
-                                              {timeDisplayStr}
+                                              <span className="whitespace-nowrap">{timeDisplayStr}</span>
                                               {isLive ? (
-                                                <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                                <span className="inline-flex items-center gap-0.5 whitespace-nowrap" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                                   <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                                   {formatTimeLeft(minutesLeft)}
                                                 </span>
                                               ) : isNoDur ? null : (
-                                                <span className="whitespace-nowrap">({durationLabel})</span>
+                                                <span className="whitespace-nowrap opacity-85">({durationLabel})</span>
                                               )}
                                             </span>
                                           )}
@@ -10523,19 +10635,25 @@ export default function DailyPlanner() {
                                             )}
                                             <p className={`font-medium break-words line-clamp-5 ${isMediumCard ? 'text-[10.5px] leading-tight' : 'text-xs leading-snug'} ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                                               {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                                              {Boolean(ev.description?.trim()) && (
+                                                <span className="inline-flex items-center align-middle ml-1 opacity-70" title="Has description">
+                                                  <AlignLeft size={10} />
+                                                </span>
+                                              )}
                                             </p>
                                           </div>
-                                          {!tooShort && (
-                                            <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex flex-wrap items-center gap-x-1 gap-y-0 leading-tight" style={{ color: textMuted }}>
-                                              {timeDisplayStr}
+                                          {/* Bottom time label: shown only if duration is < 60m (when top is hidden) OR for long events (>= 2.5h / 150m) with enough height */}
+                                          {(durationMin < 60 || showBothTimes) && (
+                                            <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 mt-auto flex flex-wrap items-center justify-center w-full text-center gap-x-1 gap-y-0 leading-tight opacity-80" style={{ color: textMuted }}>
+                                              <span className="whitespace-nowrap">{timeDisplayStr}</span>
                                               {isLive ? (
-                                                <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                                <span className="inline-flex items-center gap-0.5 whitespace-nowrap" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                                   <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                                   {minutesLeft}m left
                                                 </span>
-                                              ) : isNoDur ? null : (
+                                              ) : (durationMin < 60 && !isNoDur) ? (
                                                 <span className="whitespace-nowrap">({durationLabel})</span>
-                                              )}
+                                              ) : null}
                                             </span>
                                           )}
                                         </>
@@ -10543,7 +10661,9 @@ export default function DailyPlanner() {
                                     })()}
                                   </div>
                                 );
-                              })()}
+                              // In a stepped block the text lives in its roomiest
+                              // stretch, so it is sized by that stretch's height.
+                              })(contentArea ? height * contentArea.heightFraction : height)}
 
                               {/* Bottom resize handle — same touch rule as the top one. */}
                               {!isNoDur && segKind !== 'tail' && (!isTouch || gripsLive) && (
@@ -10615,10 +10735,10 @@ export default function DailyPlanner() {
                           const c = taskChipColors(t.color || undefined);
                           const top = minToY(startMin, interval, dayStartH);
                           const h = Math.max(18, minToY(endMin, interval, dayStartH) - top);
-                          const { col, numCols } = layout.get(key) ?? { col: 0, numCols: 1 };
-                          const colW = 100 / numCols;
-                          const EDGE = 3;
-                          const gapOffset = numCols > 1 ? COL_GAP / 2 : 0;
+                          const box = layout.get(key) ?? FULL_BOX;
+                          const boxCss = overlapBoxCss(box, 3, COL_GAP);
+                          const clipPath = overlapClipPath(box, 3, COL_GAP);
+                          const area = clipPath ? overlapContentArea(box, 3, COL_GAP) : undefined;
                           return (
                             <div
                               key={key}
@@ -10636,8 +10756,9 @@ export default function DailyPlanner() {
                               className={`absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
                               style={{
                                 top, height: h,
-                                left:  `calc(${col * colW}% + ${EDGE + (col > 0 ? gapOffset : 0)}px)`,
-                                right: `calc(${100 - (col + 1) * colW}% + ${EDGE + (col < numCols - 1 ? gapOffset : 0)}px)`,
+                                left: boxCss.left,
+                                right: boxCss.right,
+                                clipPath,
                                 background: c.bg,
                                 // Dashed border + a solid left rail: the two cues that
                                 // survive every card style, including `minimal`.
@@ -10648,6 +10769,8 @@ export default function DailyPlanner() {
                               }}
                               title={isTouch ? t.title : `${t.title}. Drag to the top of a day, or to another day`}
                             >
+                              {/* In a stepped chip the text sits in its roomiest stretch. */}
+                              <div className={area ? 'absolute overflow-hidden' : 'contents'} style={area ? { left: area.left, right: area.right, top: area.top, bottom: area.bottom } : undefined}>
                               <div className="flex items-start gap-1 px-2 py-1">
                                 <span
                                   role="button"
@@ -10670,11 +10793,12 @@ export default function DailyPlanner() {
                                 </span>
                                 {t.recur && <Repeat size={9} style={{ color: c.textMuted, flexShrink: 0, marginTop: 2 }} />}
                               </div>
-                              {h >= 38 && (
+                              {h * (area?.heightFraction ?? 1) >= 38 && (
                                 <div className="px-2 text-[9.5px] tabular-nums" style={{ color: c.textMuted }}>
                                   {formatTimeLabel(startMin, timeFormat)}
                                 </div>
                               )}
+                              </div>
                             </div>
                           );
                         })}
@@ -10783,7 +10907,7 @@ export default function DailyPlanner() {
                                       borderColor: darkMode ? '#121316' : '#ffffff',
                                       opacity: isCompleted ? 0.5 : 1,
                                     }}
-                                    title={`${ev.content || 'Untitled'} · ${timeDisplay}`}
+                                    title={ev.description ? `${ev.content || 'Untitled'} · ${timeDisplay}\n\n${ev.description}` : `${ev.content || 'Untitled'} · ${timeDisplay}`}
                                   >
                                     {!ev.noCheckbox && (
                                       <span
@@ -10800,10 +10924,13 @@ export default function DailyPlanner() {
                                       </span>
                                     )}
                                     <span
-                                      className="text-[10px] font-semibold truncate flex-1 min-w-0"
+                                      className="text-[10px] font-semibold truncate flex-1 min-w-0 flex items-center gap-1"
                                       style={{ color: c.text, textDecoration: isCompleted ? 'line-through' : 'none' }}
                                     >
-                                      {ev.content || 'Untitled'}
+                                      <span className="truncate">{ev.content || 'Untitled'}</span>
+                                      {Boolean(ev.description?.trim()) && (
+                                        <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={8.5} /></span>
+                                      )}
                                     </span>
                                     <span
                                       className="text-[8.5px] tabular-nums leading-none ml-auto opacity-80 whitespace-nowrap flex-shrink-0"
@@ -10871,6 +10998,7 @@ export default function DailyPlanner() {
                         key={ev.id}
                         data-event="1"
                         data-event-id={ev.id}
+                        title={ev.description ? `${ev.content || 'Untitled'}\n\n${ev.description}` : (ev.content || 'Untitled')}
                         className={`absolute rounded-md border text-[11px] font-semibold flex items-center gap-1.5 px-2.5 hover:-translate-y-[1.5px] pointer-events-auto ${isEdit || isMenu ? 'z-40 shadow-md' : 'z-30 shadow-sm hover:shadow-md'}`}
                         style={{
                           top: row * 28 + 4,
@@ -10933,8 +11061,11 @@ export default function DailyPlanner() {
                                 )}
                               </button>
                             )}
-                            <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                              {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                            <span className={`truncate flex-1 flex items-center gap-1 min-w-0 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                              <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}</span>
+                              {Boolean(ev.description?.trim()) && (
+                                <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9.5} /></span>
+                              )}
                             </span>
                           </>
                         )}
@@ -11321,7 +11452,7 @@ export default function DailyPlanner() {
                                         if (monthItemDragJustEndedRef.current) return;
                                         openMenu(e, ev);
                                       }}
-                                      title={ev.content}
+                                      title={ev.description ? `${ev.content || 'Untitled'}\n\n${ev.description}` : (ev.content || 'Untitled')}
                                     >
                                       <span
                                         className="rounded-full flex-shrink-0"
@@ -11364,7 +11495,7 @@ export default function DailyPlanner() {
                                             if (monthItemDragJustEndedRef.current) return;
                                             openMenu(e, ev);
                                           }}
-                                          title={`${label} ${ev.content}`}
+                                          title={ev.description ? `${label ? `${label} ` : ''}${ev.content || 'Untitled'}\n\n${ev.description}` : `${label} ${ev.content || 'Untitled'}`}
                                         >
                                           {isSpacious ? (
                                             <>
@@ -11373,8 +11504,11 @@ export default function DailyPlanner() {
                                                   className="w-1.5 h-1.5 rounded-full flex-shrink-0"
                                                   style={{ backgroundColor: dotColor }}
                                                 />
-                                                <span className="truncate flex-1 font-medium text-[11px]">
-                                                  {ev.content || <span className="opacity-40 italic">Untitled</span>}
+                                                <span className="truncate flex-1 font-medium text-[11px] flex items-center gap-1">
+                                                  <span className="truncate">{ev.content || <span className="opacity-40 italic">Untitled</span>}</span>
+                                                  {Boolean(ev.description?.trim()) && (
+                                                    <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={8.5} /></span>
+                                                  )}
                                                 </span>
                                               </div>
                                               {label && (
@@ -11394,8 +11528,11 @@ export default function DailyPlanner() {
                                                   {label}
                                                 </span>
                                               )}
-                                              <span className="truncate flex-1 font-medium text-[10px]">
-                                                {ev.content || <span className="opacity-40 italic">Untitled</span>}
+                                              <span className="truncate flex-1 font-medium text-[10px] flex items-center gap-1">
+                                                <span className="truncate">{ev.content || <span className="opacity-40 italic">Untitled</span>}</span>
+                                                {Boolean(ev.description?.trim()) && (
+                                                  <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={8} /></span>
+                                                )}
                                               </span>
                                             </>
                                           )}
@@ -11458,7 +11595,7 @@ export default function DailyPlanner() {
                                 if (monthItemDragJustEndedRef.current) return;
                                 openMenu(e, ev);
                               }}
-                              title={`All day: ${ev.content || 'Untitled'}`}
+                              title={ev.description ? `All day: ${ev.content || 'Untitled'}\n\n${ev.description}` : `All day: ${ev.content || 'Untitled'}`}
                             >
                               {!ev.isContinuationLeft && (
                                 <div
@@ -11489,8 +11626,11 @@ export default function DailyPlanner() {
                                   </span>
                                 </button>
                               )}
-                              <span className={`truncate flex-1 z-0 px-0.5 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text, pointerEvents: 'none' }}>
-                                {ev.content || <span style={{ opacity: 0.4, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                              <span className={`truncate flex-1 z-0 px-0.5 flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text, pointerEvents: 'none' }}>
+                                <span className="truncate">{ev.content || <span style={{ opacity: 0.4, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}</span>
+                                {Boolean(ev.description?.trim()) && (
+                                  <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9} /></span>
+                                )}
                               </span>
                               {!ev.isContinuationRight && (
                                 <div
@@ -14537,6 +14677,28 @@ export default function DailyPlanner() {
                 onKeyDown={(e) => { if (e.key === 'Enter') { if (isDraft) commitDraft(); setMenuId(null); setMenuPos(null); } }}
                 className="w-full text-[13px] font-semibold rounded-lg px-2.5 py-1.5 outline-none transition-all focus:ring-1 focus:ring-primary/40"
                 style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText }}
+              />
+            </div>
+
+            {/* Description field */}
+            <div className="px-3 py-2 flex flex-col gap-1" style={{ borderBottom: `1px solid ${menuBdr}` }}>
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: menuSub }}>
+                  <AlignLeft size={10} /> Description
+                </span>
+                {Boolean(menuEvent.description?.trim()) && (
+                  <span className="text-[9px] font-medium opacity-60" style={{ color: menuSub }}>
+                    {menuEvent.description!.length} chars
+                  </span>
+                )}
+              </div>
+              <textarea
+                rows={2}
+                value={menuEvent.description ?? ''}
+                placeholder="Add description or notes..."
+                onChange={(e) => applyEdit(menuEvent.id, { description: e.target.value })}
+                className="w-full text-[11.5px] leading-relaxed rounded-lg px-2.5 py-1.5 outline-none resize-y transition-all focus:ring-1 focus:ring-primary/40 custom-scrollbar"
+                style={{ background: hoverBg, border: `1px solid ${menuBdr}`, color: menuText, minHeight: '44px', maxHeight: '160px' }}
               />
             </div>
 

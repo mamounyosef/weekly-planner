@@ -378,6 +378,16 @@ export function editSeries<T extends RecurFields>(
     patch = p as Partial<T>;
   }
 
+  // A `dayIndex` with no `weekKey` is a column on screen, so it counts from the
+  // VIEWED week, never from the week the record happens to be stored under.
+  // resolveWeek stamps every occurrence with the viewed week, but a stored
+  // standalone keeps its own (normalised) week: one shown on day 7 of a custom
+  // view, or on day -1 as a spill-in from last week, was read as "day 7 of ITS
+  // week" and jumped a whole week away the moment it was dragged.
+  if (patch.dayIndex != null && !patch.weekKey) {
+    patch = { ...patch, weekKey: viewedWeekKey };
+  }
+
   // Non-repeating: plain in-place edit.
   if (!master.recur) {
     const next = normalizeAnchor({ ...master, ...patch, updatedAt: Date.now() } as T, weekStartsOn);

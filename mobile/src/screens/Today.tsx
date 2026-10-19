@@ -64,6 +64,7 @@ import { YearView } from './views/YearView';
 import { prefs } from '../lib/prefs';
 import { daysBetween } from '../lib/monthDrag';
 import { shiftMonths } from '../lib/grid';
+import { coerceOverlapLayoutMode } from '../lib/overlapLayout';
 import { ItemMenu, type ItemMenuTarget } from '../ui/ItemMenu';
 import { SWATCH_BASE_HEX } from '../lib/gcalColor';
 import { anchorFor, describeRecur, draftFromRecord, toTimeString } from '../lib/draft';
@@ -141,8 +142,9 @@ export function Today({
     visibleHours, dayWindow, swipeViewSwitch, saveDraft, applyScoped, edit, tasks,
     calendarView: view, setCalendarView,
     unreadNotifications, prayerAppearance,
-    hiddenCategoriesByView, setHiddenCategories,
+    hiddenCategoriesByView, setHiddenCategories, shared,
   } = usePlanner();
+  const overlapLayout = coerceOverlapLayoutMode(shared?.overlapLayout);
 
   const hiddenCategoryIds = useMemo(
     () => hiddenCategoriesByView[view] || [],
@@ -387,24 +389,32 @@ export function Today({
           ? { unit: 'day', size: customWindow.before + customWindow.after + 1 }
           : { unit: 'day', size: 1 };
 
+  const navigatePrevious = useCallback(() => {
+    const { unit, size } = swipeStepRef.current;
+    setSelected(current => (unit === 'day'
+      ? addDays(current, -1 * size)
+      : shiftMonths(current, -1 * size * (unit === 'year' ? 12 : 1))));
+  }, []);
+
+  const navigateNext = useCallback(() => {
+    const { unit, size } = swipeStepRef.current;
+    setSelected(current => (unit === 'day'
+      ? addDays(current, 1 * size)
+      : shiftMonths(current, 1 * size * (unit === 'year' ? 12 : 1))));
+  }, []);
+
   /**
-   * Swipe sideways to move a day.
-   *
-   * PanResponder rather than a gesture library: this app updates over the air,
-   * and a gesture library is a native module, which would end that. It is also
-   * ample for one axis.
-   *
-   * The claim is deliberately fussy. It takes the gesture only once the finger
-   * has travelled meaningfully sideways AND clearly more sideways than up, so a
-   * vertical scroll through a long day is never stolen mid-flick, and neither is
-   * a horizontal scroll of the chips or the date strip above.
+   * Swipe sideways to move a day / week / custom view period.
+   * Tolerant gesture detection: responds to natural thumb swipes at a diagonal angle
+   * without demanding a strictly horizontal straight line.
    */
   const swipe = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_e, g) =>
-      Math.abs(g.dx) > 24 && Math.abs(g.dx) > Math.abs(g.dy) * 2,
+      Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.1,
     onPanResponderRelease: (_e, g) => {
-      if (Math.abs(g.dx) < 48) return;
-      const step = g.dx < 0 ? 1 : -1;   // drag left, go forward
+      const isSwipe = (Math.abs(g.dx) >= 26 && Math.abs(g.dx) > Math.abs(g.dy) * 0.75) || (Math.abs(g.vx) >= 0.22 && Math.abs(g.dx) >= 14);
+      if (!isSwipe) return;
+      const step = (g.dx < 0 || g.vx < -0.22) ? 1 : -1;   // drag left, go forward
       const { unit, size } = swipeStepRef.current;
       setSelected(current => (unit === 'day'
         ? addDays(current, step * size)
@@ -436,6 +446,8 @@ export function Today({
       subtitle: item.startMin === null
         ? dayLabel(item.date, new Date())
         : `${dayLabel(item.date, new Date())}, ${formatClock(item.startMin, timeFormat)}`,
+      description: (item.description ?? item.notes)?.trim()
+        || (typeof master.description === 'string' ? master.description.trim() : (typeof master.notes === 'string' ? master.notes.trim() : undefined)),
       repeats: item.repeating,
       repeatLabel: item.repeating ? describeRecur(master.recur) : undefined,
       locked: master.locked === true,
@@ -795,16 +807,64 @@ export function Today({
               it, so the title would push the buttons off the edge instead of
               ellipsising, which is the wrong thing to sacrifice. */}
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Pressable
-        unstable_pressDelay={TAP_DELAY}
-      style={({ pressed }) => (pressed ? PRESSED : null)}
-              onPress={() => setSelected(today)}
-              disabled={showingToday}
-              accessibilityRole="button"
-              accessibilityLabel={showingToday ? dayLabel(selected, now) : 'Back to today'}
-            >
-              <Text variant="display" numberOfLines={1}>{dayLabel(selected, now)}</Text>
-            </Pressable>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+              <Pressable
+                unstable_pressDelay={TAP_DELAY}
+                onPress={navigatePrevious}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 6 }}
+                accessibilityRole="button"
+                accessibilityLabel="Previous view"
+                style={({ pressed }) => [{
+                  width: 28,
+                  height: 32,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: radius.pill,
+                }, pressed ? PRESSED : null]}
+              >
+                <Image
+                  source={{ uri: ICONS['chevron-right'] }}
+                  style={{ width: 18, height: 18, tintColor: p.inkSoft, transform: [{ scaleX: -1 }] }}
+                />
+              </Pressable>
+
+              <Pressable
+                unstable_pressDelay={TAP_DELAY}
+                style={({ pressed }) => [{ flexShrink: 1 }, pressed ? PRESSED : null]}
+                onPress={() => setSelected(today)}
+                disabled={showingToday}
+                accessibilityRole="button"
+                accessibilityLabel={showingToday ? dayLabel(selected, now) : 'Back to today'}
+              >
+                <Text
+                  variant="title"
+                  numberOfLines={1}
+                  style={{ fontSize: 20, lineHeight: 26, fontWeight: '700', color: p.ink }}
+                >
+                  {dayLabel(selected, now)}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                unstable_pressDelay={TAP_DELAY}
+                onPress={navigateNext}
+                hitSlop={{ top: 10, bottom: 10, left: 6, right: 10 }}
+                accessibilityRole="button"
+                accessibilityLabel="Next view"
+                style={({ pressed }) => [{
+                  width: 28,
+                  height: 32,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: radius.pill,
+                }, pressed ? PRESSED : null]}
+              >
+                <Image
+                  source={{ uri: ICONS['chevron-right'] }}
+                  style={{ width: 18, height: 18, tintColor: p.inkSoft }}
+                />
+              </Pressable>
+            </View>
           </View>
 
           {/* Only when you have wandered off. A permanent button would be a
@@ -941,6 +1001,7 @@ export function Today({
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           visibleHours={visibleHours}
           dayWindow={dayWindow}
+          overlapLayout={overlapLayout}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -967,6 +1028,7 @@ export function Today({
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           visibleHours={visibleHours}
           dayWindow={dayWindow}
+          overlapLayout={overlapLayout}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -991,6 +1053,7 @@ export function Today({
           onTogglePrayer={(date, key) => { void togglePrayer(date, key); }}
           visibleHours={visibleHours}
           dayWindow={dayWindow}
+          overlapLayout={overlapLayout}
           onCreateRange={createFromDrag}
           onMoveItem={moveFromDrag}
           onMenuItem={hold}
@@ -1393,7 +1456,16 @@ function Spotlight({ item, live, onPress, clock }: {
           {live ? 'HAPPENING NOW' : 'UP NEXT'}
         </Text>
       </Row>
-      <Text variant="title" numberOfLines={2}>{item.title}</Text>
+      <Row gap={space.xs} style={{ alignItems: 'center' }}>
+        <Text variant="title" numberOfLines={2} style={{ flexShrink: 1 }}>{item.title}</Text>
+        {Boolean((item.description || item.notes)?.trim()) ? (
+          <Image
+            source={{ uri: ICONS['align-left'] }}
+            style={{ width: 14, height: 14, tintColor: p.inkFaint }}
+            resizeMode="contain"
+          />
+        ) : null}
+      </Row>
       <Text variant="caption" tone="soft" style={{ marginTop: 4 }}>
         {item.startMin === null ? 'Any time today' : formatClock(item.startMin, clock)}
         {item.endMin !== null && item.startMin !== null
@@ -1509,15 +1581,22 @@ const ItemRow = React.memo(function ItemRow({ item, onTick, onOpen, onHold, rail
             >
               {item.title}
             </Text>
+            {Boolean((item.description || item.notes)?.trim()) ? (
+              <Image
+                source={{ uri: ICONS['align-left'] }}
+                style={{ width: 13, height: 13, tintColor: p.inkFaint, flexShrink: 0 }}
+                resizeMode="contain"
+              />
+            ) : null}
             {/* A repeat is worth one glyph, not a chip that says "Repeats". */}
             {item.repeating ? (
               <Text variant="caption" tone="faint" style={{ fontSize: 13 }}>↻</Text>
             ) : null}
           </Row>
 
-          {item.notes ? (
+          {(item.description || item.notes) ? (
             <Text variant="caption" tone="soft" numberOfLines={1} style={{ marginTop: 2 }}>
-              {item.notes}
+              {item.description || item.notes}
             </Text>
           ) : null}
         </View>

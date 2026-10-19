@@ -23,7 +23,7 @@ import {
   type PublicProbe,
 } from '../../funnel-watchdog';
 
-const HOST = 'mamoun.tail27d0a5.ts.net';
+const HOST = 'planner.tail0000.ts.net';
 const STATUS_JSON = JSON.stringify({ Self: { DNSName: `${HOST}.` } });
 
 /**
@@ -167,7 +167,7 @@ async function main() {
         code: 0,
         out: args[0] === 'status'
           ? STATUS_JSON
-          : '# Funnel on:\n https://mamoun.tail27d0a5.ts.net\n|-- / proxy http://127.0.0.1:5173',
+          : '# Funnel on:\n https://planner.tail0000.ts.net\n|-- / proxy http://127.0.0.1:5173',
       }),
       fetcher: dohFetcher([]),          // no public record: the real symptom
       probeAddress: async () => ({ ok: true, detail: 'unreachable' }),

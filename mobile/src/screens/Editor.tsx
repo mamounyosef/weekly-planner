@@ -438,6 +438,19 @@ function Sheet({ target, onClose, closeSafelyRef }: {
               ) : null}
             </Field>
 
+            <Field
+              label="Description"
+              iconName="align-left"
+              hint={(draft.description || draft.notes)?.trim() ? `${(draft.description || draft.notes)!.trim().length} chars` : undefined}
+            >
+              <TextField
+                value={draft.description ?? draft.notes ?? ''}
+                onChange={t => set({ description: t, notes: t })}
+                placeholder="Add description or notes..."
+                multiline
+              />
+            </Field>
+
             {/*
               A TASK CAN HAVE NO DAY. Most of them should not have one: "renew
               the passport" is something to get done, not something that happens
@@ -601,15 +614,6 @@ function Sheet({ target, onClose, closeSafelyRef }: {
                     </Row>
                   </Field>
                 )}
-
-                <Field label="Notes">
-                  <TextField
-                    value={draft.notes ?? ''}
-                    onChange={t => set({ notes: t })}
-                    placeholder="Anything worth remembering"
-                    multiline
-                  />
-                </Field>
 
                 {store === 'events' ? (
                   <Field label="Behaviour">

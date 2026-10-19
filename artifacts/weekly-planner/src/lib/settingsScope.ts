@@ -42,6 +42,9 @@ export const SHARED_SETTING_KEYS = [
   'taskCheckboxShape',
   'taskFilters',
   'autoRollRecurringTasks',
+  // How overlapping items share a day column. One answer for the PC and the
+  // phone, so the same day looks the same on both.
+  'overlapLayout',
   'focusDayStartHour',
   'focusDailyGoalSeconds',
   'focusChime',

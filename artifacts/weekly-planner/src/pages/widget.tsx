@@ -10,7 +10,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare } from 'lucide-react';
+import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare, AlignLeft } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { mergeContiguousFocusSession } from '@/lib/focusStats';
 import {
@@ -81,6 +81,7 @@ import { gcalChipColors, resolveEventHex, type EventCardStyle } from '@/lib/gcal
 import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { DEFAULT_CATEGORIES, resolveEventColor, coerceCategories, type EventCategory } from '@/lib/categories';
 import { themePalette, subscribeSettingsChange, type DarkPreset, type LightPreset, type TaskCheckboxShape } from '@/lib/settingsSync';
+import { layoutOverlaps, overlapBoxCss, overlapClipPath, overlapContentArea, coerceOverlapLayoutMode, type OverlapBox, type OverlapLayoutMode } from '@/lib/overlapLayout';
 import { fetchDeviceSettings, loadDeviceSettingsLocal, subscribeDeviceSettings } from '@/lib/deviceSettings';
 import { matchesCombo, formatCombo, DEFAULT_SHORTCUTS, coerceShortcuts, type ShortcutMap } from '@/lib/shortcuts';
 import {
@@ -110,6 +111,7 @@ interface PlannerEvent {
   startTime: string;
   endTime: string;
   content: string;
+  description?: string;
   color: EventColor;
   categoryId?: string;
   completedDates?: string[];
@@ -228,51 +230,9 @@ function snapMin(min: number, interval: IntervalMin): number {
   return Math.round(min / interval) * interval;
 }
 
-// ─── Parallel layout helper ───────────────────────────────────────────────────
-function layoutParallel(
-  evs: Array<{ id: string; startMin: number; endMin: number }>,
-): Map<string, { col: number; numCols: number }> {
-  const sorted = [...evs].sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
-  const colEnds: number[] = [];
-  const colAssign: Record<string, number> = {};
-
-  for (const ev of sorted) {
-    let placed = false;
-    for (let c = 0; c < colEnds.length; c++) {
-      if (colEnds[c] <= ev.startMin) {
-        colAssign[ev.id] = c;
-        colEnds[c] = ev.endMin;
-        placed = true;
-        break;
-      }
-    }
-    if (!placed) {
-      colAssign[ev.id] = colEnds.length;
-      colEnds.push(ev.endMin);
-    }
-  }
-
-  const result = new Map<string, { col: number; numCols: number }>();
-  for (const ev of sorted) {
-    const points = new Set<number>();
-    points.add(ev.startMin);
-    for (const other of sorted) {
-      if (other.startMin > ev.startMin && other.startMin < ev.endMin) points.add(other.startMin);
-      if (other.endMin   > ev.startMin && other.endMin   < ev.endMin) points.add(other.endMin);
-    }
-
-    let maxConcurrent = 1;
-    for (const p of points) {
-      let count = 0;
-      for (const other of sorted) {
-        if (other.startMin <= p && other.endMin > p) count++;
-      }
-      if (count > maxConcurrent) maxConcurrent = count;
-    }
-    result.set(ev.id, { col: colAssign[ev.id] ?? 0, numCols: maxConcurrent });
-  }
-  return result;
-}
+// ─── Parallel layout ──────────────────────────────────────────────────────────
+// Shared with the main window: lib/overlapLayout.ts.
+const FULL_BOX: OverlapBox = { left: 0, width: 1, segments: [{ fromMin: 0, toMin: 1, left: 0, width: 1 }] };
 
 export default function Widget() {
   const [events, setEvents]           = useState<PlannerData>({});
@@ -319,6 +279,7 @@ export default function Widget() {
   const [focusCelebrate, setFocusCelebrate] = useState(false);
   const [stickyAllDayWidget, setStickyAllDayWidget] = useState(true);
   const [stickyTasksWidget, setStickyTasksWidget]   = useState(true);
+  const [overlapLayout, setOverlapLayout]           = useState<OverlapLayoutMode>('fit');
   const [showTaskRow, setShowTaskRow]               = useState(true);
   const [taskColor, setTaskColor]                   = useState('#7dd3fc');
   const [taskCheckboxShape, setTaskCheckboxShape]   = useState<TaskCheckboxShape>('circle');
@@ -367,6 +328,7 @@ export default function Widget() {
         if (s.weekStartsOn != null) setWeekStartsOn(s.weekStartsOn as WeekStartsOn);
         if (typeof s.stickyAllDayWidget === 'boolean') setStickyAllDayWidget(s.stickyAllDayWidget);
         if (typeof s.stickyTasksWidget === 'boolean') setStickyTasksWidget(s.stickyTasksWidget);
+        setOverlapLayout(coerceOverlapLayoutMode(s.overlapLayout));
         if (s.taskColor) setTaskColor(s.taskColor);
         if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape as TaskCheckboxShape);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
@@ -730,8 +692,8 @@ export default function Widget() {
       startMin: item.startMin,
       endMin: item.endMin,
     }));
-    return layoutParallel(layoutInput);
-  }, [colEvents]);
+    return layoutOverlaps(layoutInput, { mode: overlapLayout });
+  }, [colEvents, overlapLayout]);
 
   // ── Scroll & Live indicator visibility logic ──────────────────────────────
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -1786,6 +1748,7 @@ export default function Widget() {
                       return (
                         <div
                           key={ev.id}
+                          title={ev.description ? `${ev.content || 'Untitled'}\n\n${ev.description}` : (ev.content || 'Untitled')}
                           className="px-2 py-1 rounded-md border text-[11px] font-semibold flex items-center gap-1.5 shadow-xs"
                           style={{ backgroundColor: bg, borderColor: border, borderLeft: accentBar ? `3px solid ${accentBar}` : undefined, color: text }}
                         >
@@ -1807,8 +1770,11 @@ export default function Widget() {
                               )}
                             </button>
                           )}
-                          <span className={`truncate flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                            {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}
+                          <span className={`truncate flex-1 flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                            <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic', fontWeight: 400 }}>Untitled</span>}</span>
+                            {Boolean(ev.description?.trim()) && (
+                              <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9.5} /></span>
+                            )}
                           </span>
                         </div>
                       );
@@ -2137,11 +2103,12 @@ export default function Widget() {
                 ? `${durationMin / 60} hour${durationMin / 60 === 1 ? '' : 's'}`
                 : `${Math.floor(durationMin / 60)}h ${durationMin % 60}m`;
 
-            const { col, numCols } = layout.get(itemKey) ?? { col: 0, numCols: 1 };
-            const colW = 100 / numCols;
-            const leftPct = col * colW;
-            const rightPct = 100 - (col + 1) * colW;
-            const EDGE = 3;
+            const box = layout.get(itemKey) ?? FULL_BOX;
+            // 2px gutter between neighbours, so two stepped blocks of the
+            // same colour never run into each other.
+            const boxCss = overlapBoxCss(box, 3, 2);
+            const clipPath = overlapClipPath(box, 3, 2);
+            const contentArea = clipPath ? overlapContentArea(box, 3, 2) : undefined;
 
             const todayDate = new Date();
             const dateStr = format(todayDate, 'yyyy-MM-dd');
@@ -2150,11 +2117,13 @@ export default function Widget() {
             return (
               <div
                 key={itemKey}
+                title={ev.description ? `${ev.content || 'Untitled'} · ${timeDisplayStr}\n\n${ev.description}` : ev.content}
                 className={`absolute border shadow-sm transition-shadow duration-150 z-10 ${segKind === 'tail' ? 'rounded-t-lg' : segKind === 'head' ? 'rounded-b-lg' : 'rounded-lg'}`}
                 style={{
                   top, height,
-                  left:  `calc(${leftPct}% + ${EDGE}px)`,
-                  right: `calc(${rightPct}% + ${EDGE}px)`,
+                  left: boxCss.left,
+                  right: boxCss.right,
+                  clipPath,
                   backgroundColor: bg,
                   borderColor: border,
                   borderBottomStyle: 'solid',
@@ -2170,18 +2139,23 @@ export default function Widget() {
                     style={{ width: ACCENT_BAR_W, background: accentBar }}
                   />
                 )}
-                {(() => {
+                {((height: number) => {
                   const isMicroCard   = height < 26;
                   const isShortCard   = height >= 26 && height < 44;
                   const isCompactCard = height >= 44 && height < 64;
+                  const padTop = isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4;
+                  const padBottom = isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4;
                   return (
                     <div
                       className={`absolute inset-0 flex flex-col overflow-hidden ${
                         isMicroCard || isShortCard ? 'px-1.5 py-0' : isCompactCard ? 'px-2 py-1' : 'px-2 pt-1.5 pb-1.5'
                       }`}
                       style={{
-                        top: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4,
-                        bottom: isMicroCard ? 1 : isShortCard ? 2 : isCompactCard ? 3 : 4,
+                        // In a stepped block the text lives in its roomiest stretch.
+                        top: contentArea ? `calc(${contentArea.top} + ${padTop}px)` : padTop,
+                        bottom: contentArea ? `calc(${contentArea.bottom} + ${padBottom}px)` : padBottom,
+                        left: contentArea?.left,
+                        right: contentArea?.right,
                         paddingLeft: accentBar ? ACCENT_BAR_W + 5 : undefined,
                       }}
                     >
@@ -2207,8 +2181,11 @@ export default function Widget() {
                                   )}
                                 </button>
                               )}
-                              <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                              <span className={`text-[10.5px] font-semibold truncate leading-none min-w-0 flex-1 flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}</span>
+                                {Boolean(ev.description?.trim()) && (
+                                  <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={8.5} /></span>
+                                )}
                               </span>
                               {isNoDur && (
                                 <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
@@ -2240,8 +2217,11 @@ export default function Widget() {
                                   )}
                                 </button>
                               )}
-                              <span className={`text-[10px] font-semibold truncate min-w-0 flex-shrink ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                              <span className={`text-[10px] font-semibold truncate min-w-0 flex-shrink flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}</span>
+                                {Boolean(ev.description?.trim()) && (
+                                  <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9} /></span>
+                                )}
                               </span>
                               <span className="text-[8.5px] font-medium tabular-nums flex-shrink-0 opacity-80 whitespace-nowrap leading-none" style={{ color: textMuted }}>
                                 · {timeDisplayStr}{isNoDur ? '' : ` (${durationMin < 60 ? `${durationMin}m` : durationLabel})`}
@@ -2272,8 +2252,11 @@ export default function Widget() {
                                     )}
                                   </button>
                                 )}
-                                <span className={`text-[12px] font-semibold truncate leading-tight min-w-0 flex-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
-                                  {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                                <span className={`text-[12px] font-semibold truncate leading-tight min-w-0 flex-1 flex items-center gap-1 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
+                                  <span className="truncate">{ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}</span>
+                                  {Boolean(ev.description?.trim()) && (
+                                    <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9.5} /></span>
+                                  )}
                                 </span>
                               </div>
                               <span className="text-[9.5px] font-medium tabular-nums flex-shrink-0 opacity-85 leading-none mt-auto flex items-center gap-1 whitespace-nowrap" style={{ color: textMuted }}>
@@ -2291,18 +2274,19 @@ export default function Widget() {
                           );
                         }
 
+                        const showBothTimes = durationMin >= 150 && height >= sh * 3.5;
                         return (
                           <>
                             {durationMin >= 60 && (
                               <span className="text-[10px] mb-0.5 font-semibold whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1 opacity-90" style={{ color: textMuted }}>
-                                {timeDisplayStr}
+                                <span className="whitespace-nowrap">{timeDisplayStr}</span>
                                 {isLive ? (
-                                  <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                  <span className="inline-flex items-center gap-0.5 whitespace-nowrap" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                     <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                     {formatTimeLeft(minutesLeft)}
                                   </span>
                                 ) : isNoDur ? null : (
-                                  <span>({durationLabel})</span>
+                                  <span className="whitespace-nowrap opacity-85">({durationLabel})</span>
                                 )}
                               </span>
                             )}
@@ -2327,19 +2311,24 @@ export default function Widget() {
                               )}
                               <p className={`text-[13px] font-semibold leading-tight break-words line-clamp-4 ${isCompleted ? 'line-through opacity-50' : ''}`} style={{ color: text }}>
                                 {ev.content || <span style={{ opacity: 0.3, fontStyle: 'italic' }}>Untitled</span>}
+                                {Boolean(ev.description?.trim()) && (
+                                  <span className="inline-flex items-center align-middle ml-1 opacity-70" title="Has description">
+                                    <AlignLeft size={10} />
+                                  </span>
+                                )}
                               </p>
                             </div>
-                            {height >= sh * 1.5 && (
-                              <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1" style={{ color: textMuted }}>
-                                {formatTimeLabel(fullStartMin, timeFormat)} to {formatTimeLabel(fullEndMin, timeFormat)}
+                            {(durationMin < 60 || showBothTimes) && (
+                              <span className="text-[10.5px] mt-0.5 font-medium whitespace-nowrap tabular-nums flex-shrink-0 flex items-center justify-center w-full text-center gap-1 opacity-80" style={{ color: textMuted }}>
+                                <span className="whitespace-nowrap">{formatTimeLabel(fullStartMin, timeFormat)} to {formatTimeLabel(fullEndMin, timeFormat)}</span>
                                 {isLive ? (
-                                  <span className="inline-flex items-center gap-0.5" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
+                                  <span className="inline-flex items-center gap-0.5 whitespace-nowrap" style={{ opacity: 1, color: darkMode ? '#ff8a8a' : '#dc2626' }}>
                                     <span className="w-1 h-1 rounded-full flex-shrink-0" style={{ background: darkMode ? '#ff8a8a' : '#dc2626' }} />
                                     {minutesLeft}m left
                                   </span>
-                                ) : (
+                                ) : (durationMin < 60 && !isNoDur) ? (
                                   <span>({durationLabel})</span>
-                                )}
+                                ) : null}
                               </span>
                             )}
                           </>
@@ -2347,7 +2336,7 @@ export default function Widget() {
                       })()}
                     </div>
                   );
-                })()}
+                })(contentArea ? height * contentArea.heightFraction : height)}
                 {segKind === 'head' && (
                   <div className="absolute top-0 left-0 right-0 flex items-center justify-center pointer-events-none" style={{ height: 9 }} title={`Continues from ${formatTimeLabel(fullStartMin, timeFormat)} the night before`}>
                     <span style={{ fontSize: 8, lineHeight: 1, opacity: 0.55, color: text }}>⌃ continued</span>
@@ -2435,6 +2424,7 @@ export default function Widget() {
                   return (
                     <div
                       key={ev.id}
+                      title={ev.description ? `${ev.content || 'Untitled'}\n\n${ev.description}` : (ev.content || 'Untitled')}
                       className="px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-2 shadow-xs"
                       style={{ backgroundColor: bg, borderColor: border, borderLeft: accentBar ? `3px solid ${accentBar}` : undefined, color: text }}
                     >
@@ -2456,8 +2446,11 @@ export default function Widget() {
                           )}
                         </button>
                       )}
-                      <span className={`break-words flex-1 leading-snug ${isCompleted ? 'line-through opacity-60' : ''}`} style={{ color: text }}>
-                        {ev.content || 'Untitled'}
+                      <span className={`break-words flex-1 leading-snug flex items-center gap-1.5 ${isCompleted ? 'line-through opacity-60' : ''}`} style={{ color: text }}>
+                        <span>{ev.content || 'Untitled'}</span>
+                        {Boolean(ev.description?.trim()) && (
+                          <span title="Has description" className="inline-flex items-center flex-shrink-0 opacity-70"><AlignLeft size={9.5} /></span>
+                        )}
                       </span>
                     </div>
                   );

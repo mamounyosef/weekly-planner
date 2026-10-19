@@ -59,6 +59,7 @@ export interface AgentEvent extends RecurFields {
   completedDates?: string[];
   noCheckbox?: boolean;
   noDuration?: boolean;
+  description?: string;
   gCalHex?: string;
   [extra: string]: unknown;
 }
@@ -289,6 +290,7 @@ export function eventFacts(ev: AgentEvent, world: AgentWorld, occDate?: string |
   if (cat) facts.category = cat.name;
   facts.color = cat?.color ?? (typeof ev.color === 'string' ? ev.color : undefined);
   if (ev.recur) facts.repeats = formatRecurrenceLabel(ev.recur, anchorDate(ev) ?? undefined);
+  if (ev.description) facts.description = ev.description;
   const rem = remindersLabel(ev.notify);
   if (rem) facts.reminders = rem;
   facts.checkbox = !ev.noCheckbox;
@@ -384,6 +386,8 @@ function compactItem(o: Occ, world: AgentWorld): Record<string, unknown> {
   if (f.list) item.list = f.list;
   if (f.repeats) item.repeats = f.repeats;
   if (f.done) item.done = true;
+  if (f.description) item.description = f.description;
+  if (f.notes) item.notes = f.notes;
   if (o.kind === 'event') {
     const cal = calendarName(o.record as AgentEvent, world);
     if (cal) item.calendar = cal;
@@ -561,6 +565,7 @@ const eventFieldProps = {
   category: { type: 'string', description: 'Category name exactly as listed in the context. Omit if none fits.' },
   color: { type: 'string', description: 'Hex colour, only when the user asks for a colour. Categories colour items already.' },
   checkbox: { type: 'boolean', description: 'Whether the item shows a completion checkbox. Omit to use the category default.' },
+  description: { type: 'string', description: 'Detailed notes or description for the event.' },
   recurrence: recurrenceSchema,
   reminders: remindersSchema,
 };
@@ -934,10 +939,10 @@ function searchItems(args: Record<string, unknown>, world: AgentWorld): ToolOutc
   const today = ymd(world.now);
   const hits: Array<Record<string, unknown>> = [];
 
-  const consider = (rec: RecurFields, k: 'event' | 'task', title: string) => {
+  const consider = (rec: RecurFields, k: 'event' | 'task', title: string, extra?: string) => {
     if (rec.deleted || String(rec.id).includes('::')) return;
-    const t = normTitle(title);
-    if (!words.every(w => t.includes(w))) return;
+    const hay = normTitle(`${title} ${extra ?? ''}`);
+    if (!words.every(w => hay.includes(w))) return;
     const anchor = anchorDate(rec);
     let date: string | null = anchor;
     if (rec.recur && anchor) {
@@ -961,8 +966,8 @@ function searchItems(args: Record<string, unknown>, world: AgentWorld): ToolOutc
     hits.push(item as Record<string, unknown>);
   };
 
-  if (kind !== 'task') for (const ev of Object.values(world.events)) if (ev) consider(ev, 'event', ev.content ?? '');
-  if (kind !== 'event') for (const t of Object.values(world.tasks)) if (t) consider(t, 'task', t.title ?? '');
+  if (kind !== 'task') for (const ev of Object.values(world.events)) if (ev) consider(ev, 'event', ev.content ?? '', ev.description);
+  if (kind !== 'event') for (const t of Object.values(world.tasks)) if (t) consider(t, 'task', t.title ?? '', t.notes);
   hits.sort((a, b) => String(a.date ?? '9999').localeCompare(String(b.date ?? '9999')));
   return {
     result: { query: args.query, count: hits.length, items: hits.slice(0, 60), ...(hits.length > 60 ? { truncated: true } : {}) },
@@ -1093,6 +1098,9 @@ function buildEvent(raw: unknown, world: AgentWorld, idx: number): BuiltEvent {
   if (recur) rec.recur = recur;
   const rem = parseReminders(a.reminders);
   if (rem && rem !== 'inherit') rec.notify = rem;
+  if (typeof a.description === 'string' && a.description.trim()) {
+    rec.description = a.description.trim();
+  }
 
   const record = clean(rec);
   return { record, facts: eventFacts(record, world) };
@@ -1240,7 +1248,7 @@ function scopeNote(applied: OccurrenceScope, occDate: string | null, repeating: 
   return 'Changed for the whole series.';
 }
 
-const EVENT_FIELD_ORDER = ['title', 'date', 'endDate', 'startTime', 'endTime', 'allDay', 'pointInTime', 'category', 'color', 'repeats', 'reminders', 'checkbox', 'done'];
+const EVENT_FIELD_ORDER = ['title', 'date', 'endDate', 'startTime', 'endTime', 'allDay', 'pointInTime', 'category', 'color', 'repeats', 'reminders', 'checkbox', 'done', 'description', 'notes'];
 
 function changedFields(before: ItemFacts, after: ItemFacts): string[] {
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
@@ -1360,6 +1368,15 @@ function updateEvents(args: Record<string, unknown>, world: AgentWorld): ToolOut
     if (set.reminders !== undefined) {
       const rem = parseReminders(set.reminders);
       patch.notify = rem === 'inherit' ? undefined : rem;
+    }
+    if (set.description !== undefined) {
+      if (set.description === null || set.description === '') {
+        patch.description = undefined;
+      } else if (typeof set.description === 'string') {
+        patch.description = set.description.trim() || undefined;
+      } else {
+        fail('description must be a string or null.');
+      }
     }
 
     const newDate = set.date !== undefined ? parseYmdStrict(set.date, 'date') : null;

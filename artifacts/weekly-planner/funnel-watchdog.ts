@@ -158,7 +158,7 @@ function oneLine(s: string, max = 300): string {
   return String(s || '').trim().replace(/\s+/g, ' ').slice(0, max);
 }
 
-/** The node's public DNS name, e.g. "mamoun.tail27d0a5.ts.net". */
+/** The node's public DNS name, e.g. "planner.tail0000.ts.net". */
 export function parseDnsName(statusJson: string): string | null {
   try {
     const data = JSON.parse(statusJson);

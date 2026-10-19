@@ -25,6 +25,7 @@ import { describeUpdate, updateStamp } from '../lib/updateLabel';
 import { SETTINGS_ENTITY } from '../lib/syncBridge';
 import {
   CHECKBOX_SHAPES,
+  OVERLAP_LAYOUTS,
   TASK_COLOURS,
   coerceDisplaySettings,
   displayPatch,
@@ -415,6 +416,19 @@ export function Settings({
         </Row>
         <Spacer size={space.xs} />
         <Toggle label="Swipe between views" hint="Drag left or right across the grid to move to the next view. Turn off if it fights scrolling." value={swipeViewSwitch} onChange={setSwipeViewSwitch} />
+        <Spacer size={space.lg} />
+        <Divider />
+        <Spacer size={space.lg} />
+        <Text variant="body">Overlapping items</Text>
+        <Text variant="caption" tone="faint" style={{ marginTop: 2 }}>
+          {(OVERLAP_LAYOUTS.find(o => o.id === display.overlapLayout) ?? OVERLAP_LAYOUTS[0]).hint} Shared with your PC.
+        </Text>
+        <Spacer size={space.sm} />
+        <Segment
+          options={OVERLAP_LAYOUTS.map(o => ({ key: o.id, label: o.id === 'fit' ? 'Where shared' : 'Whole item' }))}
+          value={display.overlapLayout}
+          onChange={k => setDisplay({ overlapLayout: k as DisplaySettings['overlapLayout'] })}
+        />
       </Section>
       <Section title="This device">
         <Text variant="body">Time slot snap interval</Text>

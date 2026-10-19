@@ -34,10 +34,11 @@
 // looks identical until the first move.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, View, Alert } from 'react-native';
+import { Alert, Image, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
+import { ICONS } from '../ui/icons';
 import { TextField } from '../ui/Fields';
 import { ListChips } from '../ui/ListChips';
 import { SortableList, SortableScrollView, type DragHandle } from '../ui/SortableList';
@@ -757,6 +758,13 @@ function TaskCard({
             >
               {task.title || 'Untitled'}
             </Text>
+            {Boolean((task.description || (task as any).notes)?.trim()) ? (
+              <Image
+                source={{ uri: ICONS['align-left'] }}
+                style={{ width: 13, height: 13, tintColor: p.inkFaint, flexShrink: 0 }}
+                resizeMode="contain"
+              />
+            ) : null}
             {task.recur ? <Text variant="caption" tone="faint" style={{ fontSize: 13 }}>↻</Text> : null}
           </Row>
 

@@ -11,6 +11,9 @@ $tools = 'C:\Users\mamou\dev-tools'
 if (-not $env:JAVA_HOME) { $env:JAVA_HOME = (Get-ChildItem "$tools\jdk" -Directory | Select-Object -First 1).FullName }
 if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = "$tools\android-sdk" }
 $env:Path = "$env:JAVA_HOME\bin;$env:Path"
+# The update URL is baked into the APK; app.config.js refuses to fall back to a
+# placeholder when this is set (it comes from PLANNER_PUBLIC_URL in the repo .env).
+$env:PLANNER_REQUIRE_URL = '1'
 
 Push-Location $mobile
 try {

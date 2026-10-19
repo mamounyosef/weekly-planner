@@ -30,10 +30,11 @@
 // long-press into the same menu.
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Animated, Easing, Image, Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from './kit';
+import { ICONS } from './icons';
 import { CategoryPicker, ColourPicker, type Swatch } from './Fields';
 import { HIT, PRESSED, PRESS_DELAY, TAP_DELAY, clearNav, radius, space } from '../theme';
 import { scopeChoices, type OccurrenceScope } from '../lib/occurrence';
@@ -52,6 +53,7 @@ export interface ItemMenuTarget {
   title: string;
   /** One quiet line under the title: the time, the day, the list. */
   subtitle?: string;
+  description?: string;
   /** True for a repeating item, which is what turns on the scope question. */
   repeats?: boolean;
   /** "Every 2 weeks on Mon, Wed", from `describeRecur`. Shown as a chip. */
@@ -251,6 +253,18 @@ function Sheet({
               </Text>
               {target.subtitle ? (
                 <Text variant="caption" tone="soft" numberOfLines={1}>{target.subtitle}</Text>
+              ) : null}
+              {target.description ? (
+                <Row gap={space.xs} style={{ alignItems: 'center', marginTop: 1 }}>
+                  <Image
+                    source={{ uri: ICONS['align-left'] }}
+                    style={{ width: 11, height: 11, tintColor: p.inkFaint }}
+                    resizeMode="contain"
+                  />
+                  <Text variant="caption" tone="faint" numberOfLines={2} style={{ flex: 1 }}>
+                    {target.description}
+                  </Text>
+                </Row>
               ) : null}
               {repeats ? (
                 <Row gap={space.xs} style={{ marginTop: 2 }}>

@@ -819,9 +819,9 @@ console.log('\n--- A TALL BLOCK LABELS BOTH ENDS, A SHORT ONE JUST THE FOOT ---'
   assert.equal(blockLabelPlacement(40), 'bottom');
   assert.equal(blockLabelPlacement(BLOCK_LABEL_BOTH_PX - 1), 'bottom');
 
-  // Both ends once there is room for two lines and a title between them.
+  // Both ends once there is room for two lines and a title between them (~2.5h on standard grid).
   assert.equal(blockLabelPlacement(BLOCK_LABEL_BOTH_PX), 'both');
-  assert.equal(blockLabelPlacement(58), 'both', 'an hour on the default 30 minute grid');
+  assert.equal(blockLabelPlacement(142), 'both', 'a tall block (~2.5h) on the grid');
   assert.equal(blockLabelPlacement(600), 'both');
 
   assert.ok(BLOCK_LABEL_MIN_PX < BLOCK_LABEL_BOTH_PX, 'the bands are in order');

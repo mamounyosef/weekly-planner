@@ -91,6 +91,7 @@ export interface ItemFacts {
   checkbox?: boolean;
   done?: boolean;
   notes?: string;
+  description?: string;
 }
 
 export interface ChangeEntry {

@@ -116,6 +116,7 @@ export interface DraftInput {
   startMin: number | null;
   endMin: number | null;
   notes?: string;
+  description?: string;
   /** A swatch name or a '#rrggbb'. Overridden by the category when one is set. */
   colour?: string;
   categoryId?: string;
@@ -276,7 +277,12 @@ export function buildEventRecord(
     record.endTime = input.endMin === null ? undefined : toTimeString(input.endMin);
   }
 
-  if (input.notes !== undefined) record.notes = input.notes.trim() || undefined;
+  const desc = input.description !== undefined ? input.description : input.notes;
+  if (desc !== undefined) {
+    const trimmed = desc.trim() || undefined;
+    record.description = trimmed;
+    record.notes = trimmed;
+  }
   if (input.colour !== undefined) record.color = input.colour;
   if (input.categoryId !== undefined) record.categoryId = input.categoryId || undefined;
 
@@ -362,7 +368,8 @@ export function draftFromRecord(
     allDay: record.allDay === true || (store === 'events' && startTime === undefined),
     startMin: startTime ? fromTimeString(startTime) : null,
     endMin: endTime ? fromTimeString(endTime) : null,
-    notes: str(record.notes) ?? '',
+    notes: str(record.description) ?? str(record.notes) ?? '',
+    description: str(record.description) ?? str(record.notes) ?? '',
     colour: str(record.color),
     categoryId: str(record.categoryId),
     recur: (record.recur && typeof record.recur === 'object')

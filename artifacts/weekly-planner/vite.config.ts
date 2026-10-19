@@ -416,8 +416,27 @@ if (Number.isNaN(port) || port <= 0) {
 
 const basePath = process.env.BASE_PATH || '/';
 
+/**
+ * The public Funnel address, from the repo-root `.env` (PLANNER_PUBLIC_URL).
+ * Kept out of the source on purpose: the repository is public and this link
+ * should not be. Empty when unset, and the settings page then hides that row.
+ */
+function readPublicUrl(): string {
+  if (process.env.PLANNER_PUBLIC_URL) return process.env.PLANNER_PUBLIC_URL.trim();
+  try {
+    const raw = fsSync.readFileSync(path.resolve(import.meta.dirname, '..', '..', '.env'), 'utf-8');
+    const m = /^\s*PLANNER_PUBLIC_URL\s*=\s*(.*?)\s*$/m.exec(raw);
+    return m ? m[1].replace(/^["']|["']$/g, '') : '';
+  } catch {
+    return '';
+  }
+}
+
 export default defineConfig({
   base: basePath,
+  define: {
+    __PLANNER_PUBLIC_URL__: JSON.stringify(readPublicUrl()),
+  },
   plugins: [
     react(),
     tailwindcss(),

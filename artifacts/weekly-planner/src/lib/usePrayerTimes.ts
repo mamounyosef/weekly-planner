@@ -29,6 +29,10 @@ export function usePrayerTimes(
   const [months, setMonths] = useState<Record<string, PrayerMonth>>({});
   const [done, setDone] = useState<PrayerDoneMap>({});
   const [stale, setStale] = useState(false);
+  // Bumped when the date rolls over, so the load effect re-runs and re-fetches
+  // `refreshYm` even though a copy of that month is still in hand.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refreshYm = useRef<string | null>(null);
   const inFlight = useRef<Set<string>>(new Set());
   const queryKey = prayerQueryKey(settings);
   // Cached months belong to one location+method; changing either invalidates all
@@ -58,7 +62,9 @@ export function usePrayerTimes(
 
     for (const ym of neededSig ? neededSig.split(',') : []) {
       const flightKey = `${keyAtStart}:${ym}`;
-      if (months[ym] || inFlight.current.has(flightKey)) continue;
+      const forced = refreshYm.current === ym;
+      if ((months[ym] && !forced) || inFlight.current.has(flightKey)) continue;
+      if (forced) refreshYm.current = null;
       inFlight.current.add(flightKey);
       const [y, m] = ym.split('-').map(Number);
       fetch(prayerMonthUrl(settings, y, m))
@@ -74,12 +80,15 @@ export function usePrayerTimes(
     // `months` is intentionally read but not a dependency: adding it would re-run
     // this on every successful load and re-check months already in hand.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [neededSig, queryKey, settings.enabled]);
+  }, [neededSig, queryKey, settings.enabled, refreshTick]);
 
   // ── Re-check with the API once a day ───────────────────────────────────────
   // Prayer times drift a minute or two every day and the whole point of using an
-  // API is not going stale, so the current month is dropped (and so re-fetched)
-  // whenever the calendar date rolls over.
+  // API is not going stale, so the current month is re-fetched whenever the
+  // calendar date rolls over. The old copy stays on screen until the reply lands:
+  // this used to DELETE the month and rely on the load effect to notice, but none
+  // of that effect's dependencies change at midnight, so a window left open
+  // overnight showed no prayers at all the next day.
   const dayStamp = prayerDateKey(new Date());
   const lastDayStamp = useRef(dayStamp);
   useEffect(() => {
@@ -88,12 +97,8 @@ export function usePrayerTimes(
       if (today === lastDayStamp.current) return;
       lastDayStamp.current = today;
       const now = new Date();
-      const ym = `${now.getFullYear()}-${now.getMonth() + 1}`;
-      setMonths(prev => {
-        const next = { ...prev };
-        delete next[ym];
-        return next;
-      });
+      refreshYm.current = `${now.getFullYear()}-${now.getMonth() + 1}`;
+      setRefreshTick(t => t + 1);
     };
     const id = window.setInterval(tick, 5 * 60 * 1000);
     return () => window.clearInterval(id);

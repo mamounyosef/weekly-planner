@@ -791,6 +791,49 @@ async function main() {
     console.log('  ok');
   }
 
+  console.log('--- 19. EVENT DESCRIPTIONS: CREATE, UPDATE, LIST, SEARCH ---');
+  {
+    const w = world();
+    const created = runTool('create_events', {
+      events: [
+        { title: 'Project Kickoff', date: '2026-09-30', startTime: '10:00', endTime: '11:00', description: 'Bring wireframes and architecture diagrams.' },
+        { title: 'Multi-day Conference', date: '2026-10-01', endDate: '2026-10-03', allDay: true, description: 'Main hall keynote & break-out sessions.' },
+      ],
+    }, w);
+    const evs = (created.events as Record<string, AgentEvent>);
+    const kickoff = Object.values(evs).find(e => e.content === 'Project Kickoff')!;
+    const conf = Object.values(evs).find(e => e.content === 'Multi-day Conference')!;
+    assert.equal(kickoff.description, 'Bring wireframes and architecture diagrams.');
+    assert.equal(conf.description, 'Main hall keynote & break-out sessions.');
+
+    // list_items includes description
+    const listed = runTool('list_items', { from: '2026-09-30', to: '2026-10-03' }, { ...w, events: evs });
+    const listItems = (listed.result as { items: Array<Record<string, unknown>> }).items;
+    const kickoffListed = listItems.find(i => i.title === 'Project Kickoff')!;
+    assert.equal(kickoffListed.description, 'Bring wireframes and architecture diagrams.');
+
+    // search_items finds by word in description
+    const searched = runTool('search_items', { query: 'wireframes' }, { ...w, events: evs });
+    const searchItems = (searched.result as { items: Array<Record<string, unknown>> }).items;
+    assert.equal(searchItems.length, 1);
+    assert.equal(searchItems[0].title, 'Project Kickoff');
+
+    // update_events changes description
+    const updated = runTool('update_events', {
+      updates: [{ id: kickoff.id, set: { description: 'Updated agenda with slides link.' } }],
+    }, { ...w, events: evs });
+    const updatedKickoff = (updated.events as Record<string, AgentEvent>)[kickoff.id];
+    assert.equal(updatedKickoff.description, 'Updated agenda with slides link.');
+
+    // update_events clears description with null or empty string
+    const cleared = runTool('update_events', {
+      updates: [{ id: kickoff.id, set: { description: '' } }],
+    }, { ...w, events: updated.events as Record<string, AgentEvent> });
+    const clearedKickoff = (cleared.events as Record<string, AgentEvent>)[kickoff.id];
+    assert.equal(clearedKickoff.description, undefined);
+    console.log('  ok');
+  }
+
   console.log('\nAll agentTools tests passed.');
 }
 

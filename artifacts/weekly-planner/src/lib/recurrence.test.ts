@@ -676,8 +676,208 @@ function testWeekPhaseIsCarriedEverywhere() {
   console.log('  Week phase reaches Google and the delete scope');
 }
 
+// A dragged item's `dayIndex` is a column on screen: it counts from the VIEWED
+// week. A standalone stored under another week (a custom view's day 7, a
+// spill-in on day -1) used to be read against its OWN week and jumped seven
+// days away. The user saw a linked train dragged twice on Sunday 18 Oct (custom
+// view anchored on Sat 17 Oct): the detached "Natural Language Processing"
+// vanished to Sunday 25 Oct on the second drag.
+function testDayIndexCountsFromViewedWeek() {
+  type Ev = RecurFields & { content: string; startTime: string; endTime: string; linkGroup?: string };
+  const VIEW = '2026-10-11';                 // Sun 11 Oct: the custom view's anchor week
+  const RANGE = { from: 4, to: 10 };         // Thu 15 .. Tue 20
+  const WSO = 0 as WeekStartsOn;
+
+  // Where an item is on the calendar, from the store alone.
+  const dateOf = (raw: Record<string, Ev>, id: string) =>
+    format(addDays(parseDate(raw[id].weekKey!), raw[id].dayIndex ?? 0), 'yyyy-MM-dd');
+  // The visible occurrences with this title, as the grid would list them.
+  const shown = (raw: Record<string, Ev>, content: string, view = VIEW, range: { from: number; to: number } | undefined = RANGE) =>
+    Object.entries(resolveWeek(raw, view, range, WSO))
+      .filter(([, e]) => e.content === content)
+      .map(([id, e]) => ({ id, dayIndex: e.dayIndex!, startTime: e.startTime, date: e.occDate! }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  // What the drag commit sends: the displayed column (+ shift) and new times. No weekKey.
+  const dragPatch = (dayIndex: number, startTime: string, endTime: string): Partial<Ev> => ({ dayIndex, startTime, endTime });
+
+  // 1. A standalone stored in NEXT week, shown on day 7 of the custom view.
+  {
+    const raw: Record<string, Ev> = {
+      s: { id: 's', content: 'S', weekKey: '2026-10-18', dayIndex: 0, startTime: '08:30', endTime: '09:30' },
+    };
+    const [occ] = shown(raw, 'S');
+    assert.equal(occ.dayIndex, 7);
+    const same = editSeries(raw, occ.id, dragPatch(7, '08:20', '09:20'), VIEW, WSO).events;
+    assert.equal(dateOf(same, 's'), '2026-10-18', 'time-only drag on day 7 keeps the date');
+    assert.equal(same.s.weekKey, '2026-10-18');
+    assert.equal(same.s.dayIndex, 0, 'stored anchor stays normalised to 0..6');
+    assert.equal(same.s.startTime, '08:20');
+    const next = editSeries(raw, occ.id, dragPatch(8, '08:30', '09:30'), VIEW, WSO).events;
+    assert.equal(dateOf(next, 's'), '2026-10-19', 'one column right is Monday 19th');
+    const back = editSeries(raw, occ.id, dragPatch(6, '08:30', '09:30'), VIEW, WSO).events;
+    assert.equal(dateOf(back, 's'), '2026-10-17', 'one column left crosses back into the anchor week');
+    assert.equal(back.s.weekKey, '2026-10-11');
+    const far = editSeries(raw, occ.id, dragPatch(4, '08:30', '09:30'), VIEW, WSO).events;
+    assert.equal(dateOf(far, 's'), '2026-10-15', 'first visible column');
+  }
+
+  // 2. A spill-in from last week (stored Sat 10 Oct) shown as day -1 of the week view.
+  {
+    const raw: Record<string, Ev> = {
+      z: { id: 'z', content: 'Z', weekKey: '2026-10-04', dayIndex: 6, startTime: '23:30', endTime: '07:00' },
+    };
+    const [occ] = shown(raw, 'Z', VIEW, { from: 0, to: 7 });
+    assert.equal(occ.dayIndex, -1);
+    const same = editSeries(raw, occ.id, dragPatch(-1, '23:00', '06:30'), VIEW, WSO).events;
+    assert.equal(dateOf(same, 'z'), '2026-10-10', 'spill-in keeps its own day, not a week earlier');
+    const fwd = editSeries(raw, occ.id, dragPatch(0, '23:30', '07:00'), VIEW, WSO).events;
+    assert.equal(dateOf(fwd, 'z'), '2026-10-11');
+  }
+
+  // 3. Item stored in the viewed week itself: unchanged behaviour, incl. dayIndex 0 (falsy).
+  {
+    const raw: Record<string, Ev> = {
+      a: { id: 'a', content: 'A', weekKey: VIEW, dayIndex: 3, startTime: '10:00', endTime: '11:00' },
+    };
+    const zero = editSeries(raw, 'a', dragPatch(0, '10:00', '11:00'), VIEW, WSO).events;
+    assert.equal(dateOf(zero, 'a'), '2026-10-11', 'dayIndex 0 is honoured, not treated as absent');
+    const six = editSeries(raw, 'a', dragPatch(6, '10:00', '11:00'), VIEW, WSO).events;
+    assert.equal(dateOf(six, 'a'), '2026-10-17');
+  }
+
+  // 4. Edits that do not move the day never touch the stored week.
+  {
+    const raw: Record<string, Ev> = {
+      s: { id: 's', content: 'S', weekKey: '2026-10-18', dayIndex: 2, startTime: '08:30', endTime: '09:30' },
+    };
+    const timeOnly = editSeries(raw, 's', { startTime: '09:00', endTime: '10:00' }, VIEW, WSO).events;
+    assert.equal(dateOf(timeOnly, 's'), '2026-10-20', 'resize/time edit keeps the date');
+    assert.equal(timeOnly.s.weekKey, '2026-10-18');
+    const titled = editSeries(raw, 's', { content: 'Renamed' }, VIEW, WSO).events;
+    assert.equal(dateOf(titled, 's'), '2026-10-20');
+    const nulled = editSeries(raw, 's', { dayIndex: undefined, weekKey: undefined } as Partial<Ev>, VIEW, WSO).events;
+    assert.equal(nulled.s.weekKey, undefined, 'an explicit clear (undated task) is left alone');
+    assert.equal(nulled.s.dayIndex, undefined);
+  }
+
+  // 5. An explicit weekKey always wins (month view / date picker / all-day drag).
+  {
+    const raw: Record<string, Ev> = {
+      s: { id: 's', content: 'S', weekKey: '2026-10-18', dayIndex: 0, startTime: '08:30', endTime: '09:30' },
+    };
+    const explicit = editSeries(raw, 's', { weekKey: '2026-11-01', dayIndex: 3 } as Partial<Ev>, VIEW, WSO).events;
+    assert.equal(dateOf(explicit, 's'), '2026-11-04');
+    const emptyKey = editSeries(raw, 's', { weekKey: '', dayIndex: 7 } as Partial<Ev>, VIEW, WSO).events;
+    assert.equal(dateOf(emptyKey, 's'), '2026-10-18', 'an empty weekKey counts as absent');
+  }
+
+  // 6. Repeating, unlocked: detach on day 7, then drag the detached copy again.
+  {
+    const raw: Record<string, Ev> = {
+      r: { id: 'r', content: 'R', weekKey: VIEW, dayIndex: 0, startTime: '08:30', endTime: '09:30', recur: { freq: 'weekly', interval: 1, byWeekday: [0, 2, 4] } },
+    };
+    const sun = shown(raw, 'R').find(o => o.date === '2026-10-18')!;
+    assert.equal(sun.dayIndex, 7);
+    const first = editSeries(raw, sun.id, dragPatch(7, '08:20', '09:20'), VIEW, WSO);
+    assert.notEqual(first.targetId, sun.id, 'unlocked repeat detaches');
+    assert.equal(dateOf(first.events, first.targetId), '2026-10-18');
+    assert.ok(first.events.r.exdates!.includes('2026-10-18'));
+    const shown1 = shown(first.events, 'R');
+    const detachedOcc = shown1.find(o => o.id === first.targetId)!;
+    assert.equal(detachedOcc.dayIndex, 7);
+    const second = editSeries(first.events, detachedOcc.id, dragPatch(7, '08:25', '09:25'), VIEW, WSO);
+    assert.equal(second.targetId, first.targetId, 'a standalone edits in place');
+    assert.equal(dateOf(second.events, first.targetId), '2026-10-18', 'second drag no longer jumps to the 25th');
+    assert.deepEqual(shown(second.events, 'R').map(o => `${o.date} ${o.startTime}`),
+      ['2026-10-15 08:30', '2026-10-18 08:25', '2026-10-20 08:30']);
+  }
+
+  // 7. Repeating, locked: the whole series moves; day 7 keeps its weekday.
+  {
+    const raw: Record<string, Ev> = {
+      l: { id: 'l', content: 'L', weekKey: VIEW, dayIndex: 0, startTime: '06:30', endTime: '07:00', locked: true, recur: { freq: 'weekly', interval: 1, byWeekday: [0, 2, 4] } },
+    };
+    const sun = shown(raw, 'L').find(o => o.date === '2026-10-18')!;
+    const res = editSeries(raw, sun.id, dragPatch(7, '06:20', '06:50'), VIEW, WSO);
+    assert.deepEqual(res.events.l.recur!.byWeekday, [0, 2, 4], 'no weekday shift on a time-only move');
+    assert.deepEqual(shown(res.events, 'L').map(o => `${o.date} ${o.startTime}`),
+      ['2026-10-15 06:20', '2026-10-18 06:20', '2026-10-20 06:20']);
+  }
+
+  // 8. The exact train from the report, dragged twice the way applyEditMany does it.
+  {
+    const G = 'train';
+    const weekly = { freq: 'weekly' as const, interval: 1, byWeekday: [0, 2, 4] as Weekday[] };
+    let raw: Record<string, Ev> = {
+      get: { id: 'get', content: 'Getting ready', weekKey: '2026-10-18', dayIndex: 0, startTime: '06:30', endTime: '07:00', locked: true, recur: weekly, exdates: ['2026-10-22'], linkGroup: G },
+      go:  { id: 'go', content: 'Going to University', weekKey: VIEW, dayIndex: 0, startTime: '07:00', endTime: '08:30', locked: true, recur: weekly, exdates: ['2026-10-11', '2026-10-13', '2026-10-15'], linkGroup: G },
+      nlp: { id: 'nlp', content: 'NLP', weekKey: VIEW, dayIndex: 0, startTime: '08:30', endTime: '09:30', recur: weekly, exdates: ['2026-10-11', '2026-10-13', '2026-10-15'], linkGroup: G },
+    };
+    const toHM = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+    const dragTrain = (shiftMin: number) => {
+      const week = resolveWeek(raw, VIEW, RANGE, WSO);
+      const ids = Object.keys(week).filter(id => week[id].linkGroup === G && week[id].dayIndex === 7);
+      assert.equal(ids.length, 3, 'all three carriages are on Sunday before the drag');
+      let map = raw;
+      for (const id of ids) {
+        const e = week[id];
+        map = editSeries(map, id, dragPatch(e.dayIndex!, toHM(toMin(e.startTime) + shiftMin), toHM(toMin(e.endTime) + shiftMin)), VIEW, WSO).events;
+      }
+      raw = map;
+    };
+    dragTrain(-10);
+    dragTrain(+5);
+    dragTrain(+5);
+    const sunday = Object.values(resolveWeek(raw, VIEW, RANGE, WSO))
+      .filter(e => e.linkGroup === G && e.occDate === '2026-10-18')
+      .map(e => `${e.content} ${e.startTime}`)
+      .sort();
+    assert.deepEqual(sunday, ['Getting ready 06:30', 'Going to University 07:00', 'NLP 08:30'],
+      'every carriage is still on Sunday after three drags');
+    const nextWeek = Object.values(resolveWeek(raw, '2026-10-25', undefined, WSO))
+      .filter(e => e.content === 'NLP' && e.occDate === '2026-10-25');
+    assert.deepEqual(nextWeek.map(e => e.masterId), ['nlp'], 'the 25th has only the series itself, no leaked detached copy');
+    assert.equal(Object.values(raw).filter(e => e.content === 'NLP' && !e.recur).length, 1, 'exactly one detached copy');
+  }
+
+  // 9. Every column of a wide custom view round-trips to the date it shows.
+  {
+    for (let from = -7; from <= 7; from++) {
+      for (let col = from; col < from + 7; col++) {
+        const date = format(addDays(parseDate(VIEW), col), 'yyyy-MM-dd');
+        const ws = weekKeyOf(parseDate(date), WSO);
+        const raw: Record<string, Ev> = {
+          x: { id: 'x', content: 'X', weekKey: ws, dayIndex: parseDate(date).getDay(), startTime: '12:00', endTime: '13:00' },
+        };
+        const occ = shown(raw, 'X', VIEW, { from, to: from + 7 });
+        assert.equal(occ.length, 1, `visible at column ${col}`);
+        assert.equal(occ[0].dayIndex, col);
+        const moved = editSeries(raw, 'x', dragPatch(col, '12:30', '13:30'), VIEW, WSO).events;
+        assert.equal(dateOf(moved, 'x'), date, `column ${col} keeps ${date}`);
+      }
+    }
+  }
+
+  // 10. Monday start of week: same guarantee with a different week phase.
+  {
+    const MON_VIEW = '2026-10-12';
+    const raw: Record<string, Ev> = {
+      m: { id: 'm', content: 'M', weekKey: '2026-10-19', dayIndex: 0, startTime: '08:00', endTime: '09:00' },
+    };
+    const occ = shown(raw, 'M', MON_VIEW, { from: 3, to: 10 });
+    assert.equal(occ[0].dayIndex, 7);
+    const moved = editSeries(raw, 'm', dragPatch(7, '08:10', '09:10'), MON_VIEW, 1 as WeekStartsOn).events;
+    assert.equal(dateOf(moved, 'm'), '2026-10-19');
+    assert.equal(moved.m.weekKey, '2026-10-19');
+  }
+
+  console.log('✓ dayIndex counts from the viewed week (custom view / spill-in drags)');
+}
+
 function runAllTests() {
   console.log('--- RUNNING COMPLETE RECURRENCE ENGINE TEST SUITE ---');
+  testDayIndexCountsFromViewedWeek();
   testRfc5545TimezoneParsing();
   testWeeklyIntervalGroupingWithWeekStartsOn();
   testDeleteFirstOccurrenceScoped();

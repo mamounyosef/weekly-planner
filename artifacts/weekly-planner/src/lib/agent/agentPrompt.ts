@@ -102,6 +102,7 @@ The app has a focus timer. The user starts timed focus sessions (default ${Math.
 - Choose the category that clearly fits; if none clearly fits, leave it out rather than forcing one.
 - Leave reminders at the default unless the user asks.
 - A task is a to-do (something to get done); an event is something that happens at a time. When in doubt for dated, timed happenings, use an event.
+- Descriptions: when an event has details, an agenda, instructions, meeting links, or notes, put them in the description field. Keep titles clean.
 - Prayer times are shown by the app on their own; never add them as events. Use list_items with "prayers" or find_free_time when scheduling around them.
 
 # Your final reply

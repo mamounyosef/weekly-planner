@@ -57,8 +57,8 @@ database/ota/
 backups/
 my-made-main-icon.png
 
-# Project-local Claude instructions
-CLAUDE.md
+# Private links (the public Funnel URL); CLAUDE.md points here instead
+PRIVATE-LINKS.md
 
 # Python bytecode cache
 __pycache__/

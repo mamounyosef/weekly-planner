@@ -16,6 +16,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,7 +31,10 @@ const run = (cmd, args, opts = {}) =>
 function readAppConfig() {
   const raw = fs.readFileSync(path.join(mobileDir, 'app.json'), 'utf-8');
   const parsed = JSON.parse(raw);
-  return parsed.expo ?? parsed;
+  // app.config.js adds the public URL (kept out of the repo); the shipped
+  // expoConfig.json must carry it exactly as the APK build saw it.
+  const { resolveConfig } = createRequire(import.meta.url)(path.join(mobileDir, 'app.config.js'));
+  return resolveConfig(parsed.expo ?? parsed, { strict: true });
 }
 
 /**
@@ -60,6 +64,9 @@ async function copyTree(from, to) {
 }
 
 async function main() {
+  // `expo export` below loads app.config.js on its own; make it strict too.
+  process.env.PLANNER_REQUIRE_URL = '1';
+
   // ── The gate ──────────────────────────────────────────────────────────────
   // Metro does not typecheck, so a ReferenceError reaches the phone as a bundle
   // that dies at launch. That has happened: `(pl as any).id.toString()` on a
