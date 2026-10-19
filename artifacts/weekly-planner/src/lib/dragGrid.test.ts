@@ -18,6 +18,7 @@ import {
   minutesAtY,
   moveBlock,
   resizeBlock,
+  resizeBlockStart,
   snapMinutes,
   yAtMinutes,
   type SnapMode,
@@ -425,6 +426,19 @@ function main() {
     assert.equal(columnAtX(100, NaN, total, 7), columnAtX(100, 0, total, 7),
       'a missing rail width reads as no rail, not as NaN');
     assert.ok(Number.isInteger(columnAtX(100, rail, NaN, 7)));
+  }
+
+  {
+    // Dragging the TOP edge: the end never moves, the start snaps, and the
+    // block can neither close up nor leave the window.
+    const win = { fromHour: 8, toHour: 20 };
+    assert.deepEqual(resizeBlockStart({ startMin: 540, endMin: 600, pointerMin: 482, interval: 15, ...win }), { startMin: 480, endMin: 600 });
+    assert.deepEqual(resizeBlockStart({ startMin: 540, endMin: 600, pointerMin: 300, interval: 15, ...win }), { startMin: 480, endMin: 600 }, 'clamped to the top of the window');
+    const shut = resizeBlockStart({ startMin: 540, endMin: 600, pointerMin: 700, interval: 15, ...win });
+    assert.equal(shut.endMin, 600);
+    assert.ok(shut.endMin - shut.startMin >= minBlockMinutes(15), 'never dragged shut');
+    const junk = resizeBlockStart({ startMin: NaN, endMin: NaN, pointerMin: NaN, interval: 0, ...win });
+    assert.ok(Number.isFinite(junk.startMin) && Number.isFinite(junk.endMin) && junk.endMin > junk.startMin);
   }
 
   console.log('\nALL PASS (dragGrid: snapping, create, move, resize, columns)');

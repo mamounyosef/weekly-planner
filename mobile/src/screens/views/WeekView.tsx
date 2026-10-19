@@ -32,8 +32,11 @@
 //   hold on a block      -> the block lifts and stays lifted; drag to move it,
 //                           sideways too in week and custom views to change
 //                           its day
-//   drag the lifted grip -> the bottom edge follows the thumb, so the block
-//                           changes length rather than position
+//   hold on an edge      -> that edge follows the thumb straight away, so a
+//                           block can be stretched in one gesture
+//   drag a lifted grip   -> the same, without a second hold: a lifted block
+//                           shows a grip on its top and bottom edge, and their
+//                           touch zones reach a little past the block
 //
 // A hold that never moves and a touch that moves before the hold completes are
 // both left alone, so a tap still opens the item and a flick still scrolls the
@@ -73,7 +76,7 @@ import {
   splitAcrossWindows, visibleMinutes, windowRanges, yOfMinute, type HourRange,
 } from '../../lib/dayWindows';
 import {
-  columnAtX, createRange, minutesAtY, moveBlock, resizeBlock,
+  columnAtX, createRange, minutesAtY, moveBlock, resizeBlock, resizeBlockStart,
 } from '../../lib/dragGrid';
 import {
   addDays, blockDurationMinutes, blockLabelPlacement, blockTiming, formatClock, formatClockShort,
@@ -89,8 +92,13 @@ const HOLD_MS = 250;
 const HOLD_SLOP = 8;
 /** Movement that starts a drag on an ALREADY lifted block, which needs no hold. */
 const LIFTED_SLOP = 6;
-/** How close to the bottom edge counts as grabbing the resize grip. */
-const GRIP_ZONE = 18;
+/** How close to an edge counts as grabbing its resize grip. */
+const GRIP_ZONE = 24;
+/** Never more than this share of a block, so a short block can still be moved. */
+const GRIP_SHARE = 0.34;
+/** How far past a LIFTED block's edge its grip still answers: a thumb aiming at
+ *  a 4px line lands beside it at least half the time. */
+const GRIP_OUTSET = 14;
 
 /*
  * THINGS IN HOURS THIS DEVICE DOES NOT DRAW USED TO BE SQUASHED, and are now
@@ -159,7 +167,27 @@ interface GridItem extends Placeable {
 /** The live gesture, as the screen draws it. Null when nothing is being dragged. */
 type Drag =
   | { mode: 'create'; date: string; startMin: number; endMin: number }
-  | { mode: 'move' | 'resize'; date: string; startMin: number; endMin: number | null; item: AgendaItem };
+  | { mode: 'move' | 'resize' | 'resize-top'; date: string; startMin: number; endMin: number | null; item: AgendaItem };
+
+type EdgeMode = 'move' | 'resize' | 'resize-top';
+
+/**
+ * An item's times in the GRID's frame. The store keeps clock minutes, so
+ * 01:00 is 60 and a night 23:30 to 07:50 ends "before" it starts; the grid
+ * counts from the window's opening hour, where 01:00 is 25:00 and that night
+ * ends at 31:50. Feeding clock minutes to the drag maths clamped an after-
+ * midnight block to the top of the day the moment it was touched.
+ */
+function inGridFrame(item: AgendaItem, fromHour: number): { startMin: number; endMin: number | null } {
+  let startMin = item.startMin ?? 0;
+  if (startMin < fromHour * 60) startMin += 1440;
+  let endMin = item.endMin;
+  if (endMin !== null) {
+    while (endMin <= startMin) endMin += 1440;
+    if (endMin - startMin > 1440) endMin -= 1440;
+  }
+  return { startMin, endMin };
+}
 
 export function WeekView({
   dates, dayOf, today, selectedDay, nowMin, clock, interval = 30, detailed,
@@ -717,9 +745,9 @@ export function WeekView({
   const touch = useRef({
     x: 0, y: 0, active: false,
     /** Set when a hold has fired, so a move may claim the responder. */
-    armed: null as null | { mode: 'create' | 'move' | 'resize'; anchorMin: number },
+    armed: null as null | { mode: 'create' | EdgeMode; anchorMin: number },
     /** A lifted block under the finger, draggable without a fresh hold. */
-    ready: null as null | { mode: 'move' | 'resize'; item: AgendaItem; date: string },
+    ready: null as null | { mode: EdgeMode; item: AgendaItem; date: string },
     /** True from the moment a gesture is taken over, so the tap underneath it
      *  does not also fire when the finger comes up. */
     consumed: false,
@@ -750,7 +778,18 @@ export function WeekView({
     const colW = count > 0 ? (g.gridW - RAIL) / count : 0;
     const inCol = x - RAIL - colW * col;
 
-    let hit: { item: AgendaItem; placed: Placed<GridItem>; onGrip: boolean } | null = null;
+    /** Which grip, if any, a y on this piece is on. A grip only exists on an
+     *  edge the piece really has: the cut edge of a night split across two
+     *  columns is not where the item starts or ends. */
+    const gripOf = (pl: Placed<GridItem>): EdgeMode => {
+      const zone = Math.min(GRIP_ZONE, pl.height * GRIP_SHARE);
+      const flags = pl as { continuesAbove?: boolean; continuesBelow?: boolean };
+      if (!flags.continuesBelow && y >= pl.top + pl.height - zone) return 'resize';
+      if (!flags.continuesAbove && y <= pl.top + zone && pl.item.item.endMin !== null) return 'resize-top';
+      return 'move';
+    };
+
+    let hit: { item: AgendaItem; placed: Placed<GridItem>; grip: EdgeMode } | null = null;
     for (const pl of g.placedByDate[col] ?? []) {
       if (y < pl.top || y > pl.top + pl.height) continue;
       // Overlapping blocks share a column, so the horizontal part matters too,
@@ -767,7 +806,24 @@ export function WeekView({
         const left = w * pl.column;
         if (inCol < left || inCol > left + w * (pl.span ?? 1)) continue;
       }
-      hit = { item: pl.item.item, placed: pl, onGrip: y > pl.top + pl.height - GRIP_ZONE };
+      hit = { item: pl.item.item, placed: pl, grip: gripOf(pl) };
+    }
+    // Just outside a LIFTED block's edge still grabs that edge.
+    if (!hit && g.lifted) {
+      for (const pl of g.placedByDate[col] ?? []) {
+        if (pl.item.item.id !== g.lifted.id) continue;
+        const flags = pl as { continuesAbove?: boolean; continuesBelow?: boolean };
+        const { box } = pl as Placed<GridItem> & Boxed;
+        const left = box ? colW * box.left : (colW / pl.columns) * pl.column;
+        const width = box ? colW * box.width : (colW / pl.columns) * (pl.span ?? 1);
+        if (inCol < left || inCol > left + width) continue;
+        const bottom = pl.top + pl.height;
+        if (!flags.continuesBelow && y > bottom && y <= bottom + GRIP_OUTSET) {
+          hit = { item: pl.item.item, placed: pl, grip: 'resize' };
+        } else if (!flags.continuesAbove && pl.item.item.endMin !== null && y < pl.top && y >= pl.top - GRIP_OUTSET) {
+          hit = { item: pl.item.item, placed: pl, grip: 'resize-top' };
+        }
+      }
     }
     return { col, date, hit, minutes: minuteAtY(y, g.shown, g.pxPerHour) };
   }, []);
@@ -789,12 +845,12 @@ export function WeekView({
     const { date, hit, minutes } = hitTest(t.x, t.y);
 
     if (hit && g.canMove) {
-      t.armed = { mode: 'move', anchorMin: minutes };
+      // Held on an edge: stretch it right away instead of making the user lift
+      // the block first and then find a 4px grip.
+      const mode: EdgeMode = hit.item.endMin === null ? 'move' : hit.grip;
+      t.armed = { mode, anchorMin: minutes };
       setLifted({ id: hit.item.id, date });
-      setDrag({
-        mode: 'move', date, item: hit.item,
-        startMin: hit.item.startMin ?? 0, endMin: hit.item.endMin,
-      });
+      setDrag({ mode, date, item: hit.item, ...inGridFrame(hit.item, g.shown[0].from) });
     } else if (!hit && g.canCreate) {
       // The ghost appears at one slot long the instant the hold lands, so the
       // gesture confirms itself before the finger has moved anywhere.
@@ -833,7 +889,7 @@ export function WeekView({
     // An already lifted block is armed and waiting: it needs no second hold,
     // which is what makes nudging it and grabbing its grip feel immediate.
     t.ready = hit && g.canMove && g.lifted?.id === hit.item.id
-      ? { mode: hit.onGrip ? 'resize' : 'move', item: hit.item, date }
+      ? { mode: hit.item.endMin === null ? 'move' : hit.grip, item: hit.item, date }
       : null;
 
     clearHold();
@@ -864,12 +920,26 @@ export function WeekView({
         startMin: cur.startMin, endMin: cur.endMin, pointerMin: minutes, ...win,
       });
       next = { ...cur, endMin: r.endMin };
-    } else {
-      const base = cur.item;
-      const b = moveBlock({
-        startMin: base.startMin ?? 0, endMin: base.endMin,
-        deltaMin: (dy * 60) / g.pxPerHour, ...win,
+    } else if (cur.mode === 'resize-top') {
+      const r = resizeBlockStart({
+        startMin: cur.startMin, endMin: cur.endMin ?? cur.startMin, pointerMin: minutes, ...win,
       });
+      next = { ...cur, startMin: r.startMin };
+    } else {
+      const base = inGridFrame(cur.item, g.shown[0].from);
+      // A block that already runs past the bottom of the window (a night's
+      // sleep) keeps running past it: clamping its END to the window would
+      // throw its start back to the afternoon on the first nudge. Only its
+      // start has to stay on the grid.
+      const overhangs = base.endMin !== null && base.endMin > win.toHour * 60;
+      const b0 = moveBlock({
+        startMin: base.startMin, endMin: base.endMin,
+        deltaMin: (dy * 60) / g.pxPerHour,
+        ...(overhangs ? { ...win, toHour: win.fromHour + 48 } : win),
+      });
+      const latest = win.toHour * 60 - g.interval;
+      const shift = overhangs && b0.startMin > latest ? b0.startMin - latest : 0;
+      const b = { startMin: b0.startMin - shift, endMin: b0.endMin === null ? null : b0.endMin - shift };
       const col = columnAtX(pt.x, RAIL, g.gridW, g.dates.length);
       next = { ...cur, date: g.dates[col] ?? cur.date, startMin: b.startMin, endMin: b.endMin };
     }
@@ -940,7 +1010,7 @@ export function WeekView({
         t.consumed = true;
         draggingRef.current = true;
         setDragging(true);
-        setDrag({ mode, date, item, startMin: item.startMin ?? 0, endMin: item.endMin });
+        setDrag({ mode, date, item, ...inGridFrame(item, geom.current.shown[0].from) });
         ghostIn.setValue(1);
         return true;
       }
@@ -1484,6 +1554,20 @@ function Ghost({
     ? `${formatClock(drag.startMin, clock)} to ${formatClock(drag.endMin, clock)}`
     : formatClock(drag.startMin, clock);
 
+  // The ghost's own text is 9pt inside a 50pt column and sits under the thumb.
+  // The badge is what you actually read: the time of the edge you are moving
+  // (and the new length), large, just outside that edge where the thumb isn't.
+  const mins = drag.endMin !== null ? Math.max(0, drag.endMin - drag.startMin) : 0;
+  const length = mins >= 60
+    ? `${Math.floor(mins / 60)}h${mins % 60 ? ` ${mins % 60}m` : ''}`
+    : `${mins}m`;
+  const badgeAbove = drag.mode !== 'resize';
+  const badgeText = drag.mode === 'resize' && drag.endMin !== null
+    ? `${formatClock(drag.endMin, clock)} · ${length}`
+    : drag.mode === 'resize-top'
+      ? `${formatClock(drag.startMin, clock)} · ${length}`
+      : formatClock(drag.startMin, clock);
+
   return (
     <Animated.View
       pointerEvents="none"
@@ -1518,6 +1602,25 @@ function Ghost({
             {drag.mode === 'create' ? 'New event' : drag.item.title}
           </Text>
         ) : null}
+      </View>
+      <View
+        style={{
+          position: 'absolute',
+          left: -40, right: -40,
+          ...(badgeAbove ? { top: -26 } : { bottom: -26 }),
+          alignItems: 'center',
+        }}
+      >
+        <View style={{
+          backgroundColor: p.ink,
+          borderRadius: 11,
+          paddingHorizontal: 8,
+          paddingVertical: 3,
+        }}>
+          <Text numberOfLines={1} style={{ color: p.bg, fontSize: 12, lineHeight: 15, fontWeight: '800' }}>
+            {badgeText}
+          </Text>
+        </View>
       </View>
     </Animated.View>
   );
@@ -1694,6 +1797,32 @@ function DayColumn({
         // Under about twenty points there is no room for a marker that would
         // not cover the block it is describing.
         const canMark = pl.height >= 22;
+        // A lifted block's grips: a wide pill on the edge, in the block's ink
+        // (a white grip on a pale fill is invisible, and an invisible grip
+        // reads as a missing feature), with a contrasting rim so it also shows
+        // against the grid where it pokes past the edge. Drawn, not touched:
+        // the grid's responder decides what a touch near an edge means.
+        const grip = (edge: 'top' | 'bottom') => (
+          <View
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              left: 0, right: 0,
+              ...(edge === 'top' ? { top: -3 } : { bottom: -3 }),
+              alignItems: 'center',
+              zIndex: 3,
+            }}
+          >
+            <View style={{
+              width: Math.max(18, Math.min(34, (columnWidth ?? 40) * 0.6)),
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: ink,
+              borderWidth: 1,
+              borderColor: fill,
+            }} />
+          </View>
+        );
         // The word only when it fits. A seven column week gives each block
         // about forty points, where "continued" would ellipsise into
         // "contin..." and say less than the arrow on its own does.
@@ -1937,26 +2066,12 @@ function DayColumn({
                 bottom edge means, because a child view could not hand the
                 gesture on if the finger left this block. */}
             {isLifted && !isBeingDragged ? (
-              <View
-                pointerEvents="none"
-                style={{
-                  position: 'absolute',
-                  left: 0, right: 0, bottom: 1,
-                  alignItems: 'center',
-                }}
-              >
-                <View style={{
-                  width: Math.max(16, Math.min(28, pl.height)),
-                  height: 4,
-                  borderRadius: 2,
-                  // The grip is drawn on the block, so it takes the block's ink
-                  // for the same reason the title does: a white grip on a pale
-                  // fill is invisible, and an invisible grip reads as a missing
-                  // feature rather than a light one.
-                  backgroundColor: ink,
-                  opacity: 0.95,
-                }} />
-              </View>
+              <>
+                {/* Top grip: only where the item really starts, and only for
+                    items with an end (a moment has no length to change). */}
+                {!continuesAbove && item.endMin !== null ? grip('top') : null}
+                {!continuesBelow ? grip('bottom') : null}
+              </>
             ) : null}
           </Pressable>
         );

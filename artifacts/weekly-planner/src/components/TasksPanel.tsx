@@ -89,7 +89,7 @@ interface TasksPanelProps {
   onToggleDone: (occId: string) => void;
   onEdit: (occId: string, patch: Partial<Task>) => string;
   onDelete: (occId: string, mode?: DeleteMode) => void;
-  onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
+  onOpenMenu: (occId: string, at: { x: number; y: number }, anchor?: Element | null) => void;
   onResize: (w: number) => void;
   onClose: () => void;
   /**
@@ -2278,7 +2278,7 @@ const TaskList = React.memo(function TaskList({
   onDrop: (sourceOccId: string, targetOccId: string, edge: InsertEdge, rows: Row[]) => void;
   onToggleExpand: (id: string) => void;
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
-  onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
+  onOpenMenu: (occId: string, at: { x: number; y: number }, anchor?: Element | null) => void;
 }) {
   /**
    * The list chip on a row, shown only in the All view. General is deliberately
@@ -2755,7 +2755,7 @@ const TaskRow = React.memo(function TaskRow({
   onDrop?: (occId: string, edge: InsertEdge) => void;
   onToggleExpand?: (taskId: string) => void;
   onToggleDone: (occId: string, currentlyDone: boolean) => void;
-  onOpenMenu: (occId: string, at: { x: number; y: number }) => void;
+  onOpenMenu: (occId: string, at: { x: number; y: number }, anchor?: Element | null) => void;
 }) {
   const vp = useViewport();
   const { task: t, done, due } = row;
@@ -2773,6 +2773,7 @@ const TaskRow = React.memo(function TaskRow({
 
   return (
     <div
+      data-task-row
       draggable
       onDragStart={(e: any) => {
         rowDragStartedRef.current = true;
@@ -2819,9 +2820,9 @@ const TaskRow = React.memo(function TaskRow({
       onClick={e => {
         if (rowDragStartedRef.current || suppressClick?.()) return;
         if ((e.target as HTMLElement).closest('button')) return;
-        onOpenMenu(row.occId, { x: e.clientX, y: e.clientY });
+        onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }, e.currentTarget);
       }}
-      onContextMenu={e => { e.preventDefault(); onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }); }}
+      onContextMenu={e => { e.preventDefault(); onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
     >
       <span
         className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r-full"
@@ -2976,7 +2977,7 @@ const TaskRow = React.memo(function TaskRow({
         )}
         <button
           type="button"
-          onClick={e => { e.stopPropagation(); onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }); }}
+          onClick={e => { e.stopPropagation(); onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }, e.currentTarget.closest('[data-task-row]') ?? e.currentTarget); }}
           className="touch-target p-1 rounded-lg transition-colors flex items-center justify-center"
           style={{ color: theme.menuSub }}
           title="Task options"

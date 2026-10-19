@@ -5,7 +5,7 @@
 // Run with: npx tsx src/lib/timelineDrag.test.ts
 
 import assert from 'node:assert/strict';
-import { absMin, splitAbs, snapTo, grabOffset, dragTo, groupDragTo, toClockMin } from './timelineDrag';
+import { absMin, splitAbs, snapTo, grabOffset, dragTo, groupDragTo, toClockMin, keepInColumn } from './timelineDrag';
 
 const DS = 6 * 60;      // day start 06:00
 const SNAP = 5;
@@ -147,6 +147,39 @@ test('toClockMin wraps column minutes back to HH:MM', () => {
   assert.equal(toClockMin(hm(23, 35)), hm(23, 35));
   assert.equal(toClockMin(1440), 0);
   assert.equal(toClockMin(-5), 1435);
+});
+
+const DE = 26 * 60;     // visible until 02:00
+const keep = (day: number, startMin: number, pointerDay: number, fromHead = false) =>
+  keepInColumn({ day, startMin }, { pointerDay, fromHead, dayStartMin: DS, dayEndMin: DE, snap: SNAP });
+
+test('a block dragged above the top of a column stops at the top, it does not vanish', () => {
+  // 1h block grabbed in its middle, pointer at Thursday 06:10: raw start is 05:40
+  // Thursday, i.e. Wednesday's hidden band. It must stay on Thursday at 06:00.
+  const raw = dragTo({ pointerDay: 4, pointerMin: hm(6, 10), offsetMin: 30, dayStartMin: DS, snap: SNAP });
+  assert.deepEqual(raw, { day: 3, startMin: hm(29, 40) });
+  assert.deepEqual(keep(raw.day, raw.startMin, 4), { day: 4, startMin: DS });
+});
+
+test('a block dragged by its morning part still lands in the previous column', () => {
+  // Sleeping grabbed at 07:00 Thursday by its head, 7.5h in: starts 23:30 Wednesday.
+  const raw = dragTo({ pointerDay: 4, pointerMin: hm(7), offsetMin: 450, dayStartMin: DS, snap: SNAP });
+  assert.deepEqual(keep(raw.day, raw.startMin, 4, true), { day: 3, startMin: hm(23, 30) });
+});
+
+test('a plain drag inside the column is untouched', () => {
+  assert.deepEqual(keep(2, hm(9), 2), { day: 2, startMin: hm(9) });
+  assert.deepEqual(keep(2, hm(25, 50), 2), { day: 2, startMin: hm(25, 50) });
+});
+
+test('a window longer than 24h folds the next day back onto the pointer column', () => {
+  const r = keepInColumn({ day: 3, startMin: hm(6, 20) }, { pointerDay: 2, fromHead: false, dayStartMin: DS, dayEndMin: hm(31), snap: SNAP });
+  assert.deepEqual(r, { day: 2, startMin: hm(30, 20) });
+});
+
+test('keepInColumn survives junk', () => {
+  const r = keepInColumn({ day: 1, startMin: 0 }, { pointerDay: 1, fromHead: false, dayStartMin: NaN, dayEndMin: NaN, snap: NaN });
+  assert.ok(Number.isFinite(r.day) && Number.isFinite(r.startMin));
 });
 
 console.log(`${n} passed`);

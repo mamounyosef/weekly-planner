@@ -246,6 +246,39 @@ export function resizeBlock(opts: {
 }
 
 /**
+ * Where a block's START goes when its top edge is dragged to `pointerMin`.
+ *
+ * The mirror of `resizeBlock`: the end stays put, the start follows the thumb,
+ * and the block can never be dragged shut or past the top of the window.
+ */
+export function resizeBlockStart(opts: {
+  startMin: number;
+  endMin: number;
+  pointerMin: number;
+  interval: number;
+  fromHour: number;
+  toHour: number;
+}): Range {
+  const step = safeInterval(opts.interval);
+  const { lo, hi } = windowOf(opts.fromHour, opts.toHour);
+  const min = minBlockMinutes(step);
+
+  const fallbackStart = Number.isFinite(opts.startMin) ? opts.startMin : lo;
+  const end = Number.isFinite(opts.endMin) ? opts.endMin : fallbackStart + min;
+  const ceilStart = end - min;
+
+  let start = snapMinutes(
+    Number.isFinite(opts.pointerMin) ? opts.pointerMin : fallbackStart,
+    step,
+    'nearest',
+  );
+  start = Math.max(start, lo);
+  start = Math.min(start, ceilStart, hi);
+
+  return { startMin: start, endMin: end };
+}
+
+/**
  * Which day column a horizontal position is over.
  *
  * Used while dragging a block sideways in the week and custom views, where

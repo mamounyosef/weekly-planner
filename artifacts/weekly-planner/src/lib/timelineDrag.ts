@@ -92,3 +92,37 @@ export function toClockMin(startMin: number): number {
   const m = Math.round(num(startMin)) % 1440;
   return m < 0 ? m + 1440 : m;
 }
+
+/**
+ * Keep a dropped item in the column the user dropped it on.
+ *
+ * `dragTo` is exact on the absolute line, but exactness is not what the eye
+ * expects: drag a one-hour block up past the top of Thursday and the maths says
+ * "05:30 Thursday", which the grid draws at the BOTTOM of Wednesday, or not at
+ * all when Wednesday is off screen or 05:30 is in the hidden early band. To the
+ * user the block simply vanished. So a block grabbed in its own column stops at
+ * the top of the column under the pointer. A block grabbed by its morning part
+ * (`fromHead`) still lands in the previous column, because that is where its
+ * evening part has always been drawn, and the grabbed part stays under the pointer.
+ * A window longer than 24h can also split the pointer into the NEXT day; that is
+ * folded back onto the pointer's own column.
+ */
+export function keepInColumn(landed: DayMinute, opts: {
+  pointerDay: number; fromHead: boolean;
+  dayStartMin: number; dayEndMin: number; snap: number;
+}): DayMinute {
+  const ds = num(opts.dayStartMin);
+  const de = Math.max(ds + 1, num(opts.dayEndMin, ds + 1440));
+  const snap = isNum(opts.snap) && opts.snap > 0 ? opts.snap : 1;
+  let { day, startMin } = landed;
+  if (day > opts.pointerDay) {
+    startMin += (day - opts.pointerDay) * 1440;
+    day = opts.pointerDay;
+  }
+  if (day < opts.pointerDay && !(opts.fromHead && day === opts.pointerDay - 1)) {
+    day = opts.pointerDay;
+    startMin = ds;
+  }
+  if (day === opts.pointerDay) startMin = Math.min(Math.max(startMin, ds), Math.max(ds, de - snap));
+  return { day, startMin };
+}

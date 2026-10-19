@@ -145,7 +145,7 @@ import { publishLiveClock } from '@/lib/liveClock';
 import { liveScrollTarget, liveColumnOffset, liveColumnDate, liveLineVisible } from '@/lib/liveScroll';
 import { placeBeside, pickAnchor } from '@/lib/popoverPlacement';
 import { ownedRef } from '@/lib/ownedRef';
-import { grabOffset, dragTo, groupDragTo } from '@/lib/timelineDrag';
+import { grabOffset, dragTo, groupDragTo, keepInColumn } from '@/lib/timelineDrag';
 import { DEFAULT_CATEGORIES, UNCATEGORISED, PRESET_CATEGORY_COLORS, resolveEventColor, canDeleteCategory, deleteCategory, LAST_CATEGORY_MESSAGE, type EventCategory } from '@/lib/categories';
 import { coerceTaskLists, GENERAL_LIST_ID, resolveListId, type TaskList } from '@/lib/taskLists';
 import TasksPanel, { type ListDeleteMode, type NewTaskInput, type TaskTheme } from '@/components/TasksPanel';
@@ -1440,27 +1440,20 @@ export default function DailyPlanner() {
     const clientX = e && 'clientX' in e ? (e.clientX as number) : undefined;
     const clientY = e && 'clientY' in e ? (e.clientY as number) : undefined;
 
+    // Placed in screen pixels, stored in the zoomed root's (see uiZoom).
+    const z = uiZoom();
+    const vpSize = { width: window.innerWidth, height: window.innerHeight };
     if (e && 'currentTarget' in e && (e as React.MouseEvent).currentTarget) {
       const rect = ((e as React.MouseEvent).currentTarget as HTMLElement).getBoundingClientRect();
-      const margin = 8;
-      let x = rect.right + 6;
-      if (x + w > window.innerWidth - margin) x = rect.left - w - 6;
-      x = Math.max(margin, Math.min(x, window.innerWidth - w - margin));
-      let y = rect.top;
-      y = Math.max(margin, Math.min(y, window.innerHeight - h - margin));
-      setMenuPos({ x, y });
+      const p = placeBeside(rect, { width: w * z, height: h * z }, vpSize);
+      setMenuPos({ x: p.x / z, y: p.y / z });
     } else if (clientX !== undefined && clientY !== undefined) {
-      const margin = 8;
-      let x = clientX + 12;
-      if (x + w > window.innerWidth - margin) x = clientX - w - 12;
-      x = Math.max(margin, Math.min(x, window.innerWidth - w - margin));
-      let y = clientY - 40;
-      y = Math.max(margin, Math.min(y, window.innerHeight - h - margin));
-      setMenuPos({ x, y });
+      const p = placeBeside({ left: clientX - 6, right: clientX + 6, top: clientY - 40, bottom: clientY }, { width: w * z, height: h * z }, vpSize);
+      setMenuPos({ x: p.x / z, y: p.y / z });
     } else {
       setMenuPos({
-        x: Math.max(8, Math.round((window.innerWidth - w) / 2)),
-        y: Math.max(8, Math.round((window.innerHeight - h) / 2)),
+        x: Math.max(8, Math.round((window.innerWidth / z - w) / 2)),
+        y: Math.max(8, Math.round((window.innerHeight / z - h) / 2)),
       });
     }
   };
@@ -1951,6 +1944,19 @@ export default function DailyPlanner() {
   // stays reachable; the popup itself scrolls if it's taller than the screen.
   const isPhoneRef = useRef(false);
   const isTouchRef = useRef(false);
+  /**
+   * The desktop zoom is CSS `zoom` on the root, and the popups live inside it.
+   * Rects and pointer coordinates come back in SCREEN pixels, while `left`/
+   * `top`/`width` written on a popup are in the root's own (zoomed) pixels and
+   * get multiplied by the zoom on the way to the screen. At 90% a popup placed
+   * "6px right of the block" in screen pixels therefore landed 10% further left,
+   * which for a block near the right edge is squarely on top of it. Everything
+   * is placed in screen pixels and divided by this on the way out.
+   */
+  const uiZoom = () => {
+    const z = isPhoneRef.current ? 1 : appZoomRef.current;
+    return Number.isFinite(z) && z > 0.05 ? z : 1;
+  };
   const repositionMenu = useCallback(() => {
     const menuEl = menuRef.current;
     const id = menuIdRef.current;
@@ -1960,8 +1966,10 @@ export default function DailyPlanner() {
     // on the first scroll.
     if (isPhoneRef.current) return;
     const margin = 8;
-    const mw = menuSizeRef.current.width || menuEl.offsetWidth || DEFAULT_MENU_WIDTH;
-    const mh = menuEl.offsetHeight || 300;
+    const z = uiZoom();
+    // Sizes in SCREEN pixels, like the rects they are placed against.
+    const mw = (menuSizeRef.current.width || menuEl.offsetWidth || DEFAULT_MENU_WIDTH) * z;
+    const mh = (menuEl.offsetHeight || 300) * z;
     const vp = { width: window.innerWidth, height: window.innerHeight };
     const held = menuAnchorRef.current;
     // A hint left over from a different item must not steer this one.
@@ -1979,21 +1987,21 @@ export default function DailyPlanner() {
     let x: number, y: number;
     if (menuPinnedRef.current) {
       // Hand-placed (dragged or centered): keep where it is, only re-clamp into view.
-      x = menuEl.offsetLeft;
-      y = menuEl.offsetTop;
+      x = menuEl.offsetLeft * z;
+      y = menuEl.offsetTop * z;
     } else if (anchor) {
       const r = anchor.getBoundingClientRect();
       menuAnchorRef.current.rect = r;
       ({ x, y } = placeBeside(r, { width: mw, height: mh }, vp, { margin, gap: 6 }));
     } else {
       const p = menuPosRef.current;                      // fallback: last known point
-      x = p?.x ?? margin;
-      y = p?.y ?? margin;
+      x = (p?.x ?? margin) * z;
+      y = (p?.y ?? margin) * z;
     }
     x = Math.max(margin, Math.min(x, window.innerWidth - mw - margin));
     y = Math.max(margin, Math.min(y, window.innerHeight - mh - margin));
-    menuEl.style.left = `${x}px`;
-    menuEl.style.top = `${y}px`;
+    menuEl.style.left = `${x / z}px`;
+    menuEl.style.top = `${y / z}px`;
   }, []);
 
   // ─── Scroll preservation across page navigation & calendar views ──────────
@@ -2208,12 +2216,13 @@ export default function DailyPlanner() {
 
     const onMove = (ev: MouseEvent) => {
       const margin = 8;
-      const mw = menuEl.offsetWidth, mh = menuEl.offsetHeight;
+      const z = uiZoom();
+      const mw = menuEl.offsetWidth * z, mh = menuEl.offsetHeight * z;
       let x = Math.max(margin, Math.min(ev.clientX - dx, window.innerWidth - mw - margin));
       let y = Math.max(margin, Math.min(ev.clientY - dy, window.innerHeight - mh - margin));
-      menuEl.style.left = `${x}px`;
-      menuEl.style.top = `${y}px`;
-      menuPosRef.current = { x, y };
+      menuEl.style.left = `${x / z}px`;
+      menuEl.style.top = `${y / z}px`;
+      menuPosRef.current = { x: x / z, y: y / z };
     };
     const onUp = () => {
       document.body.style.cursor = '';
@@ -2235,12 +2244,15 @@ export default function DailyPlanner() {
     const startX = e.clientX;
     const startY = e.clientY;
     const startRect = menuEl.getBoundingClientRect();
-    const startW = startRect.width;
-    const startH = startRect.height;
+    // Width/height are written in the zoomed root's pixels; the pointer moves in
+    // screen pixels (see uiZoom).
+    const z = uiZoom();
+    const startW = menuEl.offsetWidth;
+    const startH = menuEl.offsetHeight;
     const minW = 270;
     const minH = 200;
-    const maxW = Math.min(750, window.innerWidth - startRect.left - 8);
-    const maxH = Math.min(window.innerHeight - startRect.top - 8, window.innerHeight - 16);
+    const maxW = Math.min(750, (window.innerWidth - startRect.left - 8) / z);
+    const maxH = Math.min(window.innerHeight - startRect.top - 8, window.innerHeight - 16) / z;
 
     let curW = startW;
     let curH = startH;
@@ -2251,12 +2263,12 @@ export default function DailyPlanner() {
 
     const onMove = (ev: MouseEvent) => {
       if (direction === 'se' || direction === 'e') {
-        const deltaX = ev.clientX - startX;
+        const deltaX = (ev.clientX - startX) / z;
         curW = Math.max(minW, Math.min(maxW, Math.round(startW + deltaX)));
         menuEl.style.width = `${curW}px`;
       }
       if (direction === 'se' || direction === 's') {
-        const deltaY = ev.clientY - startY;
+        const deltaY = (ev.clientY - startY) / z;
         curH = Math.max(minH, Math.min(maxH, Math.round(startH + deltaY)));
         menuEl.style.height = `${curH}px`;
         menuEl.style.maxHeight = `${curH}px`;
@@ -2290,9 +2302,10 @@ export default function DailyPlanner() {
     if (!el) return;
     const startX = e.clientX;
     const startY = e.clientY;
-    const startRect = el.getBoundingClientRect();
-    const startW = startRect.width;
-    const startH = startRect.height;
+    // Own pixels, not screen pixels: the root is zoomed (see uiZoom).
+    const z = uiZoom();
+    const startW = el.offsetWidth;
+    const startH = el.offsetHeight;
     const minW = 400;
     const minH = 250;
 
@@ -2303,8 +2316,8 @@ export default function DailyPlanner() {
     document.body.style.userSelect = 'none';
 
     const onMove = (ev: MouseEvent) => {
-      const deltaX = ev.clientX - startX;
-      const deltaY = ev.clientY - startY;
+      const deltaX = (ev.clientX - startX) / z;
+      const deltaY = (ev.clientY - startY) / z;
       curW = Math.max(minW, Math.round(startW + deltaX));
       curH = Math.max(minH, Math.round(startH + deltaY));
       el.style.width = `${curW}px`;
@@ -3880,7 +3893,7 @@ export default function DailyPlanner() {
     const stamped = stampNewItem(base, editCtxRef.current.viewedWeekKey, editCtxRef.current.weekStartsOn);
     writeEvents({ ...eventsRef.current, [stamped.id]: stamped });
     if (opts?.edit) setEditingId(stamped.id);
-    if (opts?.menuAt) { setMenuPinned(false); setMenuId(stamped.id); setMenuPos(opts.menuAt); }
+    if (opts?.menuAt) { setMenuPinned(false); setMenuId(stamped.id); setMenuPos({ x: opts.menuAt.x / uiZoom(), y: opts.menuAt.y / uiZoom() }); }
     return stamped.id;
   }, [writeEvents]);
   const createStampedRef = useRef(createStamped);
@@ -4028,9 +4041,20 @@ export default function DailyPlanner() {
   const handleTasksPanelResize = useCallback((w: number) => setTasksPanelWidth(clampPanelWidth(w)), []);
   const closeTasksPanel = useCallback(() => setTasksPanelOpen(false), []);
 
-  const openTaskMenu = useCallback((occId: string, at: { x: number; y: number }) => {
+  // `anchor` is what was clicked: the popover goes BESIDE it (right, else left)
+  // instead of at the cursor, where it covered the chip and everything right of
+  // it. The position is stored in the zoomed root's pixels (see uiZoom).
+  const openTaskMenu = useCallback((occId: string, at: { x: number; y: number }, anchor?: Element | null) => {
+    const z = uiZoom();
+    const vpSize = { width: window.innerWidth, height: window.innerHeight };
+    const size = { width: 284 * z, height: 420 * z };
+    const el = anchor ? ((anchor.closest('[data-task]') as Element | null) ?? anchor) : null;
+    const r = el?.getBoundingClientRect();
+    const p = r && r.width > 0
+      ? placeBeside(r, size, vpSize)
+      : placeBeside({ left: at.x, right: at.x, top: at.y, bottom: at.y }, size, vpSize);
     setTaskMenuId(occId);
-    setTaskMenuPos(at);
+    setTaskMenuPos({ x: p.x / z, y: p.y / z });
     setMenuId(null); // never two popovers at once
   }, []);
 
@@ -6544,6 +6568,15 @@ export default function DailyPlanner() {
           pointerDay: coords.dayIndex, pointerMin: coords.snappedMin,
           dayStartMin, snap: POSITION_SNAP,
         });
+        // A group can't be pinned the way one block is (its spacing is the
+        // point), so it stops instead: a move that would carry a member that is
+        // on screen now off screen (an unshown day, or the hidden early band) is
+        // ignored, and the group stays at its last position you could see.
+        const shown = (day: number, startMin: number) =>
+          visibleColsRef.current.includes(day) && startMin >= dayStartMin && startMin <= dayEndMin - POSITION_SNAP;
+        for (const [id, t] of Object.entries(landed)) {
+          if (shown(br.baseDays[id], br.baseStartMins[id]) && !shown(t.day, t.startMin)) return;
+        }
         const newBatchDisp: { [id: string]: { dayIndex: number; startMin: number } } = {};
         for (const [id, t] of Object.entries(landed)) {
           newBatchDisp[id] = { dayIndex: t.day, startMin: t.startMin };
@@ -6607,10 +6640,13 @@ export default function DailyPlanner() {
         // Absolute time: the item follows the cursor across columns and past
         // midnight, and a morning-part grab can no longer be pinned at the
         // bottom of the window or thrown into the wrong day.
-        const landed = dragTo({
+        // ...but never into a place the grid can't show (above the top of the
+        // column means the previous day's hidden early band): that read as the
+        // block vanishing on drop. See keepInColumn.
+        const landed = keepInColumn(dragTo({
           pointerDay: coords.dayIndex, pointerMin: coords.snappedMin, offsetMin: dr.offsetMin,
           dayStartMin, snap: POSITION_SNAP,
-        });
+        }), { pointerDay: coords.dayIndex, fromHead: !!dr.isHeadClick, dayStartMin, dayEndMin, snap: POSITION_SNAP });
         const targetDay = landed.day;
         const newStart = landed.startMin;
         dr.curDay = targetDay; dr.curStartMin = newStart;
@@ -7229,11 +7265,12 @@ export default function DailyPlanner() {
     const pieceEl = (target.closest('[data-event-id]') as HTMLElement | null) ?? target;
     const rect = pieceEl.getBoundingClientRect();
     menuAnchorRef.current = { id: ev.id, el: pieceEl, rect };
-    const mw = menuSizeRef.current.width || DEFAULT_MENU_WIDTH;
-    const { x, y } = placeBeside(rect, { width: mw, height: 440 }, { width: window.innerWidth, height: window.innerHeight });
+    const z = uiZoom();
+    const mw = (menuSizeRef.current.width || DEFAULT_MENU_WIDTH) * z;
+    const { x, y } = placeBeside(rect, { width: mw, height: 440 * z }, { width: window.innerWidth, height: window.innerHeight });
     setMenuPinned(false);       // anchor to this event (until the user drags it)
     setMenuId(ev.id);
-    setMenuPos({ x, y });
+    setMenuPos({ x: x / z, y: y / z });
   };
 
   const toggleEventCompleted = (id: string, day: Date) => {
@@ -9716,8 +9753,8 @@ export default function DailyPlanner() {
                                         e.dataTransfer.setData('text/planner-task', t.id);
                                       }}
                                       onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
-                                      onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
-                                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                      onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
+                                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
                                       className={`flex items-center gap-1 rounded-[5px] px-2 text-left transition-opacity ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
                                       style={{
                                         height: TASK_CHIP_H,
@@ -9780,7 +9817,7 @@ export default function DailyPlanner() {
                                 title: 'New task',
                                 dueDate: format(dayAt(colIdx), 'yyyy-MM-dd'),
                               });
-                              if (id) openTaskMenu(id, { x: e.clientX + 10, y: e.clientY });
+                              if (id) openTaskMenu(id, { x: e.clientX, y: e.clientY }, e.currentTarget.parentElement);
                             }}
                             className="absolute right-1 bottom-1 w-5 h-5 rounded-md flex items-center justify-center transition-smooth bg-background/70 hover:bg-background border border-border/40 opacity-60 sm:opacity-0 sm:group-hover:opacity-100 shadow-sm active:scale-95 z-20"
                             style={{ color: menuSub }}
@@ -9878,7 +9915,7 @@ export default function DailyPlanner() {
                                   <button
                                     key={item.key}
                                     data-task="1"
-                                    onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                    onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
                                     className="flex items-center gap-1 rounded-[4px] px-2 h-[20px] flex-shrink-0 text-left transition-opacity cursor-pointer border hover:opacity-80"
                                     style={{ background: `${c.bg}80`, borderColor: darkMode ? '#121316' : '#ffffff', opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}
                                     title={`${t.title || 'Untitled task'} · ${taskTimeDisplay}`}
@@ -10206,7 +10243,7 @@ export default function DailyPlanner() {
                           const isSelected = selectedIds.has(ev.id);
                           const isBatchDrag = !!(batchDisp && batchDisp[ev.id]);
                           const isPlaceholder = (ev as any).isPlaceholder;
-                          const gripH = isTouch ? 16 : (height < 34 ? 6 : 10);
+                          const gripH = isTouch ? 16 : (height < 34 ? 6 : height < 70 ? 10 : 12);
                           const gripsLive = !isTouch || height >= 44;
                           
                           const isMoving = isDrag || isResize || isBatchDrag;
@@ -10751,8 +10788,8 @@ export default function DailyPlanner() {
                                 e.dataTransfer.setData('text/planner-task', t.id);
                               }}
                               onDragEnd={() => { setTaskDragId(null); setTaskDropCol(null); }}
-                              onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX + 8, y: e.clientY }); }}
-                              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                              onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
+                              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
                               className={`absolute rounded-lg overflow-hidden z-20 shadow-sm hover:shadow-md transition-shadow ${isTouch ? '' : 'cursor-grab active:cursor-grabbing'}`}
                               style={{
                                 top, height: h,
@@ -10839,7 +10876,7 @@ export default function DailyPlanner() {
                                   <button
                                     key={item.key}
                                     data-task="1"
-                                    onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }); }}
+                                    onClick={(e) => { e.stopPropagation(); openTaskMenu(t.id, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
                                     className="flex items-center gap-1 rounded-[4px] px-2 h-[20px] flex-shrink-0 text-left transition-opacity cursor-pointer border hover:opacity-80"
                                     style={{ background: `${c.bg}80`, borderColor: darkMode ? '#121316' : '#ffffff', opacity: done ? 0.5 : 1, filter: done ? 'saturate(0.4)' : 'none' }}
                                     title={`${t.title || 'Untitled task'} · ${taskTimeDisplay}`}
@@ -14312,8 +14349,8 @@ export default function DailyPlanner() {
             willChange: 'transform',
             contain: 'paint',
           } : {
-            left: Math.min(taskMenuPos.x, Math.max(8, window.innerWidth - 300)),
-            top:  Math.min(taskMenuPos.y, Math.max(8, window.innerHeight - 420)),
+            left: taskMenuPos.x,
+            top:  taskMenuPos.y,
             transformOrigin: 'top left',
             width: 284,
             maxHeight: 'calc(100vh - 16px)',
@@ -15711,7 +15748,7 @@ export default function DailyPlanner() {
                         onClick={(e) => {
                           e.stopPropagation();
                           setTaskOverflowModal(null);
-                          openTaskMenu(occId, { x: e.clientX + 8, y: e.clientY });
+                          openTaskMenu(occId, { x: e.clientX, y: e.clientY }, e.currentTarget);
                         }}
                         className={`break-words flex-1 leading-snug cursor-pointer hover:underline ${done ? 'line-through opacity-60' : ''}`}
                       >
