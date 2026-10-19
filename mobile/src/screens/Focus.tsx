@@ -78,6 +78,7 @@ import {
   type FocusRangeMode,
 } from '../lib/focusPeriod';
 import { YearChart } from '../components/YearChart';
+import { formatClock } from '../lib/agenda';
 import { Stepper } from '../ui/Fields';
 import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
 
@@ -288,10 +289,11 @@ export function Focus({ visible = true }: { visible?: boolean }) {
    * running timer walked the whole history to work out a number that cannot
    * change while the timer runs.
    */
-  const loggedTodaySeconds = useMemo(() => summariseFocus(
+  const loggedToday = useMemo(() => summariseFocus(
     focusSessions as FocusSessionRecord[],
     { from: focusToday, to: focusToday, dayStartHour },
-  ).totalSeconds, [focusSessions, focusToday, dayStartHour]);
+  ), [focusSessions, focusToday, dayStartHour]);
+  const loggedTodaySeconds = loggedToday.totalSeconds;
 
   /**
    * Today's total, including the session still running.
@@ -352,7 +354,16 @@ export function Focus({ visible = true }: { visible?: boolean }) {
   const elapsed = focusElapsedSeconds(timer, now);
   const remaining = focusRemainingSeconds(timer, now);
   const progress = focusProgress(timer, now);
-  const ring = Math.min(268, Math.max(200, width - space.xl * 2 - space.lg * 2));
+  // The ring is the session, not the screen: big enough to read at arm's
+  // length, small enough that today's total above it is not pushed off screen.
+  const ring = Math.min(224, Math.max(168, Math.round(width * 0.52)));
+  const liveSeconds = phase === 'running' ? focusUncreditedSeconds(timer, now) : 0;
+  // When the running session will end, as a clock time: "45:12 left" makes you
+  // do sums, "ends 3:40pm" does not.
+  const endsAt = phase === 'running' ? (() => {
+    const d = new Date(now + remaining * 1000);
+    return formatClock(d.getHours() * 60 + d.getMinutes(), (shared as any).timeFormat);
+  })() : null;
 
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
@@ -369,23 +380,14 @@ export function Focus({ visible = true }: { visible?: boolean }) {
               {phase === 'idle' ? 'HOW THE TIME GOES' : 'SESSION IN PROGRESS'}
             </Text>
             <Text variant="display">Focus</Text>
-            {focusDailyGoalSeconds > 0 && (
-              <Row gap={space.xs} style={{ marginTop: space.xs }}>
-                <View style={{ width: 48, height: 4, backgroundColor: p.surfaceAlt, borderRadius: 2, overflow: 'hidden' }}>
-                  <View style={{ width: `${goalStats.todayProgress * 100}%`, height: '100%', backgroundColor: goalStats.todayProgress >= 1 ? p.accent : p.inkSoft }} />
-                </View>
-                <Text variant="caption" tone={goalStats.todayProgress >= 1 ? 'accent' : 'soft'}>
-                  {Math.round(goalStats.todayProgress * 100)}% of goal
-                </Text>
-              </Row>
-            )}
           </View>
-          <View style={{ alignItems: 'flex-end' }}>
-            <Text variant="caption" tone="faint">TODAY</Text>
-            <Text variant="title" tone={todaySeconds > 0 ? 'accent' : 'faint'}>
-              {describeDuration(todaySeconds)}
-            </Text>
-          </View>
+          {phase !== 'idle' ? (
+            <Pill tone={phase === 'running' ? 'accent' : 'soft'}>
+              {phase === 'running' ? `● LIVE${endsAt ? ` · ends ${endsAt}` : ''}` : 'PAUSED'}
+            </Pill>
+          ) : allTimeStreaks.currentStreak > 0 ? (
+            <Pill tone="accent">{`🔥 ${allTimeStreaks.currentStreak} day${allTimeStreaks.currentStreak === 1 ? '' : 's'}`}</Pill>
+          ) : null}
         </Row>
       </View>
 
@@ -399,6 +401,16 @@ export function Focus({ visible = true }: { visible?: boolean }) {
           <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={p.accent} />
         }
       >
+        {/* ── Today ─────────────────────────────────────────────────────── */}
+        <TodayCard
+          seconds={todaySeconds}
+          liveSeconds={liveSeconds}
+          goalSeconds={focusDailyGoalSeconds}
+          sessions={loggedToday.sessions + (phase !== 'idle' ? 1 : 0)}
+          remainingSeconds={phase === 'idle' ? 0 : remaining}
+          goalStreak={focusDailyGoalSeconds > 0 ? goalStats.currentStreak : 0}
+        />
+
         {/* ── The live timer ─────────────────────────────────────────────── */}
         <View style={{
           borderRadius: radius.lg,
@@ -412,7 +424,7 @@ export function Focus({ visible = true }: { visible?: boolean }) {
           <Ring size={ring} progress={progress} phase={phase}>
             <Clock
               text={formatFocusClock(phase === 'idle' ? timer.plannedSeconds : remaining)}
-              size={Math.round(ring * 0.21)}
+              size={Math.round(ring * 0.2)}
             />
             <Text variant="label" tone="faint" style={{ marginTop: space.xs }}>
               {phase === 'idle' ? 'READY' : phase === 'paused' ? 'PAUSED' : 'LEFT'}
@@ -423,6 +435,11 @@ export function Focus({ visible = true }: { visible?: boolean }) {
               </Text>
             ) : null}
           </Ring>
+          {endsAt ? (
+            <Text variant="caption" tone="soft" style={{ marginTop: space.sm }}>
+              Ends at <Text variant="caption" style={{ fontWeight: '700', color: p.ink }}>{endsAt}</Text>
+            </Text>
+          ) : null}
 
           <View style={{ height: space.lg }} />
 
@@ -689,7 +706,7 @@ function Ring({ size, progress, phase, children }: {
   children: React.ReactNode;
 }) {
   const p = useTheme();
-  const stroke = Math.max(8, Math.round(size * 0.045));
+  const stroke = Math.max(7, Math.round(size * 0.04));
   const angle = Math.min(360, Math.max(0, progress * 360));
   const colour = phase === 'paused' ? p.inkFaint : p.accent;
 
@@ -739,6 +756,117 @@ function Ring({ size, progress, phase, children }: {
       ) : null}
 
       <View style={{ alignItems: 'center', paddingHorizontal: stroke * 2 }}>{children}</View>
+    </View>
+  );
+}
+
+/** A small rounded label for the header: live state or the current streak. */
+function Pill({ tone, children }: { tone: 'accent' | 'soft'; children: string }) {
+  const p = useTheme();
+  const on = tone === 'accent';
+  return (
+    <View style={{
+      marginTop: space.md,
+      paddingHorizontal: space.sm + 2,
+      paddingVertical: 4,
+      borderRadius: radius.pill,
+      backgroundColor: on ? p.accentSoft : p.surfaceAlt,
+      borderWidth: 1,
+      borderColor: on ? p.accent : p.line,
+    }}>
+      <Text variant="caption" style={{ color: on ? p.accent : p.inkSoft, fontWeight: '700' }}>
+        {children}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Today, as the first thing on the screen.
+ *
+ * It used to be one small number in the header's corner, which is backwards:
+ * "how much have I done today, and how far is the goal" is the question this
+ * screen is opened to answer. So: the total, big; a thick bar against the goal
+ * in which the running session shows as its own lighter stretch; what is left
+ * to do in words; and what finishing the current session would bring you to.
+ */
+function TodayCard({ seconds, liveSeconds, goalSeconds, sessions, remainingSeconds, goalStreak }: {
+  seconds: number;
+  liveSeconds: number;
+  goalSeconds: number;
+  sessions: number;
+  remainingSeconds: number;
+  goalStreak: number;
+}) {
+  const p = useTheme();
+  const hasGoal = goalSeconds > 0;
+  const total = Math.max(0, seconds);
+  const banked = Math.max(0, total - Math.max(0, liveSeconds));
+  const frac = (n: number) => (hasGoal ? Math.min(1, n / goalSeconds) : 0);
+  const reached = hasGoal && total >= goalSeconds;
+  const pct = hasGoal ? Math.round((total / goalSeconds) * 100) : 0;
+  const projected = total + Math.max(0, remainingSeconds);
+  const fmt = (n: number) => (n > 0 ? describeDuration(n) : '0m');
+
+  let status: string;
+  if (!hasGoal) status = total > 0 ? 'No daily goal set' : 'Nothing logged yet today';
+  else if (reached) status = total > goalSeconds + 59 ? `Goal reached · ${fmt(total - goalSeconds)} extra` : 'Goal reached';
+  else status = `${fmt(goalSeconds - total)} to go`;
+
+  return (
+    <View style={{
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: reached ? p.accent : p.line,
+      backgroundColor: p.surface,
+      padding: space.lg,
+      marginBottom: space.md,
+    }}>
+      <Row style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <Text variant="label" tone="faint" style={{ letterSpacing: 1 }}>TODAY</Text>
+        <Text variant="caption" tone="soft">
+          {sessions} session{sessions === 1 ? '' : 's'}
+          {goalStreak > 0 ? ` · goal streak ${goalStreak}` : ''}
+        </Text>
+      </Row>
+
+      <Row gap={space.xs} align="baseline" style={{ marginTop: 2 }}>
+        <Text
+          variant="display"
+          style={{ fontSize: 40, lineHeight: 46, color: total > 0 ? p.accent : p.inkFaint }}
+        >
+          {fmt(total)}
+        </Text>
+        {hasGoal ? (
+          <Text variant="bodyStrong" tone="soft">/ {fmt(goalSeconds)} · {pct}%</Text>
+        ) : null}
+      </Row>
+
+      {hasGoal ? (
+        <View style={{
+          marginTop: space.sm,
+          height: 12,
+          borderRadius: 6,
+          backgroundColor: p.surfaceAlt,
+          overflow: 'hidden',
+          flexDirection: 'row',
+        }}>
+          <View style={{ width: `${frac(banked) * 100}%`, backgroundColor: p.accent }} />
+          {/* The running session: counted, but not banked yet. */}
+          <View style={{ width: `${Math.max(0, frac(total) - frac(banked)) * 100}%`, backgroundColor: p.accent, opacity: 0.5 }} />
+        </View>
+      ) : null}
+
+      <Row style={{ justifyContent: 'space-between', marginTop: space.sm }}>
+        <Text variant="caption" tone={reached ? 'accent' : 'soft'} style={{ fontWeight: reached ? '700' : '400' }}>
+          {reached ? '✓ ' : ''}{status}
+        </Text>
+        {hasGoal && !reached && remainingSeconds > 0 ? (
+          <Text variant="caption" tone="faint">
+            {projected >= goalSeconds ? 'this session gets you there' : `after this: ${Math.round((projected / goalSeconds) * 100)}%`}
+          </Text>
+        ) : null}
+      </Row>
     </View>
   );
 }
