@@ -120,10 +120,11 @@ export function Tasks() {
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [showDone, setShowDone] = useState(false);
-  const [activeListIds, setActiveListIds] = useState<string[]>([]);
-  // Single selected list, when exactly one is chosen: used where only one makes
-  // sense (filing a new task, badge colour). Null otherwise.
-  const filter: string | null = activeListIds.length === 1 ? activeListIds[0] : null;
+  // The saved selection, as stored. Lists that don't exist (yet) are ignored
+  // where it is used (`activeListIds` below) but never pruned from here: the
+  // real lists can arrive after the first paint, and pruning then wiped the
+  // remembered selection on every launch.
+  const [storedListIds, setActiveListIds] = useState<string[]>([]);
   /** Which task, if any, has its "add a step" line open. */
   const [composingFor, setComposingFor] = useState<string | null>(null);
   const [sortMode, setSortModeState] = useState<SortMode>(DEFAULT_SORT_MODE);
@@ -136,14 +137,19 @@ export function Tasks() {
       if (!sortTouched.current) setSortModeState(mode);
     });
   }, []);
+  // Saved only after the stored value has been read: saving the initial []
+  // first is what erased it.
+  const listFilterLoaded = useRef(false);
   useEffect(() => {
     void prefs.getTaskListFilter().then(ids => {
-      setActiveListIds(ids);
+      listFilterLoaded.current = true;
+      setActiveListIds(prev => (prev.length ? prev : ids));
     });
   }, []);
   useEffect(() => {
-    void prefs.setTaskListFilter(activeListIds);
-  }, [activeListIds]);
+    if (!listFilterLoaded.current) return;
+    void prefs.setTaskListFilter(storedListIds);
+  }, [storedListIds]);
   const setSortMode = (mode: SortMode) => {
     sortTouched.current = true;
     setSortModeState(mode);
@@ -219,9 +225,13 @@ export function Tasks() {
       .map(l => ({ id: l.id, name: String(l.name ?? 'Untitled'), color: String(l.color ?? '') }))
   ), [taskLists]);
 
-  useEffect(() => {
-    setActiveListIds(prev => prev.filter(id => lists.some(l => l.id === id)));
-  }, [lists]);
+  const activeListIds = useMemo(
+    () => storedListIds.filter(id => lists.some(l => l.id === id)),
+    [storedListIds, lists],
+  );
+  // Single selected list, when exactly one is chosen: used where only one makes
+  // sense (filing a new task, badge colour). Null otherwise.
+  const filter: string | null = activeListIds.length === 1 ? activeListIds[0] : null;
 
   // Only worth a strip when there is a choice to make: a planner with nothing
   // but General has one possible answer, and a filter with one option is noise.

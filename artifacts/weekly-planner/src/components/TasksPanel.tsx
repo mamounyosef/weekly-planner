@@ -231,14 +231,16 @@ function TasksPanel({
     return m;
   }, [lists]);
 
-  const selectedListIds = activeListIds ?? [];
+  // Ids of lists that don't exist (deleted elsewhere) are ignored here, but
+  // NEVER pruned from the saved selection. At startup the panel briefly sees
+  // only the built-in lists, before the real ones arrive from the server;
+  // pruning then wiped the remembered selection on every restart.
+  const selectedListIds = useMemo(
+    () => (activeListIds ?? []).filter((id) => listsById[id]),
+    [activeListIds, listsById],
+  );
   const selectedListId = selectedListIds.length === 1 ? selectedListIds[0] : null;
   const activeList = selectedListId ? listsById[selectedListId] ?? null : null;
-  // Drop ids that point at lists deleted elsewhere.
-  useEffect(() => {
-    const valid = selectedListIds.filter((id) => listsById[id]);
-    if (valid.length !== selectedListIds.length) onActiveListChange(valid);
-  }, [selectedListIds, listsById, onActiveListChange]);
 
   /**
    * A subtask lives wherever its parent lives. Reading it off the parent rather

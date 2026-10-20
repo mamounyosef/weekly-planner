@@ -10,7 +10,7 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare, AlignLeft, CircleDot } from 'lucide-react';
+import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, ChevronRight, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare, AlignLeft, CircleDot } from 'lucide-react';
 import { orbAverageSeconds, orbFraction, quantiseOrbFraction } from '@/lib/orbRing';
 import type { AgentTheme } from '@/components/agent/AgentCards';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -303,7 +303,7 @@ export default function Widget() {
   const [stickyTasksWidget, setStickyTasksWidget]   = useState(true);
   const [overlapLayout, setOverlapLayout]           = useState<OverlapLayoutMode>('fit');
   const [showTaskRow, setShowTaskRow]               = useState(true);
-  const [taskColor, setTaskColor]                   = useState('#7dd3fc');
+  const [widgetTasksDoneExpanded, setWidgetTasksDoneExpanded] = useState(false);  const [taskColor, setTaskColor]                   = useState('#7dd3fc');
   const [taskCheckboxShape, setTaskCheckboxShape]   = useState<TaskCheckboxShape>('circle');
   const [tasks, setTasks]                           = useState<TaskData>({});
   const [overflowModal, setOverflowModal]           = useState<{
@@ -1877,9 +1877,11 @@ export default function Widget() {
           }).map(t => ({ task: t, dayLabel: 'Yesterday' }));
 
           const widgetTasks = [...yesterdayTasks, ...todayTasks];
+          const openWidgetTasks = widgetTasks.filter(({ task }) => !isTaskDone(task, task.occDate ?? null));
+          const doneWidgetTasks = widgetTasks.filter(({ task }) => isTaskDone(task, task.occDate ?? null));
           const MAX_TASKS_VISIBLE = 4;
-          const visibleTasks = widgetTasks.slice(0, MAX_TASKS_VISIBLE);
-          const hasMoreTasks = widgetTasks.length > MAX_TASKS_VISIBLE;
+          const visibleTasks = openWidgetTasks.slice(0, MAX_TASKS_VISIBLE);
+          const hasMoreTasks = openWidgetTasks.length > MAX_TASKS_VISIBLE;
 
           return (
             <>
@@ -2023,6 +2025,47 @@ export default function Widget() {
                         </>
                       );
                     })}
+                    {doneWidgetTasks.length > 0 && (
+                      <div className="flex flex-col gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setWidgetTasksDoneExpanded(v => !v)}
+                          className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center gap-1.5 transition-smooth active:scale-[0.98]"
+                          style={{
+                            background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+                            borderColor: surfaceBdr,
+                            color: menuSub,
+                          }}
+                          title="Show completed tasks"
+                        >
+                          {widgetTasksDoneExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                          <span>{doneWidgetTasks.length} done</span>
+                        </button>
+                        {widgetTasksDoneExpanded && doneWidgetTasks.map(({ task: t }) => {
+                          const occ = t.occDate ?? null;
+                          const done = true;
+                          return (
+                            <div
+                              key={t.id}
+                              className="px-2 py-0.5 rounded-md border text-[10.5px] font-medium flex items-center gap-1.5"
+                              style={{
+                                background: `${taskColor}0e`,
+                                borderColor: `${taskColor}2a`,
+                                color: menuText,
+                                opacity: 0.55,
+                              }}
+                            >
+                              <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
+                                {taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />}
+                              </span>
+                              <span className={`truncate flex-1 line-through opacity-60`}>
+                                {t.title || 'Untitled task'}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                     {hasMoreTasks && (
                       <button
                         type="button"
