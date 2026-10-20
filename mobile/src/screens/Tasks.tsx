@@ -120,7 +120,10 @@ export function Tasks() {
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [showDone, setShowDone] = useState(false);
-  const [listFilter, setListFilter] = useState<string | null>(null);
+  const [activeListIds, setActiveListIds] = useState<string[]>([]);
+  // Single selected list, when exactly one is chosen: used where only one makes
+  // sense (filing a new task, badge colour). Null otherwise.
+  const filter: string | null = activeListIds.length === 1 ? activeListIds[0] : null;
   /** Which task, if any, has its "add a step" line open. */
   const [composingFor, setComposingFor] = useState<string | null>(null);
   const [sortMode, setSortModeState] = useState<SortMode>(DEFAULT_SORT_MODE);
@@ -133,6 +136,14 @@ export function Tasks() {
       if (!sortTouched.current) setSortModeState(mode);
     });
   }, []);
+  useEffect(() => {
+    void prefs.getTaskListFilter().then(ids => {
+      setActiveListIds(ids);
+    });
+  }, []);
+  useEffect(() => {
+    void prefs.setTaskListFilter(activeListIds);
+  }, [activeListIds]);
   const setSortMode = (mode: SortMode) => {
     sortTouched.current = true;
     setSortModeState(mode);
@@ -208,10 +219,9 @@ export function Tasks() {
       .map(l => ({ id: l.id, name: String(l.name ?? 'Untitled'), color: String(l.color ?? '') }))
   ), [taskLists]);
 
-  // Lists are created and deleted on the PC, so the chip that is selected here
-  // can disappear underneath the user. Falling back to "All" keeps a deleted
-  // list from hiding every task behind a filter nothing can clear.
-  const filter = listFilter && lists.some(l => l.id === listFilter) ? listFilter : null;
+  useEffect(() => {
+    setActiveListIds(prev => prev.filter(id => lists.some(l => l.id === id)));
+  }, [lists]);
 
   // Only worth a strip when there is a choice to make: a planner with nothing
   // but General has one possible answer, and a filter with one option is noise.
@@ -224,7 +234,7 @@ export function Tasks() {
     // same objects it always was.
     const rawTasks = applyOrderGuess(stored, orderGuess);
     const rows = buildTaskRows(rawTasks, today, true);
-    const shown = groupTasks(rows, rawTasks, lists, filter, filters, today, sortMode);
+    const shown = groupTasks(rows, rawTasks, lists, activeListIds, filters, today, sortMode);
     // THE SAME BUCKETS WITH NO LIST FILTER, so a drag can be expressed against
     // the whole arrangement rather than against the slice of it on screen. See
     // `moveItem`. Computed only when a filter is actually on: with no filter the
@@ -232,9 +242,9 @@ export function Tasks() {
     // that turns into a stutter on a long list.
     return {
       shown,
-      whole: filter ? groupTasks(rows, rawTasks, lists, null, filters, today, sortMode) : shown,
+      whole: activeListIds.length ? groupTasks(rows, rawTasks, lists, [], filters, today, sortMode) : shown,
     };
-  }, [tasks, today, filter, lists, filters, sortMode, orderGuess]);
+  }, [tasks, today, activeListIds, lists, filters, sortMode, orderGuess]);
 
   const grouped = board.shown;
 
@@ -464,13 +474,46 @@ export function Tasks() {
 
         
         {showChips ? (
-          <ListChips
-            options={lists}
-            value={filter}
-            onChange={setListFilter}
-            allLabel="All"
-            inset={space.xl}
-          />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xl, paddingVertical: space.sm, gap: space.sm }}>
+            <Pressable
+              unstable_pressDelay={PRESS_DELAY}
+              onPress={() => setActiveListIds([])}
+              accessibilityRole="button"
+              accessibilityState={{ selected: activeListIds.length === 0 }}
+              android_ripple={{ color: p.accentSoft }}
+              style={({ pressed }) => [{
+                paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
+                backgroundColor: activeListIds.length === 0 ? p.accentSoft : p.surfaceAlt,
+                borderWidth: 1, borderColor: activeListIds.length === 0 ? p.accent : p.line
+              }, pressed ? PRESSED : null]}
+            >
+              <Text variant="caption" tone={activeListIds.length === 0 ? 'accent' : 'faint'}>All</Text>
+            </Pressable>
+            {lists.map(l => {
+              const on = activeListIds.includes(l.id);
+              return (
+                <Pressable
+                  unstable_pressDelay={PRESS_DELAY}
+                  key={l.id}
+                  onPress={() => setActiveListIds(prev =>
+                    prev.includes(l.id) ? prev.filter(x => x !== l.id) : [...prev, l.id]
+                  )}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: on }}
+                  android_ripple={{ color: p.accentSoft }}
+                  style={({ pressed }) => [{
+                    flexDirection: 'row', alignItems: 'center', gap: space.sm,
+                    paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
+                    backgroundColor: on ? p.accentSoft : p.surfaceAlt,
+                    borderWidth: 1, borderColor: on ? p.accent : p.line
+                  }, pressed ? PRESSED : null]}
+                >
+                  {l.color ? <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: l.color }} /> : null}
+                  <Text variant="caption" tone={on ? 'accent' : 'faint'}>{l.name}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
         ) : null}
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xl, paddingVertical: space.sm, gap: space.sm }}>
@@ -749,6 +792,9 @@ function TaskCard({
 
         <View style={{ flex: 1 }}>
           <Row gap={space.xs} style={{ alignItems: 'center' }}>
+            {list ? (
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: list.color || p.ok, marginTop: 3 }} />
+            ) : null}
             <Text
               variant="bodyStrong"
               tone={done ? 'faint' : 'ink'}

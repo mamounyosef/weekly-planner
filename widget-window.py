@@ -1,3 +1,4 @@
+import json
 import os
 import secrets
 import sys
@@ -393,6 +394,24 @@ class Api:
         run_windows), so there is nothing to launch: closing it only hid it."""
         show_main_window()
 
+    # ── The floating orb (see the "Floating orb" section below) ──
+
+    def orb_info(self):
+        return {"enabled": _orb_enabled, "mode": _orb_mode}
+
+    def orb_set_enabled(self, on):
+        set_orb_enabled(bool(on))
+        return self.orb_info()
+
+    def orb_tuck(self):
+        """The widget asked to go back into the orb (its close/minimize/Esc)."""
+        if _orb_enabled:
+            hide_widget()
+
+    def orb_state(self, frac, running, alert):
+        if _orb is not None:
+            _orb.set_state(frac, running, alert)
+
     def set_always_on_top(self, on_top):
         global _always_on_top_enabled
         _always_on_top_enabled = bool(on_top)
@@ -542,11 +561,36 @@ def refresh_webview_visibility():
     except Exception as e:
         print("Failed to refresh WebView2 visibility:", e)
 
+    # The hide/show above can leave the button on the generic icon; put the
+    # widget's own back.
+    set_form_icon(window, WIDGET_ICON_PATH)
+
+
+# Each window has its own taskbar icon, so the two buttons can be told apart:
+# a wide window for the planner, a tall one for the widget (drawn by
+# tools/make-window-icons.py).
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MAIN_ICON_PATH = os.path.join(_BASE_DIR, "icon-main.ico")
+WIDGET_ICON_PATH = os.path.join(_BASE_DIR, "icon-widget.ico")
+
+
+def set_form_icon(win, path):
+    """Set a window's own icon (title bar, Alt+Tab and its taskbar button).
+
+    Through the WinForms property rather than WM_SETICON: WinForms re-sends
+    its Icon whenever it recreates the handle, which would quietly undo a
+    message sent from outside."""
+    if not win or not os.path.exists(path):
+        return
     try:
-        for size, which in ((16, ICON_SMALL), (32, ICON_BIG)):
-            hicon = user32.LoadImageW(None, ICON_PATH, IMAGE_ICON, size, size, LR_LOADFROMFILE)
-            if hicon:
-                user32.SendMessageW(hwnd, WM_SETICON, which, hicon)
+        from System import Action
+        from System.Drawing import Icon
+        form = win.native
+
+        def apply():
+            form.Icon = Icon(path)
+
+        form.Invoke(Action(apply))
     except Exception as e:
         print("Failed to set window icon:", e)
 
@@ -565,7 +609,11 @@ def on_shown():
     
     try:
         hwnd = int(window.native.Handle.ToInt64())
-        
+        # In orb mode the widget starts tucked away: cloak it before anything
+        # below shows it again.
+        if _orb_enabled:
+            set_cloak(hwnd, True)
+
         # Get styles, remove title bar and force frame borders update
         style = user32.GetWindowLongW(hwnd, GWL_STYLE)
         new_style = (style & ~WS_CAPTION) | WS_MINIMIZEBOX | WS_SYSMENU | WS_THICKFRAME
@@ -850,7 +898,332 @@ def on_widget_closing():
     """
     if main_window is not None and main_window in webview.windows and _main_is_hidden():
         threading.Thread(target=main_window.destroy, daemon=True).start()
+    if _orb is not None:
+        _orb.close()
     return True
+
+
+# ── Floating orb ──────────────────────────────────────────────────────────────
+# A tiny always-on-top dot (planner_orb.py) that the widget tucks into. With it
+# on, the widget is hidden until wanted:
+#
+#   rest the mouse on the orb  -> the widget peeks out beside it, and goes
+#                                 again once the mouse leaves both (unless you
+#                                 clicked into it: then it stays until you
+#                                 click somewhere else)
+#   click                      -> the widget opens and stays (click again: away)
+#   right-click                -> the assistant, in the widget's place
+#   double-click               -> the full planner
+#   drag                       -> move it; it snaps to a screen edge nearby
+#
+# "Hidden" is DWM cloaking, not SW_HIDE. A cloaked window is invisible, takes
+# no clicks and has no taskbar button, but the page inside never learns it was
+# hidden: it keeps its timers and its live data, so showing it again is
+# instant, and none of the hidden-page problems refresh_webview_visibility
+# exists for can happen.
+
+ORB_STATE_PATH = os.path.join(_BASE_DIR, "database", "orb.json")
+dwmapi = ctypes.WinDLL("dwmapi")
+dwmapi.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.wintypes.DWORD, ctypes.c_void_p, ctypes.wintypes.DWORD]
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+DWMWA_CLOAK = 13
+PEEK_MARGIN = 14       # px of slack around the widget and orb before a peek counts as left
+PEEK_LEAVE_S = 0.35    # how long outside before it goes
+WIDGET_GAP = 10        # px between the orb and the widget beside it
+
+_orb = None
+_orb_enabled = False
+_orb_mode = None        # None (tucked), 'peek', 'pinned' or 'assistant'
+_orb_lock = threading.RLock()
+_peek_engaged = False   # the peeking widget was clicked into
+_js_lock = threading.Lock()
+
+
+def _load_orb_state():
+    try:
+        with open(ORB_STATE_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_orb_state(**changes):
+    try:
+        d = _load_orb_state()
+        d.update(changes)
+        os.makedirs(os.path.dirname(ORB_STATE_PATH), exist_ok=True)
+        tmp = ORB_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, ORB_STATE_PATH)
+    except Exception as e:
+        print("Failed to save orb state:", e)
+
+
+def set_cloak(hwnd, on):
+    try:
+        v = ctypes.c_int(1 if on else 0)
+        dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ctypes.byref(v), ctypes.sizeof(v))
+    except Exception as e:
+        print("Failed to cloak the widget:", e)
+
+
+def _widget_hwnd():
+    try:
+        return int(window.native.Handle.ToInt64())
+    except Exception:
+        return 0
+
+
+def _widget_js(cmd):
+    """Tell the widget page what just happened (it animates in, opens the
+    assistant...). evaluate_js waits on the GUI thread, so never on ours."""
+    def run():
+        with _js_lock:
+            try:
+                window.evaluate_js("window.__plannerOrb && window.__plannerOrb(%s)" % json.dumps(cmd))
+            except Exception as e:
+                print("Failed to reach the widget page:", e)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _rect(hwnd):
+    rc = ctypes.wintypes.RECT()
+    if hwnd and user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+        return rc.left, rc.top, rc.right, rc.bottom
+    return None
+
+
+def _place_widget_beside_orb(hwnd):
+    """Open towards the middle of the screen, centred on the orb, never off it."""
+    orb_rc = _orb.rect() if _orb else None
+    wrc = _rect(hwnd)
+    if not orb_rc or not wrc:
+        return
+    w, h = wrc[2] - wrc[0], wrc[3] - wrc[1]
+    ocx, ocy = (orb_rc[0] + orb_rc[2]) // 2, (orb_rc[1] + orb_rc[3]) // 2
+    mon = user32.MonitorFromPoint(ctypes.wintypes.POINT(ocx, ocy), MONITOR_DEFAULTTONEAREST)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if not mon or not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+        return
+    wa = info.rcWork
+    scale = _orb.scale if _orb else 1.0
+    gap = int(WIDGET_GAP * scale)
+    w = min(w, wa.right - wa.left)
+    h = min(h, wa.bottom - wa.top)
+    if ocx > (wa.left + wa.right) // 2:
+        x = orb_rc[0] - gap - w
+    else:
+        x = orb_rc[2] + gap
+    y = ocy - h // 2
+    x = min(max(x, wa.left), wa.right - w)
+    y = min(max(y, wa.top), wa.bottom - h)
+    SWP_NOZORDER = 0x0004
+    SWP_NOACTIVATE = 0x0010
+    user32.SetWindowPos(hwnd, 0, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE)
+
+
+def show_widget(mode):
+    """Bring the widget out of the orb in `mode`. Already out: just switch."""
+    global _orb_mode, _peek_engaged
+    with _orb_lock:
+        hwnd = _widget_hwnd()
+        if not hwnd:
+            return
+        was = _orb_mode
+        _orb_mode = mode
+        _peek_engaged = False
+        if was is None:
+            _place_widget_beside_orb(hwnd)
+            _widget_js("assistant" if mode == "assistant" else "show")
+            set_cloak(hwnd, False)
+        elif mode == "assistant" and was != "assistant":
+            _widget_js("assistant")
+        elif mode != "assistant" and was == "assistant":
+            _widget_js("show")
+        if mode == "assistant":
+            # The click on the orb was our process's input, so Windows lets us
+            # hand the widget the keyboard: type straight into the assistant.
+            user32.SetForegroundWindow(hwnd)
+
+
+def hide_widget():
+    global _orb_mode, _peek_engaged
+    with _orb_lock:
+        if _orb_mode is None:
+            return
+        _orb_mode = None
+        _peek_engaged = False
+        hwnd = _widget_hwnd()
+        if hwnd:
+            set_cloak(hwnd, True)
+        _widget_js("hide")
+
+
+def _orb_click():
+    if _orb_mode in (None, "peek"):
+        show_widget("pinned")
+    else:
+        hide_widget()
+
+
+def _orb_double_click():
+    hide_widget()
+    show_main_window()
+
+
+def _orb_right_click():
+    if _orb_mode == "assistant":
+        hide_widget()
+    else:
+        show_widget("assistant")
+
+
+def _orb_hover():
+    if _orb_mode is None:
+        show_widget("peek")
+
+
+def _orb_drag_start():
+    if _orb_mode == "peek":
+        hide_widget()
+
+
+def _orb_moved():
+    with _orb_lock:
+        if _orb_mode is not None:
+            _place_widget_beside_orb(_widget_hwnd())
+
+
+def _inside(pt, rc, margin):
+    return rc and rc[0] - margin <= pt.x < rc[2] + margin and rc[1] - margin <= pt.y < rc[3] + margin
+
+
+def _peek_watch_loop():
+    """Puts a peeking widget away once the mouse has left it and the orb.
+
+    Polls the cursor (two cheap Win32 calls) instead of hooking the mouse: a
+    global hook would sit in the path of every mouse move on the PC."""
+    global _peek_engaged
+    left_at = None
+    pt = ctypes.wintypes.POINT()
+    while True:
+        if _orb_mode != "peek":
+            left_at = None
+            time.sleep(0.15)
+            continue
+        time.sleep(0.04)
+        hwnd = _widget_hwnd()
+        if not hwnd or not user32.GetCursorPos(ctypes.byref(pt)):
+            continue
+        scale = _orb.scale if _orb else 1.0
+        margin = int(PEEK_MARGIN * scale)
+        focused = user32.GetForegroundWindow() == hwnd
+        if focused:
+            _peek_engaged = True
+        if _inside(pt, _rect(hwnd), margin) or _inside(pt, _orb.rect() if _orb else None, margin) or focused:
+            left_at = None
+            continue
+        now = time.monotonic()
+        if left_at is None:
+            left_at = now
+        elif now - left_at >= PEEK_LEAVE_S:
+            with _orb_lock:
+                if _orb_mode == "peek":
+                    hide_widget()
+            left_at = None
+
+
+def set_orb_enabled(on):
+    """Orb mode on: the widget tucks into the orb. Off: it is a normal window
+    again, back where it was before."""
+    global _orb_enabled, _orb_mode
+    with _orb_lock:
+        if on == _orb_enabled:
+            return
+        _orb_enabled = on
+        _save_orb_state(enabled=on)
+        hwnd = _widget_hwnd()
+        if on:
+            rc = _rect(hwnd)
+            if rc:
+                _save_orb_state(widgetFree=list(rc))
+            _orb_mode = "pinned"  # so hide_widget() below runs
+            hide_widget()
+            if _orb is not None:
+                _orb.set_visible(True)
+        else:
+            if _orb is not None:
+                _orb.set_visible(False)
+            free = _load_orb_state().get("widgetFree")
+            if hwnd and isinstance(free, list) and len(free) == 4:
+                l, t, r, b = (int(v) for v in free)
+                user32.SetWindowPos(hwnd, 0, l, t, r - l, b - t, 0x0004 | 0x0010)
+            _orb_mode = None
+            if hwnd:
+                set_cloak(hwnd, False)
+            _widget_js("show")
+
+
+WIDGET_ZOOM_DEFAULT = 0.85
+
+
+def apply_widget_zoom():
+    """The widget drawn smaller than the main window: it is a side panel.
+
+    85% by default. Ctrl+scroll or Ctrl +/- in the widget still adjusts it,
+    and whatever was chosen is remembered (database/orb.json)."""
+    try:
+        from System import Action, EventHandler
+        form = window.native
+        try:
+            zoom = float(_load_orb_state().get("widgetZoom", WIDGET_ZOOM_DEFAULT))
+        except Exception:
+            zoom = WIDGET_ZOOM_DEFAULT
+        zoom = min(2.0, max(0.5, zoom))
+
+        def apply():
+            control = form.browser.webview
+            control.ZoomFactor = zoom
+            if not getattr(apply_widget_zoom, "_hooked", False):
+                apply_widget_zoom._hooked = True
+
+                def changed(sender, args):
+                    z = round(float(sender.ZoomFactor), 3)
+                    threading.Thread(target=_save_orb_state, kwargs={"widgetZoom": z}, daemon=True).start()
+
+                control.ZoomFactorChanged += EventHandler(changed)
+
+        form.Invoke(Action(apply))
+    except Exception as e:
+        print("Failed to set the widget zoom:", e)
+
+
+def start_orb():
+    """Create the orb (shown only in orb mode) and its peek watcher."""
+    global _orb
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("planner_orb", os.path.join(_BASE_DIR, "planner_orb.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _orb = mod.Orb(
+            ORB_STATE_PATH,
+            on_click=_orb_click,
+            on_double_click=_orb_double_click,
+            on_right_click=_orb_right_click,
+            on_hover=_orb_hover,
+            on_drag_start=_orb_drag_start,
+            on_moved=_orb_moved,
+        )
+        _orb.set_visible(_orb_enabled)
+        _orb.start()
+        threading.Thread(target=_peek_watch_loop, name="orb-peek-watch", daemon=True).start()
+    except Exception as e:
+        print("Failed to start the orb:", e)
+        _orb = None
 
 
 def run_windows(show_main=True):
@@ -858,7 +1231,7 @@ def run_windows(show_main=True):
     WebView2 environment. `show_main=False` (the widget launched on its own by
     the server) still creates the main window, hidden, so the widget's open
     button has something to show."""
-    global window, main_window
+    global window, main_window, _orb_enabled
     if already_running():
         import sys as _sys
         _sys.exit(0)
@@ -877,6 +1250,17 @@ def run_windows(show_main=True):
     )
     main_window.events.closing += on_main_closing
     main_window.events.loaded += on_main_loaded
+    main_window.events.shown += lambda: set_form_icon(main_window, MAIN_ICON_PATH)
+
+    # The orb first: whether the widget starts tucked away depends on it. Orb
+    # mode is on unless it was switched off, and never on without a working
+    # orb (a cloaked widget with no orb would be unreachable).
+    _orb_enabled = _load_orb_state().get("enabled", True) is not False
+    start_orb()
+    if _orb is None or not _orb.hwnd:
+        _orb_enabled = False
+        if _orb is not None:
+            _orb.set_visible(False)
 
     # Create the widget window (not frameless), which we then border-strip in on_shown
     window = webview.create_window(
@@ -893,6 +1277,7 @@ def run_windows(show_main=True):
     window.events.shown += on_shown
     window.events.closing += on_widget_closing
     window.events.loaded += lambda: detach_network_hooks(window)
+    window.events.loaded += apply_widget_zoom
 
     # Start the webview window loop with custom application icon. A persistent
     # profile (not private mode) keeps the login cookie across restarts.

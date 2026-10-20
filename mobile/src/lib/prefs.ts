@@ -86,6 +86,7 @@ const KEY_LIGHT_THEME = 'planner.lightThemeVariant';
 const KEY_DARK_THEME = 'planner.darkThemeVariant';
 const KEY_FOCUS_RANGE_MODE = 'planner.focusRangeMode';
 const KEY_TASK_SORT = 'planner.taskSort';
+const KEY_TASK_LISTS = 'planner.taskListsFilter';
 const KEY_HIDDEN_CATEGORIES = 'planner.hiddenCategoriesByView';
 /**
  * This phone's OWN reminder rules, used only while sharing is switched off.
@@ -121,6 +122,7 @@ export const PREF_KEYS = [
   KEY_DARK_THEME,
   KEY_FOCUS_RANGE_MODE,
   KEY_TASK_SORT,
+  KEY_TASK_LISTS,
   KEY_HIDDEN_CATEGORIES,
   KEY_NOTIFICATIONS_LOCAL,
 ] as const;
@@ -280,6 +282,17 @@ export const prefs = {
     return coerceSortMode(await read(KEY_TASK_SORT));
   },
   setTaskSort: (mode: SortMode) => write(KEY_TASK_SORT, mode),
+
+  async getTaskListFilter(): Promise<string[]> {
+    const raw = await read(KEY_TASK_LISTS);
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map((x: unknown) => String(x));
+    } catch { /* legacy */ }
+    return [];
+  },
+  setTaskListFilter: (ids: string[]) => write(KEY_TASK_LISTS, JSON.stringify(ids)),
 
   /**
    * How coarsely times snap on this device: 5, 10, 15, 30 or 60 minutes.

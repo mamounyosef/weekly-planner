@@ -76,7 +76,10 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
           className="agent-in agent-scroll absolute z-30 overflow-y-auto overscroll-contain"
           style={{
             left: 8, right: 8, bottom: 'calc(100% + 4px)', maxHeight: 'min(520px, 62vh)',
-            background: theme.surface, border: `1px solid ${theme.bdr}`, borderRadius: 14, padding: 6,
+            // Theme surfaces can be translucent; lay them over a solid base so
+            // the chat behind never shows through the menu.
+            background: `linear-gradient(${theme.surface}, ${theme.surface}), ${theme.darkMode ? '#17191d' : '#ffffff'}`,
+            border: `1px solid ${theme.bdr}`, borderRadius: 14, padding: 6,
             boxShadow: theme.darkMode ? '0 18px 50px rgba(0,0,0,0.5)' : '0 18px 50px rgba(15,23,42,0.18)',
           }}
           onKeyDown={e => e.stopPropagation()}

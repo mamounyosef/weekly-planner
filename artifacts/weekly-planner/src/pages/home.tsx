@@ -138,7 +138,7 @@ import {
 } from '@/lib/recurrence';
 import { timeToMin, minToTime } from '@/lib/timeOfDay';
 import { gcalChipColors, resolveEventHex, SWATCH_BASE_HEX } from '@/lib/gcalColor';
-import { ACCENT_BAR_W } from '@/components/EventCardPreview';
+import { useRightClickDragScroll } from '@/lib/useRightClickDragScroll';import { ACCENT_BAR_W } from '@/components/EventCardPreview';
 import { CanvasAmbient } from '@/components/CanvasAmbient';
 import { FocusLiveCountdown, FocusLiveProgress, FocusLiveStartingLabel } from '@/components/FocusLiveBits';
 import { publishLiveClock } from '@/lib/liveClock';
@@ -1878,7 +1878,7 @@ export default function DailyPlanner() {
   const daysGridRef  = useRef<HTMLDivElement>(null);
   const gridCardRef  = useRef<HTMLDivElement>(null);
   const mainRef      = useRef<HTMLDivElement>(null);
-  const nowLineRef   = useRef<HTMLDivElement>(null);
+  useRightClickDragScroll(mainRef);  const nowLineRef   = useRef<HTMLDivElement>(null);
   const [showLiveBtn, setShowLiveBtn] = useState(false);
   const showLiveBtnRef = useRef(false);
   const editRef      = useRef<HTMLTextAreaElement>(null);

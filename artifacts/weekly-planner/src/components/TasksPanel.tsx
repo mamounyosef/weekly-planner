@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, motion, MotionConfig } from 'framer-motion';
+import { useRightClickDragScroll } from '@/lib/useRightClickDragScroll';import { AnimatePresence, motion, MotionConfig } from 'framer-motion';
 import {
   Check, ChevronDown, ChevronRight, Clock, ListTodo,
   MoreHorizontal, Plus, Repeat, StickyNote, X, Calendar, AlertCircle,
@@ -346,7 +346,8 @@ function TasksPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const dateInputRef = useRef<HTMLInputElement>(null);
   const doneTimersRef = useRef<Record<string, number>>({});
-
+  const taskListScrollRef = useRef<HTMLDivElement>(null);
+  useRightClickDragScroll(taskListScrollRef);
   useEffect(() => {
     try { localStorage.setItem(COMPLETED_COLLAPSED_KEY, completedCollapsed ? '1' : '0'); } catch { /* private mode */ }
   }, [completedCollapsed]);
@@ -1309,8 +1310,8 @@ function TasksPanel({
 
         {/* Task List */}
         <div
-          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden touch-scroll px-2.5 py-3 space-y-3 gpu-layer"
-          style={{ overscrollBehavior: 'contain', contain: 'content', paddingBottom: page ? 'calc(var(--safe-bottom) + 24px)' : undefined }}
+          ref={taskListScrollRef}
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden touch-scroll px-2.5 py-3 space-y-3 gpu-layer"          style={{ overscrollBehavior: 'contain', contain: 'content', paddingBottom: page ? 'calc(var(--safe-bottom) + 24px)' : undefined }}
         >
           {visibleCount === 0 && (
             <div

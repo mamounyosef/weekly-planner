@@ -24,6 +24,13 @@
   Closing the main window only HIDES it; closing the widget while main is hidden quits.
   Set env `PLANNER_WEBVIEW_DEBUG_PORT=9333` before launching to get a DevTools port for
   memory checks (heap snapshots over CDP).
+- Floating orb: `planner_orb.py` (native layered Win32 window, no WebView), driven by
+  the "Floating orb" section of `widget-window.py`. In orb mode (default, toggled by the
+  widget header's dot button, saved in `database/orb.json`) the widget is DWM-cloaked,
+  never SW_HIDE'd: hover peeks, click pins, right-click opens the assistant in the
+  widget, double-click opens main. Ring math: `src/lib/orbRing.ts` (tested).
+- Taskbar icons per window: `icon-main.ico` / `icon-widget.ico`, drawn by
+  `tools/make-window-icons.py`.
 - The two windows do NOT talk directly — they sync **through the dev server** (`/api/events`,
   `/api/focus-timer`, polling). If the server (that terminal/process) is killed, the windows
   stop updating each other. Keep it running.

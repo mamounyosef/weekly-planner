@@ -10,7 +10,9 @@ import {
   differenceInDays,
   startOfDay,
 } from 'date-fns';
-import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare, AlignLeft } from 'lucide-react';
+import { X, Calendar, Clock, Minus, ExternalLink, Pin, Play, Pause, RotateCcw, Square, Plus, ChevronUp, ChevronDown, CheckCircle2, Circle, Moon, ListTodo, MoreHorizontal, CheckSquare, AlignLeft, CircleDot } from 'lucide-react';
+import { orbAverageSeconds, orbFraction, quantiseOrbFraction } from '@/lib/orbRing';
+import type { AgentTheme } from '@/components/agent/AgentCards';
 import { motion, AnimatePresence } from 'framer-motion';
 import { mergeContiguousFocusSession } from '@/lib/focusStats';
 import {
@@ -148,7 +150,8 @@ const DAY_END_KEY    = 'planner-dayend';
 const HEADER_PX      = 48;
 const POSITION_SNAP  = 5;
 
-const SLOT_H: Record<IntervalMin, number> = { 5: 16, 15: 40, 30: 64, 60: 96 };
+// Compact on purpose: a side panel should show most of the day at a glance.
+const SLOT_H: Record<IntervalMin, number> = { 5: 11, 15: 28, 30: 44, 60: 66 };
 
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -234,6 +237,12 @@ function snapMin(min: number, interval: IntervalMin): number {
 // Shared with the main window: lib/overlapLayout.ts.
 const FULL_BOX: OverlapBox = { left: 0, width: 1, segments: [{ fromMin: 0, toMin: 1, left: 0, width: 1 }] };
 
+// The assistant only ever opens from the floating orb (right-click), so its
+// code loads on demand; it is warmed up while idle so that first right-click
+// is still instant.
+const loadAgentPanel = () => import('@/components/agent/AgentPanel');
+const AgentPanel = React.lazy(loadAgentPanel);
+
 export default function Widget() {
   const [events, setEvents]           = useState<PlannerData>({});
   const [interval, setIntervalOpt]    = useState<IntervalMin>(5);
@@ -248,6 +257,19 @@ export default function Widget() {
   const [dayEndH, setDayEndH]           = useState(31);
   const [nowTick, setNowTick]           = useState(Date.now());
   const [isPinned, setIsPinned]         = useState(true);
+  // ── Floating orb (widget-window.py / planner_orb.py) ──
+  // With orb mode on, this window lives tucked into a small dot and comes out
+  // on hover, click or right-click (the assistant). The window itself is
+  // hidden and shown natively; this page only animates in and reports the
+  // numbers the orb's ring shows.
+  const [bridgeReady, setBridgeReady] = useState(() => !!(window as any).pywebview?.api);
+  const [orbEnabled, setOrbEnabled]   = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantMounted, setAssistantMounted] = useState(false);
+  const [winWidth, setWinWidth] = useState(() => window.innerWidth);
+  const [focusExcludedDates, setFocusExcludedDates] = useState<string[]>([]);
+  const [focusGoalSeconds, setFocusGoalSeconds] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   /** Serialized form of the sessions on screen — see `applyFocusSessions`. */
   const lastFocusSessionsJsonRef = useRef<string | null>(null);
@@ -332,6 +354,12 @@ export default function Widget() {
         if (s.taskColor) setTaskColor(s.taskColor);
         if (s.taskCheckboxShape) setTaskCheckboxShape(s.taskCheckboxShape as TaskCheckboxShape);
         if (s.focusDayStartHour != null) setFocusDayStartHour(Math.max(0, Math.min(23, Number(s.focusDayStartHour))));
+        if (Array.isArray(s.focusExcludedDates)) {
+          const next = s.focusExcludedDates.filter((d: unknown): d is string => typeof d === 'string');
+          // Same list again (every poll): keep the old array so nothing recomputes.
+          setFocusExcludedDates(prev => (prev.join('|') === next.join('|') ? prev : next));
+        }
+        if (s.focusDailyGoalSeconds != null) setFocusGoalSeconds(Math.max(0, Number(s.focusDailyGoalSeconds) || 0));
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
         setHardware(coerceHardwareSettings(s.hardware));
@@ -654,6 +682,91 @@ export default function Widget() {
   }), [focusSessions, focusDayStartHour, focusTodayKey]);
   const focusProgressPct = Math.min(100, Math.max(0, (focusElapsedSeconds / focusTimer.plannedSeconds) * 100));
 
+  // The orb's ring: today against the average day of the last 30.
+  const orbAverage = useMemo(
+    () => orbAverageSeconds(tallyFocusDays(focusSessions, focusDayStartHour), focusTodayKey, focusExcludedDates),
+    [focusSessions, focusDayStartHour, focusTodayKey, focusExcludedDates],
+  );
+  const orbFrac = quantiseOrbFraction(orbFraction(todayFocusSeconds, orbAverage, focusGoalSeconds));
+  const orbRunning = !!focusTimer.isRunning;
+  useEffect(() => {
+    if (!bridgeReady) return;
+    (window as any).pywebview?.api?.orb_state?.(orbFrac, orbRunning, false);
+  }, [bridgeReady, orbFrac, orbRunning]);
+
+  useEffect(() => {
+    if (bridgeReady) return;
+    const on = () => setBridgeReady(true);
+    window.addEventListener('pywebviewready', on);
+    return () => window.removeEventListener('pywebviewready', on);
+  }, [bridgeReady]);
+
+  useEffect(() => {
+    if (!bridgeReady) return;
+    Promise.resolve((window as any).pywebview?.api?.orb_info?.())
+      .then((info: any) => { if (info) setOrbEnabled(!!info.enabled); })
+      .catch(() => { /* an older launcher: no orb */ });
+  }, [bridgeReady]);
+
+  useEffect(() => {
+    const onResize = () => setWinWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // What the launcher says just happened to this window. The pop-in is a
+  // class toggled straight on the DOM: no React render on the way in.
+  useEffect(() => {
+    (window as any).__plannerOrb = (cmd: string) => {
+      if (cmd === 'hide') { setAssistantOpen(false); return; }
+      const el = rootRef.current;
+      if (el) { el.classList.remove('orb-pop'); void el.offsetWidth; el.classList.add('orb-pop'); }
+      if (cmd === 'assistant') { setAssistantMounted(true); setAssistantOpen(true); }
+      else setAssistantOpen(false);
+    };
+    return () => { delete (window as any).__plannerOrb; };
+  }, []);
+
+  // Warm the assistant up while idle, mounted but closed (no connection
+  // until it opens), so a right-click on the orb shows it at once.
+  useEffect(() => {
+    if (!orbEnabled || assistantMounted) return;
+    const id = window.setTimeout(() => {
+      loadAgentPanel().then(() => setAssistantMounted(true)).catch(() => {});
+    }, 2500);
+    return () => window.clearTimeout(id);
+  }, [orbEnabled, assistantMounted]);
+
+  const tuckIntoOrb = useCallback(() => {
+    (window as any).pywebview?.api?.orb_tuck?.();
+  }, []);
+
+  const toggleOrbMode = () => {
+    const next = !orbEnabled;
+    setOrbEnabled(next);
+    if (!next) setAssistantOpen(false);
+    (window as any).pywebview?.api?.orb_set_enabled?.(next);
+  };
+
+  const closeAssistant = useCallback(() => {
+    setAssistantOpen(false);
+    if (orbEnabled) tuckIntoOrb();
+  }, [orbEnabled, tuckIntoOrb]);
+
+  // Esc puts the widget back into the orb, unless something inside the
+  // widget (a field, an editor) is using the key.
+  useEffect(() => {
+    if (!orbEnabled) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || assistantOpen) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      tuckIntoOrb();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [orbEnabled, assistantOpen, tuckIntoOrb]);
+
 
   const colEvents = useMemo(() => {
     if (todayColIdx === -1) return [];
@@ -874,12 +987,14 @@ export default function Widget() {
   }, [nowTick, normNowMin, centerScrollOnLive]);
 
   const minimizeWidget = () => {
+    if (orbEnabled) { tuckIntoOrb(); return; }
     if ((window as any).pywebview?.api?.minimize) {
       (window as any).pywebview.api.minimize();
     }
   };
 
   const closeWidget = () => {
+    if (orbEnabled) { tuckIntoOrb(); return; }
     if ((window as any).pywebview?.api?.close) {
       (window as any).pywebview.api.close();
     } else {
@@ -1410,14 +1525,31 @@ export default function Widget() {
   const surfaceBdr = widgetTheme.surfaceBdr;
   const menuText   = darkMode ? '#e8e8e8' : '#1a1a1a';
   const menuSub    = darkMode ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.40)';
+  const agentTheme: AgentTheme = {
+    darkMode,
+    text: menuText,
+    sub: menuSub,
+    bg: widgetTheme.cardBg,
+    bdr: surfaceBdr,
+    surface: surfaceBg,
+    hover: darkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)',
+    accent: darkMode ? '#38bdf8' : '#0284c7',
+  };
 
   return (
     <div
+      ref={rootRef}
       onMouseDown={handleWindowMouseDown}
-      className={`h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`}
+      className={`relative h-screen bg-background text-foreground flex flex-col font-sans select-none overflow-hidden ${darkMode ? 'dark' : ''}`}
       style={{ background: widgetTheme.rootBg }}
     >
       <style>{`
+        /* Coming out of the orb: the content settles in while the window's
+           own background stays put (fading the whole window would flash
+           whatever is behind the page). backwards, not both, so nothing
+           is left overriding transforms afterwards. */
+        @keyframes orb-pop { from { opacity: 0; transform: translateY(4px) scale(0.985); } to { opacity: 1; transform: none; } }
+        .orb-pop > *:not(.agent-panel-host) { animation: orb-pop 150ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards; }
         /* Hide scrollbars globally in the widget window */
         html, body, #root {
           margin: 0;
@@ -1513,6 +1645,15 @@ export default function Widget() {
           </div>
         </div>
         <div className="flex items-center gap-0.5 pointer-events-auto flex-shrink-0">
+          {bridgeReady && (
+            <button
+              onClick={toggleOrbMode}
+              className={`wgt-header-btn ${orbEnabled ? 'is-active' : ''}`}
+              title={orbEnabled ? 'Floating orb is on: the widget hides into it. Click to keep the widget out instead.' : 'Tuck the widget into a floating orb'}
+            >
+              <CircleDot size={13} />
+            </button>
+          )}
           <button
             onClick={togglePin}
             className={`wgt-header-btn ${isPinned ? 'is-active' : ''}`}
@@ -1532,7 +1673,7 @@ export default function Widget() {
         </div>
       </header>
 
-      <section className={`flex-shrink-0 px-3 ${focusCollapsed ? 'py-2' : 'py-3'} border-b border-border/50 transition-smooth duration-200`} style={{ background: darkMode ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.38)' }}>
+      <section className={`flex-shrink-0 px-3 ${focusCollapsed ? 'py-2' : 'py-3'} border-b border-border/50 transition-smooth duration-200`} style={{ background: darkMode ? 'rgba(0,0,0,0.18)' : 'rgba(255,255,255,0.38)', zoom: 0.88 }}>
         <div className="rounded-lg overflow-hidden" style={{ background: surfaceBg, border: `1px solid ${surfaceBdr}` }}>
           <div className={`${focusCollapsed ? 'px-3 py-2' : 'px-3 pt-3 pb-2'} flex items-center justify-between gap-2`}>
             <div className="flex items-center gap-2 min-w-0">
@@ -1934,9 +2075,12 @@ export default function Widget() {
                 const isHour = time.endsWith(':00');
                 return (
                   <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i * sh, height: sh }}>
-                    <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[12px] font-semibold text-muted-foreground' : 'mt-1 text-[7.5px] text-muted-foreground/30'}`}>
-                      {formatSlotLabel(time, timeFormat)}
-                    </span>
+                    {/* Minor labels only where there is room for them. */}
+                    {(isHour || sh >= 14) && (
+                      <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[12px] font-semibold text-muted-foreground' : 'mt-1 text-[7.5px] text-muted-foreground/30'}`}>
+                        {formatSlotLabel(time, timeFormat)}
+                      </span>
+                    )}
                   </div>
                 );
               })}
@@ -2500,6 +2644,25 @@ export default function Widget() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* The assistant, opened by right-clicking the orb: slides over the
+          widget and fills the window. */}
+      {assistantMounted && (
+        <div className="agent-panel-host" data-no-drag="true" style={{ display: 'contents' }}>
+          <React.Suspense fallback={null}>
+            <AgentPanel
+              open={assistantOpen}
+              onClose={closeAssistant}
+              theme={agentTheme}
+              timeFormat={timeFormat === '24h' ? '24h' : '12h'}
+              fullscreen={false}
+              floating
+              width={winWidth}
+              onResize={() => { /* the window edge resizes it */ }}
+            />
+          </React.Suspense>
+        </div>
+      )}
     </div>
   );
 }
