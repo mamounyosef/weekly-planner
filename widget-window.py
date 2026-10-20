@@ -908,9 +908,7 @@ def on_widget_closing():
 # on, the widget is hidden until wanted:
 #
 #   rest the mouse on the orb  -> the widget peeks out beside it, and goes
-#                                 again once the mouse leaves both (unless you
-#                                 clicked into it: then it stays until you
-#                                 click somewhere else)
+#                                 again once the mouse leaves both
 #   click                      -> the widget opens and stays (click again: away)
 #   right-click                -> the assistant, in the widget's place
 #   double-click               -> the full planner
@@ -1120,10 +1118,10 @@ def _peek_watch_loop():
             continue
         scale = _orb.scale if _orb else 1.0
         margin = int(PEEK_MARGIN * scale)
-        focused = user32.GetForegroundWindow() == hwnd
-        if focused:
-            _peek_engaged = True
-        if _inside(pt, _rect(hwnd), margin) or _inside(pt, _orb.rect() if _orb else None, margin) or focused:
+        # Only a click on the orb pins the widget. Clicking INSIDE a peeking
+        # widget (a task, "show more") used to keep it open until focus moved,
+        # which read as pinning itself for no reason.
+        if _inside(pt, _rect(hwnd), margin) or _inside(pt, _orb.rect() if _orb else None, margin):
             left_at = None
             continue
         now = time.monotonic()

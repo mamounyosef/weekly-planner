@@ -303,8 +303,9 @@ export default function Widget() {
   const [stickyTasksWidget, setStickyTasksWidget]   = useState(true);
   const [overlapLayout, setOverlapLayout]           = useState<OverlapLayoutMode>('fit');
   const [showTaskRow, setShowTaskRow]               = useState(true);
-  const [widgetTasksDoneExpanded, setWidgetTasksDoneExpanded] = useState(false);  const [taskColor, setTaskColor]                   = useState('#7dd3fc');
-  const [taskCheckboxShape, setTaskCheckboxShape]   = useState<TaskCheckboxShape>('circle');
+  const [widgetTasksDoneExpanded, setWidgetTasksDoneExpanded] = useState(false);
+  const [widgetTasksOpenExpanded, setWidgetTasksOpenExpanded] = useState(false);
+  const [taskColor, setTaskColor]                   = useState('#7dd3fc');  const [taskCheckboxShape, setTaskCheckboxShape]   = useState<TaskCheckboxShape>('circle');
   const [tasks, setTasks]                           = useState<TaskData>({});
   const [overflowModal, setOverflowModal]           = useState<{
     type: 'all-day' | 'tasks';
@@ -1882,6 +1883,7 @@ export default function Widget() {
           const MAX_TASKS_VISIBLE = 4;
           const visibleTasks = openWidgetTasks.slice(0, MAX_TASKS_VISIBLE);
           const hasMoreTasks = openWidgetTasks.length > MAX_TASKS_VISIBLE;
+          const displayedOpenWidgetTasks = widgetTasksOpenExpanded ? openWidgetTasks : visibleTasks;
 
           return (
             <>
@@ -1974,11 +1976,12 @@ export default function Widget() {
                   </div>
                   {/* Tasks list */}
                   <div className="flex-1 p-1.5 flex flex-col gap-1">
-                    {visibleTasks.map((item, idx) => {
+                    {displayedOpenWidgetTasks.map((item, idx) => {
                       const t = item.task;
                       const occ = t.occDate ?? null;
                       const done = isTaskDone(t, occ);
-                      const showDayLabel = idx === 0 || visibleTasks[idx - 1].dayLabel !== item.dayLabel;
+                      const showDayLabel = idx === 0 || displayedOpenWidgetTasks[idx - 1].dayLabel !== item.dayLabel;
+                      const isLastVisibleDay = idx === displayedOpenWidgetTasks.length - 1 || displayedOpenWidgetTasks[idx + 1].dayLabel !== item.dayLabel;
                       return (
                         <>
                           {showDayLabel && (
@@ -2018,6 +2021,9 @@ export default function Widget() {
                               taskCheckboxShape === 'square' ? <Square size={10} /> : <Circle size={10} />
                             )}
                           </span>
+                          <span className="text-[8px] font-bold uppercase tracking-wide px-1 rounded" style={{ background: `${taskColor}22`, color: taskColor }}>
+                            {item.dayLabel}
+                          </span>
                           <span className={`truncate flex-1 ${done ? 'line-through opacity-60' : ''}`}>
                             {t.title || 'Untitled task'}
                           </span>
@@ -2025,6 +2031,22 @@ export default function Widget() {
                         </>
                       );
                     })}
+                    {hasMoreTasks && (
+                      <button
+                        type="button"
+                        onClick={() => setWidgetTasksOpenExpanded(v => !v)}
+                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-smooth active:scale-[0.98] shadow-2xs"
+                        style={{
+                          background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                          borderColor: surfaceBdr,
+                          color: menuSub,
+                        }}
+                        title="Show all open tasks"
+                      >
+                        {widgetTasksOpenExpanded ? <ChevronUp size={12} /> : <MoreHorizontal size={12} />}
+                        <span>{widgetTasksOpenExpanded ? 'Show less' : `+${openWidgetTasks.length - MAX_TASKS_VISIBLE} more`}</span>
+                      </button>
+                    )}
                     {doneWidgetTasks.length > 0 && (
                       <div className="flex flex-col gap-1">
                         <button
@@ -2041,7 +2063,7 @@ export default function Widget() {
                           {widgetTasksDoneExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                           <span>{doneWidgetTasks.length} done</span>
                         </button>
-                        {widgetTasksDoneExpanded && doneWidgetTasks.map(({ task: t }) => {
+                        {widgetTasksDoneExpanded && doneWidgetTasks.map(({ task: t, dayLabel }) => {
                           const occ = t.occDate ?? null;
                           const done = true;
                           return (
@@ -2058,6 +2080,9 @@ export default function Widget() {
                               <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
                                 {taskCheckboxShape === 'square' ? <CheckSquare size={10} /> : <CheckCircle2 size={10} />}
                               </span>
+                              <span className="text-[8px] font-bold uppercase tracking-wide px-1 rounded" style={{ background: `${taskColor}22`, color: taskColor }}>
+                                {dayLabel}
+                              </span>
                               <span className={`truncate flex-1 line-through opacity-60`}>
                                 {t.title || 'Untitled task'}
                               </span>
@@ -2065,26 +2090,6 @@ export default function Widget() {
                           );
                         })}
                       </div>
-                    )}
-                    {hasMoreTasks && (
-                      <button
-                        type="button"
-                        onClick={() => setOverflowModal({
-                          type: 'tasks',
-                          title: "Today's and Yesterday's Tasks",
-                          items: widgetTasks.map(x => x.task)
-                        })}
-                        className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-smooth active:scale-[0.98] shadow-2xs"
-                        style={{
-                          background: darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-                          borderColor: surfaceBdr,
-                          color: menuSub,
-                        }}
-                        title="Click to view all tasks"
-                      >
-                        <MoreHorizontal size={12} />
-                        <span>+{todayTasks.length - MAX_TASKS_VISIBLE} more</span>
-                      </button>
                     )}
                   </div>
                 </div>
@@ -2142,12 +2147,14 @@ export default function Widget() {
                 const isHour = time.endsWith(':00');
                 return (
                   <div key={time} className="absolute w-full flex justify-center items-start" style={{ top: i * sh, height: sh }}>
-                    {/* Minor labels only where there is room for them. */}
-                    {(isHour || sh >= 14) && (
-                      <span className={`leading-none px-1 tabular-nums ${isHour ? 'mt-1 text-[12px] font-semibold text-muted-foreground' : 'mt-1 text-[7.5px] text-muted-foreground/30'}`}>
-                        {formatSlotLabel(time, timeFormat)}
-                      </span>
-                    )}
+                    {/* Every slot keeps its label. On the compact grid the
+                        margins shrink so an hour label never runs into the
+                        :05 label under it. */}
+                    <span className={`leading-none px-1 tabular-nums ${isHour
+                      ? (sh < 14 ? 'mt-0 text-[11px] font-semibold text-muted-foreground' : 'mt-1 text-[12px] font-semibold text-muted-foreground')
+                      : (sh < 14 ? 'mt-[1.5px] text-[7.5px] text-muted-foreground/30' : 'mt-1 text-[7.5px] text-muted-foreground/30')}`}>
+                      {formatSlotLabel(time, timeFormat)}
+                    </span>
                   </div>
                 );
               })}
