@@ -1863,11 +1863,23 @@ export default function Widget() {
           const todayTasks = Object.values(res).filter(t => {
             if (t.deleted || t.startTime) return false;
             return t.dayIndex === targetDayIdx;
-          });
+          }).map(t => ({ task: t, dayLabel: 'Today' }));
 
-          const MAX_TASKS_VISIBLE = 3;
-          const visibleTasks = todayTasks.slice(0, MAX_TASKS_VISIBLE);
-          const hasMoreTasks = todayTasks.length > MAX_TASKS_VISIBLE;
+          // Yesterday's tasks may live in the previous week.
+          const yestDate = addDays(today, -1);
+          const yestWeekKey = weekKeyOf(yestDate, weekStartsOn);
+          const yestWeekStart = startOfWeek(yestDate, { weekStartsOn });
+          const yestDayIdx = Math.max(0, Math.min(6, differenceInDays(startOfDay(yestDate), startOfDay(yestWeekStart))));
+          const yestRes = resolveWeekTasks(tasks, yestWeekKey, undefined, weekStartsOn);
+          const yesterdayTasks = Object.values(yestRes).filter(t => {
+            if (t.deleted || t.startTime) return false;
+            return t.dayIndex === yestDayIdx;
+          }).map(t => ({ task: t, dayLabel: 'Yesterday' }));
+
+          const widgetTasks = [...yesterdayTasks, ...todayTasks];
+          const MAX_TASKS_VISIBLE = 4;
+          const visibleTasks = widgetTasks.slice(0, MAX_TASKS_VISIBLE);
+          const hasMoreTasks = widgetTasks.length > MAX_TASKS_VISIBLE;
 
           return (
             <>
@@ -1945,7 +1957,7 @@ export default function Widget() {
               )}
 
               {/* Tasks row */}
-              {showTaskRow && todayTasks.length > 0 && (
+              {showTaskRow && widgetTasks.length > 0 && (
                 <div
                   className={`flex border-b border-border/50 flex-shrink-0 ${stickyTasksWidget ? 'sticky z-[35] shadow-xs backdrop-blur-md' : ''}`}
                   style={{
@@ -1960,10 +1972,21 @@ export default function Widget() {
                   </div>
                   {/* Tasks list */}
                   <div className="flex-1 p-1.5 flex flex-col gap-1">
-                    {visibleTasks.map(t => {
+                    {visibleTasks.map((item, idx) => {
+                      const t = item.task;
                       const occ = t.occDate ?? null;
                       const done = isTaskDone(t, occ);
+                      const showDayLabel = idx === 0 || visibleTasks[idx - 1].dayLabel !== item.dayLabel;
                       return (
+                        <>
+                          {showDayLabel && (
+                            <div
+                              className="text-[8px] font-bold uppercase tracking-widest px-1 pt-0.5"
+                              style={{ color: menuSub }}
+                            >
+                              {item.dayLabel}
+                            </div>
+                          )}
                         <div
                           key={t.id}
                           onClick={() => {
@@ -1997,6 +2020,7 @@ export default function Widget() {
                             {t.title || 'Untitled task'}
                           </span>
                         </div>
+                        </>
                       );
                     })}
                     {hasMoreTasks && (
@@ -2004,8 +2028,8 @@ export default function Widget() {
                         type="button"
                         onClick={() => setOverflowModal({
                           type: 'tasks',
-                          title: "Today's Tasks",
-                          items: todayTasks
+                          title: "Today's and Yesterday's Tasks",
+                          items: widgetTasks.map(x => x.task)
                         })}
                         className="px-2 py-0.5 rounded-md border text-[10px] font-semibold flex items-center justify-center gap-1 transition-smooth active:scale-[0.98] shadow-2xs"
                         style={{
