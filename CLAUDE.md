@@ -69,6 +69,11 @@
   resolved via 8.8.8.8 with explicit SNI. Neither a local fetch nor a DNS lookup
   proves anything: on this machine the name resolves to the 100.x tailnet address,
   and the public DNS record was observed still resolving while the funnel was down.
+- After the nightly hibernate, Tailscale sometimes takes ~30 min to republish the
+  public DNS record; local restarts never speed it up. The watchdog detects a wake
+  (gap > 15 min between runs) and for 45 min only re-asserts, never restarts or
+  alerts. The phone runs the Tailscale app, so MagicDNS reaches the PC privately
+  under the same name and does not depend on that public record.
 - The dev server is only restarted after 2 consecutive failed probes, so a vite
   rebuild does not trigger a relaunch. Create `database/watchdog-off` to pause the
   watchdog entirely when deliberately stopping the server; delete it to resume.

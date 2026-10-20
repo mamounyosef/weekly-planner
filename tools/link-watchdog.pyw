@@ -221,6 +221,21 @@ GRACE_PROBE_EVERY = 30
 # being fixed; an alert every five minutes would be the same bug, ignored.
 ALERT_AFTER_STRIKES = 2
 
+# After the PC resumes from its nightly hibernate, Tailscale's control plane
+# sometimes takes ~30 minutes to republish the public DNS record (2026-10-15,
+# -19, -20). Nothing local speeds that up: five service restarts in a row never
+# did, they only dropped the tailnet each time. So inside this window a missing
+# record gets the gentle rung only and raises no alert. The phone is unaffected
+# when it runs the Tailscale app: MagicDNS resolves the same name privately.
+# A gap this long between runs (they are 5 minutes apart) means the PC was
+# asleep, hibernated or off.
+WAKE_GAP_SECONDS = 15 * 60
+POST_WAKE_GRACE_SECONDS = 45 * 60
+
+# A single failed probe is often just a slow or dropped DNS answer from 8.8.8.8.
+# Re-probe once before treating it as an outage.
+PROBE_RETRY_DELAY = 15
+
 
 def alert(title, body, critical):
     """Raise a Windows toast. Best effort: never let this break the watchdog."""
@@ -345,6 +360,14 @@ def main():
 
     state = load_state()
 
+    now = time.time()
+    last = state.get("last_run_ts")
+    if not isinstance(last, (int, float)) or now - last > WAKE_GAP_SECONDS:
+        state["woke_at"] = now
+    state["last_run_ts"] = now
+    woke_at = state.get("woke_at")
+    just_woke = isinstance(woke_at, (int, float)) and now - woke_at < POST_WAKE_GRACE_SECONDS
+
     ensure_service()
     host = ensure_backend()
 
@@ -369,6 +392,9 @@ def main():
 
     if host:
         ok, detail = public_ok(host)
+        if not ok:
+            time.sleep(PROBE_RETRY_DELAY)
+            ok, detail = public_ok(host)
         if ok:
             if state.get("public_fail_streak"):
                 log("public link healthy again (%s)" % detail)
@@ -389,8 +415,14 @@ def main():
             # just burn 10 more minutes of outage.
             if streak >= 2 and detail == "no public DNS record":
                 rung = len(REPAIR_LADDER)
+            # ...except right after a wake, when the record is just slow to come
+            # back and a restart only knocks the tailnet over again.
+            post_wake_dns = just_woke and detail == "no public DNS record"
+            if post_wake_dns:
+                rung = 1
             name, fix = REPAIR_LADDER[rung - 1]
-            log("  repair step %d: %s" % (streak, name))
+            log("  repair step %d: %s%s" % (
+                streak, name, " (post-wake grace)" if post_wake_dns else ""))
             try:
                 fix()
             except Exception as e:
@@ -406,7 +438,8 @@ def main():
                 state["alerted"] = False
             else:
                 log("  still down after repair (%s)" % detail)
-                if streak >= ALERT_AFTER_STRIKES and not state.get("alerted"):
+                if (streak >= ALERT_AFTER_STRIKES and not post_wake_dns
+                        and not state.get("alerted")):
                     state["alerted"] = True
                     alert(
                         "Planner link is down",
