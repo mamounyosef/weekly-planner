@@ -8,9 +8,26 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowRight, BadgeCheck, CalendarDays, Check, CircleHelp, Copy, CornerDownLeft, Loader2,
-  ShieldAlert, Trash2, Undo2,
+  AlertTriangle, ArrowRight, BadgeCheck, CalendarDays, Check, CircleHelp, Copy, CornerDownLeft, ListTodo, Loader2,
+  Settings2, ShieldAlert, Tag, Timer, Trash2, Undo2,
 } from 'lucide-react';
+
+/** Heading icons for the report's dateless sections. */
+const SECTION_ICON: Record<string, React.ComponentType<{ size?: number }>> = {
+  Categories: Tag,
+  'Task lists': ListTodo,
+  Settings: Settings2,
+  'Focus timer': Timer,
+};
+
+/** What the narrow left column says for things with no time of their own. */
+const KIND_LABEL: Record<string, string> = {
+  task: 'Task',
+  category: 'Category',
+  task_list: 'List',
+  setting: 'Setting',
+  focus_timer: 'Timer',
+};
 
 import type { AgentApproval, AgentQuestion, AgentQuestionAnswer, ChangeSet } from '@/lib/agent/agentTypes';
 import { buildReport, reportAsText, summarize, type Tone } from '@/lib/agent/agentReport';
@@ -388,7 +405,7 @@ export function ReportCard({ sets, timeFormat, theme, onUndo, onOpenDate }: {
                 style={{ color: theme.sub }}
                 title={g.date && onOpenDate ? 'Show this day in the calendar' : undefined}
               >
-                <CalendarDays size={11} />
+                {React.createElement(SECTION_ICON[g.heading] ?? CalendarDays, { size: 11 })}
                 {g.heading}
                 {g.date && onOpenDate && <ArrowRight size={10} className="opacity-0 group-hover:opacity-100 transition-opacity" />}
               </button>
@@ -408,14 +425,14 @@ export function ReportCard({ sets, timeFormat, theme, onUndo, onOpenDate }: {
                       <span className="w-1 rounded-full flex-shrink-0" style={{ background: bar, opacity: struck ? 0.35 : 0.9 }} />
                       <div className="w-[74px] flex-shrink-0 pt-px">
                         <div className="text-[11px] font-semibold tabular-nums leading-tight" style={{ color: theme.text }}>
-                          {r.facts?.allDay ? 'All day' : r.facts?.startTime ? r.time.split(' to ')[0] : r.facts?.kind === 'task' ? 'Task' : ''}
+                          {r.facts?.allDay && r.facts.kind !== 'category' ? 'All day' : r.facts?.startTime ? r.time.split(' to ')[0] : KIND_LABEL[r.facts?.kind ?? r.entry.kind] ?? ''}
                         </div>
                         {r.facts?.endTime && !r.facts.allDay && (
                           <div className="text-[10.5px] tabular-nums leading-tight" style={{ color: theme.sub }}>
                             {r.time.split(' to ')[1]}
                           </div>
                         )}
-                        {r.facts?.allDay && r.facts.endDate && <div className="text-[10.5px] leading-tight" style={{ color: theme.sub }}>{r.time.replace('All day, ', '')}</div>}
+                        {r.facts?.allDay && r.facts.kind !== 'category' && r.facts.endDate && <div className="text-[10.5px] leading-tight" style={{ color: theme.sub }}>{r.time.replace('All day, ', '')}</div>}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-start gap-1.5">

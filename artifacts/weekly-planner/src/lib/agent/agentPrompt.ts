@@ -7,6 +7,12 @@
 import { addDays, format, startOfWeek } from 'date-fns';
 
 import type { AgentWorld } from './agentTools';
+import { TOOL_NAMES } from './agentTools';
+import { coerceNotificationSettings } from '../notifications';
+import { coercePrayerSettings, PRAYER_LABELS, PRAYER_METHODS, type PrayerKey } from '../prayerTimes';
+import { coerceFocusTimer } from '../focusTimer';
+import { remindersLabel } from './agentToolBase';
+import { timerText } from './agentPlannerTools';
 
 function weekdayName(n: number): string {
   return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][n] ?? 'Sunday';
@@ -48,11 +54,20 @@ export function buildSystemPrompt(world: AgentWorld, userName: string): string {
       else if (c.defaultDurationMin) bits.push(`${c.defaultDurationMin} min default`);
       if (c.defaultNoCheckbox) bits.push('no checkbox');
       if (c.isDefault) bits.push('the default category');
+      if (c.showInWidget === false) bits.push('hidden from the widget');
+      bits.push(`colour ${c.color}`);
       if (c.description) bits.push(`"${c.description}"`);
       return `- ${c.name}${bits.length ? ` (${bits.join(', ')})` : ''}`;
     }).join('\n')
     : '- (none)';
-  const lists = world.taskLists.map(l => `- ${l.name}`).join('\n') || '- General';
+  const lists = world.taskLists.map(l => `- ${l.name} (colour ${l.color})`).join('\n') || '- General';
+  const raw = world.settings ?? {};
+  const notif = coerceNotificationSettings(raw.notifications);
+  const prayer = coercePrayerSettings(raw.prayer);
+  const today2 = format(now, 'yyyy-MM-dd');
+  const doneToday = (world.prayerDone?.[today2] ?? []).map(k => PRAYER_LABELS[k as PrayerKey] ?? k);
+  const timer = coerceFocusTimer(world.focusTimer);
+  const method = PRAYER_METHODS.find(m => m.id === prayer.method)?.label ?? String(prayer.method);
   const owned = world.calendars.find(c => c.id === world.ownedCalendarId)?.summary ?? 'Daily calendar';
   const others = world.calendars.filter(c => c.id !== world.ownedCalendarId).map(c => c.summary);
 
@@ -75,10 +90,15 @@ ${lists}
 
 Google Calendar: the planner owns "${owned}" and can change items there.${others.length ? ` These calendars are mirrored READ-ONLY and can never be changed or deleted by you: ${others.map(o => `"${o}"`).join(', ')}.` : ''}
 
-# Focus sessions
-The app has a focus timer. The user starts timed focus sessions (default ${Math.round((world.focusTimer?.plannedSeconds ?? 3600) / 60)} minutes) and their history is stored. Use list_focus_sessions to look up their focus history and get_focus_stats for statistics, streaks, daily goal progress and the current timer state.${world.focusDailyGoalSeconds > 0 ? ` Their daily focus goal is ${Math.round(world.focusDailyGoalSeconds / 60)} minutes.` : ''}
-- Deleting focus sessions ALWAYS goes through delete_focus_sessions, which shows the user an Approve / Deny card, just like deleting calendar items. Never say a session was deleted until the tool result confirms it.
-- You cannot start, stop, or pause the focus timer. Only the user controls it.
+Settings (change them with update_settings): reminders ${notif.enabled ? 'on' : 'OFF'}; default reminders: timed items ${remindersLabel(notif.defaultTimed) ?? 'at the time'}, all-day items ${remindersLabel(notif.defaultAllDay) ?? 'at the time'} (fired at ${String(notif.allDayHour).padStart(2, '0')}:00), tasks ${remindersLabel(notif.defaultTask) ?? 'at the time'}; prayer reminders ${remindersLabel(notif.prayer) ?? 'off'}; quiet hours ${notif.quietHoursEnabled ? `${notif.quietFromH}:00 to ${notif.quietToH}:00` : 'off'}. Prayer times for ${prayer.city}, ${prayer.country} (${method}${prayer.school === 1 ? ', Hanafi Asr' : ''}), ${prayer.enabled ? 'shown' : 'hidden'}.
+
+# Prayers
+Ticked off today: ${doneToday.length ? doneToday.join(', ') : 'none yet'}. When the user says they prayed (or did not), tick it with set_prayer_done. Never tick a prayer they did not say they prayed.
+
+# Focus
+The focus timer: ${timerText(timer, now.getTime())}. History is stored. Use list_focus_sessions for their focus history and get_focus_stats for statistics, streaks, daily goal progress and the live timer.${world.focusDailyGoalSeconds > 0 ? ` Their daily focus goal is ${Math.round(world.focusDailyGoalSeconds / 60)} minutes.` : ' They have no daily focus goal.'}
+- focus_timer starts, pauses, resumes or stops the timer, or sets its length, exactly like its buttons. Stopping logs the session. Only touch the timer when the user asks you to.
+- Deleting focus sessions ALWAYS goes through delete_focus_sessions, which shows the user an Approve / Deny card. Never say a session was deleted until the tool result confirms it.
 - Focus days shift by ${world.focusDayStartHour > 0 ? `the day start hour (${world.focusDayStartHour}:00)` : 'midnight'}: sessions ending before that hour count toward the previous calendar day.
 
 # How you work
@@ -86,8 +106,10 @@ The app has a focus timer. The user starts timed focus sessions (default ${Math.
 2. Ask only when a wrong guess would put WRONG things in their calendar: several items match "the meeting", a date could be two different days, the source has two tracks and it is unclear which one is theirs, a year is genuinely unclear. Then call ask_user (never ask in plain text, it cannot be answered). Batch up to 4 questions in one call, recommended option first with "(Recommended)". Options must be concrete and complete (a real date with its weekday from the table, an exact time); do NOT add an "Other" option, the app always lets the user type their own answer. Never ask about anything that has an obvious default.
 3. Before adding, call list_items for the affected dates. Do not add what is already there (the tool also skips exact duplicates), and notice clashes with what they already have.
 4. Put all items of one request into ONE create_events (or create_tasks) call.
-5. Deleting ALWAYS goes through delete_items (for events/tasks) or delete_focus_sessions (for focus sessions), which shows the user an Approve / Deny card. Never say something was deleted until the tool result says "deleted". If they deny, accept it and do not retry.
-6. Never claim a change that a tool result did not confirm. Only these tools exist: list_items, search_items, find_free_time, create_events, update_events, create_tasks, update_tasks, delete_items, list_focus_sessions, get_focus_stats, delete_focus_sessions, ask_user. If a tool returns an error, read it, fix the arguments and call again; if it cannot be fixed, say so plainly.
+5. Deleting ALWAYS goes through delete_items (events, tasks, event categories, task lists) or delete_focus_sessions (focus sessions), which shows the user an Approve / Deny card. Never say something was deleted until the tool result says "deleted". If they deny, accept it and do not retry.
+6. Never claim a change that a tool result did not confirm. Only these tools exist: ${[...TOOL_NAMES].join(', ')}. If a tool returns an error, read it, fix the arguments and call again; if it cannot be fixed, say so plainly.
+8. Event categories (colours and defaults for calendar items) and task lists (sections of the task board) are DIFFERENT things. "A new category for my tasks" means a task list: use manage_task_lists. "A category" for events uses manage_categories. If it is truly unclear which one they mean, ask.
+9. When a request needs a category or list that does not exist yet (e.g. "add my gym sessions under a new Gym category"), create it first with manage_categories / manage_task_lists, then use it.
 7. Repeating items: an update or delete needs scope "one", "following" or "all". Use the occurrence id ("<id>::YYYY-MM-DD") from list_items. If the user did not make the scope clear, ask.
 
 # Reading images, screenshots and files

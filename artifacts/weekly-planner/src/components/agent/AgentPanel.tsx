@@ -7,9 +7,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowDown, ArrowUp, BarChart3, Brain, CalendarSearch, Camera, Check, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
-  Clock, FileText, History, ImagePlus, ListChecks, Loader2, Mic, MicOff, Paperclip, Pencil, Plus, Search,
-  Square, Timer, Trash2, Wand2, X,
+  ArrowDown, ArrowUp, BarChart3, Brain, CalendarSearch, Camera, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
+  Clock, FileText, History, ImagePlus, ListChecks, ListTodo, Loader2, Mic, MicOff, Pencil, Plus, Search, Settings2,
+  Square, Tag, Timer, Trash2, Wand2, X,
 } from 'lucide-react';
 
 import type { AgentConversation, AgentMessage, AgentToolTrace } from '@/lib/agent/agentTypes';
@@ -20,6 +20,8 @@ import {
 } from '@/lib/agent/agentClient';
 import AgentMarkdown from './AgentMarkdown';
 import AgentOrb from './AgentOrb';
+import ModelPicker from './ModelPicker';
+import { fmtMoney, fmtTokens, modelInfo } from '@/lib/agent/agentModels';
 import { ApprovalCard, ErrorNote, QuestionCard, ReportCard, type AgentTheme } from './AgentCards';
 import { ImagePreviewModal, type PreviewImageItem } from './ImagePreviewModal';
 
@@ -60,6 +62,11 @@ const TOOL_ICON: Record<string, React.ComponentType<{ size?: number; className?:
   get_focus_stats: BarChart3,
   delete_focus_sessions: Trash2,
   ask_user: CircleHelp,
+  manage_categories: Tag,
+  manage_task_lists: ListTodo,
+  set_prayer_done: CheckCircle2,
+  focus_timer: Timer,
+  update_settings: Settings2,
 };
 
 /** Keyframes the panel needs, injected once (Tailwind has no caret or shimmer). */
@@ -264,6 +271,17 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
   }, [width, onResize]);
 
   const lastAssistant = useMemo(() => [...(conv?.messages ?? [])].reverse().find(m => m.role === 'assistant') ?? null, [conv]);
+  // For the model menu's context meter: the latest reply that reported usage,
+  // and what the whole chat cost (unknown once any reply used an unpriced model).
+  const lastUsage = useMemo(() => [...(conv?.messages ?? [])].reverse().find(m => m.usage?.calls)?.usage ?? null, [conv]);
+  const chatCost = useMemo(() => {
+    let sum: number | null = 0;
+    for (const m of conv?.messages ?? []) {
+      if (!m.usage?.calls) continue;
+      sum = sum === null || m.usage.costUsd === null ? null : sum + m.usage.costUsd;
+    }
+    return sum;
+  }, [conv]);
   const waitingOnUser = conv?.state === 'awaiting_answer' || conv?.state === 'awaiting_approval';
   const statusLine = agent.status?.configured === false
     ? 'Not set up'
@@ -325,7 +343,7 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
         {/* Header */}
         <div className="flex-shrink-0 flex items-center gap-2.5 px-3.5 h-14 relative" style={{ background: theme.bg }}>
           <div className="absolute left-3 right-3 bottom-0 h-px pointer-events-none" style={{ background: `linear-gradient(90deg, transparent, ${theme.bdr} 15%, ${theme.bdr} 85%, transparent)` }} />
-          <AgentOrb size={26} busy={busy} />
+          <AgentOrb size={20} busy={busy} tile={{ bg: theme.surface, border: theme.bdr, radius: 9, pad: 4 }} />
           <button type="button" onClick={() => setHistoryOpen(v => !v)} className="min-w-0 flex-1 text-left rounded-lg px-1 py-0.5 transition-colors" title="Your chats" style={{ background: historyOpen ? theme.hover : undefined }}>
             <div className="text-[13.5px] font-bold truncate flex items-center gap-1" style={{ color: theme.text }}>
               <span className="truncate" dir="auto">{historyOpen ? 'Your chats' : conv?.messages.length ? conv.title : 'Assistant'}</span>
@@ -412,7 +430,7 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
         {!historyOpen && (
           <div className="flex-shrink-0 px-3 pt-2 pb-3" style={{ background: `linear-gradient(to top, ${theme.bg} 70%, transparent)` }}>
             <div
-              className="rounded-[24px] flex flex-col agent-composer"
+              className="rounded-[24px] flex flex-col agent-composer relative"
               style={{
                 ['--agent-accent' as any]: listening ? '#ef4444' : theme.accent,
                 border: `1px solid ${listening ? '#ef4444' : theme.bdr}`,
@@ -485,13 +503,14 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
                   onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
                 <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden"
                   onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
-                <ComposerButton theme={theme} title="Attach images or text files (or paste, or drop them here)" onClick={() => fileInputRef.current?.click()}><Paperclip size={16} /></ComposerButton>
+                <ComposerButton theme={theme} title="Attach images or text files (or paste, or drop them here)" onClick={() => fileInputRef.current?.click()}><Plus size={18} strokeWidth={2.25} /></ComposerButton>
                 {fullscreen && <ComposerButton theme={theme} title="Take a photo" onClick={() => cameraInputRef.current?.click()}><Camera size={16} /></ComposerButton>}
                 <ComposerButton theme={theme} title={listening ? 'Stop listening' : 'Speak'} active={listening} danger={listening} onClick={toggleMic}>
                   {listening ? <MicOff size={16} /> : <Mic size={16} />}
                 </ComposerButton>
+                <ModelPicker model={agent.model} onPick={agent.setModel} theme={theme} usage={lastUsage} chatCost={chatCost} />
                 <div className="flex-1 text-[10.5px] text-right pr-2 truncate" style={{ color: theme.sub }}>
-                  {!fullscreen && !busy && (draft ? 'Enter to send, Shift+Enter for a new line' : '')}
+                  {!fullscreen && !busy && width >= 470 && (draft ? 'Enter to send' : '')}
                 </div>
                 {busy ? (
                   <button type="button" onClick={agent.stop} title="Stop" className="h-9 w-9 rounded-full flex items-center justify-center" style={{ background: theme.text }}>
@@ -587,7 +606,7 @@ function EmptyState({ theme, onPick }: { theme: AgentTheme; gradient?: string; o
   return (
     <div className="pt-10 pb-2 space-y-7 agent-in">
       <div className="space-y-3 px-1">
-        <AgentOrb size={44} />
+        <AgentOrb size={40} tile={{ bg: theme.surface, border: theme.bdr, radius: 18, pad: 12, glow: true }} />
         <div className="text-[22px] font-semibold tracking-tight leading-tight" style={{ color: theme.text }}>
           {greeting()}.<br /><span style={{ color: theme.sub }}>What should we plan?</span>
         </div>
@@ -783,7 +802,28 @@ function AssistantBlock({ m, conv, isLast, liveText, liveThinking, theme, gradie
         )}
         {sets.length > 0 && <ReportCard sets={sets} timeFormat={timeFormat} theme={theme} onUndo={onUndo} onOpenDate={onOpenDate} />}
         {m.error && <ErrorNote theme={theme} text={m.error} />}
+        {!running && m.usage && m.usage.calls > 0 && <UsageLine usage={m.usage} theme={theme} />}
       </div>
+    </div>
+  );
+}
+
+/** Which model wrote a reply, and what it cost. Quiet until you look for it. */
+function UsageLine({ usage, theme }: { usage: NonNullable<AgentMessage['usage']>; theme: AgentTheme }) {
+  const info = modelInfo(usage.model);
+  const parts = [
+    info.name,
+    `${fmtTokens(usage.promptTokens)} in`,
+    `${fmtTokens(usage.outputTokens)} out`,
+    usage.costUsd === null ? 'price not listed' : fmtMoney(usage.costUsd),
+  ];
+  return (
+    <div
+      className="text-[10.5px] tabular-nums opacity-60 hover:opacity-100 transition-opacity"
+      style={{ color: theme.sub }}
+      title={`${usage.calls} model call${usage.calls === 1 ? '' : 's'}. Context now ${fmtTokens(usage.contextTokens)} of ${Math.round(info.context / 1024)}K.`}
+    >
+      {parts.join(' · ')}
     </div>
   );
 }

@@ -77,9 +77,10 @@ interface TasksPanelProps {
   theme: TaskTheme;
   /** Every list, in the order they appear on the rail. Always contains General. */
   lists: TaskListDef[];
-  /** Which list the panel is showing; `null` is the "All lists" view. */
-  activeListId: string | null;
-  onActiveListChange: (id: string | null) => void;
+  /** Which lists the panel is showing; `[]` is the "All lists" view. */
+  activeListIds: string[];
+  /** Toggle-replace semantics: pass the full new selected list id set. */
+  onActiveListChange: (ids: string[]) => void;
   /** Create / rename / recolour / reorder — the whole array, already updated. */
   onListsChange: (next: TaskListDef[]) => void;
   onDeleteList: (id: string, mode: ListDeleteMode) => void;
@@ -161,7 +162,7 @@ function TasksPanel({
   open, width, tasks, filters, timeFormat, weekStartsOn, taskColor, taskCheckboxShape = 'circle',
   autoRollRecurringTasks = true, theme,
   today: propToday,
-  lists, activeListId, onActiveListChange, onListsChange, onDeleteList, onMoveTaskToList,
+  lists, activeListIds, onActiveListChange, onListsChange, onDeleteList, onMoveTaskToList,
   onFiltersChange, onCreate, onToggleDone, onEdit, onDelete, onOpenMenu, onResize, onClose,
   sheet = false,
   page = false,
@@ -230,13 +231,14 @@ function TasksPanel({
     return m;
   }, [lists]);
 
-  const activeList = activeListId ? listsById[activeListId] ?? null : null;
-  // An active list that was deleted elsewhere falls back to "All" rather than
-  // leaving the panel stuck on a tab that no longer exists.
-  const effectiveListId = activeListId && activeList ? activeListId : null;
+  const selectedListIds = activeListIds ?? [];
+  const selectedListId = selectedListIds.length === 1 ? selectedListIds[0] : null;
+  const activeList = selectedListId ? listsById[selectedListId] ?? null : null;
+  // Drop ids that point at lists deleted elsewhere.
   useEffect(() => {
-    if (activeListId && !listsById[activeListId]) onActiveListChange(null);
-  }, [activeListId, listsById, onActiveListChange]);
+    const valid = selectedListIds.filter((id) => listsById[id]);
+    if (valid.length !== selectedListIds.length) onActiveListChange(valid);
+  }, [selectedListIds, listsById, onActiveListChange]);
 
   /**
    * A subtask lives wherever its parent lives. Reading it off the parent rather
@@ -250,8 +252,10 @@ function TasksPanel({
   }, [tasks, lists]);
 
   const rows = useMemo(
-    () => (effectiveListId ? allRows.filter(r => listOfTask(r.task) === effectiveListId) : allRows),
-    [allRows, effectiveListId, listOfTask],
+    () => (selectedListIds.length
+      ? allRows.filter(r => selectedListIds.includes(listOfTask(r.task)))
+      : allRows),
+    [allRows, selectedListIds, listOfTask],
   );
 
   /** Open (not done) task count per list id — what the rail's badges show. */
@@ -297,12 +301,12 @@ function TasksPanel({
   // Which list the composer files into. It follows the tab you're on, because
   // that's what "add a task here" means — but it stays overridable, so you can
   // sit on one list and throw something onto another without switching.
-  const [composerListId, setComposerListId] = useState<string>(() => effectiveListId ?? GENERAL_LIST_ID);
+  const [composerListId, setComposerListId] = useState<string>(() => selectedListId ?? GENERAL_LIST_ID);
   const [showListPicker, setShowListPicker] = useState(false);
   useEffect(() => {
-    setComposerListId(effectiveListId ?? GENERAL_LIST_ID);
+    setComposerListId(selectedListId ?? GENERAL_LIST_ID);
     setShowListPicker(false);
-  }, [effectiveListId]);
+  }, [selectedListId]);
   // The rail's inline editor: `null` closed, `'new'` creating, otherwise the id
   // of the list being edited.
   const [listEditor, setListEditor] = useState<string | null>(null);
@@ -489,7 +493,7 @@ function TasksPanel({
     if (id === 'new') {
       const fresh = { id: makeListId(trimmed), name: trimmed, color };
       onListsChange([...lists, fresh]);
-      onActiveListChange(fresh.id);
+      onActiveListChange([fresh.id]);
     } else {
       onListsChange(lists.map(l => (l.id === id ? { ...l, name: trimmed, color } : l)));
     }
@@ -503,10 +507,10 @@ function TasksPanel({
   const removeList = useCallback((id: string, mode: ListDeleteMode) => {
     // Leave the tab you were standing on before it disappears, or the panel
     // spends a render pointing at a list that is already gone.
-    if (activeListId === id) onActiveListChange(null);
+    if (selectedListIds.includes(id)) onActiveListChange(selectedListIds.filter(x => x !== id));
     setListEditor(null);
     onDeleteList(id, mode);
-  }, [activeListId, onActiveListChange, onDeleteList]);
+  }, [selectedListIds, onActiveListChange, onDeleteList]);
 
   // ── Reordering the rail ────────────────────────────────────────────────────
   // Same hook the Settings lists use, just on the horizontal axis. The default
@@ -768,7 +772,11 @@ function TasksPanel({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 min-w-0">
                 <span className="text-sm font-semibold tracking-tight truncate" style={{ color: theme.menuText }}>
-                  {activeList ? activeList.name : 'Tasks'}
+                  {selectedListIds.length === 0
+                    ? 'Tasks'
+                    : selectedListIds.length === 1
+                      ? (activeList?.name ?? 'Tasks')
+                      : `${selectedListIds.length} Lists`}
                 </span>
                 {openCount > 0 && (
                   <span
@@ -862,10 +870,10 @@ function TasksPanel({
               label="All"
               icon={<Layers size={11} />}
               tone={theme.accent}
-              active={effectiveListId === null}
+              active={selectedListIds.length === 0}
               count={lists.length > 1 ? Object.values(listCounts).reduce((a, b) => a + b, 0) : undefined}
               theme={theme}
-              onClick={() => onActiveListChange(null)}
+              onClick={() => onActiveListChange([])}
             />
             {lists.map((l, i) => (
               <React.Fragment key={l.id}>
@@ -874,7 +882,7 @@ function TasksPanel({
                   listId={l.id}
                   label={l.name}
                   tone={l.color}
-                  active={effectiveListId === l.id}
+                  active={selectedListIds.includes(l.id)}
                   count={listCounts[l.id]}
                   theme={theme}
                   editable
@@ -884,7 +892,12 @@ function TasksPanel({
                   dragActive={!!draggingId}
                   dropActive={dragOverListId === l.id}
                   onPointerDownPill={e => rail.startDrag(e, l.id)}
-                  onClick={() => { if (!rail.wasDragged()) onActiveListChange(l.id); }}
+                  onClick={() => { if (!rail.wasDragged()) {
+                    const next = selectedListIds.includes(l.id)
+                      ? selectedListIds.filter((x) => x !== l.id)
+                      : [...selectedListIds, l.id];
+                    onActiveListChange(next);
+                  } }}
                   onEdit={() => setListEditor(prev => (prev === l.id ? null : l.id))}
                   onDragOverList={() => setDragOverListId(l.id)}
                   onDragLeaveList={() => setDragOverListId(prev => (prev === l.id ? null : prev))}
@@ -1331,10 +1344,10 @@ function TasksPanel({
                 name={name}
                 label={
                   name === 'Today'
-                    ? `Today (${format(new Date(`${today}T00:00:00`), 'd/M/yyyy')})`
+                    ? format(new Date(`${today}T00:00:00`), 'EEE, MMM d')
                     : name === 'Tomorrow'
-                    ? `Tomorrow (${format(new Date(`${tomorrow}T00:00:00`), 'd/M/yyyy')})`
-                    : name
+                    ? format(new Date(`${tomorrow}T00:00:00`), 'EEE, MMM d')
+                    : undefined
                 }
                 count={list.length}
                 danger={name === 'Overdue'}
@@ -1352,7 +1365,7 @@ function TasksPanel({
                   showDate={name === 'Upcoming' || name === 'Overdue'}
                   listOf={listOfTask}
                   listsById={listsById}
-                  showListBadge={effectiveListId === null && lists.length > 1}
+                  showListBadge={(selectedListIds.length === 0 || selectedListIds.length > 1) && lists.length > 1}
                   onListHover={setDragOverListId}
                   onMoveToList={dropTaskOnList}
                   expandedParents={expandedParents}
@@ -1388,7 +1401,7 @@ function TasksPanel({
                 showDate
                 listOf={listOfTask}
                 listsById={listsById}
-                showListBadge={effectiveListId === null && lists.length > 1}
+                showListBadge={(selectedListIds.length === 0 || selectedListIds.length > 1) && lists.length > 1}
                 onListHover={setDragOverListId}
                 onMoveToList={dropTaskOnList}
                 expandedParents={expandedParents}
@@ -2199,26 +2212,29 @@ function Section({ name, label, count, danger, collapsed, theme, onToggle, child
   onToggle: () => void; children: React.ReactNode;
 }) {
   const dangerHue = theme.darkMode ? '#ff6b6b' : '#e5484d';
+  const tone = danger ? dangerHue : theme.menuText;
   return (
-    <div className="mb-2">
+    <div className="mb-1">
+      {/* A plain heading, not a box: the rows below already carry the shape. */}
       <button
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-colors group mb-1"
-        style={{ background: theme.surfaceBg, border: `1px solid ${theme.surfaceBdr}` }}
+        className="w-full flex items-baseline gap-2 px-2 pt-1 pb-1.5 rounded-lg text-left group"
       >
-        <div className="flex items-center gap-1.5">
-          {collapsed ? <ChevronRight size={13} style={{ color: theme.menuSub }} />
-                     : <ChevronDown size={13} style={{ color: theme.menuSub }} />}
-          <span
-            className="text-[11px] font-bold uppercase tracking-wider"
-            style={{ color: danger ? dangerHue : theme.menuSub }}
-          >
-            {label || name}
+        <span className="self-center flex items-center justify-center w-4 transition-transform duration-200"
+          style={{ color: theme.menuSub, transform: collapsed ? 'rotate(-90deg)' : 'none', opacity: 0.7 }}>
+          <ChevronDown size={14} />
+        </span>
+        <span className="text-[13.5px] font-semibold tracking-tight" style={{ color: tone }}>
+          {name}
+        </span>
+        {label && label !== name && (
+          <span className="text-[11.5px] font-medium tabular-nums truncate" style={{ color: theme.menuSub, opacity: 0.8 }}>
+            {label}
           </span>
-        </div>
+        )}
         <span
-          className="text-[10px] font-bold tabular-nums px-2 py-0.5 rounded-md"
-          style={{ background: danger ? `${dangerHue}20` : theme.surfaceBdr, color: danger ? dangerHue : theme.menuSub }}
+          className="ml-auto text-[11.5px] font-medium tabular-nums"
+          style={{ color: danger ? dangerHue : theme.menuSub, opacity: danger ? 0.9 : 0.75 }}
         >
           {count}
         </span>
@@ -2281,14 +2297,12 @@ const TaskList = React.memo(function TaskList({
   onOpenMenu: (occId: string, at: { x: number; y: number }, anchor?: Element | null) => void;
 }) {
   /**
-   * The list chip on a row, shown only in the All view. General is deliberately
-   * unlabelled: tagging every unfiled task "General" is noise, and the absence
-   * of a chip already reads as "not filed anywhere".
+   * The list chip on a row, shown whenever more than one list is on screen.
+   * General is labelled too, so every row says where it lives.
    */
   const badgeFor = (t: Task): TaskListDef | null => {
     if (!showListBadge) return null;
-    const id = listOf(t);
-    return id === GENERAL_LIST_ID ? null : listsById[id] ?? null;
+    return listsById[listOf(t)] ?? null;
   };
 
   const presentIds = new Set(rows.map(r => r.task.id));
@@ -2764,7 +2778,13 @@ const TaskRow = React.memo(function TaskRow({
   const dangerHue = theme.darkMode ? '#ff6b6b' : '#e5484d';
   const isCircle = taskCheckboxShape === 'circle';
   const visualDone = done || !!pendingDone;
-  const statusColor = visualDone ? theme.accent : swatch || (overdue ? dangerHue : theme.surfaceBdr);
+  const statusColor = visualDone ? theme.accent : swatch || (overdue ? dangerHue : theme.menuSub);
+  // Soft tile: a lifted fill and a top highlight instead of a hard outline.
+  const tileBg = theme.darkMode ? 'rgba(255,255,255,0.045)' : 'rgba(15,23,42,0.035)';
+  const tileHover = theme.darkMode ? 'rgba(255,255,255,0.075)' : 'rgba(15,23,42,0.06)';
+  const tileEdge = theme.darkMode
+    ? 'inset 0 1px 0 rgba(255,255,255,0.05), 0 1px 2px rgba(0,0,0,0.25)'
+    : 'inset 0 0 0 1px rgba(15,23,42,0.05), 0 1px 2px rgba(15,23,42,0.05)';
   const rowDragStartedRef = useRef(false);
   const edgeFromEvent = (e: React.DragEvent<HTMLDivElement>): InsertEdge => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -2799,13 +2819,15 @@ const TaskRow = React.memo(function TaskRow({
         e.stopPropagation?.();
         onDrop?.(row.occId, edgeFromEvent(e));
       }}
-      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition-smooth cursor-grab active:cursor-grabbing border overflow-hidden content-auto-task ${
-        lifted ? '' : isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:shadow-md hover:-translate-y-px'
+      className={`group relative flex items-start gap-3 pl-3 pr-2 py-2.5 rounded-[14px] transition-smooth cursor-grab active:cursor-grabbing overflow-hidden content-auto-task bg-[var(--tile)] ${
+        lifted ? '' : isDragging ? 'opacity-30 scale-95' : isDragActive ? '' : 'hover:bg-[var(--tile-hover)]'
       }`}
       style={{
-        background: visualDone ? `${theme.accent}10` : overdue ? `${dangerHue}08` : theme.surfaceBg,
-        borderColor: overdue ? `${dangerHue}40` : theme.surfaceBdr,
-        boxShadow: lifted ? '0 12px 30px rgba(0,0,0,0.38)' : '0 1px 0 rgba(0,0,0,0.03)',
+        ['--tile' as any]: lifted ? theme.menuBg : tileBg,
+        ['--tile-hover' as any]: tileHover,
+        backgroundImage: overdue && !visualDone ? `linear-gradient(90deg, ${dangerHue}1f, ${dangerHue}00 55%)` : undefined,
+        boxShadow: lifted ? '0 12px 30px rgba(0,0,0,0.38)' : tileEdge,
+        opacity: visualDone && !lifted ? 0.75 : undefined,
         contain: lifted ? undefined : 'layout paint',
         // Carried by the finger: off the page, above its neighbours, and
         // transparent to hit-testing so elementFromPoint reads what is BELOW it.
@@ -2824,15 +2846,6 @@ const TaskRow = React.memo(function TaskRow({
       }}
       onContextMenu={e => { e.preventDefault(); onOpenMenu(row.occId, { x: e.clientX, y: e.clientY }, e.currentTarget); }}
     >
-      <span
-        className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r-full"
-        style={{
-          background: visualDone ? `${theme.accent}80`
-            : overdue ? dangerHue
-            : listBadge ? `${listBadge.color}99`
-            : 'transparent',
-        }}
-      />
       <AnimatePresence>
         {pendingDone && (
           <motion.span
@@ -2851,7 +2864,7 @@ const TaskRow = React.memo(function TaskRow({
       {/* Checkbox with generous hit target and compact spring animation */}
       <button
         onClick={e => { e.stopPropagation(); onToggleDone(row.occId, done); }}
-        className="relative p-1.5 -m-1.5 rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer group/chk transition-smooth touch-target"
+        className="relative p-1.5 -m-1.5 mt-[-4px] rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer group/chk transition-smooth touch-target"
         title={done ? 'Mark as incomplete' : 'Mark as completed'}
       >
         <AnimatePresence>
@@ -2864,8 +2877,8 @@ const TaskRow = React.memo(function TaskRow({
               transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
               className={`absolute ${isCircle ? 'rounded-full' : 'rounded-md'}`}
               style={{
-                width: 18,
-                height: 18,
+                width: 20,
+                height: 20,
                 border: `1px solid ${theme.accent}`,
                 boxShadow: `0 0 14px ${theme.accent}80`,
               }}
@@ -2876,15 +2889,19 @@ const TaskRow = React.memo(function TaskRow({
           whileTap={{ scale: 0.8 }}
           animate={visualDone ? { scale: [1, 1.15, 1] } : { scale: 1 }}
           transition={vp.isPhone ? { duration: 0.1 } : { type: 'spring', stiffness: 450, damping: 20 }}
-          className={`relative z-10 w-4 h-4 ${isCircle ? 'rounded-full' : 'rounded'} flex items-center justify-center transition-smooth ${
-            visualDone ? 'shadow-sm' : 'group-hover/chk:scale-110'
+          className={`relative z-10 w-[18px] h-[18px] ${isCircle ? 'rounded-full' : 'rounded-[5px]'} flex items-center justify-center transition-smooth ${
+            visualDone ? '' : 'group-hover/chk:scale-105'
           }`}
           style={{
-            border: `1.5px solid ${statusColor}`,
+            border: `1.75px solid ${statusColor}`,
             background: visualDone ? theme.accent : 'transparent',
-            boxShadow: visualDone ? `0 0 10px ${theme.accent}65` : 'none',
+            boxShadow: 'none',
           }}
         >
+          {/* Hover hint, like Google Tasks: a faint tick before you commit. */}
+          {!visualDone && (
+            <Check size={11} strokeWidth={3} className="opacity-0 group-hover/chk:opacity-60 transition-opacity" style={{ color: statusColor }} />
+          )}
           <AnimatePresence mode="wait">
             {visualDone && (
               <motion.div
@@ -2894,40 +2911,40 @@ const TaskRow = React.memo(function TaskRow({
                 exit={{ scale: 0, rotate: 45, opacity: 0 }}
                 transition={vp.isPhone ? { duration: 0.08 } : { type: 'spring', stiffness: 500, damping: 22 }}
               >
-                <Check size={10} strokeWidth={3.2} color={theme.darkMode ? '#0b1220' : '#ffffff'} />
+                <Check size={11} strokeWidth={3.2} color={theme.darkMode ? '#0b1220' : '#ffffff'} />
               </motion.div>
             )}
           </AnimatePresence>
         </motion.div>
       </button>
       {/* Title & Metadata */}
-      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+      <div className="flex-1 min-w-0 flex flex-col gap-1">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span
-            className="text-[13px] font-medium leading-snug break-words"
+            className="text-[13.5px] font-normal leading-[18px] break-words"
             style={{
               color: visualDone ? theme.menuSub : theme.menuText,
               textDecoration: visualDone ? 'line-through' : 'none',
-              opacity: visualDone ? 0.68 : 1,
+              opacity: visualDone ? 0.6 : 1,
             }}
           >
             {t.title || 'Untitled task'}
           </span>
           {childProgress && (
             <span
-              className="text-[10px] font-bold tabular-nums px-1.5 py-0.5 rounded-md"
-              style={{ color: theme.menuSub, background: theme.surfaceBdr }}
+              className="text-[10.5px] font-medium tabular-nums px-1.5 rounded-full"
+              style={{ color: theme.menuSub, border: `1px solid ${theme.surfaceBdr}` }}
             >
               {childProgress}
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap empty:hidden">
           {listBadge && (
             <span
-              className="text-[10.5px] font-semibold flex items-center gap-1 px-1.5 py-0.5 rounded-md"
-              style={{ color: listBadge.color, background: `${listBadge.color}14`, border: `1px solid ${listBadge.color}33` }}
+              className="text-[11px] font-medium flex items-center gap-1.5 pl-1.5 pr-2 h-[22px] rounded-full"
+              style={{ color: theme.menuSub, border: `1px solid ${theme.surfaceBdr}` }}
               title={`In list: ${listBadge.name}`}
             >
               <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: listBadge.color }} />
@@ -2936,34 +2953,34 @@ const TaskRow = React.memo(function TaskRow({
           )}
           {showDate && due && (
             <span
-              className="text-[10.5px] font-semibold tabular-nums flex items-center gap-1 px-1.5 py-0.5 rounded-md"
-              style={{ color: overdue ? dangerHue : theme.menuSub, background: overdue ? `${dangerHue}12` : theme.surfaceBg }}
+              className="text-[11px] font-medium tabular-nums flex items-center gap-1 px-2 h-[22px] rounded-full"
+              style={{ color: overdue ? dangerHue : theme.menuSub, border: `1px solid ${overdue ? `${dangerHue}55` : theme.surfaceBdr}` }}
             >
-              {overdue && <AlertCircle size={10} />}
+              {overdue ? <AlertCircle size={11} /> : <Calendar size={11} />}
               {format(new Date(`${due}T00:00:00`), 'EEE, MMM d')}
             </span>
           )}
           {t.startTime && (
-            <span className="text-[10.5px] font-medium tabular-nums flex items-center gap-1 px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: theme.surfaceBg }}>
-              <Clock size={10} />
+            <span className="text-[11px] font-medium tabular-nums flex items-center gap-1 px-2 h-[22px] rounded-full" style={{ color: theme.menuSub, border: `1px solid ${theme.surfaceBdr}` }}>
+              <Clock size={11} />
               {fmtTime(t.startTime, timeFormat)}
             </span>
           )}
           {t.recur && (
-            <span className="flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: theme.surfaceBg }}>
-              <Repeat size={10} />
+            <span className="flex items-center text-[11px] h-[22px] px-0.5" style={{ color: theme.menuSub, opacity: 0.8 }} title="Repeats">
+              <Repeat size={12} />
             </span>
           )}
           {t.notes && (
-            <span className="flex items-center gap-0.5 text-[10.5px] px-1.5 py-0.5 rounded-md" style={{ color: theme.menuSub, background: theme.surfaceBg }}>
-              <StickyNote size={10} />
+            <span className="flex items-center text-[11px] h-[22px] px-0.5" style={{ color: theme.menuSub, opacity: 0.8 }} title="Has notes">
+              <StickyNote size={12} />
             </span>
           )}
         </div>
       </div>
 
       {/* Quick Action Buttons */}
-      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-80 sm:opacity-50 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+      <div className="flex items-center gap-0.5 flex-shrink-0 -my-0.5 opacity-80 sm:opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
         {onToggleExpand && (
           <button
             type="button"

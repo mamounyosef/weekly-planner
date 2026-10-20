@@ -90,6 +90,8 @@ const testFiles = [
   'src/lib/liveColumn.test.ts',
   'src/lib/agent/agentTools.test.ts',
   'src/lib/agent/agentReport.test.ts',
+  'src/lib/agent/agentPlannerTools.test.ts',
+  'src/lib/agent/agentModels.test.ts',
   'src/lib/quickAdd.test.ts',
   'src/lib/dayWindows.test.ts',
   'src/lib/displaySettings.test.ts',

@@ -33,6 +33,8 @@ import type {
 import { AGENT_LIMITS } from '../lib/agent/agentTypes';
 import { buildReport, summarize, type Tone } from '../lib/agent/agentReport';
 import { PhoneImagePreviewModal, type PreviewItem } from './AssistantImagePreview';
+import { ModelPill } from './AssistantModelPicker';
+import { fmtMoney, fmtTokens, modelInfo } from '../lib/agent/agentModels';
 
 export interface SharedToAssistant {
   /** Changes whenever something new is shared, so the same file twice still lands. */
@@ -228,6 +230,15 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
   }, [conv?.messages.length, conv?.state, agent.liveText.length > 0]);
 
   const lastAssistantId = useMemo(() => [...(conv?.messages ?? [])].reverse().find(m => m.role === 'assistant')?.id, [conv]);
+  const lastUsage = useMemo(() => [...(conv?.messages ?? [])].reverse().find(m => m.usage?.calls)?.usage ?? null, [conv]);
+  const chatCost = useMemo(() => {
+    let sum: number | null = 0;
+    for (const m of conv?.messages ?? []) {
+      if (!m.usage?.calls) continue;
+      sum = sum === null || m.usage.costUsd === null ? null : sum + m.usage.costUsd;
+    }
+    return sum;
+  }, [conv]);
 
   return (
     <KeyboardAvoidingView behavior="padding" style={{ flex: 1, backgroundColor: p.bg }}>
@@ -236,13 +247,13 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
         paddingTop: insets.top + space.sm, paddingHorizontal: space.lg, paddingBottom: space.sm,
         flexDirection: 'row', alignItems: 'center', gap: space.sm, borderBottomWidth: 1, borderBottomColor: p.line,
       }}>
-        <AgentOrb size={30} busy={busy} />
+        <AgentOrb size={24} busy={busy} tile={{ bg: p.surface, border: p.line, radius: 10, pad: 5 }} />
         <Pressable style={{ flex: 1 }} onPress={() => setShowHistory(v => !v)}>
           <Text variant="heading" numberOfLines={1}>{conv?.title ?? 'Assistant'}</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: agent.online ? p.ok : p.warn }} />
             <Text variant="caption" tone="faint">
-              {agent.status?.configured === false ? 'Not set up on the PC' : busy ? 'Working...' : agent.online ? 'Gemma 4, running on your PC' : 'Cannot reach the PC'}
+              {agent.status?.configured === false ? 'Not set up on the PC' : busy ? 'Working...' : agent.online ? `${modelInfo(agent.model).name}, via your PC` : 'Cannot reach the PC'}
             </Text>
           </View>
         </Pressable>
@@ -340,6 +351,7 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
             <IconButton name="camera" label="Take a photo" color={p.inkSoft} onPress={() => takePhoto().catch(e => agent.setError(String(e?.message ?? e)))} />
             {clipHasImage && <IconButton name="clipboard-paste" label="Paste image" color={p.accent} onPress={pasteImage} />}
             <IconButton name="mic" label={listening ? 'Stop listening' : 'Speak'} color={listening ? p.danger : p.inkSoft} bg={listening ? p.warnSoft : undefined} onPress={() => toggleMic().catch(e => agent.setError(String(e?.message ?? e)))} />
+            <ModelPill p={p} model={agent.model} onPick={agent.setModel} usage={lastUsage} chatCost={chatCost} />
             <View style={{ flex: 1 }} />
             {busy ? (
               <Pressable onPress={agent.stop} accessibilityLabel="Stop" style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: p.ink, alignItems: 'center', justifyContent: 'center' }}>
@@ -391,7 +403,7 @@ function EmptyState({ p, onPick }: { p: Palette; onPick: (t: string) => void }) 
   return (
     <View style={{ gap: space.lg, paddingTop: space.xl }}>
       <View style={{ alignItems: 'center', gap: space.sm }}>
-        <AgentOrb size={52} />
+        <AgentOrb size={44} tile={{ bg: p.surface, border: p.line, radius: 20, pad: 12, glow: true }} />
         <Text variant="title">{greeting()}</Text>
         <Text variant="heading" tone="soft">What should we plan?</Text>
       </View>
@@ -569,10 +581,20 @@ function AssistantBlock({ m, conv, p, isLast, liveText, liveThinking, timeFormat
       ) : null}
       {sets.length ? <ReportCard p={p} sets={sets} timeFormat={timeFormat} onUndo={onUndo} onOpenDate={onOpenDate} /> : null}
       {m.error ? <Note p={p} text={m.error} /> : null}
+      {!running && m.usage && m.usage.calls > 0 ? (
+        <Text variant="caption" tone="faint" style={{ fontSize: 10.5 }}>
+          {[modelInfo(m.usage.model).name, `${fmtTokens(m.usage.promptTokens)} in`, `${fmtTokens(m.usage.outputTokens)} out`, m.usage.costUsd === null ? 'price not listed' : fmtMoney(m.usage.costUsd)].join(' · ')}
+        </Text>
+      ) : null}
       </View>
     </View>
   );
 }
+
+/** What the narrow left column says for things with no time of their own. */
+const KIND_LABEL: Record<string, string> = {
+  task: 'Task', category: 'Category', task_list: 'List', setting: 'Setting', focus_timer: 'Timer',
+};
 
 function Note({ p, text }: { p: Palette; text: string }) {
   return (
@@ -811,7 +833,7 @@ function ReportCard({ p, sets, timeFormat, onUndo, onOpenDate }: {
                       <View style={{ width: 4, borderRadius: 2, backgroundColor: bar, opacity: struck ? 0.35 : 0.9 }} />
                       <View style={{ width: 66 }}>
                         <Text variant="caption" style={{ fontWeight: '700' }}>
-                          {r.facts?.allDay ? 'All day' : r.facts?.startTime ? from : r.facts?.kind === 'task' ? 'Task' : ''}
+                          {r.facts?.allDay && r.facts.kind !== 'category' ? 'All day' : r.facts?.startTime ? from : KIND_LABEL[r.facts?.kind ?? r.entry.kind] ?? ''}
                         </Text>
                         {r.facts?.endTime && !r.facts.allDay && to ? <Text variant="caption" tone="faint">{to}</Text> : null}
                       </View>

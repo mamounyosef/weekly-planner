@@ -3319,6 +3319,32 @@ ${body}
               await syncService.ingestFile(username, syncPathsOf(userPaths), store, snapshot as any, baseId);
             },
             noteBase: (username, store, snapshot) => syncService.noteBase(username, store, snapshot as any),
+            // The same doors the app's own saves take, so the other windows
+            // and the phone hear about the assistant's changes like any other.
+            writeSettings: async (username, userPaths, settings) => {
+              const body = JSON.stringify(settings);
+              const result = await safeWriteJsonFile({ filePath: userPaths.settingsPath, backupDir: userPaths.backupDir, baseName: 'settings', body, kind: 'object', force: false });
+              if (!result.ok) throw new Error(result.error);
+              trace(`AGENT SAVE settings bytes=${body.length}`);
+              await syncService.ingestFile(username, syncPathsOf(userPaths), 'settings', settings as any);
+            },
+            togglePrayerDone: async (username, userPaths, toggle) => {
+              const out = await syncService.togglePrayerDone(username, syncPathsOf(userPaths), toggle);
+              if (out.reason) throw new Error(out.reason);
+              trace(`AGENT PRAYER ${toggle.date} ${toggle.key}=${toggle.present}`);
+            },
+            writeFocusTimer: async (_username, userPaths, state) => {
+              const result = await safeWriteJsonFile({ filePath: (userPaths as any).timerPath, backupDir: userPaths.backupDir, baseName: 'focus-timer', body: JSON.stringify(state), kind: 'object', force: true });
+              if (!result.ok) throw new Error(result.error);
+              trace('AGENT SAVE focus-timer');
+            },
+            writeFocusSessions: async (username, userPaths, sessions) => {
+              const body = JSON.stringify(sessions);
+              const result = await safeWriteJsonFile({ filePath: (userPaths as any).focusPath, backupDir: userPaths.backupDir, baseName: 'focus-sessions', body, kind: 'array', force: true });
+              if (!result.ok) throw new Error(result.error);
+              trace(`AGENT SAVE focus-sessions count=${sessions.length}`);
+              await syncService.ingestFile(username, syncPathsOf(userPaths), 'focusSessions');
+            },
             isLoopback: isLocalDesktopRequest,
             log: trace,
           });

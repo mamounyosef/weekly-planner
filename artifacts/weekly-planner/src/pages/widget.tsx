@@ -659,7 +659,7 @@ export default function Widget() {
     if (todayColIdx === -1) return [];
     const items: Array<{ ev: PlannerEvent; key: string; startMin: number; endMin: number; segKind: 'normal' | 'tail' | 'head' }> = [];
     for (const ev of Object.values(weekEvents)) {
-      if (ev.allDay) continue; // Skip all-day events in the timeline scroll area
+      if (ev.allDay || !ev.startTime) continue; // Skip all-day/undated events in the timeline scroll area
       const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
       const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
       let e = isNoDur ? s + 10 : normalizeMin(timeToMin(ev.endTime), dayStartH);

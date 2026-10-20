@@ -5,7 +5,7 @@
 // built by code from the records actually written and read back, never from
 // the model's text. This file only decides WORDING and GROUPING.
 
-import type { ChangeEntry, ChangeSet, ItemFacts } from './agentTypes';
+import type { ChangeEntry, ChangeKind, ChangeSet, ItemFacts } from './agentTypes';
 
 const SHORT_DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const LONG_DAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -83,7 +83,33 @@ const FIELD_LABEL: Record<string, string> = {
   done: 'Done',
   notes: 'Notes',
   description: 'Description',
+  duration: 'Default length',
+  widget: 'In the side widget',
+  isDefault: 'Default category',
+  position: 'Position',
+  remindersAllDay: 'All-day reminders',
+  value: 'Value',
 };
+
+/** Field names that read differently on a category or list than on an item. */
+const SETUP_LABEL: Record<string, string> = {
+  title: 'Name',
+  allDay: 'All-day by default',
+  checkbox: 'Checkbox on items',
+  reminders: 'Timed reminders',
+  description: 'Description',
+};
+
+/** The section a dateless change is listed under, in this order. */
+const SECTION: Partial<Record<ChangeKind, string>> = {
+  category: 'Categories',
+  task_list: 'Task lists',
+  setting: 'Settings',
+  focus_timer: 'Focus timer',
+};
+const SECTION_ORDER = ['', 'Categories', 'Task lists', 'Settings', 'Focus timer'];
+
+const isSetup = (k: ChangeKind | undefined) => k === 'category' || k === 'task_list' || k === 'setting' || k === 'focus_timer';
 
 export interface FieldDiff { field: string; label: string; before: string; after: string }
 
@@ -108,10 +134,16 @@ function fieldValue(f: ItemFacts | undefined, field: string, fmt: '12h' | '24h')
 /** The before/after rows for an update, skipping pure bookkeeping fields. */
 export function diffsOf(entry: ChangeEntry, fmt: '12h' | '24h'): FieldDiff[] {
   if (entry.action === 'added' || entry.action === 'deleted' || entry.action === 'skipped' || entry.action === 'failed') return [];
-  const fields = (entry.changed ?? []).filter(f => f !== 'kind' && f !== 'color' && f !== 'overnight');
+  const setup = entry.kind === 'category' || entry.kind === 'task_list';
+  // An item's colour follows its category, so it is noise there; on a
+  // category or a list the colour IS the change.
+  const fields = (entry.changed ?? []).filter(f => f !== 'kind' && f !== 'overnight' && (setup || f !== 'color'));
   return fields.map(field => ({
     field,
-    label: FIELD_LABEL[field] ?? field,
+    label: (entry.kind === 'setting' && field === 'value' ? entry.after?.title : undefined)
+      ?? (entry.kind === 'focus_timer' && field === 'value' ? 'Timer' : undefined)
+      ?? (setup ? SETUP_LABEL[field] : undefined)
+      ?? FIELD_LABEL[field] ?? field,
     before: fieldValue(entry.before, field, fmt),
     after: fieldValue(entry.after, field, fmt),
   })).filter(d => d.before !== d.after);
@@ -121,6 +153,18 @@ export function diffsOf(entry: ChangeEntry, fmt: '12h' | '24h'): FieldDiff[] {
 export function chipsOf(f: ItemFacts | undefined): Array<{ label: string; color?: string }> {
   if (!f) return [];
   const out: Array<{ label: string; color?: string }> = [];
+  if (f.kind === 'category') {
+    out.push({ label: f.title, color: f.color });
+    if (f.duration) out.push({ label: f.duration });
+    if (f.allDay) out.push({ label: 'All-day by default' });
+    if (f.checkbox === false) out.push({ label: 'No checkbox' });
+    if (f.isDefault) out.push({ label: 'Default' });
+    if (f.widget === false) out.push({ label: 'Hidden from widget' });
+    if (f.reminders) out.push({ label: `Reminders: ${f.reminders}` });
+    return out;
+  }
+  if (f.kind === 'task_list') return [{ label: f.title, color: f.color }];
+  if (f.kind === 'setting' || f.kind === 'focus_timer') return f.value ? [{ label: f.value }] : [];
   if (f.category) out.push({ label: f.category, color: f.color });
   if (f.list) out.push({ label: f.list });
   if (f.repeats) out.push({ label: f.repeats });
@@ -155,17 +199,23 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 export function summarize(sets: ChangeSet[]): ReportSummary {
   const counts: Partial<Record<ChangeEntry['action'], number>> = {};
-  const kinds: Record<string, Set<'event' | 'task'>> = {};
+  const kinds: Record<string, Set<ChangeKind>> = {};
   let unverified = 0;
   for (const s of sets) for (const e of s.entries) {
     counts[e.action] = (counts[e.action] ?? 0) + 1;
     (kinds[e.action] ??= new Set()).add(e.kind);
     if (!e.verified && e.action !== 'failed' && e.action !== 'skipped') unverified++;
   }
+  const NOUN: Record<ChangeKind, [string, string]> = {
+    event: ['event', 'events'], task: ['task', 'tasks'], focus_session: ['focus session', 'focus sessions'],
+    category: ['category', 'categories'], task_list: ['task list', 'task lists'], setting: ['setting', 'settings'],
+    prayer: ['prayer', 'prayers'], focus_timer: ['timer change', 'timer changes'],
+  };
   const noun = (a: string, n: number) => {
     const k = kinds[a];
     if (!k || k.size !== 1) return plural(n, 'item');
-    return plural(n, k.has('event') ? 'event' : 'task');
+    const [one, many] = NOUN[[...k][0]] ?? ['item', 'items'];
+    return plural(n, one, many);
   };
   const parts: string[] = [];
   const order: Array<[ChangeEntry['action'], string]> = [
@@ -202,18 +252,28 @@ export function buildReport(sets: ChangeSet[], fmt: '12h' | '24h', now = new Dat
       });
     });
   }
+  // Dated things group by day; dateless items under "No date"; setup changes
+  // (categories, lists, settings, the timer) each under their own heading.
   const groups = new Map<string, ReportRow[]>();
+  const keyFor = (r: ReportRow) => {
+    const kind = r.facts?.kind ?? r.entry.kind;
+    if (isSetup(kind)) return `~${SECTION[kind] ?? ''}`;
+    return r.facts?.date ?? '';
+  };
   for (const r of rows) {
-    const k = r.facts?.date ?? '';
+    const k = keyFor(r);
     const list = groups.get(k);
     if (list) list.push(r); else groups.set(k, [r]);
   }
-  const keyOf = (r: ReportRow) => `${r.facts?.allDay ? '0' : '1'}|${r.facts?.startTime ?? '99:99'}|${r.facts?.title ?? ''}`;
+  const rank = (k: string) => (k.startsWith('~') ? 2 + SECTION_ORDER.indexOf(k.slice(1)) : k === '' ? 1 : 0);
+  const keyOf = (r: ReportRow) => isSetup(r.facts?.kind ?? r.entry.kind)
+    ? `${String(r.facts?.position ?? 0).padStart(4, '0')}|${r.facts?.title ?? ''}`
+    : `${r.facts?.allDay ? '0' : '1'}|${r.facts?.startTime ?? '99:99'}|${r.facts?.title ?? ''}`;
   return [...groups.entries()]
-    .sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)))
-    .map(([date, list]) => ({
-      date: date || null,
-      heading: date ? dayHeading(date, now) : 'No date',
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([key, list]) => ({
+      date: key && !key.startsWith('~') ? key : null,
+      heading: key.startsWith('~') ? key.slice(1) : key ? dayHeading(key, now) : 'No date',
       rows: list.sort((x, y) => keyOf(x).localeCompare(keyOf(y))),
     }));
 }

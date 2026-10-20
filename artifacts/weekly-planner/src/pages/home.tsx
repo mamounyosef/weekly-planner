@@ -1122,8 +1122,16 @@ export default function DailyPlanner() {
   // Which list the panel is showing. Deliberately device-local rather than a
   // synced setting: the tab you happen to be reading on this screen is not
   // something the phone or the widget should be dragged to as well.
-  const [activeTaskListId, setActiveTaskListId] = useState<string | null>(() => {
-    try { return localStorage.getItem(ACTIVE_TASK_LIST_KEY) || null; } catch { return null; }
+  const [activeTaskListIds, setActiveTaskListIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(ACTIVE_TASK_LIST_KEY);
+      if (!raw) return [];
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.map((x) => String(x));
+      } catch { /* legacy single-id value */ }
+      return [raw];
+    } catch { return []; }
   });
   const [prayer, setPrayer]                   = useState<PrayerSettings>(initialSettings.prayer);
   const [hardware, setHardware]               = useState<HardwareSettings>(initialSettings.hardware);
@@ -1203,6 +1211,29 @@ export default function DailyPlanner() {
   const [showFocusAnalysis, setShowFocusAnalysis] = useState(false);
   const showFocusAnalysisRef = useRef(showFocusAnalysis);
   useEffect(() => { showFocusAnalysisRef.current = showFocusAnalysis; }, [showFocusAnalysis]);
+
+  // Assistant + Tasks share the row. When both don't fit at their saved widths,
+  // squeeze Tasks first, then the assistant, down to their minimums, keeping at
+  // least SIDE_CAL_MIN for the calendar. The saved widths are untouched, so
+  // closing the assistant gives Tasks its full width back. Only a screen too
+  // small even for the minimums falls back to floating the assistant.
+  const sideLayout = useMemo(() => {
+    const SIDE_CAL_MIN = 720, TASKS_MIN = 300, AGENT_MIN = 360;
+    const z = isPhone ? 1 : (Number.isFinite(appZoom) && appZoom > 0.05 ? appZoom : 1);
+    const room = vp.width / z - SIDE_CAL_MIN;
+    const tasksShown = tasksPanelOpen && !showFocusAnalysis;
+    let tasksW = tasksShown ? tasksPanelWidth : 0;
+    let agentW = agentWidth;
+    let over = tasksW + agentW - room;
+    if (over > 0 && tasksShown) { const next = Math.max(Math.min(TASKS_MIN, tasksW), tasksW - over); over -= tasksW - next; tasksW = next; }
+    if (over > 0) { const next = Math.max(Math.min(AGENT_MIN, agentW), agentW - over); over -= agentW - next; agentW = next; }
+    const floating = !isPhone && over > 0;
+    return {
+      floating,
+      agentW: floating ? agentWidth : agentW,
+      tasksW: agentOpen && !floating && tasksShown ? tasksW : tasksPanelWidth,
+    };
+  }, [isPhone, appZoom, vp.width, tasksPanelOpen, showFocusAnalysis, tasksPanelWidth, agentWidth, agentOpen]);
   const [analysisTab, setAnalysisTab]       = useState<'week' | 'month' | 'year'>('week');
   /** Per device, like the prayer colour and shape: what one screen names them. */
   const [prayerLanguage, setPrayerLanguage] = useState<'english' | 'arabic'>('english');
@@ -2824,7 +2855,7 @@ export default function DailyPlanner() {
   // week rebuilt and re-filtered the same array seven times per render — and a
   // drag renders on every frame.
   const weekTimedEvents = useMemo(
-    () => Object.values(weekEvents).filter(ev => !ev.allDay),
+    () => Object.values(weekEvents).filter(ev => !ev.allDay && !!ev.startTime),
     [weekEvents],
   );
   const timedEventsByDay = useMemo(() => {
@@ -2845,7 +2876,7 @@ export default function DailyPlanner() {
         mapped.push({
           ...ev,
           visibleDayIndex: overlap.dayIndex,
-          visibleDaysSpan: overlap.daysSpan,
+          visibleDaysSpan: Number.isFinite(overlap.daysSpan) && overlap.daysSpan > 0 ? overlap.daysSpan : 1,
           isContinuationLeft: overlap.isContinuationLeft,
           isContinuationRight: overlap.isContinuationRight,
         });
@@ -3227,7 +3258,7 @@ export default function DailyPlanner() {
           weekAllDays.push({
             ...ev,
             visibleDayIndex: overlap.dayIndex,
-            visibleDaysSpan: overlap.daysSpan,
+            visibleDaysSpan: Number.isFinite(overlap.daysSpan) && overlap.daysSpan > 0 ? overlap.daysSpan : 1,
             isContinuationLeft: overlap.isContinuationLeft,
             isContinuationRight: overlap.isContinuationRight,
           });
@@ -3978,10 +4009,10 @@ export default function DailyPlanner() {
   }, [writeTasks, autoRollRecurringTasks]);
 
   // ── Task lists ─────────────────────────────────────────────────────────────
-  const handleActiveTaskListChange = useCallback((id: string | null) => {
-    setActiveTaskListId(id);
+  const handleActiveTaskListChange = useCallback((ids: string[]) => {
+    setActiveTaskListIds(ids);
     try {
-      if (id) localStorage.setItem(ACTIVE_TASK_LIST_KEY, id);
+      if (ids.length) localStorage.setItem(ACTIVE_TASK_LIST_KEY, JSON.stringify(ids));
       else localStorage.removeItem(ACTIVE_TASK_LIST_KEY);
     } catch { /* private mode */ }
   }, []);
@@ -9386,6 +9417,7 @@ export default function DailyPlanner() {
                   // 7am day cutoff) — it can't be drawn as one block in a single column, so it
                   // renders as a linked tail (in its own day) + head (in the next day) segment.
                   const isBoundarySpanning = (ev: PlannerEvent) => {
+                    if (!ev.startTime) return false;
                     const s = normalizeMin(timeToMin(ev.startTime), dayStartH);
                     let e = normalizeMin(timeToMin(ev.endTime), dayStartH);
                     if (e <= s) e += 1440;
@@ -9947,8 +9979,8 @@ export default function DailyPlanner() {
                                 const dateStr = format(startDayDate, 'yyyy-MM-dd');
                                 const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
 
-                                const start24 = timeToMin(ev.startTime);
-                                let end24 = timeToMin(ev.endTime);
+                                const start24 = timeToMin(ev.startTime || '00:00');
+                                let end24 = timeToMin(ev.endTime || ev.startTime || '00:00');
                                 if (end24 <= start24) end24 += 1440;
                                 const durMin = end24 - start24;
                                 const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
@@ -10908,8 +10940,8 @@ export default function DailyPlanner() {
                                 const dateStr = format(startDayDate, 'yyyy-MM-dd');
                                 const isCompleted = !ev.noCheckbox && (ev.completedDates?.includes(dateStr) ?? false);
 
-                                const start24 = timeToMin(ev.startTime);
-                                let end24 = timeToMin(ev.endTime);
+                                const start24 = timeToMin(ev.startTime || '00:00');
+                                let end24 = timeToMin(ev.endTime || ev.startTime || '00:00');
                                 if (end24 <= start24) end24 += 1440;
                                 const durMin = end24 - start24;
                                 const isNoDur = Boolean(ev.noDuration || ev.endTime === ev.startTime);
@@ -13078,7 +13110,7 @@ export default function DailyPlanner() {
           // it opens on the Tasks tab regardless of the docked-panel preference
           // (which is about a side-by-side layout this screen doesn't have).
           open={isPhone ? mobileTab === 'tasks' : (tasksPanelOpen && !showFocusAnalysis)}
-          width={tasksPanelWidth}
+          width={sideLayout.tasksW}
           tasks={tasks}
           today={format(nowDate, 'yyyy-MM-dd')}
           filters={taskFilters}
@@ -13089,7 +13121,7 @@ export default function DailyPlanner() {
           autoRollRecurringTasks={autoRollRecurringTasks}
           theme={taskPanelTheme}
           lists={taskLists}
-          activeListId={activeTaskListId}
+          activeListIds={activeTaskListIds}
           onActiveListChange={handleActiveTaskListChange}
           onListsChange={setTaskLists}
           onDeleteList={deleteTaskList}
@@ -13110,10 +13142,10 @@ export default function DailyPlanner() {
           theme={agentTheme}
           timeFormat={timeFormat === '24h' ? '24h' : '12h'}
           fullscreen={isPhone}
-          // Too narrow to share the row: float over the calendar rather than
-          // crushing it (the toolbar overflowed into the panel when squeezed).
-          floating={!isPhone && vp.width - agentWidth - (tasksPanelOpen && !showFocusAnalysis ? tasksPanelWidth : 0) < 1050}
-          width={agentWidth}
+          // Docks beside Tasks, both compacted to fit (see sideLayout). Floats
+          // over the calendar only when even the minimum widths don't fit.
+          floating={sideLayout.floating}
+          width={sideLayout.agentW}
           onResize={setAgentWidth}
           onOpenDate={(date) => {
             const [y, m, d] = date.split('-').map(Number);
@@ -13121,7 +13153,7 @@ export default function DailyPlanner() {
             setShowFocusAnalysis(false);
             setDirection(0);
             setCurrentDate(new Date(y, m - 1, d));
-            if (isPhone || vp.width - agentWidth < 1050) setAgentOpen(false);
+            if (isPhone || sideLayout.floating) setAgentOpen(false);
           }}
         />
       </div>
@@ -13779,7 +13811,7 @@ export default function DailyPlanner() {
                     <select
                       value={dayStartH}
                       onChange={e => {
-                        const newStart = parseInt(e.target.value);
+                        const newStart = parseInt(e.target.value) || 0;
                         const duration = Math.max(1, dayEndH - dayStartH);
                         setDayStartH(newStart);
                         setDayEndH(newStart + duration);

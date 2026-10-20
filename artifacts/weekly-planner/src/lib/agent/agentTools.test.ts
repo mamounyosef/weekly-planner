@@ -782,8 +782,8 @@ async function main() {
       assert.equal(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()], m![1], cell);
       assert.equal(String(d.getDate()), m![2], cell);
     }
-    assert.match(p, /- Events \(60 min default\)/);
-    assert.match(p, /- Deadlines \(point-in-time by default\)/);
+    assert.match(p, /- Events \(60 min default, colour #f97316\)/);
+    assert.match(p, /- Deadlines \(point-in-time by default, colour #993600\)/);
     assert.match(p, /READ-ONLY.*"University"/);
     assert.match(p, /Shopping/);
     assert.doesNotMatch(p, /[–—]/, 'no en or em dashes in the prompt');

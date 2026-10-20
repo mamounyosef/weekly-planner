@@ -46,11 +46,20 @@ export interface AgentQuestionAnswer {
   other?: string;
 }
 
+/**
+ * What a change is about. Events, tasks and focus sessions are records; the
+ * rest are parts of the planner's setup (categories, task lists, settings), a
+ * prayer ticked off, or the focus timer itself.
+ */
+export type ChangeKind =
+  | 'event' | 'task' | 'focus_session'
+  | 'category' | 'task_list' | 'setting' | 'prayer' | 'focus_timer';
+
 /** One item the agent wants to delete, exactly as it will be deleted. */
 export interface PendingDeletion {
   /** The id the model passed (may be an occurrence id "<master>::<date>"). */
   id: string;
-  kind: 'event' | 'task' | 'focus_session';
+  kind: 'event' | 'task' | 'focus_session' | 'category' | 'task_list';
   title: string;
   /** Human description of the scope, e.g. "Only Tue 29 Sep" or "The whole series". */
   scopeLabel: string;
@@ -72,7 +81,7 @@ export type ChangeAction = 'added' | 'updated' | 'deleted' | 'completed' | 'reop
 /** A plain, display-ready snapshot of one calendar item at one moment. */
 export interface ItemFacts {
   title: string;
-  kind: 'event' | 'task' | 'focus_session';
+  kind: ChangeKind;
   /** 'yyyy-MM-dd' of the (first) occurrence; absent for a task with no date. */
   date?: string;
   /** Last day of a multi-day all-day event, inclusive. */
@@ -92,11 +101,24 @@ export interface ItemFacts {
   done?: boolean;
   notes?: string;
   description?: string;
+  // Categories, task lists, settings and the timer:
+  /** Category default length, e.g. "30 min", "No duration". */
+  duration?: string;
+  /** Category: shown in the side widget. */
+  widget?: boolean;
+  /** Category: the one picked for new items. */
+  isDefault?: boolean;
+  /** 1-based place in its list. */
+  position?: number;
+  /** Reminders a category gives its all-day items. */
+  remindersAllDay?: string;
+  /** A setting's (or the focus timer's) value, in words. */
+  value?: string;
 }
 
 export interface ChangeEntry {
   action: ChangeAction;
-  kind: 'event' | 'task' | 'focus_session';
+  kind: ChangeKind;
   /** The stored record id (never an occurrence id). */
   id: string;
   /** What it looks like now (absent for a delete). */
@@ -156,6 +178,21 @@ export interface AgentMessage {
   changeSetIds?: string[];
   /** Assistant only: the turn ended in an error the user should see. */
   error?: string;
+  /** Assistant only: which model wrote it and what it cost, summed over the turn. */
+  usage?: AgentUsage;
+}
+
+/** Token counts Ollama reported for one assistant turn (all its model calls). */
+export interface AgentUsage {
+  model: string;
+  /** Prompt tokens summed over every call of the turn. */
+  promptTokens: number;
+  outputTokens: number;
+  /** Prompt size of the LAST call: how full the context window is now. */
+  contextTokens: number;
+  calls: number;
+  /** US dollars at list price; null when the model's price is not published. */
+  costUsd: number | null;
 }
 
 export type RunState =

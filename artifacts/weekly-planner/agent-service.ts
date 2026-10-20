@@ -18,10 +18,12 @@ import path from 'path';
 import crypto from 'crypto';
 
 import {
-  runTool, applyDeletion, applyFocusDeletion, planUndo, verifyAgainst, answersToResult,
+  runTool, applyDeletion, applyFocusDeletion, planUndoAll, verifyAll, entryVerified, answersToResult,
   TOOL_DEFS, READ_ONLY_TOOLS,
-  type AgentWorld, type ToolOutcome, type UndoRecord, type DeletionPlan, type EventData, type PrayerDay,
+  type AgentWorld, type ToolOutcome, type UndoRecord, type UndoStores, type DeletionPlan, type EventData, type PrayerDay,
 } from './src/lib/agent/agentTools';
+import { DEFAULT_MODEL, VISION_MODEL, costOf, isKnownModel, modelInfo, thinkValue } from './src/lib/agent/agentModels';
+import { coercePrayerDone } from './src/lib/prayerTimes';
 import { buildSystemPrompt } from './src/lib/agent/agentPrompt';
 import type { FocusSessionRecord } from './src/lib/focusStats';
 import type { FocusTimerState } from './src/lib/focusTimer';
@@ -29,6 +31,7 @@ import {
   AGENT_LIMITS,
   type AgentAttachment, type AgentConversation, type AgentConversationSummary, type AgentMessage,
   type AgentQuestion, type AgentQuestionAnswer, type AgentStreamEvent, type AgentToolTrace, type ChangeSet,
+  type AgentUsage,
 } from './src/lib/agent/agentTypes';
 import { coerceCategories } from './src/lib/categories';
 import { coerceTaskLists } from './src/lib/taskLists';
@@ -45,7 +48,15 @@ export interface AgentUserPaths {
   tasksPath: string;
   settingsPath: string;
   backupDir: string;
+  /** Optional so an older caller keeps working; each falls back to its usual name in dbDir. */
+  focusPath?: string;
+  timerPath?: string;
+  donePath?: string;
 }
+
+const focusFileOf = (p: AgentUserPaths) => p.focusPath ?? path.join(p.dbDir, 'focus-sessions.json');
+const timerFileOf = (p: AgentUserPaths) => p.timerPath ?? path.join(p.dbDir, 'focus-timer.json');
+const doneFileOf = (p: AgentUserPaths) => p.donePath ?? path.join(p.dbDir, 'prayer-done.json');
 
 export interface AgentAuth {
   user: { username: string; name?: string };
@@ -59,6 +70,14 @@ export interface AgentServiceDeps {
   writeStore: (username: string, userPaths: AgentUserPaths, store: 'events' | 'tasks', snapshot: object, baseId?: string) => Promise<void>;
   /** Register a snapshot as a merge baseline; returns its id. */
   noteBase: (username: string, store: 'events' | 'tasks', snapshot: object) => string | undefined;
+  /** The whole settings.json: safe write + sync ingest, awaited. */
+  writeSettings: (username: string, userPaths: AgentUserPaths, settings: object) => Promise<void>;
+  /** One prayer ticked or un-ticked, through the sync queue like a tap in the app. */
+  togglePrayerDone: (username: string, userPaths: AgentUserPaths, toggle: { date: string; key: string; present: boolean }) => Promise<void>;
+  /** The focus timer file. */
+  writeFocusTimer: (username: string, userPaths: AgentUserPaths, state: object) => Promise<void>;
+  /** The whole focus history: safe write + sync ingest, awaited. */
+  writeFocusSessions: (username: string, userPaths: AgentUserPaths, sessions: object[]) => Promise<void>;
   isLoopback: (req: any) => boolean;
   log: (line: string) => void;
 }
@@ -91,7 +110,7 @@ function loadConfig(rootDir: string): OllamaConfig | null {
   return {
     apiKey,
     baseUrl: (env.OLLAMA_BASE_URL?.trim() || 'https://ollama.com').replace(/\/+$/, ''),
-    model: env.OLLAMA_AGENT_MODEL?.trim() || 'gemma4:31b',
+    model: isKnownModel(env.OLLAMA_AGENT_MODEL?.trim()) ? env.OLLAMA_AGENT_MODEL!.trim() : DEFAULT_MODEL,
   };
 }
 
@@ -262,15 +281,17 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
   // ── The planner snapshot a tool sees ──
   async function loadWorld(auth: AgentAuth): Promise<AgentWorld> {
     const p = auth.userPaths;
-    const [events, tasksRaw, settings, gcals, prayerCache, focusRaw, timerRaw] = await Promise.all([
+    const [events, tasksRaw, settingsRaw, gcals, prayerCache, focusRaw, timerRaw, doneRaw] = await Promise.all([
       readJson<EventData>(p.dbPath, {}),
       readJson<unknown>(p.tasksPath, {}),
       readJson<Record<string, any>>(p.settingsPath, {}),
       readJson<{ ownedCalendarId?: string; calendars?: Array<{ id: string; summary: string }> }>(path.join(p.dbDir, 'google-calendars.json'), {}),
       readJson<Record<string, unknown>>(path.join(rootDir, 'database', 'prayer-times.json'), {}),
-      readJson<unknown[]>(path.join(p.dbDir, 'focus-sessions.json'), []),
-      readJson<unknown>(path.join(p.dbDir, 'focus-timer.json'), null),
+      readJson<unknown[]>(focusFileOf(p), []),
+      readJson<unknown>(timerFileOf(p), null),
+      readJson<unknown>(doneFileOf(p), {}),
     ]);
+    const settings: Record<string, any> = settingsRaw && typeof settingsRaw === 'object' && !Array.isArray(settingsRaw) ? settingsRaw : {};
     const prayerSettings = coercePrayerSettings(settings.prayer);
     const months = prayerMonthsFromCache(prayerCache, prayerSettings);
     const ws = Number(settings.weekStartsOn);
@@ -282,7 +303,9 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       tasks: coerceTasksKeepAll(tasksRaw),
       categories: coerceCategories(settings.categories),
       taskLists: coerceTaskLists(settings.taskLists),
-      weekStartsOn: (Number.isInteger(ws) && ws >= 0 && ws <= 6 ? ws : 0) as WeekStartsOn,
+      // The app's own default is Monday; a file that never saved the key must
+      // read the same here, or "this week" would be a different week.
+      weekStartsOn: (settings.weekStartsOn != null && Number.isInteger(ws) && ws >= 0 && ws <= 6 ? ws : 1) as WeekStartsOn,
       dayStartH,
       dayEndH: Number.isFinite(Number(settings.dayEndH)) ? Number(settings.dayEndH) : 24,
       timeFormat: settings.timeFormat === '24h' ? '24h' : '12h',
@@ -294,7 +317,10 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       focusTimer: timerRaw && typeof timerRaw === 'object' ? timerRaw as FocusTimerState : null,
       focusDailyGoalSeconds: Number(settings.focusDailyGoalSeconds) || 0,
       focusExcludedDates: Array.isArray(settings.focusExcludedDates) ? settings.focusExcludedDates : [],
-      focusDayStartHour: Number.isFinite(Number(settings.focusDayStartHour)) ? Number(settings.focusDayStartHour) : dayStartH,
+      // The app's default focus day starts at 04:00 (settingsSync DEFAULT_SETTINGS).
+      focusDayStartHour: settings.focusDayStartHour != null && Number.isFinite(Number(settings.focusDayStartHour)) ? Number(settings.focusDayStartHour) : 4,
+      settings,
+      prayerDone: coercePrayerDone(doneRaw),
     };
   }
 
@@ -310,6 +336,18 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
     return raw as TaskData;
   }
 
+  /** Every store a change set can touch, from a freshly loaded world. */
+  function storesOf(w: AgentWorld): UndoStores {
+    return {
+      events: w.events,
+      tasks: w.tasks,
+      settings: w.settings ?? {},
+      prayerDone: w.prayerDone ?? {},
+      focusSessions: w.focusSessions,
+      focusTimer: w.focusTimer,
+    };
+  }
+
   // ── Committing a tool's outcome ──
   async function commit(auth: AgentAuth, world: AgentWorld, outcome: ToolOutcome, tool: string): Promise<ChangeSet | null> {
     const { username } = auth.user;
@@ -321,15 +359,17 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       const baseId = deps.noteBase(username, 'tasks', world.tasks);
       await deps.writeStore(username, auth.userPaths, 'tasks', outcome.tasks, baseId);
     }
+    if (outcome.settings) await deps.writeSettings(username, auth.userPaths, outcome.settings);
+    for (const t of outcome.prayerToggles ?? []) await deps.togglePrayerDone(username, auth.userPaths, t);
+    if (outcome.focusTimer) await deps.writeFocusTimer(username, auth.userPaths, outcome.focusTimer);
+    if (outcome.focusSessions) await deps.writeFocusSessions(username, auth.userPaths, outcome.focusSessions);
     if (!outcome.entries?.length) return null;
     // Read back what is REALLY on disk now (after the sync layer's rebuild) and
-    // mark each entry verified only if its record landed exactly as written.
+    // mark each entry verified only if every record behind it landed as written.
     const after = await loadWorld(auth);
-    const ok = verifyAgainst(outcome.undo ?? [], after.events, after.tasks);
-    const entries = outcome.entries.map(e => ({
-      ...e,
-      verified: e.verified || ok.has(`${e.kind === 'event' ? 'events' : 'tasks'}:${e.id}`),
-    }));
+    const records = outcome.undo ?? [];
+    const ok = verifyAll(records, storesOf(after), after.now.getTime());
+    const entries = outcome.entries.map(e => ({ ...e, verified: entryVerified(e, records, ok) }));
     const cs: ChangeSet = { id: newId(), at: Date.now(), tool, entries };
     if (outcome.undo?.length) await writeJsonAtomic(undoFile(auth.userPaths, cs.id), outcome.undo);
     const unverified = entries.filter(e => !e.verified).length;
@@ -339,7 +379,44 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
 
   // ── Talking to the model ──
 
-  async function materialize(auth: AgentAuth, msgs: LlmMessage[]): Promise<Array<Record<string, unknown>>> {
+  /**
+   * Text for an image, for a model that cannot see. Read once by VISION_MODEL
+   * and kept next to the upload, so switching models mid-chat or replaying a
+   * long conversation never pays for the same picture twice.
+   */
+  async function describeImage(auth: AgentAuth, cfg: OllamaConfig, id: string, signal: AbortSignal): Promise<string | null> {
+    const metaFile = path.join(uploadDir(auth.userPaths), `${id}.json`);
+    const meta = await readJson<(AgentAttachment & { description?: string }) | null>(metaFile, null);
+    if (!meta || meta.kind !== 'image') return null;
+    if (meta.description) return meta.description;
+    let b64: string;
+    try { b64 = (await fsp.readFile(path.join(uploadDir(auth.userPaths), `${id}.bin`))).toString('base64'); } catch { return null; }
+    const res = await fetch(`${cfg.baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        stream: false,
+        think: false,
+        options: { temperature: 0 },
+        messages: [{
+          role: 'user',
+          content: 'Transcribe this image for a planning assistant that cannot see it. Copy EVERY piece of text exactly, row by row and column by column: titles, dates, weekdays, times, places, names, links, notes. Keep tables as tables (one line per row, cells separated by " | "). Then add one line describing anything visual that matters (colour coding, which rows are highlighted or crossed out). Do not summarise, do not skip rows, do not invent anything.',
+          images: [b64],
+        }],
+      }),
+      signal,
+    });
+    if (!res.ok) throw new RetryableModelError(`Could not read the image with ${modelInfo(VISION_MODEL).name} (Ollama answered ${res.status}).`, res.status === 429 || res.status >= 500);
+    const j: any = await res.json().catch(() => ({}));
+    const text = String(j?.message?.content ?? '').trim();
+    if (!text) return null;
+    await writeJsonAtomic(metaFile, { ...meta, description: text });
+    return text;
+  }
+
+  async function materialize(auth: AgentAuth, msgs: LlmMessage[], cfg: OllamaConfig, model: string, signal: AbortSignal): Promise<Array<Record<string, unknown>>> {
+    const sees = modelInfo(model).vision;
     // Images are re-sent only for the two most recent user messages that have
     // them. Older ones were already read; resending every screenshot on every
     // step would make each call slower and costlier for nothing.
@@ -354,7 +431,15 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       if (m.tool_calls) o.tool_calls = m.tool_calls;
       if (m.tool_name) o.tool_name = m.tool_name;
       if (m.attachmentIds?.length) {
-        if (withImages.includes(i)) {
+        if (withImages.includes(i) && !sees) {
+          // The model cannot see: it reads what the vision model transcribed.
+          const parts: string[] = [];
+          for (const [n, id] of m.attachmentIds.entries()) {
+            const d = await describeImage(auth, cfg, id, signal);
+            parts.push(`--- Image ${n + 1}, as read by ${modelInfo(VISION_MODEL).name} ---\n${d ?? '(The image could not be read.)'}\n--- End of image ${n + 1} ---`);
+          }
+          o.content = `${m.content}\n\n${parts.join('\n\n')}`;
+        } else if (withImages.includes(i)) {
           const images: string[] = [];
           for (const id of m.attachmentIds) {
             const meta = await readJson<AgentAttachment | null>(path.join(uploadDir(auth.userPaths), `${id}.json`), null);
@@ -371,10 +456,18 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
     return out;
   }
 
-  interface ModelTurn { content: string; thinking: string; toolCalls: Array<{ function: { name: string; arguments: unknown } }> }
+  interface ModelTurn {
+    content: string;
+    thinking: string;
+    toolCalls: Array<{ function: { name: string; arguments: unknown } }>;
+    /** From the final stream chunk; zero when Ollama did not say. */
+    promptTokens: number;
+    outputTokens: number;
+  }
 
   async function callModel(
     cfg: OllamaConfig,
+    model: string,
     messages: Array<Record<string, unknown>>,
     signal: AbortSignal,
     onDelta: (d: { text?: string; thinking?: string }) => void,
@@ -387,16 +480,16 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         const res = await fetch(`${cfg.baseUrl}/api/chat`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: cfg.model, messages, tools: TOOL_DEFS, stream: true, think: true, options: { temperature: 0.2 } }),
+          body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, think: thinkValue(model), options: { temperature: 0.2 } }),
           signal,
         });
         if (res.status === 401 || res.status === 403) throw new FatalModelError('Ollama rejected the API key. Put a valid key in the .env file (OLLAMA_API_KEY).');
-        if (res.status === 404) throw new FatalModelError(`Ollama does not know the model "${cfg.model}".`);
+        if (res.status === 404) throw new FatalModelError(`Ollama does not know the model "${model}". Pick another one in the model menu.`);
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => '');
           throw new RetryableModelError(`Ollama answered ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`, res.status === 429 || res.status >= 500);
         }
-        const turn: ModelTurn = { content: '', thinking: '', toolCalls: [] };
+        const turn: ModelTurn = { content: '', thinking: '', toolCalls: [], promptTokens: 0, outputTokens: 0 };
         const decoder = new TextDecoder();
         let buf = '';
         const reader = (res.body as any).getReader();
@@ -424,6 +517,10 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
               if (msg.thinking) { turn.thinking += msg.thinking; streamed = true; onDelta({ thinking: msg.thinking }); }
               if (msg.content) { turn.content += msg.content; streamed = true; onDelta({ text: msg.content }); }
               if (Array.isArray(msg.tool_calls)) { turn.toolCalls.push(...msg.tool_calls); streamed = true; }
+              if (j.done) {
+                if (Number.isFinite(j.prompt_eval_count)) turn.promptTokens = Number(j.prompt_eval_count);
+                if (Number.isFinite(j.eval_count)) turn.outputTokens = Number(j.eval_count);
+              }
             }
           }
         } finally {
@@ -492,13 +589,24 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         await finish('error', 'The assistant is not set up: OLLAMA_API_KEY is missing from the .env file on the PC.');
         return;
       }
-      conv.model = cfg.model;
+      // The model this device picked for the message (validated on the way
+      // in), else whatever the chat last used, else the server default.
+      const model = isKnownModel(conv.model) ? conv.model : cfg.model;
+      conv.model = model;
+      const usage: AgentUsage = { model, promptTokens: 0, outputTokens: 0, contextTokens: 0, calls: 0, costUsd: 0 };
+      msg.usage = usage;
 
       for (let step = 0; step < MAX_STEPS; step++) {
         const world = await loadWorld(auth);
         const system = buildSystemPrompt(world, auth.user.name || auth.user.username);
-        const messages = [{ role: 'system', content: system }, ...(await materialize(auth, llm.messages))];
-        const turn = await callModel(cfg, messages, controller.signal, onDelta);
+        const messages = [{ role: 'system', content: system }, ...(await materialize(auth, llm.messages, cfg, model, controller.signal))];
+        const turn = await callModel(cfg, model, messages, controller.signal, onDelta);
+        usage.calls += 1;
+        usage.promptTokens += turn.promptTokens;
+        usage.outputTokens += turn.outputTokens;
+        if (turn.promptTokens) usage.contextTokens = turn.promptTokens + turn.outputTokens;
+        const callCost = costOf(model, { prompt: turn.promptTokens, output: turn.outputTokens });
+        usage.costUsd = callCost === null || usage.costUsd === null ? null : usage.costUsd + callCost;
         if (flushTimer) { clearTimeout(flushTimer); flush(); }
 
         llm.messages.push({
@@ -537,7 +645,8 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
               ({ outcome, cs } = await withLock(username, async () => {
                 const fresh = await loadWorld(auth);
                 const o = runTool(name, args, fresh);
-                const c = (o.events || o.tasks || o.entries?.length) && !o.isError ? await commit(auth, fresh, o, name) : null;
+                const writes = o.events || o.tasks || o.settings || o.prayerToggles?.length || o.focusTimer || o.focusSessions;
+                const c = (writes || o.entries?.length) && !o.isError ? await commit(auth, fresh, o, name) : null;
                 return { outcome: o, cs: c };
               }));
             }
@@ -644,7 +753,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       // GET /api/agent/status
       if (parts[0] === 'status' && method === 'GET') {
         const cfg = loadConfig(rootDir);
-        return sendJson(res, 200, { configured: !!cfg, model: cfg?.model ?? null, limits: AGENT_LIMITS, dictation: deps.isLoopback(req) });
+        return sendJson(res, 200, { configured: !!cfg, model: cfg?.model ?? null, defaultModel: cfg?.model ?? DEFAULT_MODEL, limits: AGENT_LIMITS, dictation: deps.isLoopback(req) });
       }
 
       // GET /api/agent/stream  (SSE)
@@ -710,9 +819,11 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         if (parts.length === 1 && method === 'GET') return sendJson(res, 200, { conversations: await listConvs(p) });
         if (parts.length === 1 && method === 'POST') {
           const cfg = loadConfig(rootDir);
+          let body0: { model?: unknown } = {};
+          try { body0 = JSON.parse((await readBody(req, 16 * 1024)) || '{}'); } catch { body0 = {}; }
           const conv: AgentConversation = {
             id: newId(), title: 'New chat', createdAt: Date.now(), updatedAt: Date.now(),
-            messages: [], changeSets: {}, state: 'idle', model: cfg?.model ?? 'gemma4:31b',
+            messages: [], changeSets: {}, state: 'idle', model: isKnownModel(body0.model) ? body0.model : (cfg?.model ?? DEFAULT_MODEL),
           };
           await saveConv(username, p, conv);
           await saveLlm(p, conv.id, { messages: [] });
@@ -742,6 +853,10 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         }
 
         if (running.has(id)) return sendJson(res, 409, { error: 'The assistant is still working on this chat. Wait for it, or press Stop.' });
+
+        // Per device: each send says which model that device has picked. An
+        // unknown name is ignored rather than trusted (the run would 404).
+        if (isKnownModel(body.model) && (action === 'messages' || action === 'answer' || action === 'approval')) conv.model = body.model;
 
         if (action === 'messages') {
           const text = typeof body.text === 'string' ? body.text.slice(0, AGENT_LIMITS.maxMessageChars) : '';
@@ -807,10 +922,9 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
               if (isFocusDeletion) {
                 // Focus session deletion: write directly to focus-sessions.json
                 const focusResult = applyFocusDeletion(pending.plan.focusSessionIds!, fresh.focusSessions, fresh);
-                if (focusResult.deleted > 0) {
-                  await writeJsonAtomic(path.join(auth.userPaths.dbDir, 'focus-sessions.json'), focusResult.sessions);
-                }
                 o = {
+                  ...(focusResult.deleted > 0 ? { focusSessions: focusResult.sessions } : {}),
+                  undo: focusResult.undo,
                   entries: focusResult.entries,
                   result: { approved: true, deleted: focusResult.deleted, items: pending.plan.focusSessionIds },
                   label: `Deleted ${focusResult.deleted} focus session${focusResult.deleted === 1 ? '' : 's'}`,
@@ -846,11 +960,16 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
           if (!cs || !SAFE_ID.test(csId)) return sendJson(res, 404, { error: 'Nothing to undo there.' });
           if (cs.undoneAt) return sendJson(res, 409, { error: 'Already undone.' });
           const records = await readJson<UndoRecord[]>(undoFile(p, csId), []);
+          if (!records.length) return sendJson(res, 409, { error: 'There is nothing saved to undo for this change.' });
           const r = await withLock(username, async () => {
             const world = await loadWorld(auth);
-            const u = planUndo(records, world.events, world.tasks);
-            if (records.some(x => x.store === 'events')) await deps.writeStore(username, p, 'events', u.events, deps.noteBase(username, 'events', world.events));
-            if (records.some(x => x.store === 'tasks')) await deps.writeStore(username, p, 'tasks', u.tasks, deps.noteBase(username, 'tasks', world.tasks));
+            const u = planUndoAll(records, storesOf(world), Date.now());
+            if (u.events) await deps.writeStore(username, p, 'events', u.events, deps.noteBase(username, 'events', world.events));
+            if (u.tasks) await deps.writeStore(username, p, 'tasks', u.tasks, deps.noteBase(username, 'tasks', world.tasks));
+            if (u.settings) await deps.writeSettings(username, p, u.settings);
+            for (const t of u.prayerToggles ?? []) await deps.togglePrayerDone(username, p, t);
+            if (u.focusTimer) await deps.writeFocusTimer(username, p, u.focusTimer);
+            if (u.focusSessions) await deps.writeFocusSessions(username, p, u.focusSessions);
             return u;
           });
           cs.undoneAt = Date.now();

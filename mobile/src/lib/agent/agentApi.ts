@@ -22,8 +22,11 @@ import type {
   AgentAttachment, AgentConversation, AgentConversationSummary, AgentQuestionAnswer, AgentStreamEvent,
 } from './agentTypes';
 import { AGENT_LIMITS } from './agentTypes';
+import { DEFAULT_MODEL, isKnownModel } from './agentModels';
 
 const ACTIVE_KEY = 'planner.agentActiveConversation';
+/** This phone's own model pick. Per device: the PC keeps its own. */
+const MODEL_KEY = 'planner.agentModel';
 const MAX_EDGE = 2048;
 
 export class AgentHttpError extends Error {
@@ -113,7 +116,7 @@ export async function attachmentSource(id: string): Promise<{ uri: string; heade
 
 // ─── The hook ───────────────────────────────────────────────────────────────
 
-export interface AgentStatus { configured: boolean; model: string | null }
+export interface AgentStatus { configured: boolean; model: string | null; defaultModel?: string }
 
 export interface PhoneAgentState {
   status: AgentStatus | null;
@@ -134,6 +137,19 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
   const activeRef = useRef<string | null>(null);
   activeRef.current = state.activeId;
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+
+  const [storedModel, setStoredModel] = useState<string | null>(null);
+  useEffect(() => {
+    SecureStore.getItemAsync(MODEL_KEY).then(v => { if (isKnownModel(v)) setStoredModel(v); }).catch(() => {});
+  }, []);
+  const model = storedModel ?? (isKnownModel(state.status?.defaultModel) ? state.status!.defaultModel! : DEFAULT_MODEL);
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  const setModel = useCallback((id: string) => {
+    if (!isKnownModel(id)) return;
+    setStoredModel(id);
+    SecureStore.setItemAsync(MODEL_KEY, id).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', s => setAppActive(s === 'active'));
@@ -253,7 +269,7 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
   }, []);
 
   const newChat = useCallback(async () => {
-    const c = await agentApi<AgentConversation>('/api/agent/conversations', { method: 'POST', body: {} });
+    const c = await agentApi<AgentConversation>('/api/agent/conversations', { method: 'POST', body: { model: modelRef.current } });
     setState(s => ({ ...s, activeId: c.id, conversation: c, liveText: '', liveThinking: '', error: null }));
     return c;
   }, []);
@@ -261,19 +277,19 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
   const send = useCallback(async (text: string, attachmentIds: string[]) => {
     let id = activeRef.current;
     if (!id) id = (await newChat()).id;
-    await agentApi(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: { text, attachmentIds } });
+    await agentApi(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: { text, attachmentIds, model: modelRef.current } });
     refreshConversation(id);
   }, [newChat, refreshConversation]);
 
   const answer = useCallback(async (answers: AgentQuestionAnswer[]) => {
     const id = activeRef.current; if (!id) return;
-    await agentApi(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: { answers } });
+    await agentApi(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: { answers, model: modelRef.current } });
     refreshConversation(id);
   }, [refreshConversation]);
 
   const decide = useCallback(async (approved: boolean) => {
     const id = activeRef.current; if (!id) return;
-    await agentApi(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: { approved } });
+    await agentApi(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: { approved, model: modelRef.current } });
     refreshConversation(id);
   }, [refreshConversation]);
 
@@ -296,5 +312,5 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
     setState(s => ({ ...s, list: s.list.filter(c => c.id !== id) }));
   }, [select]);
 
-  return { ...state, select, newChat, send, answer, decide, undo, stop, remove, setError };
+  return { ...state, model, setModel, select, newChat, send, answer, decide, undo, stop, remove, setError };
 }

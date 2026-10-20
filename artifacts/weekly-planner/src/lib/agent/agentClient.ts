@@ -12,11 +12,28 @@ import type {
   AgentAttachment, AgentConversation, AgentConversationSummary, AgentQuestionAnswer, AgentStreamEvent,
 } from './agentTypes';
 import { AGENT_LIMITS } from './agentTypes';
+import { DEFAULT_MODEL, isKnownModel } from './agentModels';
 
 export interface AgentStatus {
   configured: boolean;
   model: string | null;
+  /** The server's default, used until this device picks one. */
+  defaultModel?: string;
   dictation: boolean;
+}
+
+// ─── Model choice, per device ───────────────────────────────────────────────
+// Each device keeps its own pick (the PC app's two windows share one, since
+// they share a profile). Sent with every message, so the server never has to
+// know which device is which.
+
+const MODEL_KEY = 'planner-agent-model';
+
+function readStoredModel(): string | null {
+  try {
+    const v = localStorage.getItem(MODEL_KEY);
+    return isKnownModel(v) ? v : null;
+  } catch { return null; }
 }
 
 // The open chat used to be remembered and reopened on every visit; it no
@@ -133,6 +150,22 @@ export function useAgent(enabled: boolean) {
   const activeRef = useRef(state.activeId);
   activeRef.current = state.activeId;
 
+  const [storedModel, setStoredModel] = useState<string | null>(readStoredModel);
+  const model = storedModel ?? (isKnownModel(state.status?.defaultModel) ? state.status!.defaultModel! : DEFAULT_MODEL);
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  const setModel = useCallback((id: string) => {
+    if (!isKnownModel(id)) return;
+    try { localStorage.setItem(MODEL_KEY, id); } catch { /* private mode: this session only */ }
+    setStoredModel(id);
+  }, []);
+  // The other window of the PC app picking a model updates this one.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => { if (e.key === MODEL_KEY) setStoredModel(readStoredModel()); };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   // Every open starts on a fresh screen; old chats are one click away in the
   // history. A reply still being written is the exception: it stays in view.
   const wasEnabled = useRef(enabled);
@@ -213,7 +246,7 @@ export function useAgent(enabled: boolean) {
   }, []);
 
   const newChat = useCallback(async () => {
-    const c = await api<AgentConversation>('/api/agent/conversations', { method: 'POST', body: '{}' });
+    const c = await api<AgentConversation>('/api/agent/conversations', { method: 'POST', body: JSON.stringify({ model: modelRef.current }) });
     setState(s => ({ ...s, activeId: c.id, conversation: c, liveText: '', liveThinking: '', error: null }));
     return c;
   }, []);
@@ -222,19 +255,19 @@ export function useAgent(enabled: boolean) {
     setError(null);
     let id = activeRef.current;
     if (!id) id = (await newChat()).id;
-    await api(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, attachmentIds }) });
+    await api(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, attachmentIds, model: modelRef.current }) });
   }, [newChat, setError]);
 
   const answer = useCallback(async (answers: AgentQuestionAnswer[]) => {
     const id = activeRef.current; if (!id) return;
     setError(null);
-    await api(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: JSON.stringify({ answers }) });
+    await api(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: JSON.stringify({ answers, model: modelRef.current }) });
   }, [setError]);
 
   const decide = useCallback(async (approved: boolean) => {
     const id = activeRef.current; if (!id) return;
     setError(null);
-    await api(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: JSON.stringify({ approved }) });
+    await api(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: JSON.stringify({ approved, model: modelRef.current }) });
   }, [setError]);
 
   const undo = useCallback(async (changeSetId: string) => {
@@ -256,7 +289,7 @@ export function useAgent(enabled: boolean) {
     await api(`/api/agent/conversations/${id}/rename`, { method: 'POST', body: JSON.stringify({ title }) });
   }, []);
 
-  return { ...state, select, newChat, send, answer, decide, undo, stop, remove, rename, setError };
+  return { ...state, model, setModel, select, newChat, send, answer, decide, undo, stop, remove, rename, setError };
 }
 
 // ─── Dictation ───────────────────────────────────────────────────────────────

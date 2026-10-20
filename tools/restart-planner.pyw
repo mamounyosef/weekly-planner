@@ -96,11 +96,16 @@ def find_windows(titles):
 def close_windows():
     hwnds = find_windows(WINDOW_TITLES)
     log(f"closing {len(hwnds)} window(s)")
-    for hwnd in hwnds:
-        try:
-            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-        except Exception:
-            pass
+    # ORDER MATTERS: closing the main window only HIDES it, and the app quits
+    # cleanly (saving the login cookie) only when the widget closes while the
+    # main window is hidden. Main first, then the widget.
+    for title in WINDOW_TITLES:
+        for hwnd in find_windows((title,)):
+            try:
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+        time.sleep(0.4)
     # Give them a moment to go quietly before anything is killed outright.
     for _ in range(20):
         if not find_windows(WINDOW_TITLES):
@@ -165,20 +170,33 @@ def kill_window_host():
     the launcher mutex and the relaunch would do nothing, so it goes by pid.
     NO /T: the dev server is its child, and this script is the server's child.
     """
-    out = run([
-        "powershell", "-NoProfile", "-NonInteractive", "-Command",
-        "Get-CimInstance Win32_Process "
-        "| Where-Object { $_.Name -eq 'Daily Planner.exe' "
-        "-or $_.CommandLine -like '*planner-launcher.pyw*' } "
-        "| ForEach-Object { $_.ProcessId }",
-    ])
-    if not out or not out.stdout:
-        return
-    for line in out.stdout.decode("utf-8", "ignore").splitlines():
-        pid = line.strip()
-        if pid.isdigit() and int(pid) != os.getpid():
-            log(f"killing window host {pid}")
-            run(["taskkill", "/PID", pid, "/F"])
+    def host_pids():
+        out = run([
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            "Get-CimInstance Win32_Process "
+            "| Where-Object { $_.Name -eq 'Daily Planner.exe' "
+            "-or $_.CommandLine -like '*planner-launcher.pyw*' } "
+            "| ForEach-Object { $_.ProcessId }",
+        ])
+        if not out or not out.stdout:
+            return []
+        return [
+            p.strip() for p in out.stdout.decode("utf-8", "ignore").splitlines()
+            if p.strip().isdigit() and int(p.strip()) != os.getpid()
+        ]
+
+    # WAIT FOR IT TO EXIT BY ITSELF FIRST. WebView2 writes its cookie store
+    # (the login) to the profile on a clean shutdown; force-killing the host
+    # two seconds after WM_CLOSE lost it, and every restart signed the user
+    # out. Only a host still alive after 10 s is killed.
+    for _ in range(40):
+        if not host_pids():
+            log("window host exited on its own")
+            return
+        time.sleep(0.25)
+    for pid in host_pids():
+        log(f"killing window host {pid} (did not exit within 10s)")
+        run(["taskkill", "/PID", pid, "/F"])
 
 
 def own_process_chain():

@@ -125,7 +125,7 @@ export function groupTasks(
   rows: Row[],
   tasks: TaskData,
   lists: TaskList[],
-  activeListId: string | null,
+  activeListIds: string[],
   filters: TaskFilter[],
   today: string,
   sortMode: SortMode
@@ -144,8 +144,8 @@ export function groupTasks(
     return resolveListId(owner.listId, lists);
   };
 
-  const allVisibleRows = activeListId
-    ? rows.filter(r => listOfTask(r.task) === activeListId)
+  const allVisibleRows = activeListIds.length
+    ? rows.filter(r => activeListIds.includes(listOfTask(r.task)))
     : rows;
 
   /**

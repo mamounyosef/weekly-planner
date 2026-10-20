@@ -3197,7 +3197,7 @@ export default function SettingsPage() {
                         <select
                           value={dayStartH}
                           onChange={e => {
-                            const newStart = parseInt(e.target.value);
+                            const newStart = parseInt(e.target.value) || 0;
                             const duration = Math.max(1, dayEndH - dayStartH);
                             setDayStartH(newStart);
                             setDayEndH(newStart + duration);
