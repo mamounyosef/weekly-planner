@@ -72,7 +72,22 @@ TTS_RATE = 24000
 MIC_RATE = 16000
 FRAME = 512                 # samples per VAD frame (32 ms at 16 kHz)
 FRAME_MS = FRAME * 1000 // MIC_RATE
-IDLE_UNLOAD_S = 20 * 60
+IDLE_UNLOAD_S = 10 * 60
+# GPU memory. Whisper's weights in 8-bit (about half of float16, the same
+# accuracy for practical purposes), and Kokoro's onnxruntime held to what it
+# actually needs: by default its CUDA arena grows in powers of two and cuDNN
+# searches with huge workspaces, which is where most of a 4 GB footprint went.
+# Overrides: SPEECH_WHISPER_COMPUTE (e.g. float16), SPEECH_TTS_DEVICE=cpu
+# (Kokoro on the CPU: no GPU memory at all for speaking, a little slower).
+WHISPER_COMPUTE = os.environ.get("SPEECH_WHISPER_COMPUTE", "int8_float16")
+TTS_DEVICE = os.environ.get("SPEECH_TTS_DEVICE", "cuda").lower()
+KOKORO_CUDA_OPTIONS = {
+    "arena_extend_strategy": "kSameAsRequested",
+    "cudnn_conv_algo_search": "HEURISTIC",
+    "cudnn_conv_use_max_workspace": "0",
+    # A ceiling, not a reservation: the arena only grows as far as it is used.
+    "gpu_mem_limit": str(1536 * 1024 * 1024),
+}
 MAX_UTTERANCE_S = 45
 PARTIAL_EVERY_S = 0.7
 
@@ -172,7 +187,11 @@ class Engine:
 
                 self.load_vad()
                 try:
-                    whisper = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+                    try:
+                        whisper = WhisperModel(WHISPER_MODEL, device="cuda", compute_type=WHISPER_COMPUTE)
+                    except Exception as e:
+                        log("Whisper %s on the GPU failed, trying float16:" % WHISPER_COMPUTE, e)
+                        whisper = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
                     device = "cuda"
                 except Exception as e:
                     log("Whisper on the GPU failed, using the CPU:", e)
@@ -183,7 +202,8 @@ class Engine:
                 sess = ort.InferenceSession(
                     KOKORO_MODEL,
                     sess_options=opts,
-                    providers=["CUDAExecutionProvider", "CPUExecutionProvider"] if device == "cuda" else ["CPUExecutionProvider"],
+                    providers=[("CUDAExecutionProvider", KOKORO_CUDA_OPTIONS), "CPUExecutionProvider"]
+                    if device == "cuda" and TTS_DEVICE != "cpu" else ["CPUExecutionProvider"],
                 )
                 kokoro = Kokoro.from_session(sess, KOKORO_VOICES)
                 # The first call of each model compiles kernels; pay that now,
