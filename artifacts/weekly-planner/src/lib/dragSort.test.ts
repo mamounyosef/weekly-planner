@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   centreOf, slotSpan, shiftThreshold, dropIndexFor, rowShift, reorderList,
   manualOrders, planAppendOrder, planReorder, bridgeVerdict, ORDER_STEP,
+  planOrderNumbers, planSubsetOrder, placeRow,
   type Orderable, type RowBoxes,
 } from './dragSort';
 
@@ -838,6 +839,168 @@ async function main() {
     // The other ending: a sync arrives first with a new task, and the bridge
     // gets out of the way rather than hiding it.
     assert.equal(bridgeVerdict(dropped, [...before, 'f']), 'changed');
+    console.log('  ok');
+  }
+
+
+  // ─── Several rows at once (the assistant's reorder_tasks) ─────────────────
+
+  const ids = (xs: readonly Item[]) => xs.map(t => t.id);
+
+  console.log('planSubsetOrder: a filtered subset is re-dealt into its own places');
+  {
+    // Work and Home interleaved. The assistant reorders what Work shows.
+    const full = [
+      item('w1', 'work', 0), item('h1', 'home', 10), item('w2', 'work', 20),
+      item('h2', 'home', 30), item('w3', 'work', 40), item('h3', 'home', 50),
+    ];
+    const plan = planSubsetOrder(full, ['w3', 'w1', 'w2'])!;
+    assert.deepEqual(ids(plan.items), ['w3', 'h1', 'w1', 'h2', 'w2', 'h3'], 'Work takes its own slots');
+    const after = settle(full, plan.changes);
+    assert.deepEqual(ids(after), ids(plan.items), 'and the numbers draw exactly that');
+    assert.deepEqual(ids(onlyList(after, 'home')), ['h1', 'h2', 'h3'], 'Home is untouched, in order');
+    assert.deepEqual(ids(onlyList(after, 'work')), ['w3', 'w1', 'w2'], 'Work reads as asked');
+    for (const t of onlyList(full, 'home')) {
+      assert.ok(!plan.changes.some(c => c.id === t.id), `${t.id} (hidden) is never written`);
+    }
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: one write when there is room');
+  {
+    const full = [item('a', 'x', 0), item('b', 'x', 10), item('c', 'x', 20), item('d', 'x', 30)];
+    // c above b: two named rows swap their two places.
+    const plan = planSubsetOrder(full, ['c', 'b'])!;
+    assert.deepEqual(ids(plan.items), ['a', 'c', 'b', 'd']);
+    assert.equal(plan.changes.length, 1, 'one of the two keeps its number');
+    assert.deepEqual(ids(settle(full, plan.changes)), ['a', 'c', 'b', 'd']);
+    // d to the top of the whole list, named with everything it passes.
+    const top = planSubsetOrder(full, ['d', 'a', 'b', 'c'])!;
+    assert.deepEqual(top.changes, [{ id: 'd', order: -10 }], 'the top is always one write');
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: no room means a renumber, never a fraction');
+  {
+    const full = [item('a', 'x', 0), item('b', 'x', 1), item('c', 'x', 2), item('d', 'x', 3)];
+    const plan = planSubsetOrder(full, ['d', 'b', 'c', 'a'])!;
+    assert.deepEqual(ids(settle(full, plan.changes)), ['d', 'b', 'c', 'a']);
+    for (const c of plan.changes) {
+      assert.ok(Number.isInteger(c.order), `${c.id} gets a whole number`);
+    }
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: unplaced rows sort last and stay unplaced unless moved');
+  {
+    const full = [item('a', 'x', 0), item('b', 'x', 10), item('u1', 'x'), item('u2', 'x'), item('u3', 'x')];
+    const plan = planSubsetOrder(full, ['b', 'a'])!;
+    assert.deepEqual(ids(settle(full, plan.changes)), ['b', 'a', 'u1', 'u2', 'u3']);
+    assert.ok(plan.changes.every(c => !c.id.startsWith('u')), 'the untouched tail is not written');
+
+    // An unplaced row moved up gets a real number, and so does anything that
+    // now has to sit above a placed row; the end of the tail does not.
+    const up = planSubsetOrder(full, ['u2', 'a'])!;
+    assert.deepEqual(ids(up.items), ['u2', 'b', 'u1', 'a', 'u3'], 'u2 and a swap places');
+    assert.deepEqual(ids(settle(full, up.changes)), ['u2', 'b', 'u1', 'a', 'u3']);
+    assert.ok(!up.changes.some(c => c.id === 'u3'), 'the tail end stays unplaced');
+
+    // Nothing placed at all: the head is numbered, in the order asked.
+    const none = [item('p', 'x'), item('q', 'x'), item('r', 'x')];
+    const fresh = planSubsetOrder(none, ['r', 'p'])!;
+    assert.deepEqual(ids(settle(none, fresh.changes)), ['r', 'q', 'p']);
+    for (const c of fresh.changes) assert.ok(Number.isFinite(c.order), 'never NaN');
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: steps of one task are just a short list');
+  {
+    const steps = [item('s1', 'p', 10), item('s2', 'p', 20), item('s3', 'p')];
+    const plan = planSubsetOrder(steps, ['s3', 's1', 's2'])!;
+    assert.deepEqual(ids(settle(steps, plan.changes)), ['s3', 's1', 's2']);
+    assert.deepEqual(plan.changes, [{ id: 's3', order: 0 }], 'one write, above the first');
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: a repeating master is one row however often it is drawn');
+  {
+    // The caller passes masters, once each. Asking for a master twice is refused.
+    const full = [item('rep', 'x', 10), item('one', 'x', 20)];
+    assert.equal(planSubsetOrder(full, ['one', 'rep', 'rep']), null);
+    const plan = planSubsetOrder(full, ['one', 'rep'])!;
+    assert.deepEqual(ids(settle(full, plan.changes)), ['one', 'rep']);
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: bad input is refused, not guessed at');
+  {
+    const full = [item('a', 'x', 0), item('b', 'x', 10)];
+    assert.equal(planSubsetOrder(full, ['a', 'zzz']), null, 'an id that is not in the list');
+    assert.equal(planSubsetOrder(full, ['a', 'a']), null, 'a duplicate');
+    assert.equal(planSubsetOrder([item('a', 'x', 0), item('a', 'y', 10)], ['a']), null, 'a broken list');
+    assert.deepEqual(planSubsetOrder(full, ['a', 'b'])!.changes, [], 'the order it already has writes nothing');
+    assert.deepEqual(planSubsetOrder(full, [])!.changes, [], 'nothing named, nothing written');
+    console.log('  ok');
+  }
+
+  console.log('planOrderNumbers: keeps the longest climbing run, repairs junk');
+  {
+    const before = [item('a', 'x', 0), item('b', 'x', 10), item('c', 'x', 20), item('d', 'x', 30), item('e', 'x', 40)];
+    // e to the top, c to the bottom: everything else keeps its number.
+    const after = [before[4], before[0], before[1], before[3], before[2]];
+    const changes = planOrderNumbers(before, after)!;
+    assert.equal(changes.length, 2);
+    assert.deepEqual(ids(settle(before, changes)), ids(after));
+    // Junk numbers are treated as unplaced and replaced.
+    const junk = [item('a', 'x', NaN), item('b', 'x', Infinity), item('c', 'x', 5)];
+    const fixed = planOrderNumbers(junk, [junk[1], junk[0], junk[2]])!;
+    assert.deepEqual(ids(settle(junk, fixed)), ['b', 'a', 'c']);
+    for (const c of fixed) assert.ok(Number.isFinite(c.order));
+    assert.equal(planOrderNumbers(before, before.slice(1)), null, 'different rows are refused');
+    console.log('  ok');
+  }
+
+  console.log('placeRow: before, after, top and bottom');
+  {
+    const xs = [item('a', 'x'), item('b', 'x'), item('c', 'x')];
+    assert.deepEqual(ids(placeRow(xs, 'c', { before: 'a' })!), ['c', 'a', 'b']);
+    assert.deepEqual(ids(placeRow(xs, 'a', { after: 'b' })!), ['b', 'a', 'c']);
+    assert.deepEqual(ids(placeRow(xs, 'b', { edge: 'top' })!), ['b', 'a', 'c']);
+    assert.deepEqual(ids(placeRow(xs, 'a', { edge: 'bottom' })!), ['b', 'c', 'a']);
+    assert.equal(placeRow(xs, 'a', { before: 'a' }), null);
+    assert.equal(placeRow(xs, 'zzz', { edge: 'top' }), null);
+    assert.equal(placeRow(xs, 'a', { after: 'zzz' }), null);
+    console.log('  ok');
+  }
+
+  console.log('planSubsetOrder: random subsets never disturb the rows not named');
+  {
+    let seed = 7;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let round = 0; round < 300; round += 1) {
+      const n = 2 + Math.floor(rnd() * 12);
+      const full: Item[] = [];
+      let o = 0;
+      for (let i = 0; i < n; i += 1) {
+        o += 1 + Math.floor(rnd() * 15);
+        full.push(item(`t${String(i).padStart(2, '0')}`, rnd() < 0.5 ? 'a' : 'b', rnd() < 0.15 ? undefined : o));
+      }
+      // As drawn: placed rows by number, unplaced last by id.
+      const drawn = settle(full, []);
+      const named = drawn.filter(() => rnd() < 0.5).map(t => t.id);
+      for (let i = named.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(rnd() * (i + 1));
+        [named[i], named[j]] = [named[j], named[i]];
+      }
+      const plan = planSubsetOrder(drawn, named)!;
+      const after = settle(drawn, plan.changes);
+      assert.deepEqual(ids(after), ids(plan.items), `round ${round}: numbers draw the plan`);
+      assert.deepEqual(ids(after).filter(id => named.includes(id)), named, `round ${round}: named rows as asked`);
+      const others = ids(drawn).filter(id => !named.includes(id));
+      const slotsOf = (xs: string[]) => others.map(id => xs.indexOf(id));
+      assert.deepEqual(slotsOf(ids(after)), slotsOf(ids(drawn)), `round ${round}: others keep their places`);
+      for (const c of plan.changes) assert.ok(Number.isFinite(c.order) && Number.isInteger(c.order));
+    }
     console.log('  ok');
   }
 

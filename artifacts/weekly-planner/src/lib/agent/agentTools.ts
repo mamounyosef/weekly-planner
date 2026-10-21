@@ -30,16 +30,22 @@ import {
   type Weekday,
 } from '../recurrence';
 import { planOccurrenceEdit, type OccurrenceScope } from '../occurrence';
-import { deleteTaskScoped, type Task, type TaskData } from '../tasks';
+import { ALL_TASK_FILTERS, TASK_FILTER_LABELS, deleteTaskScoped, type Task, type TaskData, type TaskFilter } from '../tasks';
+import {
+  buildTaskRows, groupTasks, SORT_MODES,
+  type Bucket, type Node as BoardNode, type Row as BoardRow, type SectionKey, type SortMode,
+} from '../taskBoard';
+import { planOrderNumbers, planSubsetOrder, placeRow, type RowPlacement } from '../dragSort';
 import type { EventCategory } from '../categories';
 import type { NotifySpec, NotificationSettings } from '../notifications';
-import type { TaskList } from '../taskLists';
+import { resolveListId, type TaskList } from '../taskLists';
 import type {
   AgentApproval,
   AgentQuestion,
   ChangeEntry,
   ItemFacts,
   PendingDeletion,
+  AgentTaskView,
 } from './agentTypes';
 import {
   dedupeFocusHistory, applyTypedDayTotals, isTypedDayTotal,
@@ -111,6 +117,12 @@ export interface AgentWorld {
   settings?: Record<string, unknown>;
   /** Which prayers are ticked off: { 'yyyy-MM-dd': ['fajr', ...] }. */
   prayerDone?: Record<string, string[]>;
+  /**
+   * How the user's Tasks panel is set up on the device that sent the message
+   * (sort, selected lists, filters), as that device reported it. Untrusted:
+   * coerced by `coerceTaskView`. Absent when the device did not say.
+   */
+  taskView?: AgentTaskView;
 }
 
 export type UndoStore = 'events' | 'tasks' | 'settings' | 'prayerDone' | 'focusSessions' | 'focusTimer';
@@ -385,6 +397,21 @@ function compactItem(o: Occ, world: AgentWorld): Record<string, unknown> {
 const sortKey = (i: Record<string, unknown>) =>
   `${i.date}|${i.allDay ? '0' : '1'}|${i.start ?? '99:99'}|${i.title}`;
 
+/**
+ * Tag listed tasks with where the Tasks panel draws them: the section and the
+ * 1-based place in its manual order (across all lists). Only tasks the panel
+ * actually draws get one; a future day of a repeat is not on the board yet.
+ */
+function withBoardPlaces(items: Array<Record<string, unknown>>, world: AgentWorld): void {
+  if (!items.some(i => i.kind === 'task')) return;
+  const places = boardPlaces(world);
+  for (const item of items) {
+    if (item.kind !== 'task' || item.done) continue;
+    const at = places.get(String(item.id));
+    if (at) { item.section = at.section; item.place = at.place; }
+  }
+}
+
 // ─── Argument coercion shared by create and update ───────────────────────────
 
 function resolveCategory(raw: unknown, world: AgentWorld): EventCategory | null {
@@ -524,7 +551,7 @@ export const TOOL_DEFS = [
     type: 'function',
     function: {
       name: 'list_items',
-      description: 'Read what is on the calendar between two dates (inclusive): events, dated tasks, and optionally prayer times. Repeating items are expanded; each occurrence has its own id ("<id>::<date>") that you pass to update/delete. Always check before adding, so you do not create duplicates or clashes.',
+      description: 'Read what is on the calendar between two dates (inclusive): events, dated tasks, and optionally prayer times. Repeating items are expanded; each occurrence has its own id ("<id>::<date>") that you pass to update/delete. Always check before adding, so you do not create duplicates or clashes. A task on the Tasks panel also has its section and place there (place = its position in that section in manual order, across all lists); list_tasks shows the whole board in that order.',
       parameters: {
         type: 'object',
         properties: {
@@ -692,6 +719,49 @@ export const TOOL_DEFS = [
   {
     type: 'function',
     function: {
+      name: 'list_tasks',
+      description: 'Read the Tasks panel exactly as the user sees it in Manual order: sections Overdue, Today, Tomorrow, Upcoming, No Date, each top to bottom, with every task\'s position, list and steps. The manual order is ONE order shared by all task lists and all devices (PC, widget, phone); choosing lists only filters it. Use this before reorder_tasks and for "what is next on my list".',
+      parameters: {
+        type: 'object',
+        properties: {
+          lists: { type: 'array', items: { type: 'string' }, description: 'Only these task lists (names), as if the user selected them. Default: every list.' },
+          section: { type: 'string', enum: ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'], description: 'Only this section.' },
+          includeDone: { type: 'boolean', description: 'Also list recently finished tasks (they have no manual order). Default false.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'reorder_tasks',
+      description: 'Change the manual order of tasks inside ONE section of the Tasks panel (or the steps of one task). The order is shared by all lists and devices, so tasks you do not mention never move relative to each other, whatever lists the user has selected. Use EITHER "order" (the tasks you name are put in exactly this order, top to bottom, in the places they already occupy; to reorder what the user sees, name every task they see in that section) OR "moves" (one task at a time: before/after another task, or to the top/bottom of the section). It never changes dates or lists: moving a task to another day is update_tasks. Completed tasks cannot be ordered. Get ids from list_tasks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          order: { type: 'array', items: { type: 'string' }, description: 'Task ids, top to bottom. At least two. All in the same section, or all steps of the same task.' },
+          moves: {
+            type: 'array',
+            description: 'Applied in turn. Each needs exactly one of before, after or to.',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'The task (or step) to move.' },
+                before: { type: 'string', description: 'Put it directly above this task.' },
+                after: { type: 'string', description: 'Put it directly below this task.' },
+                to: { type: 'string', enum: ['top', 'bottom'], description: 'Top or bottom of the section (of the steps, for a step).' },
+              },
+              required: ['id'],
+            },
+          },
+          section: { type: 'string', enum: ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'], description: 'Usually worked out from the ids. Needed only for a repeating task that shows in several sections.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'delete_items',
       description: 'Delete events, tasks, event categories or task lists. This does NOT delete immediately: the user sees exactly what will be removed and must press Approve. Batch every deletion of a request into one call. Repeating items need a scope. Deleting a category keeps its items (they lose the category); deleting a task list moves its tasks to General.',
       parameters: {
@@ -802,7 +872,7 @@ export const TOOL_DEFS = [
 export const TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_DEFS.map(t => t.function.name));
 
 /** Tools that change nothing and may run without any bookkeeping. */
-export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['list_items', 'search_items', 'find_free_time', 'list_focus_sessions', 'get_focus_stats']);
+export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(['list_items', 'search_items', 'list_tasks', 'find_free_time', 'list_focus_sessions', 'get_focus_stats']);
 
 // ─── Tool dispatch ───────────────────────────────────────────────────────────
 
@@ -829,6 +899,8 @@ export function runTool(name: string, rawArgs: unknown, world: AgentWorld): Tool
       case 'update_events': return updateEvents(args, world);
       case 'create_tasks': return createTasks(args, world);
       case 'update_tasks': return updateTasks(args, world);
+      case 'list_tasks': return listTasks(args, world);
+      case 'reorder_tasks': return reorderTasks(args, world);
       case 'delete_items': return prepareDeletion(args, world);
       case 'list_focus_sessions': return listFocusSessions(args, world);
       case 'get_focus_stats': return getFocusStats(args, world);
@@ -867,6 +939,7 @@ function listItems(args: Record<string, unknown>, world: AgentWorld): ToolOutcom
   if (cat !== undefined) occs = occs.filter(o => o.kind === 'event' && (o.record as AgentEvent).categoryId === (cat?.id ?? undefined));
 
   const items = occs.map(o => compactItem(o, world)).sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+  if (include.has('tasks')) withBoardPlaces(items, world);
   const MAX = 250;
   const result: Record<string, unknown> = {
     from, to,
@@ -923,6 +996,7 @@ function searchItems(args: Record<string, unknown>, world: AgentWorld): ToolOutc
   if (kind !== 'task') for (const ev of Object.values(world.events)) if (ev) consider(ev, 'event', ev.content ?? '', ev.description);
   if (kind !== 'event') for (const t of Object.values(world.tasks)) if (t) consider(t, 'task', t.title ?? '', t.notes);
   hits.sort((a, b) => String(a.date ?? '9999').localeCompare(String(b.date ?? '9999')));
+  if (kind !== 'event') withBoardPlaces(hits, world);
   return {
     result: { query: args.query, count: hits.length, items: hits.slice(0, 60), ...(hits.length > 60 ? { truncated: true } : {}) },
     label: `Searched for "${args.query}" (${hits.length} found)`,
@@ -1382,13 +1456,19 @@ const GTASK_FRESH = {
   gTaskSeriesDate: undefined, gTaskParentId: undefined, lastSyncedAt: undefined, seriesDone: undefined,
 };
 
-function nextOrder(tasks: TaskData, listId: string | undefined, parentId: string | undefined): number {
+/**
+ * The place a new task takes: last. For a task that means after every placed
+ * task on EVERY list, because the manual order is one order shared by all
+ * lists (selecting a list only filters it); numbering per list put a new task
+ * in the middle of the other lists' tasks in the "All" view. A step goes after
+ * its own siblings.
+ */
+function nextOrder(tasks: TaskData, parentId: string | undefined): number {
   let max = 0;
   for (const t of Object.values(tasks)) {
     if (!t || t.deleted) continue;
-    if ((t.listId || 'general') !== (listId || 'general')) continue;
     if ((t.parentId ?? undefined) !== parentId) continue;
-    if (typeof t.order === 'number' && t.order > max) max = t.order;
+    if (typeof t.order === 'number' && Number.isFinite(t.order) && t.order > max) max = t.order;
   }
   return max + 10;
 }
@@ -1402,6 +1482,7 @@ function createTasks(args: Record<string, unknown>, world: AgentWorld): ToolOutc
   const now = world.now.getTime();
   const newId = world.newId ?? uuid;
 
+  const assigned = new Map<string, number>();
   const built: Task[][] = (args.tasks as unknown[]).map((raw, idx) => {
     if (!isRecord(raw)) fail(`tasks[${idx}] must be an object.`);
     const a = raw as Record<string, unknown>;
@@ -1434,7 +1515,11 @@ function createTasks(args: Record<string, unknown>, world: AgentWorld): ToolOutc
     }
     const rem = parseReminders(a.reminders);
     if (rem && rem !== 'inherit') t.notify = rem;
-    t.order = nextOrder(next, t.listId, t.parentId);
+    // One past the last, and past the ones added earlier in this same call
+    // (they are not in `next` yet), so a batch keeps the order it was given.
+    const key = t.parentId ?? '';
+    t.order = Math.max(nextOrder(next, t.parentId), (assigned.get(key) ?? -Infinity) + 10);
+    assigned.set(key, t.order);
     const group = [clean(t)];
     if (a.subtasks != null) {
       if (!Array.isArray(a.subtasks)) fail(`tasks[${idx}].subtasks must be a list of titles.`);
@@ -1605,6 +1690,399 @@ function updateTasks(args: Record<string, unknown>, world: AgentWorld): ToolOutc
     undo: diffStores('tasks', world.tasks as Record<string, unknown>, store as Record<string, unknown>),
     result: { updated: entries.length, items: results },
     label: `Updated ${entries.length} task${entries.length === 1 ? '' : 's'}`,
+  };
+}
+
+// ─── The task board's manual order ───────────────────────────────────────────
+//
+// ONE ORDER, SHARED BY EVERY LIST AND EVERY DEVICE. Each task has a single
+// `order` number (spaced by ORDER_STEP), and the Tasks panel compares those
+// numbers inside a SECTION (Overdue, Today, Tomorrow, Upcoming, No Date).
+// Selecting lists only FILTERS that one order. So the assistant reads the board
+// exactly the way the PC panel and the phone draw it (`groupTasks`, the shared
+// comparator) and writes through the same pure placement the drags use, which
+// never disturbs the tasks of lists that are not being looked at. Steps are
+// ordered among the steps of their own task. A repeating task's place is on
+// its master, so it is one place for every day it shows.
+
+const OPEN_SECTIONS: readonly Bucket[] = ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'];
+
+const SORT_LABEL: Record<SortMode, string> = {
+  datetime: 'Date & Time',
+  manual: 'Manual order',
+  title: 'Title (A-Z)',
+  'title-desc': 'Title (Z-A)',
+};
+
+/**
+ * A device's report of its Tasks panel, made safe. It comes from the client,
+ * so anything that is not exactly what the app itself would send is dropped.
+ */
+export function coerceTaskView(raw: unknown): AgentTaskView | undefined {
+  if (!isRecord(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: AgentTaskView = {};
+  if (typeof r.sort === 'string' && (SORT_MODES as readonly string[]).includes(r.sort)) out.sort = r.sort as SortMode;
+  if (Array.isArray(r.lists)) {
+    out.lists = [...new Set(r.lists.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 120))].slice(0, 50);
+  }
+  if (Array.isArray(r.filters)) {
+    const given = r.filters;
+    out.filters = ALL_TASK_FILTERS.filter(f => given.includes(f));
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** The lists the user has selected that still exist; [] means all of them. */
+function viewListIds(world: AgentWorld): string[] {
+  const ids = world.taskView?.lists ?? [];
+  return ids.filter(id => world.taskLists.some(l => l.id === id));
+}
+
+/** One line describing the user's Tasks panel, or null when the device did not say. */
+export function taskViewLine(world: AgentWorld): string | null {
+  const v = world.taskView;
+  if (!v) return null;
+  const parts: string[] = [];
+  if (v.sort) parts.push(`sorted by ${SORT_LABEL[v.sort]}`);
+  if (v.lists) {
+    const names = viewListIds(world).map(id => world.taskLists.find(l => l.id === id)!.name);
+    parts.push(names.length ? `showing only the lists ${names.join(', ')}` : 'showing all lists');
+  }
+  if (v.filters?.length) parts.push(`filtered to ${v.filters.map(f => TASK_FILTER_LABELS[f as TaskFilter]).join(', ')}`);
+  return parts.length ? parts.join('; ') : null;
+}
+
+/** Whether a manual reorder shows on the user's screen, given their sort. */
+function sortVisibility(world: AgentWorld): { visible: 'yes' | 'partly' | 'no' | 'unknown'; note?: string } {
+  const sort = world.taskView?.sort;
+  if (!sort) return { visible: 'unknown' };
+  if (sort === 'manual') return { visible: 'yes' };
+  if (sort === 'datetime') {
+    return {
+      visible: 'partly',
+      note: 'Their Tasks panel is sorted by Date & Time, so there this order only decides between tasks with the same date and time. It shows in full when they sort by Manual order.',
+    };
+  }
+  return {
+    visible: 'no',
+    note: `Their Tasks panel is sorted by ${SORT_LABEL[sort]}, so this order does not show there until they sort by Manual order.`,
+  };
+}
+
+/** The board as the Tasks panel draws it, every list, manual order. */
+function boardOf(world: AgentWorld, listIds: string[] = []): Record<SectionKey, BoardNode[]> {
+  const today = ymd(world.now);
+  const autoRoll = world.settings?.autoRollRecurringTasks !== false;
+  const rows = buildTaskRows(world.tasks, today, autoRoll);
+  return groupTasks(rows, world.tasks, world.taskLists, listIds, [], today, 'manual');
+}
+
+/**
+ * Each task once, in the order its section draws it. A repeat can be drawn
+ * more than once in one section (missed days in Overdue); its place is one
+ * place, the master's, so it counts once, where it first appears.
+ */
+function onceEach(nodes: BoardNode[]): BoardNode[] {
+  const seen = new Set<string>();
+  return nodes.filter(n => !seen.has(n.row.task.id) && !!seen.add(n.row.task.id));
+}
+
+function onceEachRow(rows: BoardRow[]): BoardRow[] {
+  const seen = new Set<string>();
+  return rows.filter(r => !seen.has(r.task.id) && !!seen.add(r.task.id));
+}
+
+function listIdOf(t: Task, world: AgentWorld): string {
+  const owner = (t.parentId && world.tasks[t.parentId] ? world.tasks[t.parentId] : null) ?? t;
+  return resolveListId(owner.listId, world.taskLists);
+}
+
+function listNameOf(t: Task, world: AgentWorld): string {
+  const id = listIdOf(t, world);
+  return world.taskLists.find(l => l.id === id)?.name ?? 'General';
+}
+
+/** Where each drawn task occurrence sits: its section and 1-based place in it (all lists). */
+function boardPlaces(world: AgentWorld): Map<string, { section: Bucket; place: number }> {
+  const board = boardOf(world);
+  const out = new Map<string, { section: Bucket; place: number }>();
+  for (const key of OPEN_SECTIONS) {
+    const places = new Map<string, number>();
+    onceEach(board[key]).forEach((n, i) => places.set(n.row.task.id, i + 1));
+    for (const n of board[key]) {
+      if (!out.has(n.row.occId)) out.set(n.row.occId, { section: key, place: places.get(n.row.task.id)! });
+    }
+  }
+  return out;
+}
+
+function parseSection(raw: unknown): Bucket {
+  const q = typeof raw === 'string' ? raw.toLowerCase().replace(/[\s_-]+/g, '') : '';
+  const hit = OPEN_SECTIONS.find(k => k.toLowerCase().replace(/\s+/g, '') === q)
+    ?? (q === 'undated' || q === 'nodue' ? 'No Date' : undefined);
+  if (!hit) fail(`section must be one of: ${OPEN_SECTIONS.join(', ')}.`);
+  return hit as Bucket;
+}
+
+function boardItem(n: BoardNode, position: number, world: AgentWorld): Record<string, unknown> {
+  const t = n.row.task;
+  const item: Record<string, unknown> = { position, id: n.row.occId, title: t.title || '(untitled)', list: listNameOf(t, world) };
+  if (n.row.due) {
+    item.date = n.row.due;
+    item.day = format(parseDate(n.row.due), 'EEEE');
+  }
+  if (t.startTime) item.start = t.startTime;
+  if (t.recur) item.repeats = formatRecurrenceLabel(t.recur, anchorDate(t) ?? undefined);
+  if (n.row.done) item.done = true;
+  const steps = onceEachRow(n.children);
+  if (steps.length) {
+    item.steps = steps.map((c, j) => ({
+      position: j + 1, id: c.task.id, title: c.task.title || '(untitled)', ...(c.done ? { done: true } : {}),
+    }));
+  }
+  return item;
+}
+
+function listTasks(args: Record<string, unknown>, world: AgentWorld): ToolOutcome {
+  let listIds: string[] = [];
+  if (args.lists != null) {
+    if (!Array.isArray(args.lists)) fail('lists must be a list of task list names, e.g. ["University"].');
+    listIds = [...new Set((args.lists as unknown[]).map(l => resolveList(l, world)).filter((l): l is TaskList => !!l).map(l => l.id))];
+  }
+  const only = args.section != null ? parseSection(args.section) : null;
+  const includeDone = args.includeDone === true;
+  const board = boardOf(world, listIds);
+  const MAX = 80;
+  const sections: Array<Record<string, unknown>> = [];
+  let count = 0;
+  const keys: SectionKey[] = [...OPEN_SECTIONS, ...(includeDone ? ['Done' as const] : [])];
+  for (const key of keys) {
+    if (only && key !== only) continue;
+    const nodes = key === 'Done' ? board.Done.slice(0, 30) : onceEach(board[key]);
+    if (!nodes.length) continue;
+    count += nodes.length;
+    sections.push({
+      section: key,
+      ...(key === 'Done' ? { note: 'Finished tasks, newest first. They have no manual order.' } : {}),
+      tasks: nodes.slice(0, MAX).map((n, i) => boardItem(n, i + 1, world)),
+      ...(nodes.length > MAX ? { truncated: `Only the first ${MAX} of ${nodes.length} are shown.` } : {}),
+    });
+  }
+  const names = listIds.map(id => world.taskLists.find(l => l.id === id)!.name);
+  const view = taskViewLine(world);
+  return {
+    result: {
+      order: 'Each section is in the manual order of the Tasks panel, top to bottom. That order is ONE order shared by all lists and all devices; choosing lists only filters it.'
+        + (names.length ? ` Only the lists ${names.join(', ')} are shown here, so positions count those lists only.` : ' Every list is shown.'),
+      ...(view ? { userTaskView: view } : {}),
+      sections,
+      count,
+    },
+    label: `Read the task board${names.length ? ` (${names.join(', ')})` : ''} (${count} task${count === 1 ? '' : 's'})`,
+  };
+}
+
+interface OrderRef { raw: string; id: string; occId: string; occDate: string | null }
+
+function reorderTasks(args: Record<string, unknown>, world: AgentWorld): ToolOutcome {
+  const hasOrder = args.order !== undefined && args.order !== null;
+  const hasMoves = args.moves !== undefined && args.moves !== null;
+  if (hasOrder === hasMoves) fail('Pass either "order" (task ids, top to bottom) or "moves" (one task at a time), not both.');
+  if (hasOrder && (!Array.isArray(args.order) || !(args.order as unknown[]).length)) fail('order must be a list of task ids, top to bottom.');
+  if (hasMoves && (!Array.isArray(args.moves) || !(args.moves as unknown[]).length)) fail('moves must be a non-empty list.');
+  if (hasOrder && (args.order as unknown[]).length > 200) fail('At most 200 tasks per call.');
+  if (hasMoves && (args.moves as unknown[]).length > 50) fail('At most 50 moves per call.');
+
+  const titleOf = (id: string) => `"${world.tasks[id]?.title || id}"`;
+  const resolve = (raw: unknown, what: string): OrderRef => {
+    if (typeof raw !== 'string' || !raw.trim()) fail(`${what} must be a task id from list_tasks.`);
+    const occId = (raw as string).trim();
+    const { masterId, occDate } = parseOccId(occId);
+    const t = world.tasks[masterId];
+    if (!t || t.deleted) fail(`${what}: no task with id "${occId}". Use list_tasks for current ids.`);
+    return { raw: occId, id: masterId, occId, occDate };
+  };
+
+  // Every id the call mentions: the tasks to place, and (for moves) the anchors.
+  const named: OrderRef[] = [];
+  const anchors: OrderRef[] = [];
+  const moves: Array<{ ref: OrderRef; where: RowPlacement }> = [];
+  if (hasOrder) {
+    (args.order as unknown[]).forEach((raw, i) => named.push(resolve(raw, `order[${i}]`)));
+  } else {
+    (args.moves as unknown[]).forEach((m, i) => {
+      if (!isRecord(m)) fail(`moves[${i}] must be an object like {"id": "...", "before": "..."}.`);
+      const mv = m as Record<string, unknown>;
+      const ref = resolve(mv.id, `moves[${i}].id`);
+      const given = ['before', 'after', 'to'].filter(k => mv[k] !== undefined && mv[k] !== null);
+      if (given.length !== 1) fail(`moves[${i}] needs exactly one of "before" (a task id), "after" (a task id) or "to" ("top" or "bottom").`);
+      let where: RowPlacement;
+      if (given[0] === 'to') {
+        if (mv.to !== 'top' && mv.to !== 'bottom') fail(`moves[${i}].to must be "top" or "bottom".`);
+        where = { edge: mv.to as 'top' | 'bottom' };
+      } else {
+        const anchor = resolve(mv[given[0]], `moves[${i}].${given[0]}`);
+        if (anchor.id === ref.id) fail(`moves[${i}]: a task cannot be placed next to itself.`);
+        anchors.push(anchor);
+        where = given[0] === 'before' ? { before: anchor.id } : { after: anchor.id };
+      }
+      named.push(ref);
+      moves.push({ ref, where });
+    });
+  }
+  const refs = [...named, ...anchors];
+
+  // Where everything is drawn right now.
+  const board = boardOf(world);
+  const sectionsOf = new Map<string, Set<Bucket>>();
+  const occSection = new Map<string, Bucket>();
+  const stepParent = new Map<string, BoardNode>();
+  const done = new Set<string>();
+  for (const key of [...OPEN_SECTIONS, 'Done' as const]) {
+    for (const n of board[key]) {
+      if (key === 'Done') done.add(n.row.task.id);
+      else {
+        const set = sectionsOf.get(n.row.task.id) ?? new Set<Bucket>();
+        set.add(key);
+        sectionsOf.set(n.row.task.id, set);
+        occSection.set(n.row.occId, key);
+      }
+      for (const c of n.children) if (!stepParent.has(c.task.id)) stepParent.set(c.task.id, n);
+    }
+  }
+
+  const steps = refs.filter(r => stepParent.has(r.id));
+  if (steps.length && steps.length !== refs.length) {
+    fail('Steps (subtasks) are ordered only among the steps of their own task, and tasks only among tasks. Do not mix them in one call.');
+  }
+
+  let rows: BoardRow[];
+  let section: Bucket | null = null;
+  let parent: Task | null = null;
+  if (steps.length) {
+    const parents = new Set(refs.map(r => stepParent.get(r.id)!.row.task.id));
+    if (parents.size > 1) fail('These steps belong to different tasks. Steps are ordered among the steps of the same task, so reorder each task\'s steps in its own call.');
+    const pnode = stepParent.get(refs[0].id)!;
+    parent = pnode.row.task;
+    rows = onceEachRow(pnode.children);
+  } else {
+    const candidates = refs.map(r => {
+      const all = sectionsOf.get(r.id);
+      if (!all) {
+        if (done.has(r.id)) fail(`${titleOf(r.id)} is completed. Completed tasks are listed by when they were finished and have no manual order; reopen it with update_tasks first if it should be placed.`);
+        fail(`${titleOf(r.id)} is not on the task board right now (its date is too far ahead or too long ago), so it has no place to move to.`);
+      }
+      // An occurrence id pins the section that day is drawn in.
+      const pinned = r.occDate ? occSection.get(r.occId) : undefined;
+      return { ref: r, sections: pinned ? new Set([pinned]) : all! };
+    });
+    if (args.section != null) {
+      section = parseSection(args.section);
+      for (const c of candidates) {
+        if (!c.sections.has(section)) fail(`${titleOf(c.ref.id)} is in ${[...c.sections].join(' / ')}, not ${section}. The manual order only applies inside one section; reordering never changes a date (use update_tasks for that).`);
+      }
+    } else {
+      const common = OPEN_SECTIONS.filter(k => candidates.every(c => c.sections.has(k)));
+      if (!common.length) {
+        fail(`These tasks are in different sections: ${candidates.map(c => `${titleOf(c.ref.id)} (${[...c.sections].join(' / ')})`).join(', ')}. The manual order only applies inside one section (Overdue, Today, Tomorrow, Upcoming, No Date), so reorder each section in its own call. Reordering never changes dates: to move a task to another day use update_tasks.`);
+      }
+      // Only repeating tasks can be drawn in more than one section; the first
+      // one they share is the one the user reads first.
+      section = common[0];
+    }
+    rows = onceEach(board[section!]).map(n => n.row);
+  }
+
+  // A repeat has one place for all its days: name it once.
+  const seen = new Set<string>();
+  for (const r of named) {
+    if (seen.has(r.id)) fail(`${titleOf(r.id)} is listed twice${r.occDate ? ' (a repeating task has one place for all its days)' : ''}. Give each task once.`);
+    seen.add(r.id);
+  }
+
+  const full = rows.map(r => ({ id: r.task.id, order: world.tasks[r.task.id]?.order }));
+  let items: typeof full;
+  let changes: Array<{ id: string; order: number }>;
+  if (hasOrder) {
+    if (named.length < 2) fail('order needs at least two tasks, top to bottom. To move one task, use moves, e.g. [{"id": "...", "before": "..."}] or [{"id": "...", "to": "top"}].');
+    const plan = planSubsetOrder(full, named.map(r => r.id));
+    if (!plan) fail('Those tasks could not be placed. Use list_tasks for current ids and try again.');
+    ({ items, changes } = plan!);
+  } else {
+    items = full;
+    for (const m of moves) {
+      const next = placeRow(items, m.ref.id, m.where);
+      if (!next) fail(`${titleOf(m.ref.id)} could not be placed there. Use list_tasks for current ids and try again.`);
+      items = next!;
+    }
+    const planned = planOrderNumbers(full, items);
+    if (!planned) fail('Those tasks could not be placed. Use list_tasks for current ids and try again.');
+    changes = planned!;
+  }
+
+  const where = parent ? `the steps of "${parent.title || 'a task'}"` : section!;
+  const orderNow = (list: typeof full) => list.slice(0, 60).map((t, i) => ({ position: i + 1, id: t.id, title: world.tasks[t.id]?.title || '(untitled)' }));
+  if (items.every((t, i) => t.id === full[i].id) || !changes.length) {
+    return {
+      result: { unchanged: true, where, message: 'They are already in that order. Nothing was changed.', order: orderNow(full) },
+      label: `Order of ${where} already as asked`,
+    };
+  }
+
+  const now = world.now.getTime();
+  const store: TaskData = { ...world.tasks };
+  for (const c of changes) store[c.id] = clean({ ...store[c.id], order: c.order, updatedAt: now });
+
+  // Positions as the user counts them: among the lists they have selected
+  // when the task is on one of them, otherwise across every list.
+  const selected = parent ? [] : viewListIds(world);
+  const counted = (list: typeof full, id: string): number => {
+    const inView = selected.length && selected.includes(listIdOf(world.tasks[id], world));
+    const scope = inView ? list.filter(t => selected.includes(listIdOf(world.tasks[t.id], world))) : list;
+    return scope.findIndex(t => t.id === id) + 1;
+  };
+  const dueOf = new Map(rows.map(r => [r.task.id, r.due]));
+  const vis = parent ? { visible: 'yes' as const } : sortVisibility(world);
+  const viewNames = selected.map(id => world.taskLists.find(l => l.id === id)!.name);
+  const entries: ChangeEntry[] = [];
+  for (const id of [...new Set(named.map(r => r.id))]) {
+    const moved = full.findIndex(t => t.id === id) !== items.findIndex(t => t.id === id);
+    const pb = counted(full, id);
+    const pa = counted(items, id);
+    if (!moved && pb === pa) continue;
+    const t0 = world.tasks[id];
+    const occ = t0.recur ? dueOf.get(id) ?? null : null;
+    const inView = selected.includes(listIdOf(t0, world));
+    const bits = [parent
+      ? `Order of the steps of "${parent.title || 'a task'}".`
+      : `Manual order in ${section}${inView && viewNames.length ? `, counted among ${viewNames.join(', ')}` : ', across all lists'}.`];
+    if (t0.recur && !parent) bits.push('It repeats, so this is its place on every day it shows.');
+    if (vis.note) bits.push(vis.note);
+    entries.push({
+      action: 'updated', kind: 'task', id,
+      before: { ...taskFacts(t0, world, occ), position: pb },
+      after: { ...taskFacts(store[id], world, occ), position: pa },
+      changed: ['position'],
+      note: bits.join(' '),
+      verified: false,
+    });
+  }
+
+  return {
+    tasks: store,
+    entries,
+    undo: diffStores('tasks', world.tasks as Record<string, unknown>, store as Record<string, unknown>),
+    result: {
+      reordered: true,
+      where,
+      order: orderNow(items),
+      ...(items.length > 60 ? { truncated: `Only the first 60 of ${items.length} are shown.` } : {}),
+      tasksRewritten: changes.length,
+      visibleToUser: vis.visible,
+      ...(vis.note ? { note: `${vis.note} Tell the user this.` } : {}),
+    },
+    label: parent ? `Reordered the steps of "${parent.title || 'a task'}"` : `Reordered ${entries.length} task${entries.length === 1 ? '' : 's'} in ${section}`,
   };
 }
 
@@ -2233,6 +2711,12 @@ export function entryVerified(e: ChangeEntry, records: UndoRecord[], ok: Set<str
   let keys = recordKeysFor(e).filter(k => present.has(k));
   if (!keys.length && (e.kind === 'category' || e.kind === 'task_list')) {
     keys = [e.kind === 'category' ? 'settings:categories#order' : 'settings:taskLists#order'].filter(k => present.has(k));
+  }
+  // A task that changed place only because others moved around it (reorder_tasks
+  // writes as few rows as it can) has no record of its own: its place is right
+  // exactly when every task the reorder wrote landed as written.
+  if (!keys.length && e.kind === 'task' && e.changed?.includes('position')) {
+    keys = [...present].filter(k => k.startsWith('tasks:'));
   }
   return keys.length > 0 && keys.every(k => ok.has(k));
 }

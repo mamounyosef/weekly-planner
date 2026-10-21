@@ -18,7 +18,7 @@ import path from 'path';
 import crypto from 'crypto';
 
 import {
-  runTool, applyDeletion, applyFocusDeletion, planUndoAll, verifyAll, entryVerified, answersToResult,
+  runTool, applyDeletion, applyFocusDeletion, planUndoAll, verifyAll, entryVerified, answersToResult, coerceTaskView,
   TOOL_DEFS, READ_ONLY_TOOLS,
   type AgentWorld, type ToolOutcome, type UndoRecord, type UndoStores, type DeletionPlan, type EventData, type PrayerDay,
 } from './src/lib/agent/agentTools';
@@ -607,8 +607,11 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       const usage: AgentUsage = { model, promptTokens: 0, outputTokens: 0, contextTokens: 0, calls: 0, costUsd: 0 };
       msg.usage = usage;
 
+      // The world every model call and tool of this run sees, with the sending
+      // device's Tasks panel view on it.
+      const worldNow = async () => ({ ...(await loadWorld(auth)), taskView: conv.taskView });
       for (let step = 0; step < MAX_STEPS; step++) {
-        const world = await loadWorld(auth);
+        const world = await worldNow();
         const system = buildSystemPrompt(world, auth.user.name || auth.user.username, { voice: !!conv.voice });
         const messages = [{ role: 'system', content: system }, ...(await materialize(auth, llm.messages, cfg, model, controller.signal))];
         // A spoken reply is waited for in silence: whether to think first is
@@ -654,10 +657,10 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
           let cs: ChangeSet | null = null;
           try {
             if (READ_ONLY_TOOLS.has(name) || name === 'ask_user' || name === 'delete_items') {
-              outcome = runTool(name, args, await loadWorld(auth));
+              outcome = runTool(name, args, await worldNow());
             } else {
               ({ outcome, cs } = await withLock(username, async () => {
-                const fresh = await loadWorld(auth);
+                const fresh = await worldNow();
                 const o = runTool(name, args, fresh);
                 const writes = o.events || o.tasks || o.settings || o.prayerToggles?.length || o.focusTimer || o.focusSessions;
                 const c = (writes || o.entries?.length) && !o.isError ? await commit(auth, fresh, o, name) : null;
@@ -719,6 +722,8 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       case 'update_events': return 'Updating events';
       case 'create_tasks': return 'Adding tasks';
       case 'update_tasks': return 'Updating tasks';
+      case 'list_tasks': return 'Reading your task board';
+      case 'reorder_tasks': return 'Reordering tasks';
       case 'delete_items': return 'Preparing a deletion for your approval';
       case 'list_focus_sessions': return 'Checking your focus sessions';
       case 'get_focus_stats': return 'Looking at your focus stats';
@@ -967,6 +972,11 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         // unknown name is ignored rather than trusted (the run would 404).
         if (isKnownModel(body.model) && (action === 'messages' || action === 'answer' || action === 'approval')) conv.model = body.model;
         if (conv.voice && typeof body.think === 'boolean') conv.voiceThink = body.think;
+        // The Tasks panel of the device sending this (sort, lists, filters), so
+        // "the order I see" means what that screen shows. Untrusted: coerced.
+        if (body.view !== undefined && (action === 'messages' || action === 'answer' || action === 'approval')) {
+          conv.taskView = coerceTaskView(body.view);
+        }
 
         if (action === 'messages') {
           const text = typeof body.text === 'string' ? body.text.slice(0, AGENT_LIMITS.maxMessageChars) : '';

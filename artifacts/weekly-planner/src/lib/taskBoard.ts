@@ -121,11 +121,69 @@ export function buildTaskRows(
   return rows;
 }
 
+/** The least a row needs to be put in order: what `Row` has, minus `done`. */
+export interface SortableRow {
+  occId: string;
+  task: Task;
+  due: string | null;
+}
+
+/**
+ * How the rows of one open section are ordered, for a sort mode.
+ *
+ * EXPORTED SO THERE IS ONLY ONE. The PC panel, the phone, the side widget and
+ * the assistant all have to agree on which task is "above" which, and each of
+ * them used to carry its own copy of this comparator -- one reading an absent
+ * order as zero, one without the id at the end -- which is how the same store
+ * came to be drawn in two different orders on two screens.
+ */
+export function rowComparator(sortMode: SortMode): (a: SortableRow, b: SortableRow) => number {
+  return (ar, br) => {
+    // EVERY branch ends on the id, so the comparator is a TOTAL order and never
+    // returns 0 for two different rows. A comparator with ties is not a cosmetic
+    // problem: the order becomes whatever the sort happened to do this time, so
+    // a list redraws in a different order after an unrelated edit and looks like
+    // it moved on its own.
+    const tie = ar.occId < br.occId ? -1 : ar.occId > br.occId ? 1 : 0;
+
+    if (sortMode === 'manual') {
+      return orderKey(ar.task) - orderKey(br.task)
+        || (ar.due ?? '9999').localeCompare(br.due ?? '9999')
+        || (ar.task.title ?? '').localeCompare(br.task.title ?? '')
+        || tie;
+    }
+    if (sortMode === 'title') {
+      return (ar.task.title ?? '').localeCompare(br.task.title ?? '') || tie;
+    }
+    if (sortMode === 'title-desc') {
+      return (br.task.title ?? '').localeCompare(ar.task.title ?? '') || tie;
+    }
+    return (ar.due ?? '9999').localeCompare(br.due ?? '9999')
+      || (ar.task.startTime ?? '99:99').localeCompare(br.task.startTime ?? '99:99')
+      || orderKey(ar.task) - orderKey(br.task)
+      || (ar.task.title ?? '').localeCompare(br.task.title ?? '')
+      || tie;
+  };
+}
+
+/**
+ * How the steps under one task are ordered, whatever the board is sorted by:
+ * the hand-made order, then the title.
+ */
+export function compareStepRows(a: SortableRow, b: SortableRow): number {
+  return orderKey(a.task) - orderKey(b.task)
+    || (a.task.title ?? '').localeCompare(b.task.title ?? '')
+    // The id last, always. Without it two subtasks with the same name and the
+    // same order compare equal, and a comparator that returns 0 lets the sort
+    // put them in either order: the list quietly reshuffles between renders.
+    || (a.occId < b.occId ? -1 : a.occId > b.occId ? 1 : 0);
+}
+
 export function groupTasks(
   rows: Row[],
   tasks: TaskData,
   lists: TaskList[],
-  activeListId: string | null,
+  activeListIds: string[],
   filters: TaskFilter[],
   today: string,
   sortMode: SortMode
@@ -144,8 +202,8 @@ export function groupTasks(
     return resolveListId(owner.listId, lists);
   };
 
-  const allVisibleRows = activeListId
-    ? rows.filter(r => listOfTask(r.task) === activeListId)
+  const allVisibleRows = activeListIds.length
+    ? rows.filter(r => activeListIds.includes(listOfTask(r.task)))
     : rows;
 
   /**
@@ -215,13 +273,7 @@ export function groupTasks(
     // phone a different set of tasks than the PC for the same filters.
     if (!matchesFilters(r.task, r.due, filters, today)) continue;
 
-    const children = (kids.get(r.occId) ?? []).sort((a, b) =>
-      orderKey(a.task) - orderKey(b.task)
-      || (a.task.title ?? '').localeCompare(b.task.title ?? '')
-      // The id last, always. Without it two subtasks with the same name and the
-      // same order compare equal, and a comparator that returns 0 lets the sort
-      // put them in either order: the list quietly reshuffles between renders.
-      || (a.occId < b.occId ? -1 : a.occId > b.occId ? 1 : 0));
+    const children = (kids.get(r.occId) ?? []).sort(compareStepRows);
 
     const node: Node = { row: r, children };
 
@@ -233,37 +285,11 @@ export function groupTasks(
     else out.Upcoming.push(node);
   }
 
-  const sortFn = (a: Node, b: Node) => {
-    const ar = a.row;
-    const br = b.row;
-    // EVERY branch ends on the id, so the comparator is a TOTAL order and never
-    // returns 0 for two different rows. A comparator with ties is not a cosmetic
-    // problem: the order becomes whatever the sort happened to do this time, so
-    // a list redraws in a different order after an unrelated edit and looks like
-    // it moved on its own.
-    const tie = ar.occId < br.occId ? -1 : ar.occId > br.occId ? 1 : 0;
-
-    if (sortMode === 'manual') {
-      return orderKey(ar.task) - orderKey(br.task)
-        || (ar.due ?? '9999').localeCompare(br.due ?? '9999')
-        || (ar.task.title ?? '').localeCompare(br.task.title ?? '')
-        || tie;
-    }
-    if (sortMode === 'title') {
-      return (ar.task.title ?? '').localeCompare(br.task.title ?? '') || tie;
-    }
-    if (sortMode === 'title-desc') {
-      return (br.task.title ?? '').localeCompare(ar.task.title ?? '') || tie;
-    }
-    return (ar.due ?? '9999').localeCompare(br.due ?? '9999')
-      || (ar.task.startTime ?? '99:99').localeCompare(br.task.startTime ?? '99:99')
-      || orderKey(ar.task) - orderKey(br.task)
-      || (ar.task.title ?? '').localeCompare(br.task.title ?? '')
-      || tie;
-  };
+  const sortFn = rowComparator(sortMode);
+  const byRow = (a: Node, b: Node) => sortFn(a.row, b.row);
 
   for (const key of ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'] as const) {
-    out[key].sort(sortFn);
+    out[key].sort(byRow);
   }
   // Newest first, and the id again so two things finished in the same
   // millisecond (a "clear all" does exactly that) keep a settled order.

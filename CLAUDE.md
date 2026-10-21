@@ -151,6 +151,15 @@
   deciding "edited since", keeps the Google link, and tombstones synced adds.
 - Prompt: `src/lib/agent/agentPrompt.ts`, rebuilt every model call, with a
   week-by-week date table (the model gets weekdays wrong otherwise).
+- Task order: ONE manual `order` per task (master for repeats), shared by all lists and
+  devices, compared within a Tasks-panel section (Overdue/Today/Tomorrow/Upcoming/No Date);
+  selecting lists only filters it. `list_tasks` reads it via `groupTasks` (taskBoard.ts),
+  `reorder_tasks` writes via `planSubsetOrder`/`placeRow`+`planOrderNumbers` (dragSort.ts):
+  unnamed tasks never move, minimal writes. The PC panel, widget, calendar band and phone
+  all use the same comparator (`rowComparator`) and `planReorder` for drags.
+- Each message carries the sending device's Tasks view (`view`: sort, lists, filters;
+  PC `taskViewPrefs.ts`, phone `mobile/src/lib/agent/taskView.ts`), coerced server-side into
+  `conv.taskView`; the prompt and reorder report say when the sort is not Manual.
 - UI: PC/browser `src/components/agent/*` (Alt+I, toolbar "Assistant", phone-browser
   nav). Android: `mobile/src/screens/Assistant.tsx` + `mobile/src/lib/agent/`
   (`agentTypes.ts` and `agentReport.ts` are COPIES of the web ones: edit there,
@@ -248,7 +257,7 @@
   the app never waits on the network.
 - **The engine is shared by copying.** `sync*.ts`, `alarmPlan.ts`, `agenda.ts`,
   `notifications.ts`, `recurrence.ts`, `categories.ts`, `prayerTimes.ts`,
-  `tasks.ts`, `taskLists.ts`, `gcalColor.ts` are edited and TESTED in
+  `tasks.ts`, `taskLists.ts`, `gcalColor.ts`, `taskBoard.ts`, `dragSort.ts` are edited and TESTED in
   `artifacts/weekly-planner/src/lib/`, then copied into `mobile/src/lib/`. Both
   machines must run identical merge and scheduling logic or they drift apart
   permanently. See `mobile/README.md` for the copy command.

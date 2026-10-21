@@ -101,6 +101,8 @@ import {
   type HardwareSettings,
 } from '@/lib/hardwareController';
 import { usePrayerTimes } from '@/lib/usePrayerTimes';
+import { buildTaskRows, groupTasks, orderKey } from '@/lib/taskBoard';
+import { planReorder } from '@/lib/dragSort';
 
 // ─── Types & Constants ────────────────────────────────────────────────────────
 type IntervalMin   = 5 | 15 | 30 | 60;
@@ -1021,21 +1023,34 @@ export default function Widget() {
   };
 
   /**
-   * New order for a day's tasks, written as `order` on each task itself (the
-   * master of a repeating one, so no occurrence is split off). The same field
-   * the main panel's manual order uses, so both windows agree.
+   * Move one of a day's tasks, written as `order` on the task itself (the master
+   * of a repeating one, so no occurrence is split off). The same field and the
+   * same placement as the main panel's and the phone's manual order: the move
+   * is placed against the WHOLE section across every list (`planReorder`), so
+   * tasks this widget does not show (timed ones, other lists' tasks) keep
+   * their places, and usually only the moved task is written. Renumbering just
+   * the rows shown here, as this used to, scrambled the main panel's order.
    */
-  const reorderWidgetTasks = (masterIds: string[]) => {
+  const reorderWidgetTasks = (masterIds: string[], from: number, to: number, section: 'Today' | 'Overdue', today: string) => {
+    const visible = masterIds.map(id => tasks[id]).filter(Boolean);
+    if (visible.length !== masterIds.length) return;
+    const board = groupTasks(buildTaskRows(tasks, today, autoRollRecurringTasks), tasks, [], [], [], today, 'manual');
+    const seen = new Set<string>();
+    const whole = board[section]
+      .map(n => tasks[n.row.task.id])
+      .filter(t => t && !seen.has(t.id) && !!seen.add(t.id));
+    let plan = planReorder(whole, visible, from, to);
+    // A row the board draws elsewhere (a step, say) cannot be placed against the
+    // section; fall back to placing it among what this widget shows.
+    if (!plan.changes.length) plan = planReorder(visible, visible, from, to);
+    if (!plan.changes.length) return;
     const now = Date.now();
     let next = tasks;
-    let changed = false;
-    [...new Set(masterIds)].forEach((id, i) => {
-      const m = next[id];
-      if (!m || m.order === i * 10) return;
-      next = { ...next, [id]: { ...m, order: i * 10, updatedAt: now } };
-      changed = true;
-    });
-    if (changed) saveWidgetTasks(next);
+    for (const c of plan.changes) {
+      const m = next[c.id];
+      if (m) next = { ...next, [c.id]: { ...m, order: c.order, updatedAt: now } };
+    }
+    saveWidgetTasks(next);
   };
 
   const minimizeWidget = () => {
@@ -1942,8 +1957,11 @@ export default function Widget() {
           }
           // Within each day, the same order as the main Tasks panel: the
           // task's own `order` (what a drag sets, here or there), then title.
+          // `orderKey` as in taskBoard.ts: a task nobody placed sorts last, not
+          // first, and the id ends every tie so the list never reshuffles.
           const byOrder = (a: { task: (typeof tasks)[string] }, b: { task: (typeof tasks)[string] }) =>
-            ((a.task.order ?? 0) - (b.task.order ?? 0)) || (a.task.title || '').localeCompare(b.task.title || '');
+            (orderKey(a.task) - orderKey(b.task)) || (a.task.title || '').localeCompare(b.task.title || '')
+            || (a.task.id < b.task.id ? -1 : a.task.id > b.task.id ? 1 : 0);
           const widgetTasks = [
             ...yesterdayTasks.filter(({ task }) => shownOccIds.has(task.id)).sort(byOrder),
             ...todayTasks.filter(({ task }) => shownOccIds.has(task.id)).sort(byOrder),
@@ -1995,11 +2013,13 @@ export default function Widget() {
               const group = openWidgetTasks.filter(x => x.dayLabel === item.dayLabel);
               const from = group.findIndex(x => x.task.id === item.task.id);
               if (from === -1) return;
-              const [moved] = group.splice(from, 1);
-              const at = group.findIndex(x => x.task.id === target.id);
+              const at = group.filter((_, i) => i !== from).findIndex(x => x.task.id === target.id);
               if (at === -1) return;
-              group.splice(target.edge === 'before' ? at : at + 1, 0, moved);
-              reorderWidgetTasks(group.map(x => x.task.masterId || x.task.id));
+              // Masters, once each: a repeat's place is one place.
+              const ids = group.map(x => x.task.masterId || x.task.id);
+              if (new Set(ids).size !== ids.length) return;
+              reorderWidgetTasks(ids, from, target.edge === 'before' ? at : at + 1,
+                item.dayLabel === 'Today' ? 'Today' : 'Overdue', todayYmd);
             };
             window.addEventListener('pointermove', move);
             window.addEventListener('pointerup', up);

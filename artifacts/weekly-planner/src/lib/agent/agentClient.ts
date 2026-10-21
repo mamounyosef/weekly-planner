@@ -13,6 +13,7 @@ import type {
 } from './agentTypes';
 import { AGENT_LIMITS } from './agentTypes';
 import { DEFAULT_MODEL, isKnownModel } from './agentModels';
+import { readTaskView } from '../taskViewPrefs';
 
 export interface AgentStatus {
   configured: boolean;
@@ -185,7 +186,9 @@ export function useAgent(enabled: boolean, opts: UseAgentOptions = {}) {
   const thinkRef = useRef(opts.think);
   thinkRef.current = opts.think;
   /** What every send carries besides its own fields. */
-  const extra = () => ({ model: modelRef.current, ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
+  // `view` is this screen's Tasks panel (sort, selected lists, filters), read
+  // fresh at each send, so "the order I see" means what is on screen now.
+  const extra = () => ({ model: modelRef.current, view: readTaskView(), ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
 
   // Every open starts on a fresh screen; old chats are one click away in the
   // history. A reply still being written is the exception: it stays in view.

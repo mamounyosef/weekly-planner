@@ -316,7 +316,7 @@ export const TASK_PANEL_MAX_W = 520;
 // settings ⇄ tasks import cycle.)
 const TASK_FILTER_ORDER = ['today', 'overdue', 'upcoming', 'general', 'completed'];
 
-const SETTINGS_STORAGE_KEY = 'planner-app-settings-v2';
+export const SETTINGS_STORAGE_KEY = 'planner-app-settings-v2';
 const SETTINGS_EVENT = 'planner-settings-updated';
 
 export function applyDarkModeClass(isDark: boolean) {

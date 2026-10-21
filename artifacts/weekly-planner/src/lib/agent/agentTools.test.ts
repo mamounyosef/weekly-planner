@@ -11,11 +11,13 @@ import assert from 'node:assert/strict';
 
 import {
   runTool, applyDeletion, planUndo, verifyAgainst, answersToResult, parseTime, parseYmdStrict,
+  entryVerified, coerceTaskView,
   anchorFor, anchorDate, TOOL_DEFS, TOOL_NAMES, READ_ONLY_TOOLS,
   type AgentWorld, type AgentEvent, type EventData, type DeletionPlan,
 } from './agentTools';
 import { buildSystemPrompt, calendarTable } from './agentPrompt';
 import type { Task, TaskData } from '../tasks';
+import { buildTaskRows, groupTasks, type SectionKey } from '../taskBoard';
 
 const OWNED = 'owned-cal@group.calendar.google.com';
 const FOREIGN = 'uni@group.calendar.google.com';
@@ -474,7 +476,10 @@ async function main() {
     const byTitle = (s: string) => Object.values(t).find(x => x.title === s)!;
     assert.equal(byTitle('Call bank').weekKey, undefined, 'no date means the task board');
     assert.equal(byTitle('Bread').listId, 'shopping');
-    assert.equal(byTitle('Bread').order, 20, 'after the existing Buy milk');
+    // The manual order is one order across every list, so a new task goes after
+    // every existing task (Pack, order 30), not just after its own list's.
+    assert.ok(byTitle('Bread').order! > 30, 'after every existing task, on every list');
+    assert.ok(byTitle('Bread').order! > byTitle('Call bank').order!, 'and after the ones added before it');
     assert.equal(dateOf(byTitle('Submit form')), '2026-10-05');
     assert.equal(byTitle('Submit form').startTime, undefined);
     assert.equal(byTitle('Standup notes').endTime, '09:30');
@@ -831,6 +836,186 @@ async function main() {
     }, { ...w, events: updated.events as Record<string, AgentEvent> });
     const clearedKickoff = (cleared.events as Record<string, AgentEvent>)[kickoff.id];
     assert.equal(clearedKickoff.description, undefined);
+    console.log('  ok');
+  }
+
+
+  console.log('--- 20. TASK ORDER: list_tasks SHOWS THE PANEL\'S ORDER ---');
+  // Today (Sun 27 Sep): Work and Home interleaved in one shared order, one task
+  // nobody placed, one finished, a repeat, and an undated task with steps.
+  const orderWorld = (over: Partial<AgentWorld> = {}) => world({
+    taskLists: [
+      { id: 'general', name: 'General', color: '#3b82f6' },
+      { id: 'work', name: 'Work', color: '#ef4444' },
+      { id: 'home', name: 'Home', color: '#22c55e' },
+    ],
+    tasks: {
+      w1: { id: 'w1', title: 'Email boss', listId: 'work', ...anchorFor('2026-09-27', 0), order: 0, deleted: false, updatedAt: 1 },
+      h1: { id: 'h1', title: 'Laundry', listId: 'home', ...anchorFor('2026-09-27', 0), order: 10, deleted: false, updatedAt: 1 },
+      w2: { id: 'w2', title: 'Slides', listId: 'work', ...anchorFor('2026-09-27', 0), order: 20, deleted: false, updatedAt: 1 },
+      rep: {
+        id: 'rep', title: 'Stand-up notes', listId: 'work', ...anchorFor('2026-09-27', 0), recur: { freq: 'daily', interval: 1 },
+        order: 25, deleted: false, updatedAt: 1,
+      },
+      h2: { id: 'h2', title: 'Cook', listId: 'home', ...anchorFor('2026-09-27', 0), order: 30, deleted: false, updatedAt: 1 },
+      w3: { id: 'w3', title: 'Budget', listId: 'work', ...anchorFor('2026-09-27', 0), order: 40, deleted: false, updatedAt: 1 },
+      u: { id: 'u', title: 'Unplaced', ...anchorFor('2026-09-27', 0), deleted: false, updatedAt: 1 },
+      fin: { id: 'fin', title: 'Finished', ...anchorFor('2026-09-27', 0), order: 5, completed: true, completedAt: 5, deleted: false, updatedAt: 1 },
+      fut: { id: 'fut', title: 'Future', listId: 'work', ...anchorFor('2026-10-05', 0), order: 1, deleted: false, updatedAt: 1 },
+      p: { id: 'p', title: 'Move house', order: 50, deleted: false, updatedAt: 1 },
+      s1: { id: 's1', title: 'Boxes', parentId: 'p', order: 10, deleted: false, updatedAt: 1 },
+      s2: { id: 's2', title: 'Van', parentId: 'p', order: 20, deleted: false, updatedAt: 1 },
+      s3: { id: 's3', title: 'Keys', parentId: 'p', deleted: false, updatedAt: 1 },
+    } as TaskData,
+    ...over,
+  });
+  /** What the PC panel and the phone draw, by the shared groupTasks. */
+  const drawn = (tasks: TaskData, w: AgentWorld, section: SectionKey, lists: string[] = []) =>
+    groupTasks(buildTaskRows(tasks, '2026-09-27'), tasks, w.taskLists, lists, [], '2026-09-27', 'manual')[section]
+      .map(n => n.row.task.id);
+  type BoardSection = { section: string; tasks: Array<{ position: number; id: string; title: string; list: string; steps?: Array<{ id: string }> }> };
+  const sectionsOf = (o: ReturnType<typeof runTool>) => (o.result as { sections: BoardSection[] }).sections;
+  {
+    const w = orderWorld();
+    const o = call('list_tasks', {}, w);
+    assert.equal(o.isError, undefined, err(o));
+    assert.ok(READ_ONLY_TOOLS.has('list_tasks'));
+    const today = sectionsOf(o).find(x => x.section === 'Today')!;
+    const ids = today.tasks.map(t => t.id.split('::')[0]);
+    assert.deepEqual(ids, drawn(w.tasks, w, 'Today'), 'exactly the order the panel draws');
+    assert.deepEqual(ids, ['w1', 'h1', 'w2', 'rep', 'h2', 'w3', 'u'], 'unplaced last, finished not here');
+    assert.deepEqual(today.tasks.map(t => t.position), [1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(today.tasks[1].list, 'Home');
+    assert.equal(today.tasks[6].list, 'General');
+    const noDate = sectionsOf(o).find(x => x.section === 'No Date')!;
+    assert.deepEqual(noDate.tasks[0].steps!.map(st => st.id), ['s1', 's2', 's3'], 'steps in their own order');
+    assert.ok(!sectionsOf(o).some(x => x.section === 'Done'), 'done only when asked');
+
+    // Selecting lists filters the same order; positions count what is shown.
+    const work = sectionsOf(call('list_tasks', { lists: ['Work'] }, w)).find(x => x.section === 'Today')!;
+    assert.deepEqual(work.tasks.map(t => t.id.split('::')[0]), drawn(w.tasks, w, 'Today', ['work']));
+    assert.deepEqual(work.tasks.map(t => t.position), [1, 2, 3, 4]);
+
+    // list_items tags tasks with their section and place on the board.
+    const li = (call('list_items', { from: '2026-09-27', to: '2026-09-27', include: ['tasks'] }, w).result as { items: Array<Record<string, unknown>> }).items;
+    const h2 = li.find(i => i.id === 'h2')!;
+    assert.equal(h2.section, 'Today');
+    assert.equal(h2.place, 5);
+    assert.equal(li.find(i => i.id === 'fin')!.place, undefined, 'a finished task has no place');
+    console.log('  ok');
+  }
+
+  console.log('--- 21. reorder_tasks: A FILTERED VIEW NEVER DISTURBS THE OTHER LISTS ---');
+  {
+    const w = orderWorld({ taskView: { sort: 'manual', lists: ['work'] } });
+    const o = call('reorder_tasks', { order: ['w3', 'w1', 'w2'] }, w);
+    assert.equal(o.isError, undefined, err(o));
+    const t = o.tasks!;
+    const all = drawn(t, w, 'Today');
+    assert.deepEqual(all.filter(id => id.startsWith('h')), ['h1', 'h2'], 'Home keeps its order');
+    assert.deepEqual(all.filter(id => ['w1', 'w2', 'w3'].includes(id)), ['w3', 'w1', 'w2'], 'Work reads as asked');
+    // The three take the slots they held between them: everything else stays put.
+    assert.deepEqual(all, ['w3', 'h1', 'w1', 'rep', 'h2', 'w2', 'u']);
+    for (const id of ['h1', 'h2', 'rep', 'u', 'fut', 'p', 's1']) {
+      assert.deepEqual(t[id], w.tasks[id], `${id} is not touched`);
+    }
+    // Undo records only for what was written, and Undo puts it back.
+    assert.ok(o.undo!.every(r => r.store === 'tasks' && ['w1', 'w2', 'w3'].includes(r.id)));
+    const undone = planUndo(o.undo!, w.events, t);
+    assert.deepEqual(drawn(undone.tasks, w, 'Today'), drawn(w.tasks, w, 'Today'), 'Undo restores the order');
+    // The report: positions as the user counts them (among Work), verified.
+    const byId = Object.fromEntries(o.entries!.map(e => [e.id, e]));
+    assert.deepEqual([byId.w3.before!.position, byId.w3.after!.position], [4, 1]);
+    assert.deepEqual([byId.w1.before!.position, byId.w1.after!.position], [1, 2]);
+    assert.deepEqual(byId.w1.changed, ['position']);
+    assert.match(byId.w1.note!, /among Work/);
+    const ok = verifyAgainst(o.undo!, w.events, t);
+    for (const e of o.entries!) assert.ok(entryVerified(e, o.undo!, ok), `${e.id} verified`);
+    assert.ok(!o.entries!.some(e => entryVerified(e, o.undo!, verifyAgainst(o.undo!, w.events, w.tasks))), 'and not before the write');
+    assert.equal((o.result as { visibleToUser: string }).visibleToUser, 'yes');
+    console.log('  ok');
+  }
+
+  console.log('--- 22. reorder_tasks: MOVES, OCCURRENCES, STEPS ---');
+  {
+    const w = orderWorld();
+    // To the top: one write, nothing else touched.
+    const top = call('reorder_tasks', { moves: [{ id: 'u', to: 'top' }] }, w);
+    assert.equal(top.isError, undefined, err(top));
+    assert.deepEqual(drawn(top.tasks!, w, 'Today'), ['u', 'w1', 'h1', 'w2', 'rep', 'h2', 'w3']);
+    assert.equal(top.undo!.length, 1, 'one task written');
+    // Above another task, by an occurrence id of a repeat: the master moves,
+    // nothing is split off its series.
+    const today = sectionsOf(call('list_tasks', { section: 'Today' }, w))[0];
+    const repOcc = today.tasks.find(x => x.id.startsWith('rep'))!.id;
+    const mv = call('reorder_tasks', { moves: [{ id: repOcc, before: 'w1' }, { id: 'w3', after: 'h1' }] }, w);
+    assert.equal(mv.isError, undefined, err(mv));
+    assert.deepEqual(drawn(mv.tasks!, w, 'Today'), ['rep', 'w1', 'h1', 'w3', 'w2', 'h2', 'u']);
+    assert.equal(Object.keys(mv.tasks!).length, Object.keys(w.tasks).length, 'no occurrence split off');
+    assert.ok(mv.tasks!.rep.recur, 'still repeating');
+    assert.match(mv.entries!.find(e => e.id === 'rep')!.note!, /repeats/);
+    // Steps of one task.
+    const st = call('reorder_tasks', { order: ['s3', 's1'] }, w);
+    assert.equal(st.isError, undefined, err(st));
+    const kids = groupTasks(buildTaskRows(st.tasks!, '2026-09-27'), st.tasks!, w.taskLists, [], [], '2026-09-27', 'manual')['No Date'][0].children;
+    assert.deepEqual(kids.map(k => k.task.id), ['s3', 's2', 's1']);
+    // Already in that order: nothing written.
+    const same = call('reorder_tasks', { order: ['w1', 'h1'] }, w);
+    assert.equal(same.tasks, undefined);
+    assert.equal((same.result as { unchanged: boolean }).unchanged, true);
+    console.log('  ok');
+  }
+
+  console.log('--- 23. reorder_tasks: REFUSALS CHANGE NOTHING ---');
+  {
+    const w = orderWorld();
+    const refused: Array<[unknown, RegExp]> = [
+      [{ order: ['w1', 'fut'] }, /different sections/],
+      [{ order: ['w1', 'fin'] }, /completed/],
+      [{ order: ['w1', 'w2', 'w1'] }, /listed twice/],
+      [{ order: ['w1', 'nope'] }, /no task with id/],
+      [{ order: ['w1', 's1'] }, /Steps/],
+      [{ order: ['w1'] }, /at least two/],
+      [{ order: ['w1', 'w2'], moves: [{ id: 'w1', to: 'top' }] }, /either/],
+      [{}, /either/],
+      [{ moves: [{ id: 'w1' }] }, /exactly one of/],
+      [{ moves: [{ id: 'w1', before: 'w1' }] }, /itself/],
+      [{ moves: [{ id: 'w1', to: 'middle' }] }, /top" or "bottom/],
+      [{ moves: [{ id: 'w1', before: 'fut' }] }, /different sections/],
+      [{ order: ['w1', 'w2'], section: 'Tomorrow' }, /not Tomorrow/],
+      [{ order: ['w1', 'w2'], section: 'Someday' }, /section must be/],
+    ];
+    for (const [args, re] of refused) {
+      const o = call('reorder_tasks', args, w);
+      assert.equal(o.isError, true, JSON.stringify(args));
+      assert.match(err(o), re, JSON.stringify(args));
+      assert.equal(o.tasks, undefined, 'nothing written');
+    }
+    console.log('  ok');
+  }
+
+  console.log('--- 24. THE USER\'S VIEW: COERCED, IN THE PROMPT, AND HONEST ABOUT THE SORT ---');
+  {
+    assert.deepEqual(coerceTaskView({ sort: 'manual', lists: ['work', 7, '', 'work'], filters: ['today', 'evil'] }),
+      { sort: 'manual', lists: ['work'], filters: ['today'] });
+    assert.deepEqual(coerceTaskView({ sort: 'rm -rf' }), undefined);
+    assert.equal(coerceTaskView('manual'), undefined);
+    assert.equal(coerceTaskView(null), undefined);
+
+    const w = orderWorld({ taskView: { sort: 'title', lists: ['work', 'gone'], filters: ['today'] } });
+    const prompt = buildSystemPrompt(w, 'Mamoun');
+    assert.match(prompt, /sorted by Title \(A-Z\); showing only the lists Work; filtered to Today/);
+    assert.match(prompt, /NOT in Manual order/);
+    assert.match(prompt, /shared by every list and every device/);
+    const o = call('reorder_tasks', { moves: [{ id: 'h2', to: 'top' }] }, w);
+    assert.equal((o.result as { visibleToUser: string }).visibleToUser, 'no');
+    assert.match(o.entries![0].note!, /sort by Manual order/);
+    // h2 is not on Work, so its place is counted across every list.
+    assert.match(o.entries![0].note!, /across all lists/);
+    assert.deepEqual([o.entries![0].before!.position, o.entries![0].after!.position], [5, 1]);
+    const dt = call('reorder_tasks', { moves: [{ id: 'h2', to: 'top' }] }, orderWorld({ taskView: { sort: 'datetime' } }));
+    assert.equal((dt.result as { visibleToUser: string }).visibleToUser, 'partly');
+    assert.match(buildSystemPrompt(orderWorld(), 'Mamoun'), /view is not known/);
     console.log('  ok');
   }
 

@@ -7,7 +7,7 @@
 import { addDays, format, startOfWeek } from 'date-fns';
 
 import type { AgentWorld } from './agentTools';
-import { TOOL_NAMES, runTool } from './agentTools';
+import { TOOL_NAMES, runTool, taskViewLine } from './agentTools';
 import { coerceNotificationSettings } from '../notifications';
 import { coercePrayerSettings, PRAYER_LABELS, PRAYER_METHODS, type PrayerKey } from '../prayerTimes';
 import { coerceFocusTimer } from '../focusTimer';
@@ -130,6 +130,7 @@ export function buildSystemPrompt(world: AgentWorld, userName: string, opts: Pro
   const doneToday = (world.prayerDone?.[today2] ?? []).map(k => PRAYER_LABELS[k as PrayerKey] ?? k);
   const timer = coerceFocusTimer(world.focusTimer);
   const method = PRAYER_METHODS.find(m => m.id === prayer.method)?.label ?? String(prayer.method);
+  const view = taskViewLine(world);
   const owned = world.calendars.find(c => c.id === world.ownedCalendarId)?.summary ?? 'Daily calendar';
   const others = world.calendars.filter(c => c.id !== world.ownedCalendarId).map(c => c.summary);
 
@@ -149,6 +150,9 @@ ${categories}
 
 Task lists:
 ${lists}
+
+Task order: the Tasks panel has sections (Overdue, Today, Tomorrow, Upcoming, No Date) and each task has ONE manual position, shared by every list and every device (PC, widget, phone). Selecting lists only filters that one order, it never has an order of its own. Read it with list_tasks; change it with reorder_tasks (never with update_tasks, and reordering never changes dates). Steps are ordered under their own task.
+${view ? `The user's Tasks panel right now: ${view}. "The order I see" means this view: count positions among the lists shown.${world.taskView?.sort && world.taskView.sort !== 'manual' ? ' Their panel is NOT in Manual order, so after a reorder tell them it shows when they sort by Manual order.' : ''}` : "The user's Tasks panel view is not known (their device did not say)."}
 
 Google Calendar: the planner owns "${owned}" and can change items there.${others.length ? ` These calendars are mirrored READ-ONLY and can never be changed or deleted by you: ${others.map(o => `"${o}"`).join(', ')}.` : ''}
 

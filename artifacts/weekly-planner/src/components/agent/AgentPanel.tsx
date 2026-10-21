@@ -9,7 +9,7 @@ import { createPortal } from 'react-dom';
 import {
   ArrowDown, ArrowUp, AudioLines, BarChart3, Brain, CalendarSearch, Camera, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
   Clock, FileText, History, ImagePlus, ListChecks, ListTodo, Loader2, Mic, MicOff, Pencil, Plus, Search, Settings2,
-  Square, Tag, Timer, Trash2, Wand2, X,
+  ArrowUpDown, Square, Tag, Timer, Trash2, Wand2, X,
 } from 'lucide-react';
 
 import type { AgentConversation, AgentMessage, AgentToolTrace } from '@/lib/agent/agentTypes';
@@ -61,6 +61,8 @@ const TOOL_ICON: Record<string, React.ComponentType<{ size?: number; className?:
   update_events: Pencil,
   create_tasks: ListChecks,
   update_tasks: ListChecks,
+  list_tasks: ListTodo,
+  reorder_tasks: ArrowUpDown,
   delete_items: Trash2,
   list_focus_sessions: Timer,
   get_focus_stats: BarChart3,

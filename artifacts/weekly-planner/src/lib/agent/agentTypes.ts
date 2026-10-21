@@ -145,6 +145,26 @@ export interface ChangeSet {
   undoNote?: string;
 }
 
+// ─── What the user is looking at ────────────────────────────────────────────
+
+/** The Tasks panel's sort modes (taskBoard.ts `SortMode`). */
+export type AgentTaskSort = 'datetime' | 'manual' | 'title' | 'title-desc';
+
+/**
+ * How the Tasks panel is set up on the device that sent a message, so "the
+ * order I see" means the same thing to the assistant as to the user. Sent with
+ * every message, answer and approval; the server treats it as untrusted and
+ * coerces it. The manual order itself is shared by every device and list:
+ * this only says how THIS screen sorts and filters it.
+ */
+export interface AgentTaskView {
+  sort?: AgentTaskSort;
+  /** Selected task list ids; empty means "All lists". */
+  lists?: string[];
+  /** Panel filters ('today', 'overdue', 'upcoming', 'general', 'completed'); empty means everything. */
+  filters?: string[];
+}
+
 // ─── Conversation ───────────────────────────────────────────────────────────
 
 export interface AgentToolTrace {
@@ -216,6 +236,8 @@ export interface AgentConversation {
   voice?: boolean;
   /** Voice chats: think before answering (slower, more careful). */
   voiceThink?: boolean;
+  /** The Tasks panel of the device that sent the latest message (coerced). */
+  taskView?: AgentTaskView;
   /** Partial text of the assistant turn being generated right now. */
   liveText?: string;
   liveThinking?: string;

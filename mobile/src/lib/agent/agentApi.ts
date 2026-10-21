@@ -23,6 +23,7 @@ import type {
 } from './agentTypes';
 import { AGENT_LIMITS } from './agentTypes';
 import { DEFAULT_MODEL, isKnownModel } from './agentModels';
+import { readPhoneTaskView } from './taskView';
 
 const ACTIVE_KEY = 'planner.agentActiveConversation';
 /** This phone's own model pick. Per device: the PC keeps its own. */
@@ -172,6 +173,8 @@ export function usePhoneAgent(visible: boolean, onTab = visible, opts: PhoneAgen
   thinkRef.current = opts.think;
   /** What every send carries besides its own fields. */
   const extra = () => ({ model: modelRef.current, ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
+  /** `extra()` plus this phone's Tasks view (sort, lists, filters), read at each send. */
+  const extraWithView = async () => ({ ...extra(), view: await readPhoneTaskView() });
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', s => setAppActive(s === 'active'));
@@ -299,19 +302,19 @@ export function usePhoneAgent(visible: boolean, onTab = visible, opts: PhoneAgen
   const send = useCallback(async (text: string, attachmentIds: string[]) => {
     let id = activeRef.current;
     if (!id) id = (await newChat()).id;
-    await agentApi(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: { text, attachmentIds, ...extra() } });
+    await agentApi(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: { text, attachmentIds, ...(await extraWithView()) } });
     refreshConversation(id);
   }, [newChat, refreshConversation]);
 
   const answer = useCallback(async (answers: AgentQuestionAnswer[]) => {
     const id = activeRef.current; if (!id) return;
-    await agentApi(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: { answers, ...extra() } });
+    await agentApi(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: { answers, ...(await extraWithView()) } });
     refreshConversation(id);
   }, [refreshConversation]);
 
   const decide = useCallback(async (approved: boolean) => {
     const id = activeRef.current; if (!id) return;
-    await agentApi(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: { approved, ...extra() } });
+    await agentApi(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: { approved, ...(await extraWithView()) } });
     refreshConversation(id);
   }, [refreshConversation]);
 

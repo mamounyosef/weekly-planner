@@ -71,7 +71,7 @@ const SECTIONS: SectionKey[] = ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No 
 const group = (
   tasks: TaskData,
   opts: {
-    activeListId?: string | null;
+    activeListIds?: string[];
     filters?: TaskFilter[];
     sort?: SortMode;
     today?: string;
@@ -81,7 +81,7 @@ const group = (
   const rows = buildTaskRows(tasks, today);
   return groupTasks(
     rows, tasks, LISTS,
-    opts.activeListId ?? null,
+    opts.activeListIds ?? [],
     opts.filters ?? [],
     today,
     opts.sort ?? 'datetime',
@@ -157,7 +157,7 @@ function main() {
     }
     // And with no lists configured at all.
     const rows = buildTaskRows(store(task('a', TODAY)), TODAY);
-    const out = groupTasks(rows, store(task('a', TODAY)), [], null, [], TODAY, 'datetime');
+    const out = groupTasks(rows, store(task('a', TODAY)), [], [], [], TODAY, 'datetime');
     assert.equal(out.Today.length, 1, 'a task survives having no lists to belong to');
   }
 
@@ -170,8 +170,13 @@ function main() {
     // Unfiltered, it is still shown: losing a list must never lose the tasks.
     assert.ok(flatten(group(tasks)).includes('orphan'));
     // And it falls back to General rather than disappearing when a list is open.
-    assert.deepEqual(flatten(group(tasks, { activeListId: GENERAL_LIST_ID })), ['orphan']);
-    assert.deepEqual(flatten(group(tasks, { activeListId: 'work' })), ['work']);
+    assert.deepEqual(flatten(group(tasks, { activeListIds: [GENERAL_LIST_ID] })), ['orphan']);
+    assert.deepEqual(flatten(group(tasks, { activeListIds: ['work'] })), ['work']);
+    // Several lists selected at once show the union, in the one shared order.
+    assert.deepEqual(
+      flatten(group(tasks, { activeListIds: ['work', GENERAL_LIST_ID], sort: 'manual' })),
+      flatten(group(tasks, { sort: 'manual' })).filter(id => id === 'orphan' || id === 'work'),
+    );
   }
 
   console.log('--- 5. SUBTASKS SIT UNDER THEIR PARENT, ONE LEVEL DEEP ---');
@@ -459,11 +464,11 @@ function main() {
       task('parent', TODAY, { listId: 'work' }),
       task('kid', TODAY, { parentId: 'parent' }),
     );
-    const work = group(tasks, { activeListId: 'work' });
+    const work = group(tasks, { activeListIds: ['work'] });
     assert.deepEqual(work.Today.map(n => n.row.occId), ['parent']);
     assert.deepEqual(work.Today[0].children.map(c => c.occId), ['kid'],
       'the child came with its parent');
-    assert.deepEqual(flatten(group(tasks, { activeListId: GENERAL_LIST_ID })), [],
+    assert.deepEqual(flatten(group(tasks, { activeListIds: [GENERAL_LIST_ID] })), [],
       'and is not also on General');
   }
 
@@ -736,9 +741,9 @@ function main() {
       task('trip', TODAY, { listId: 'work', recur: { freq: 'daily', interval: 1 } as never }),
       task('milk', TODAY, { parentId: 'trip' }),
     );
-    const general = SECTIONS.flatMap(k => group(filed, { activeListId: GENERAL_LIST_ID })[k]);
+    const general = SECTIONS.flatMap(k => group(filed, { activeListIds: [GENERAL_LIST_ID] })[k]);
     assert.equal(general.length, 0, 'neither half shows on the other list');
-    const work = SECTIONS.flatMap(k => group(filed, { activeListId: 'work' })[k]);
+    const work = SECTIONS.flatMap(k => group(filed, { activeListIds: ['work'] })[k]);
     assert.equal(work.length, 1, 'and the card is whole on its own list');
     assert.deepEqual(work[0].children.map(c => c.task.id), ['milk']);
 

@@ -22,6 +22,9 @@ import {
   type TaskList as TaskListDef,
 } from '@/lib/taskLists';
 import { useReorder } from '@/lib/useReorder';
+import { compareStepRows, rowComparator, type SortMode } from '@/lib/taskBoard';
+import { planReorder } from '@/lib/dragSort';
+import { TASK_SORT_MODE_KEY } from '@/lib/taskViewPrefs';
 import { useViewport } from '@/hooks/use-mobile';
 import { useWheelScrollX } from '@/lib/useWheelScrollX';
 
@@ -53,7 +56,7 @@ export interface TaskTheme {
   chip: (hex?: string) => TaskChipColors;
 }
 
-export type SortMode = 'datetime' | 'manual' | 'title' | 'title-desc';
+export type { SortMode };
 
 const SORT_LABELS: Record<SortMode, string> = {
   datetime: 'Date & Time',
@@ -111,7 +114,7 @@ interface TasksPanelProps {
 }
 
 const COMPLETED_COLLAPSED_KEY = 'planner-tasks-completed-collapsed';
-const SORT_MODE_KEY = 'planner-tasks-sort-mode';
+const SORT_MODE_KEY = TASK_SORT_MODE_KEY;
 
 /** One row in the flattened list: a task plus the occurrence date it represents. */
 interface Row { occId: string; task: Task; due: string | null; done: boolean }
@@ -156,6 +159,50 @@ function useTaskRows(tasks: TaskData, today: string, autoRollRecurringTasks = tr
     }
     return rows;
   }, [tasks, today, autoRollRecurringTasks]);
+}
+
+/** Each task once, where it first appears: a repeat can be drawn several times. */
+function onceEach(rows: Row[]): Row[] {
+  const seen = new Set<string>();
+  return rows.filter(r => !seen.has(r.task.id) && !!seen.add(r.task.id));
+}
+
+/** The rows of a section that are drawn as tasks, not as steps under one. */
+function topLevelOf(rows: Row[]): Row[] {
+  const present = new Set(rows.map(r => r.task.id));
+  return rows.filter(r => !r.task.parentId || !present.has(r.task.parentId));
+}
+
+/**
+ * Rows into the panel's sections, each in the sort the user picked.
+ *
+ * The order inside a section is `rowComparator` from taskBoard.ts, the SAME
+ * comparator the phone, the widget and the assistant use: a task nobody has
+ * placed sorts last (not first, as reading an absent order as 0 did), and every
+ * tie ends on the id so the list never reshuffles between renders.
+ */
+function sectionize(rows: Row[], filters: TaskFilter[], today: string, sortMode: SortMode) {
+  const tomorrowStr = format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd');
+  const openSecs: Record<string, Row[]> = { Overdue: [], Today: [], Tomorrow: [], Upcoming: [], 'No Date': [] };
+  const doneSecs: Row[] = [];
+
+  for (const r of rows) {
+    const bucket = taskBucket(r.task, r.due, today);
+    const visible = !filters.length || (r.done ? filters.includes('completed') : filters.includes(bucket));
+    if (!visible) continue;
+    if (r.done) { doneSecs.push(r); continue; }
+    if (!r.due) openSecs['No Date'].push(r);
+    else if (r.due < today) openSecs.Overdue.push(r);
+    else if (r.due === today) openSecs.Today.push(r);
+    else if (r.due === tomorrowStr) openSecs.Tomorrow.push(r);
+    else openSecs.Upcoming.push(r);
+  }
+
+  const sortFn = rowComparator(sortMode);
+  for (const k of Object.keys(openSecs)) openSecs[k].sort(sortFn);
+  doneSecs.sort((a, b) => (b.task.completedAt ?? 0) - (a.task.completedAt ?? 0)
+    || (a.occId < b.occId ? -1 : a.occId > b.occId ? 1 : 0));
+  return { open: openSecs, done: doneSecs };
 }
 
 function TasksPanel({
@@ -410,46 +457,14 @@ function TasksPanel({
   };
 
   // Sectioning & Sorting
-  const sections = useMemo(() => {
-    const tomorrowStr = format(addDays(new Date(`${today}T00:00:00`), 1), 'yyyy-MM-dd');
-    const openSecs: Record<string, Row[]> = { Overdue: [], Today: [], Tomorrow: [], Upcoming: [], 'No Date': [] };
-    const doneSecs: Row[] = [];
-
-    for (const r of rows) {
-      const bucket = taskBucket(r.task, r.due, today);
-      const visible = !filters.length || (r.done ? filters.includes('completed') : filters.includes(bucket));
-      if (!visible) continue;
-      if (r.done) { doneSecs.push(r); continue; }
-      if (!r.due) openSecs['No Date'].push(r);
-      else if (r.due < today) openSecs.Overdue.push(r);
-      else if (r.due === today) openSecs.Today.push(r);
-      else if (r.due === tomorrowStr) openSecs.Tomorrow.push(r);
-      else openSecs.Upcoming.push(r);
-    }
-
-    const sortFn = (a: Row, b: Row) => {
-      if (sortMode === 'manual') {
-        return (a.task.order ?? 0) - (b.task.order ?? 0)
-          || (a.due ?? '9999').localeCompare(b.due ?? '9999')
-          || a.task.title.localeCompare(b.task.title);
-      }
-      if (sortMode === 'title') {
-        return a.task.title.localeCompare(b.task.title);
-      }
-      if (sortMode === 'title-desc') {
-        return b.task.title.localeCompare(a.task.title);
-      }
-      // 'datetime' (default)
-      return (a.due ?? '9999').localeCompare(b.due ?? '9999')
-        || (a.task.startTime ?? '99:99').localeCompare(b.task.startTime ?? '99:99')
-        || (a.task.order ?? 0) - (b.task.order ?? 0)
-        || a.task.title.localeCompare(b.task.title);
-    };
-
-    for (const k of Object.keys(openSecs)) openSecs[k].sort(sortFn);
-    doneSecs.sort((a, b) => (b.task.completedAt ?? 0) - (a.task.completedAt ?? 0));
-    return { open: openSecs, done: doneSecs };
-  }, [rows, filters, today, sortMode]);
+  const sections = useMemo(() => sectionize(rows, filters, today, sortMode), [rows, filters, today, sortMode]);
+  // The same sections with NO list filter: a drag made while some lists are
+  // selected is placed against this, so the lists that are not on screen keep
+  // their order (see handleDropTask).
+  const wholeSections = useMemo(
+    () => (selectedListIds.length ? sectionize(allRows, filters, today, sortMode) : sections),
+    [selectedListIds.length, allRows, filters, today, sortMode, sections],
+  );
 
   const openCount = counts.today + counts.overdue + counts.upcoming + counts.general;
   const visibleOpenCount = useMemo(
@@ -459,35 +474,68 @@ function TasksPanel({
   const visibleCount = visibleOpenCount + sections.done.length;
   const totalCount = openCount + counts.completed;
 
-  const applyManualOrder = useCallback((orderedRows: Row[]) => {
-    orderedRows.forEach((r, idx) => {
-      onEdit(r.occId, { order: idx * 10 });
-    });
+  /**
+   * Move one row of a drawn list, the way the phone does it.
+   *
+   * THE MANUAL ORDER IS ONE ORDER FOR EVERY LIST. This used to renumber only the
+   * rows on screen, 0, 10, 20 -- so a drag with the Work list selected gave Work
+   * 0, 10, 20 while Home already had 0, 10, 20, and "All" then interleaved the
+   * two in an order nobody chose (and the phone, which places drags properly,
+   * disagreed with this screen). Now the drop is expressed against the WHOLE
+   * section across every list (`planReorder`, shared with the phone and
+   * tested): the rows on screen land exactly where they were dropped, the
+   * hidden ones keep their order, and usually only the dragged row is written.
+   *
+   * A task only moves among the tasks of its section, a step only among the
+   * steps of its own task; a drop anywhere else is ignored rather than guessed.
+   */
+  const handleDropTask = useCallback((sourceOccId: string, targetOccId: string, edge: InsertEdge, list: Row[]) => {
+    if (sourceOccId === targetOccId) return;
+    const source = list.find(r => r.occId === sourceOccId);
+    const target = list.find(r => r.occId === targetOccId);
+    // A row in a DIFFERENT section is not a reorder target. Appending to the end
+    // meant a drag that overshot into Tomorrow or Completed sent the task to the
+    // bottom of its own section instead. Do nothing rather than something the
+    // user never pointed at.
+    if (!source || !target) return;
+
+    const present = new Set(list.map(r => r.task.id));
+    const nestedUnder = (r: Row) => (r.task.parentId && present.has(r.task.parentId) ? r.task.parentId : null);
+    const parentId = nestedUnder(source);
+    if (parentId !== nestedUnder(target)) return;
+    const roots = list.filter(r => !nestedUnder(r));
+    const stepsOf = (id: string) => onceEach(allRows.filter(r => r.task.parentId === id)).sort(compareStepRows);
+
+    let visible: Row[];
+    let whole: Row[];
+    if (parentId) {
+      // Steps drawn under their task inside a section's list.
+      visible = list.filter(r => nestedUnder(r) === parentId).sort(compareStepRows);
+      whole = stepsOf(parentId);
+    } else if (source.task.parentId && tasks[source.task.parentId]
+      && roots.every(r => r.task.parentId === source.task.parentId)) {
+      // The steps list of one task, handed in on its own.
+      visible = [...roots].sort(compareStepRows);
+      whole = stepsOf(source.task.parentId);
+    } else {
+      const name = Object.keys(sections.open).find(k => sections.open[k].some(r => r.occId === sourceOccId));
+      if (!name) return;
+      visible = roots;
+      whole = topLevelOf(wholeSections.open[name] ?? []);
+    }
+
+    // A repeat can be drawn more than once; its place is one place, the master's.
+    const v = onceEach(visible).map(r => r.task);
+    const w = onceEach(whole).map(r => r.task);
+    const from = v.findIndex(t => t.id === source.task.id);
+    const at = v.filter(t => t.id !== source.task.id).findIndex(t => t.id === target.task.id);
+    if (from < 0 || at < 0) return;
+    const plan = planReorder(w, v, from, edge === 'after' ? at + 1 : at);
+    for (const c of plan.changes) onEdit(c.id, { order: c.order });
     if (sortMode !== 'manual') {
       setSortMode('manual');
     }
-  }, [onEdit, sortMode]);
-
-  const handleDropTask = useCallback((sourceOccId: string, targetOccId: string, edge: InsertEdge, sectionList: Row[]) => {
-    if (sourceOccId === targetOccId) return;
-
-    const sourceIndex = sectionList.findIndex(r => r.occId === sourceOccId);
-    if (sourceIndex === -1) return;
-
-    const reordered = [...sectionList];
-    const [moved] = reordered.splice(sourceIndex, 1);
-
-    const targetIndex = reordered.findIndex(r => r.occId === targetOccId);
-    // A row in a DIFFERENT section is not a reorder target. Appending to the end
-    // (what this did) meant a drag that overshot into Tomorrow or Completed sent
-    // the task to the bottom of its own section instead — and, worse, flipped
-    // the whole panel to manual sort while doing it. Do nothing rather than
-    // something the user never pointed at.
-    if (targetIndex === -1) return;
-    reordered.splice(edge === 'after' ? targetIndex + 1 : targetIndex, 0, moved);
-
-    applyManualOrder(reordered);
-  }, [applyManualOrder]);
+  }, [allRows, tasks, sections, wholeSections, onEdit, sortMode]);
 
   // ── List mutations ─────────────────────────────────────────────────────────
   const saveList = useCallback((id: string | 'new', name: string, color: string) => {
@@ -2314,7 +2362,8 @@ const TaskList = React.memo(function TaskList({
   // "is this drop target one of mine?" test reads the rows through a ref.
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
-  const childrenOf = (id: string) => rows.filter(r => r.task.parentId === id);
+  // Steps in the same order the phone draws them, whatever the panel's sort.
+  const childrenOf = (id: string) => rows.filter(r => r.task.parentId === id).sort(compareStepRows);
   const insertTarget = (id: string, edge: InsertEdge) => `${id}:${edge}`;
   const targetFromPointer = (e: React.DragEvent<HTMLElement>, list: Row[]): { row: Row; edge: InsertEdge } | null => {
     if (!list.length) return null;

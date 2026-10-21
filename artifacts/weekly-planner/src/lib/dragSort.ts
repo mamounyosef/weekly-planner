@@ -387,6 +387,191 @@ export function planAppendOrder<T extends Orderable>(
   return { order: keys[siblings.length], changes };
 }
 
+// ─── Placing several rows at once ────────────────────────────────────────────
+
+/**
+ * The numbers that make `after` the drawn order, writing as few rows as it can.
+ *
+ * `before` is the list exactly as it is drawn now (so the rows nobody has
+ * placed are at the end, in the order the tie-breaks put them), and `after` is
+ * the same rows in the order they should be drawn in. Only rows whose number
+ * actually changes come back. Null when the two are not the same set of rows.
+ *
+ * WHY NOT JUST RENUMBER. Every row written is a merge, an op in the log and a
+ * line in the next sync on the other machine, and a renumber also rewrites
+ * rows the user never touched. So:
+ *
+ *   - The longest run of rows whose numbers already climb in the new order
+ *     keeps its numbers. Everything else is slotted between them, which is
+ *     always possible at the two ends and possible in the middle while the
+ *     numbers are spaced (that is what ORDER_STEP is for).
+ *   - Rows that were never placed, sitting at the very end in the order they
+ *     are already drawn, stay unplaced: they are drawn there anyway.
+ *   - When there is no room, the list is renumbered 0, 10, 20 in the new
+ *     order, which is the only thing that can repair numbers that never were
+ *     in order.
+ *
+ * Whole numbers only, as in `slideBetween`: fractions halve forever.
+ */
+export function planOrderNumbers<T extends Orderable>(
+  before: readonly T[],
+  after: readonly T[],
+  step: number = ORDER_STEP,
+): Array<{ id: string; order: number }> | null {
+  if (before.length !== after.length) return null;
+  const posBefore = new Map<string, number>();
+  for (let i = 0; i < before.length; i += 1) {
+    const id = before[i]?.id;
+    if (typeof id !== 'string' || id === '' || posBefore.has(id)) return null;
+    posBefore.set(id, i);
+  }
+  const seen = new Set<string>();
+  for (const t of after) {
+    const id = t?.id;
+    if (typeof id !== 'string' || !posBefore.has(id) || seen.has(id)) return null;
+    seen.add(id);
+  }
+
+  const real = (t: T): number | null =>
+    typeof t.order === 'number' && Number.isFinite(t.order) ? t.order : null;
+
+  // The unplaced tail: drawn last already, in this same order, so left alone.
+  let head = after.length;
+  while (head > 0) {
+    const t = after[head - 1];
+    if (real(t) !== null) break;
+    if (head < after.length && (posBefore.get(t.id) as number) > (posBefore.get(after[head].id) as number)) break;
+    head -= 1;
+  }
+
+  // A climbing run of real numbers among the rest keeps them. Rows that have
+  // not moved at all count for far more than rows that have, so the rows the
+  // request did not name are the last thing ever written; a plain longest run
+  // is the second choice, and a renumber the last.
+  const idx: number[] = [];
+  for (let i = 0; i < head; i += 1) if (real(after[i]) !== null) idx.push(i);
+
+  const keepRun = (weight: (i: number) => number): Set<number> => {
+    // O(n^2) is fine: a section of a task board is tens of rows, not thousands.
+    const best = new Array<number>(idx.length).fill(0);
+    const prev = new Array<number>(idx.length).fill(-1);
+    let top = -1;
+    for (let k = 0; k < idx.length; k += 1) {
+      const v = real(after[idx[k]]) as number;
+      best[k] = weight(idx[k]);
+      for (let m = 0; m < k; m += 1) {
+        if ((real(after[idx[m]]) as number) < v && best[m] + weight(idx[k]) > best[k]) {
+          best[k] = best[m] + weight(idx[k]);
+          prev[k] = m;
+        }
+      }
+      if (top < 0 || best[k] > best[top]) top = k;
+    }
+    const kept = new Set<number>();
+    for (let k = top; k >= 0; k = prev[k]) kept.add(idx[k]);
+    return kept;
+  };
+
+  // Numbers for everything between the kept rows, or null when they do not fit.
+  const fill = (kept: Set<number>): Map<number, number> | null => {
+    if (!kept.size) return null;
+    const out = new Map<number, number>();
+    let i = 0;
+    while (i < head) {
+      if (kept.has(i)) { i += 1; continue; }
+      let j = i;
+      while (j < head && !kept.has(j)) j += 1;
+      const run = j - i;
+      const lower = i > 0 ? real(after[i - 1]) as number : null;   // i-1 is kept
+      const upper = j < head ? real(after[j]) as number : null;    // j is kept
+      if (lower !== null && upper !== null && upper - lower < run + 1) return null;
+      for (let r = 0; r < run; r += 1) {
+        const v = lower === null ? (upper as number) - step * (run - r)
+          : upper === null ? lower + step * (r + 1)
+          : lower + Math.floor(((upper - lower) * (r + 1)) / (run + 1));
+        if (!Number.isFinite(v)) return null;
+        out.set(i + r, v);
+      }
+      i = j;
+    }
+    return out;
+  };
+
+  const unmoved = (i: number) => (posBefore.get(after[i].id) === i ? head + 1 : 1);
+  let out = fill(keepRun(unmoved)) ?? fill(keepRun(() => 1));
+  if (!out) {
+    out = new Map<number, number>();
+    const keys = manualOrders(head, step);
+    for (let k = 0; k < head; k += 1) out.set(k, keys[k]);
+  }
+
+  const changes: Array<{ id: string; order: number }> = [];
+  for (const [k, v] of [...out.entries()].sort((a, b) => a[0] - b[0])) {
+    if (after[k].order !== v) changes.push({ id: after[k].id, order: v });
+  }
+  return changes;
+}
+
+/**
+ * Put some rows of a list into a new order WITHOUT disturbing the others.
+ *
+ * `full` is the whole bucket as drawn now (every list, not just the ones on
+ * screen) and `ids` names some of its rows, top to bottom. Those rows are
+ * re-dealt into the same places they occupied between them, in the order
+ * given; every row not named stays exactly where it was. That is what makes it
+ * safe to reorder what one list shows: the tasks of the lists that are not
+ * shown keep their places, relative to each other and to everything else.
+ *
+ * Null when the request names a row twice or one that is not in `full`.
+ */
+export function planSubsetOrder<T extends Orderable>(
+  full: readonly T[],
+  ids: readonly string[],
+  step: number = ORDER_STEP,
+): ReorderPlan<T> | null {
+  const at = new Map<string, number>();
+  for (let i = 0; i < full.length; i += 1) {
+    const id = full[i]?.id;
+    if (typeof id !== 'string' || id === '' || at.has(id)) return null;
+    at.set(id, i);
+  }
+  if (new Set(ids).size !== ids.length) return null;
+  if (!ids.every(id => at.has(id))) return null;
+
+  const slots = ids.map(id => at.get(id) as number).sort((a, b) => a - b);
+  const items = full.slice();
+  slots.forEach((slot, k) => { items[slot] = full[at.get(ids[k]) as number]; });
+  const changes = planOrderNumbers(full, items, step);
+  return changes ? { items, changes } : null;
+}
+
+/** Where `placeRow` puts a row: next to another row, or at an end. */
+export type RowPlacement =
+  | { before: string }
+  | { after: string }
+  | { edge: 'top' | 'bottom' };
+
+/**
+ * The list with one row taken out and put back at `where`. Null when the row
+ * or the anchor is not in the list, or the row is its own anchor.
+ */
+export function placeRow<T extends Orderable>(items: readonly T[], id: string, where: RowPlacement): T[] | null {
+  const from = items.findIndex(t => t.id === id);
+  if (from < 0) return null;
+  const rest = items.filter((_, i) => i !== from);
+  let to: number;
+  if ('edge' in where) to = where.edge === 'top' ? 0 : rest.length;
+  else {
+    const anchor = 'before' in where ? where.before : where.after;
+    if (anchor === id) return null;
+    const a = rest.findIndex(t => t.id === anchor);
+    if (a < 0) return null;
+    to = 'before' in where ? a : a + 1;
+  }
+  rest.splice(to, 0, items[from]);
+  return rest;
+}
+
 // ─── Holding the dropped order until the store agrees ────────────────────────
 
 /**

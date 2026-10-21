@@ -204,6 +204,9 @@ import {
   withDueDate,
   withTime,
 } from '@/lib/tasks';
+import { ACTIVE_TASK_LIST_KEY, readActiveTaskListIds } from '@/lib/taskViewPrefs';
+import { buildTaskRows, groupTasks, orderKey } from '@/lib/taskBoard';
+import { planReorder } from '@/lib/dragSort';
 import {
   buildPrayerDay,
   coercePrayerSettings,
@@ -369,7 +372,6 @@ const WEEK_START_KEY  = 'planner-weekstart';
 const DAY_START_KEY  = 'planner-daystart';
 const DAY_END_KEY    = 'planner-dayend';
 /** Which task list this screen is looking at. Per-device, never synced. */
-const ACTIVE_TASK_LIST_KEY = 'planner-active-task-list';
 const HEADER_PX      = 56;
 const HEADER_COMPACT_PX = 28;
 
@@ -1122,17 +1124,7 @@ export default function DailyPlanner() {
   // Which list the panel is showing. Deliberately device-local rather than a
   // synced setting: the tab you happen to be reading on this screen is not
   // something the phone or the widget should be dragged to as well.
-  const [activeTaskListIds, setActiveTaskListIds] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem(ACTIVE_TASK_LIST_KEY);
-      if (!raw) return [];
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed.map((x) => String(x));
-      } catch { /* legacy single-id value */ }
-      return [raw];
-    } catch { return []; }
-  });
+  const [activeTaskListIds, setActiveTaskListIds] = useState<string[]>(readActiveTaskListIds);
   const [prayer, setPrayer]                   = useState<PrayerSettings>(initialSettings.prayer);
   const [hardware, setHardware]               = useState<HardwareSettings>(initialSettings.hardware);
   const [prayerPanelOpen, setPrayerPanelOpen] = useState(false);
@@ -2919,7 +2911,11 @@ export default function DailyPlanner() {
 
   const datedTasksByCol = useMemo(() => {
     const cols = bucketTasks(false);
-    for (const c of cols.values()) c.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.title.localeCompare(b.title));
+    // The panel's manual order (`orderKey`: a task nobody placed sorts last),
+    // and the id last so a tie never reshuffles between renders.
+    for (const c of cols.values()) {
+      c.sort((a, b) => orderKey(a) - orderKey(b) || a.title.localeCompare(b.title) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    }
     return cols;
   }, [bucketTasks]);
   const timedTasksByCol = useMemo(() => bucketTasks(true), [bucketTasks]);
@@ -3966,8 +3962,13 @@ export default function DailyPlanner() {
    * Drop a task into a day column at a given position.
    *
    * `beforeId` is the chip it was dropped above (null = dropped at the end).
-   * The column is then renumbered 0..n so "first in the list" survives a reload
-   * — order is a stored field, not a rendering accident.
+   * Order is a stored field, not a rendering accident -- and it is the SAME
+   * field as the Tasks panel's manual order, one order shared by every list
+   * and device. So the drop is placed against the whole panel section the day
+   * belongs to (`planReorder`, as the panel and the phone do): the chips in
+   * this column land where they were dropped and every task not in it keeps
+   * its place. Renumbering the column 0, 1, 2 (what this did) wiped the
+   * spacing and scrambled the panel's order for every other list.
    */
   const moveTaskToColumn = useCallback((occId: string, colIdx: number, beforeId: string | null) => {
     const wso = editCtxRef.current.weekStartsOn;
@@ -3976,28 +3977,51 @@ export default function DailyPlanner() {
     const ymd = format(dayAtRef.current(colIdx), 'yyyy-MM-dd');
 
     // Everything already sitting in that column, in display order, with the
-    // dragged chip removed and re-inserted at the drop point.
+    // dragged chip removed.
     const column = (datedTasksByColRef.current.get(colIdx) ?? []).filter(t => t.id !== occId);
     const insertAt = beforeId ? column.findIndex(t => t.id === beforeId) : -1;
-    const ordered = [...column];
-    ordered.splice(insertAt === -1 ? ordered.length : insertAt, 0, { ...target, id: occId } as Task);
 
+    // The day first. Only the dragged chip changes day, and dropping onto the
+    // band turns a timed task into a top-of-day task. A chip that stays on its
+    // own day is not re-dated at all, so reordering a repeat's occurrence never
+    // splits it off its series.
     let map = tasksRef.current;
-    ordered.forEach((t, i) => {
-      const isDragged = t.id === occId;
-      const current = map[t.id] ?? weekTasksRef.current[t.id];
-      if (!current) return;
-      // Only the dragged chip changes day; the rest just get their new index.
-      // Clear startTime & endTime so dropping onto the top task band turns timed tasks into top-of-day tasks.
-      const moved = isDragged ? withDueDate(current, ymd, wso) : null;
-      const patch: Partial<Task> = moved
-        ? { weekKey: moved.weekKey, dayIndex: moved.dayIndex, startTime: undefined, endTime: undefined, order: i }
-        : { order: i };
-      const res = editTaskSeries(map, t.id, patch, editCtxRef.current.viewedWeekKey, wso);
+    let movedId = occId;
+    const moved = withDueDate(target, ymd, wso);
+    if (moved.weekKey !== target.weekKey || moved.dayIndex !== target.dayIndex || target.startTime) {
+      const res = editTaskSeries(map, occId, { weekKey: moved.weekKey, dayIndex: moved.dayIndex, startTime: undefined, endTime: undefined }, editCtxRef.current.viewedWeekKey, wso);
       map = res.events;
-    });
+      movedId = res.targetId;
+    }
+
+    // Then the place, on masters: a repeat has one place for all its days.
+    const masterOf = (id: string) => (map[id] ? id : parseOccId(id).masterId);
+    const movedMaster = masterOf(movedId);
+    const others = column.map(t => masterOf(t.id)).filter(id => id !== movedMaster && map[id]);
+    if (!map[movedMaster] || new Set(others).size !== others.length) { writeTasks(map); return; }
+    const to = insertAt === -1 ? others.length : Math.min(insertAt, others.length);
+    // Where the moved chip is drawn NOW (by its stored number), and where it goes.
+    const now = [...others, movedMaster].map(id => map[id]).sort((a, b) =>
+      orderKey(a) - orderKey(b) || (a.title ?? '').localeCompare(b.title ?? '') || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const from = now.findIndex(t => t.id === movedMaster);
+    const today = format(new Date(), 'yyyy-MM-dd');
+    const board = groupTasks(buildTaskRows(map, today, autoRollRecurringTasks), map, [], [], [], today, 'manual');
+    const seen = new Set<string>();
+    const section = (['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'] as const)
+      .find(k => board[k].some(n => n.row.task.id === movedMaster));
+    const whole = section
+      ? board[section].map(n => map[n.row.task.id]).filter(t => t && !seen.has(t.id) && !!seen.add(t.id))
+      : now;
+    let plan = planReorder(whole, now, from, to);
+    // A chip the panel draws elsewhere (a step under its task, a finished one)
+    // cannot be placed against the section; place it among the column instead.
+    if (!plan.changes.length && from !== to) plan = planReorder(now, now, from, to);
+    const stamp = Date.now();
+    for (const c of plan.changes) {
+      if (map[c.id]) map = { ...map, [c.id]: { ...map[c.id], order: c.order, updatedAt: stamp } };
+    }
     writeTasks(map);
-  }, [writeTasks]);
+  }, [writeTasks, autoRollRecurringTasks]);
 
   const deleteTask = useCallback((occId: string, mode: DeleteMode = 'one') => {
     writeTasks(deleteTaskScoped(tasksRef.current, occId, mode));

@@ -56,6 +56,7 @@ import {
   type Node, type Row as BoardRow, type SectionKey, type SortMode,
 } from '../lib/taskBoard';
 import { planAppendOrder, planReorder } from '../lib/dragSort';
+import { setLiveTaskFilters } from '../lib/agent/taskView';
 import { planTick, setPending, isPending as heldDone } from '../lib/pendingDone';
 import type { TaskFilter } from '../lib/tasks';
 
@@ -156,6 +157,8 @@ export function Tasks() {
     void prefs.setTaskSort(mode);
   };
   const [filters, setFilters] = useState<TaskFilter[]>([]);
+  // The assistant is told what this screen shows (see lib/agent/taskView.ts).
+  useEffect(() => { setLiveTaskFilters(filters); }, [filters]);
 
   /**
    * Things the user has just ticked, before the store has been told.
