@@ -248,6 +248,12 @@ export class PhoneVoiceSession implements VoiceEngine {
       case 'error':
         this.h.onError?.(String(m.message ?? 'The speech engine reported an error.'));
         break;
+      case 'shutdown':
+        // Turned off on purpose (Settings, the toolbar, the Notes app):
+        // reconnecting would only start it again.
+        this.closedByUs = true;
+        this.fail('Voice mode ended: the speech engine was turned off.');
+        break;
     }
   }
 

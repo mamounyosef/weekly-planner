@@ -205,6 +205,7 @@ import {
   withTime,
 } from '@/lib/tasks';
 import { ACTIVE_TASK_LIST_KEY, readActiveTaskListIds } from '@/lib/taskViewPrefs';
+import VoiceEngineChip from '@/components/voice/VoiceEngineChip';
 import { buildTaskRows, groupTasks, orderKey } from '@/lib/taskBoard';
 import { planReorder } from '@/lib/dragSort';
 import {
@@ -8543,6 +8544,7 @@ export default function DailyPlanner() {
               <BarChart3 size={15}/>
               Analysis
             </button>
+            <VoiceEngineChip surfaceBg={surfaceBg} surfaceBdr={surfaceBdr} menuText={menuText} />
             <button
               onClick={() => setAgentOpen(v => !v)}
               title={`${agentOpen ? 'Hide the assistant' : 'Assistant: add or change things by chatting, with screenshots'} (${formatCombo(shortcuts.openAgent)})`}

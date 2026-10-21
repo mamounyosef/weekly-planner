@@ -213,6 +213,12 @@ export class VoiceSession implements VoiceEngine {
       case 'error':
         this.h.onError?.(String(m.message ?? 'The speech engine reported an error.'));
         break;
+      case 'shutdown':
+        // Turned off on purpose (Settings, the toolbar, the Notes app):
+        // reconnecting would only start it again.
+        this.closedByUs = true;
+        this.fail('Voice mode ended: the speech engine was turned off.');
+        break;
     }
   }
 
@@ -408,9 +414,16 @@ export async function fetchVoices(): Promise<VoiceInfo[]> {
   return Array.isArray(j.voices) ? j.voices : [];
 }
 
-export async function fetchVoiceStatus(): Promise<{ available: boolean; running: boolean; ready: boolean; loading: boolean; device: string | null; error: string | null }> {
-  const r = await fetch('/api/voice/status');
+export interface VoiceEngineStatus { available: boolean; running: boolean; ready: boolean; loading: boolean; device: string | null; vramMb?: number | null; error: string | null }
+
+export async function fetchVoiceStatus(): Promise<VoiceEngineStatus> {
+  const r = await fetch('/api/voice/status', { cache: 'no-store' });
   return r.json();
+}
+
+/** Turn the speech engine off: it exits and frees all GPU memory (gaming). */
+export async function turnOffVoiceEngine(): Promise<void> {
+  await fetch('/api/voice/off', { method: 'POST' });
 }
 
 /** Play one sentence in a voice (Settings). Resolves when it has finished. */

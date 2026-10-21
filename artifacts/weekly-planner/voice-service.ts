@@ -8,6 +8,8 @@
 //   GET  /api/voice/voices    the voices to pick from
 //   POST /api/voice/preview   one sentence in a voice (WAV), for Settings
 //   POST /api/voice/warm      load the models now (the voice view opened)
+//   POST /api/voice/off       turn the engine off (frees all GPU memory, e.g. for
+//                             gaming); the next voice session starts it again
 //   GET  /api/voice/prefs     this user's voice settings (all their devices)
 //   PUT  /api/voice/prefs     change some of them
 //   WS   /api/voice/ws        one live voice session, piped straight through
@@ -211,8 +213,21 @@ export function registerVoiceRoutes(middlewares: Middlewares, httpServer: Upgrad
           ready: !!h?.ready,
           loading: !!h?.loading,
           device: h?.device ?? null,
+          vramMb: typeof h?.vramMb === 'number' ? h.vramMb : null,
           error: h?.error ?? null,
         });
+      }
+      if (route === 'off' && method === 'POST') {
+        // Never starts the engine just to stop it. A running one, ours or the
+        // Notes app's, exits on /shutdown; an older one without it is killed
+        // if we started it.
+        if (await health(800)) {
+          let ok = false;
+          try { ok = (await fetch(`http://${HOST}:${PORT}/shutdown`, { method: 'POST', signal: AbortSignal.timeout(2000) })).ok; } catch { /* exiting */ ok = true; }
+          if (!ok) stopEngine();
+          log(`VOICE engine turned off by ${auth.user.username}`);
+        }
+        return sendJson(res, 200, { ok: true });
       }
       if (!available()) return sendJson(res, 503, { error: 'Voice mode is not installed on this PC (the speech engine is missing).' });
       if (!(await ensureEngine())) return sendJson(res, 503, { error: 'The speech engine did not start. See database/speech-server.log on the PC.' });

@@ -173,7 +173,11 @@
 - Speech engine: `speech-server.py` (repo root), run ONLY with `.venv-speech` (CUDA 12
   wheels, faster-whisper large-v3-turbo, Kokoro 82M via kokoro-onnx, Silero VAD v6).
   Models in git-ignored `speech-models/` (Kokoro files there, Whisper in `speech-models/hf`).
-  Everything on D: because C: is nearly full. Free, local, GPU, unloaded after 10 idle minutes.
+  Everything on D: because C: is nearly full. Free, local, GPU, unloaded after 20 idle minutes.
+  "Turn off" (toolbar chip `VoiceEngineChip.tsx`, shown only while it runs with its VRAM, and
+  Settings > Voice; Notes has its own) = `POST /api/voice/off` -> engine `/shutdown`: open sessions
+  get `{type:"shutdown"}` (clients must NOT reconnect) and the process exits, freeing all VRAM.
+  No GPU (the laptop): Whisper falls back to CPU with `small.en` (`SPEECH_WHISPER_CPU_MODEL`).
   VRAM: it measured 4.2 GB with float16 Whisper and onnxruntime's default CUDA arena; now Whisper
   runs int8_float16 and Kokoro's arena is capped (kSameAsRequested, HEURISTIC cuDNN, 1.5 GB limit).
   Env overrides: `SPEECH_WHISPER_COMPUTE`, `SPEECH_TTS_DEVICE=cpu`. Log: `database/speech-server.log`.

@@ -18,7 +18,10 @@ One WebSocket per voice session:
                     binary  [uint32 speak id][int16 24 kHz mono PCM]
 
 Models load on the first session and are dropped again after 20 idle minutes,
-so the GPU memory (about 2 GB) is only held while voice mode is in use.
+so the GPU memory is only held while voice mode is in use. POST /shutdown ends
+the whole process (both apps offer "Turn off", e.g. before gaming); the next
+voice session starts it again. On a computer with no usable GPU it runs on the
+CPU with a smaller Whisper (slower, still free and local).
 
 Run with the speech venv, never the launcher one (CUDA, Whisper, Kokoro):
     .venv-speech\\Scripts\\python.exe speech-server.py --port 5179
@@ -66,13 +69,16 @@ import numpy as np  # noqa: E402
 from aiohttp import WSMsgType, web  # noqa: E402
 
 WHISPER_MODEL = "large-v3-turbo"
+# Without a GPU, large-v3-turbo is far too slow for live speech on a laptop
+# CPU; small.en keeps up and is still accurate for clear English.
+WHISPER_CPU_MODEL = os.environ.get("SPEECH_WHISPER_CPU_MODEL", "small.en")
 KOKORO_MODEL = os.path.join(MODELS_DIR, "kokoro-v1.0.onnx")
 KOKORO_VOICES = os.path.join(MODELS_DIR, "voices-v1.0.bin")
 TTS_RATE = 24000
 MIC_RATE = 16000
 FRAME = 512                 # samples per VAD frame (32 ms at 16 kHz)
 FRAME_MS = FRAME * 1000 // MIC_RATE
-IDLE_UNLOAD_S = 10 * 60
+IDLE_UNLOAD_S = 20 * 60
 # GPU memory. Whisper's weights in 8-bit (about half of float16, the same
 # accuracy for practical purposes), and Kokoro's onnxruntime held to what it
 # actually needs: by default its CUDA arena grows in powers of two and cuDNN
@@ -195,7 +201,7 @@ class Engine:
                     device = "cuda"
                 except Exception as e:
                     log("Whisper on the GPU failed, using the CPU:", e)
-                    whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+                    whisper = WhisperModel(WHISPER_CPU_MODEL, device="cpu", compute_type="int8")
                     device = "cpu"
                 opts = ort.SessionOptions()
                 opts.log_severity_level = 3
@@ -226,6 +232,7 @@ class Engine:
                 return
             self.whisper = None
             self.kokoro = None
+            self.device = None
             gc.collect()
             log("Models unloaded after %d idle minutes" % (IDLE_UNLOAD_S // 60))
 
@@ -406,7 +413,10 @@ class Session:
             self._end_utterance()
             return
         now = time.monotonic()
-        if not self.partial_busy and now - self.last_partial_at >= PARTIAL_EVERY_S and len(self.frames) * FRAME_MS > 600:
+        # On a CPU, live captions less often, so the final transcript is not
+        # stuck behind them.
+        every = PARTIAL_EVERY_S if ENGINE.device == "cuda" else 2.0
+        if not self.partial_busy and now - self.last_partial_at >= every and len(self.frames) * FRAME_MS > 600:
             self.last_partial_at = now
             self.partial_busy = True
             audio = np.concatenate(self.frames[-int(25000 / FRAME_MS):])
@@ -565,8 +575,53 @@ async def ws_handler(request):
     return ws
 
 
+_vram = {"at": 0.0, "mb": None}
+
+
+def vram_mb():
+    """This process's GPU memory in MB (nvidia-smi), or None. Cached 5 s."""
+    if time.monotonic() - _vram["at"] < 5:
+        return _vram["mb"]
+    _vram["at"] = time.monotonic()
+    _vram["mb"] = None
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+        for line in out.splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) == 2 and parts[0] == str(os.getpid()):
+                _vram["mb"] = int(parts[1])
+    except Exception:
+        pass
+    return _vram["mb"]
+
+
+async def shutdown(_request):
+    """Turn off: end every session and exit, freeing all GPU memory."""
+    log("Turned off on request (%d open sessions)" % len(SESSIONS))
+    for s in list(SESSIONS):
+        await s.send_json({"type": "shutdown"})
+        s.closed = True
+        try:
+            await s.ws.close()
+        except Exception:
+            pass
+
+    async def bye():
+        await asyncio.sleep(0.2)
+        os._exit(0)
+    asyncio.ensure_future(bye())
+    return web.json_response({"ok": True})
+
+
 async def health(_request):
+    mb = await asyncio.get_running_loop().run_in_executor(None, vram_mb) if ENGINE.device == "cuda" else None
     return web.json_response({
+        "vramMb": mb,
         "ok": True, "ready": ENGINE.ready, "loading": ENGINE.loading, "device": ENGINE.device,
         "error": ENGINE.error, "sessions": len(SESSIONS),
         # 2: sessions take the user's voice from the planner (/ws?user=, /session-prefs).
@@ -641,6 +696,7 @@ def main():
     app.router.add_post("/preview", preview)
     app.router.add_post("/warm", warm)
     app.router.add_post("/session-prefs", session_prefs)
+    app.router.add_post("/shutdown", shutdown)
     app.router.add_get("/ws", ws_handler)
     app.cleanup_ctx.append(idle_unloader)
     log("speech server on 127.0.0.1:%d" % args.port)

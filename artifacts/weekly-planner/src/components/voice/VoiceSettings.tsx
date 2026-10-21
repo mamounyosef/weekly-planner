@@ -4,13 +4,14 @@
 // Everything here belongs to this device, like the chat's model pick.
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { AudioLines, Check, Cpu, Gauge, Loader2, Pause, Play, RefreshCw } from 'lucide-react';
+import { AudioLines, Check, Cpu, Gauge, Loader2, Pause, Play, Power, RefreshCw } from 'lucide-react';
 
 import { MODELS, paramsLabel } from '@/lib/agent/agentModels';
 import { VOICE_MODEL_KEY, useModelSpeeds, type ModelSpeed } from '@/lib/agent/agentClient';
 import { isKnownModel, DEFAULT_MODEL } from '@/lib/agent/agentModels';
 import { useVoicePrefs } from '@/lib/voice/voicePrefs';
-import { fetchVoiceStatus, fetchVoices, previewVoice, stopPreview, type VoiceInfo } from '@/lib/voice/voiceSession';
+import { fetchVoiceStatus, fetchVoices, previewVoice, stopPreview, turnOffVoiceEngine, type VoiceInfo } from '@/lib/voice/voiceSession';
+import { formatVram } from './VoiceEngineChip';
 import type { PauseLength } from '@/lib/voice/speechText';
 
 export interface VoiceSettingsTheme {
@@ -118,8 +119,21 @@ export default function VoiceSettings({ theme: t }: { theme: VoiceSettingsTheme 
               : status.ready ? `Speech engine ready on the ${status.device === 'cuda' ? 'GPU' : 'CPU'}.`
                 : status.loading ? 'Loading the voice models...'
                   : status.running ? 'Speech engine running; models load on first use (a few seconds).'
-                    : 'Speech engine asleep; it starts when you use voice mode.'}
+                    : 'Speech engine off; it starts when you use voice mode.'}
           {status?.error && <span style={{ color: '#ef4444' }}>{status.error}</span>}
+          {status?.running && (
+            <>
+              {formatVram(status.vramMb) && <span style={{ color: t.sub }}>Using {formatVram(status.vramMb)} of graphics memory.</span>}
+              <button
+                onClick={() => { void turnOffVoiceEngine().catch(() => {}).finally(() => setTimeout(() => fetchVoiceStatus().then(setStatus).catch(() => setStatus(null)), 900)); }}
+                title="The engine exits and frees all graphics memory (before gaming, say). Voice mode starts it again."
+                className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-semibold shrink-0"
+                style={{ border: `1px solid ${t.bdr}`, color: t.text }}
+              >
+                <Power size={13} /> Turn off
+              </button>
+            </>
+          )}
         </div>
       </>)}
 
