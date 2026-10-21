@@ -178,6 +178,8 @@
   Settings > Voice; Notes has its own) = `POST /api/voice/off` -> engine `/shutdown`: open sessions
   get `{type:"shutdown"}` (clients must NOT reconnect) and the process exits, freeing all VRAM.
   No GPU (the laptop): Whisper falls back to CPU with `small.en` (`SPEECH_WHISPER_CPU_MODEL`).
+  The Notes app keeps a COPY at `notes-app/speech-engine/speech-server.py` for computers without
+  the planner (its setup.bat installs a CPU venv + models there): copy it over after changes.
   VRAM: it measured 4.2 GB with float16 Whisper and onnxruntime's default CUDA arena; now Whisper
   runs int8_float16 and Kokoro's arena is capped (kSameAsRequested, HEURISTIC cuDNN, 1.5 GB limit).
   Env overrides: `SPEECH_WHISPER_COMPUTE`, `SPEECH_TTS_DEVICE=cpu`. Log: `database/speech-server.log`.

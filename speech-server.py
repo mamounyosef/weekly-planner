@@ -145,6 +145,31 @@ def log(*parts):
     print(time.strftime("%H:%M:%S"), *parts, flush=True)
 
 
+def espeak_config():
+    """Kokoro's espeak-ng data, from a short path when its own is too long.
+
+    espeak-ng keeps its data path in a fixed buffer (160 characters, 230 on
+    Windows) and silently falls back to a build-machine path it cannot find
+    when the real one is longer, so a deep install folder broke speaking with
+    "Error processing file .../phontab". A copy in the temp folder fixes it.
+    """
+    try:
+        import espeakng_loader
+        from kokoro_onnx import EspeakConfig
+        src = os.path.abspath(espeakng_loader.get_data_path())
+        if len(src) < 150:
+            return None
+        import shutil
+        import tempfile
+        dst = os.path.join(tempfile.gettempdir(), "espeak-ng-data")
+        if not os.path.exists(os.path.join(dst, "phontab")):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        return EspeakConfig(data_path=dst)
+    except Exception as e:
+        log("espeak data path check skipped:", repr(e))
+        return None
+
+
 # ─── The engine: models, shared by every session ─────────────────────────────
 
 class Engine:
@@ -211,7 +236,7 @@ class Engine:
                     providers=[("CUDAExecutionProvider", KOKORO_CUDA_OPTIONS), "CPUExecutionProvider"]
                     if device == "cuda" and TTS_DEVICE != "cpu" else ["CPUExecutionProvider"],
                 )
-                kokoro = Kokoro.from_session(sess, KOKORO_VOICES)
+                kokoro = Kokoro.from_session(sess, KOKORO_VOICES, espeak_config=espeak_config())
                 # The first call of each model compiles kernels; pay that now,
                 # not on the user's first sentence.
                 kokoro.create("Ready.", voice=DEFAULT_VOICE, speed=1.0, lang="en-us")
