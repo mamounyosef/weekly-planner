@@ -72,6 +72,8 @@ export default function VoiceDock({ voice, theme, model, onPickModel, speed, thi
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      // A model menu is open: Esc closes just that, and keys must not act on the call.
+      if (document.querySelector('[data-model-menu]')) return;
       if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); voice.stop(); }
       else if (e.key === 'm' || e.key === 'M') { e.preventDefault(); voice.setMuted(!voice.muted); }
       else if (e.key === 'Enter') { e.preventDefault(); voice.finishTurn(); }
@@ -92,7 +94,7 @@ export default function VoiceDock({ voice, theme, model, onPickModel, speed, thi
     <div className="flex-shrink-0 relative px-3 pt-1 pb-3 agent-in" style={{ background: `linear-gradient(to top, ${theme.bg} 78%, transparent)` }}>
       <style>{DOCK_CSS}</style>
       <div
-        className="rounded-[26px] relative overflow-hidden"
+        className="rounded-[26px] relative"
         style={{
           border: `1px solid ${theme.bdr}`,
           background: theme.darkMode

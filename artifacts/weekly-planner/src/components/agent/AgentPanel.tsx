@@ -24,6 +24,7 @@ import ModelPicker from './ModelPicker';
 import VoiceDock from '../voice/VoiceDock';
 import { useVoiceConversation } from '@/lib/voice/useVoiceConversation';
 import { useVoicePrefs } from '@/lib/voice/voicePrefs';
+import { WEB_VOICE_ENV } from '@/lib/voice/webVoiceEnv';
 import { fmtMoney, fmtTokens, modelInfo } from '@/lib/agent/agentModels';
 import { ApprovalCard, ErrorNote, QuestionCard, ReportCard, type AgentTheme } from './AgentCards';
 import { ImagePreviewModal, type PreviewImageItem } from './ImagePreviewModal';
@@ -101,7 +102,7 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
   const agent = useAgent(open, { voice: voiceOn, think: voicePrefs.think });
   const conv = agent.conversation;
   const busy = conv?.state === 'running';
-  const voice = useVoiceConversation(agent, voicePrefs);
+  const voice = useVoiceConversation(agent, voicePrefs, WEB_VOICE_ENV);
   const speeds = useModelSpeeds(open && voiceOn, true);
   const startVoice = useCallback(() => {
     stopDictationRef.current?.();

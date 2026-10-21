@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Image, KeyboardAvoidingView, Modal, Pressable, ScrollView, TextInput, View, useWindowDimensions,
+  ActivityIndicator, AppState, Image, KeyboardAvoidingView, Modal, Pressable, ScrollView, TextInput, View, useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
@@ -34,6 +34,10 @@ import { AGENT_LIMITS } from '../lib/agent/agentTypes';
 import { buildReport, summarize, type Tone } from '../lib/agent/agentReport';
 import { PhoneImagePreviewModal, type PreviewItem } from './AssistantImagePreview';
 import { ModelPill } from './AssistantModelPicker';
+import { AssistantVoice } from './AssistantVoice';
+import { useVoiceConversation } from '../lib/voice/useVoiceConversation';
+import { usePhoneVoicePrefs } from '../lib/voice/phoneVoicePrefs';
+import { PHONE_VOICE_ENV, fetchModelSpeeds, runModelSpeedTest, type PhoneModelSpeeds } from '../lib/voice/phoneVoiceEnv';
 import { fmtMoney, fmtTokens, modelInfo } from '../lib/agent/agentModels';
 
 export interface SharedToAssistant {
@@ -98,9 +102,46 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
 }) {
   const p = useTheme();
   const insets = useSafeAreaInsets();
-  const agent = usePhoneAgent(visible, onTab ?? visible);
+  // Voice mode: the same chats with their own model pick and spoken replies;
+  // switching it on swaps the composer for the voice view.
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [voicePrefs, setVoicePrefs] = usePhoneVoicePrefs();
+  const agent = usePhoneAgent(visible, onTab ?? visible, { voice: voiceOn, think: voicePrefs.think });
   const conv = agent.conversation;
   const busy = conv?.state === 'running';
+  const voice = useVoiceConversation(agent, voicePrefs, PHONE_VOICE_ENV);
+  const { height: winH } = useWindowDimensions();
+
+  const [speeds, setSpeeds] = useState<PhoneModelSpeeds>({});
+  const [speedTesting, setSpeedTesting] = useState(false);
+  const [speedError, setSpeedError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!voiceOn) return;
+    fetchModelSpeeds().then(s => { setSpeeds(s); setSpeedTesting(!!s.running); }).catch(() => {});
+  }, [voiceOn]);
+  const testSpeed = useCallback(() => {
+    setSpeedTesting(true);
+    setSpeedError(null);
+    runModelSpeedTest().then(setSpeeds).catch(e => setSpeedError(String(e?.message ?? e))).finally(() => setSpeedTesting(false));
+  }, []);
+
+  const startVoice = useCallback(() => {
+    try { ExpoSpeechRecognitionModule.stop(); } catch { /* was not dictating */ }
+    // Both in the same tap, so the "voice ended" check never sees voice mode
+    // on with no session yet.
+    setVoiceOn(true);
+    void voice.start();
+  }, [voice]);
+  useEffect(() => { if (voiceOn && !voice.active && voice.phase !== 'error') setVoiceOn(false); }, [voiceOn, voice.active, voice.phase]);
+  // Leaving the tab, or the app going to the background, ends the conversation:
+  // the mic is never left open behind the user's back.
+  useEffect(() => { if (!visible && voice.active) voice.stop(); }, [visible, voice]);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', s => { if (s !== 'active') voiceStopRef.current(); });
+    return () => sub.remove();
+  }, []);
+  const voiceStopRef = useRef(() => {});
+  voiceStopRef.current = () => { if (voice.active) voice.stop(); };
 
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState<PendingFile[]>([]);
@@ -270,7 +311,7 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
           contentContainerStyle={{ padding: space.lg, gap: space.lg, paddingBottom: space.xl }}
           keyboardShouldPersistTaps="handled"
         >
-          {!conv?.messages.length && <EmptyState p={p} onPick={t => setDraft(t)} />}
+          {!conv?.messages.length && (voiceOn ? <VoiceEmpty p={p} /> : <EmptyState p={p} onPick={t => setDraft(t)} onVoice={startVoice} />)}
           {conv?.messages.map(m => (m.role === 'user'
             ? <UserBubble key={m.id} m={m} p={p} onPreview={(items, index) => setPreviewState({ items, index, isPending: false })} />
             : (
@@ -293,8 +334,24 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
         </ScrollView>
       )}
 
+      {/* Voice mode takes the composer's place */}
+      {!showHistory && voiceOn && (
+        <View style={{ paddingBottom: insets.bottom > 0 ? 0 : 0 }}>
+          <AssistantVoice
+            p={p}
+            voice={voice}
+            model={agent.model}
+            onPickModel={agent.setModel}
+            speed={{ speeds, mode: voicePrefs.think ? 'thinking' : 'quick', testing: speedTesting, error: speedError, onTest: testSpeed }}
+            think={voicePrefs.think}
+            onThink={v => setVoicePrefs({ think: v })}
+            compact={winH < 720}
+          />
+        </View>
+      )}
+
       {/* Composer */}
-      {!showHistory && (
+      {!showHistory && !voiceOn && (
         <View style={{ margin: space.sm, marginTop: 0, borderRadius: 22, borderWidth: 1, borderColor: listening ? p.danger : p.line, backgroundColor: p.surface, paddingHorizontal: space.sm, paddingTop: space.sm, paddingBottom: 4, elevation: 6 }}>
           {files.length > 0 && (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm, paddingBottom: space.sm }}>
@@ -351,6 +408,10 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
             <IconButton name="camera" label="Take a photo" color={p.inkSoft} onPress={() => takePhoto().catch(e => agent.setError(String(e?.message ?? e)))} />
             {clipHasImage && <IconButton name="clipboard-paste" label="Paste image" color={p.accent} onPress={pasteImage} />}
             <IconButton name="mic" label={listening ? 'Stop listening' : 'Speak'} color={listening ? p.danger : p.inkSoft} bg={listening ? p.warnSoft : undefined} onPress={() => toggleMic().catch(e => agent.setError(String(e?.message ?? e)))} />
+            <Pressable onPress={startVoice} accessibilityLabel="Voice mode: talk with the assistant" hitSlop={6}
+              style={({ pressed }) => ({ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', opacity: pressed ? 0.6 : 1 })}>
+              <AgentOrb size={20} still />
+            </Pressable>
             <ModelPill p={p} model={agent.model} onPick={agent.setModel} usage={lastUsage} chatCost={chatCost} />
             <View style={{ flex: 1 }} />
             {busy ? (
@@ -399,7 +460,25 @@ const EXAMPLES = [
   { icon: 'check', title: 'Plan for me', text: 'Find 2 free hours on Friday to study and book them' },
 ];
 
-function EmptyState({ p, onPick }: { p: Palette; onPick: (t: string) => void }) {
+function VoiceEmpty({ p }: { p: Palette }) {
+  const tips = ['What do I have tomorrow?', 'Move my gym session to Thursday at six', 'Find me two free hours on Friday to study'];
+  return (
+    <View style={{ gap: space.md, paddingTop: space.lg }}>
+      <Text variant="title">{greeting()}.</Text>
+      <Text variant="heading" tone="soft">I'm listening.</Text>
+      <Text variant="caption" tone="soft">
+        Talk naturally, even fast or messy. I'll ask if something is unclear. You can cut in while I'm talking, and everything we say is written down here.
+      </Text>
+      {tips.map(t => (
+        <View key={t} style={{ borderRadius: radius.md, borderWidth: 1, borderColor: p.line, backgroundColor: p.surface, padding: space.md }}>
+          <Text variant="caption"><Text variant="caption" style={{ color: '#60a5fa', fontWeight: '700' }}>Try: </Text>"{t}"</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function EmptyState({ p, onPick, onVoice }: { p: Palette; onPick: (t: string) => void; onVoice?: () => void }) {
   return (
     <View style={{ gap: space.lg, paddingTop: space.xl }}>
       <View style={{ alignItems: 'center', gap: space.sm }}>
@@ -425,6 +504,22 @@ function EmptyState({ p, onPick }: { p: Palette; onPick: (t: string) => void }) 
           </Pressable>
         ))}
       </View>
+      {onVoice ? (
+        <Pressable
+          onPress={onVoice}
+          accessibilityLabel="Talk instead: a spoken conversation"
+          style={({ pressed }) => ({
+            flexDirection: 'row', alignItems: 'center', gap: space.md, borderWidth: 1, borderColor: 'rgba(249,115,22,0.35)',
+            borderRadius: radius.lg, padding: space.md, backgroundColor: 'rgba(249,115,22,0.08)', opacity: pressed ? 0.7 : 1,
+          })}
+        >
+          <AgentOrb size={26} still />
+          <View style={{ flex: 1 }}>
+            <Text variant="bodyStrong">Talk instead</Text>
+            <Text variant="caption" tone="soft">A spoken conversation. It answers out loud.</Text>
+          </View>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -477,7 +572,7 @@ function UserBubble({
       ) : null}
       {m.text ? (
         <View style={{ maxWidth: '85%', backgroundColor: p.surfaceAlt, borderRadius: 20, paddingHorizontal: space.lg, paddingVertical: 10 }}>
-          <Text variant="body">{m.text}</Text>
+          <Text variant="body">{m.text.replace(/^\(You were interrupted\.\)\s*/, '')}</Text>
         </View>
       ) : null}
     </View>

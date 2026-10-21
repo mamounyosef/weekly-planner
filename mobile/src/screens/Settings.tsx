@@ -32,6 +32,7 @@ import {
   type DisplaySettings,
 } from '../lib/displaySettings';
 import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
+import { VoiceSettings } from './VoiceSettings';
 import {
   DAY_HOUR_MAX,
   DAY_HOUR_MIN,
@@ -201,6 +202,7 @@ export function Settings({
       <Section title="Preferences">
         <MenuRow label="Appearance" hint="Theme, and how tasks are drawn" iconName="palette" onPress={() => setSection('appearance')} />
         <MenuRow label="Calendar Grid" hint="Visible hours and gestures" iconName="calendar" onPress={() => setSection('calendar')} />
+        <MenuRow label="Voice Assistant" hint="Voice, speed, and how it takes turns" iconName="mic" onPress={() => setSection('voice')} />
       </Section>
       <Section title="Configuration">
         <MenuRow label="Core Planner" hint="Clock format, week start" iconName="settings" onPress={onOpenPlanner} />
@@ -460,7 +462,7 @@ export function Settings({
                 <Text variant="title" tone="soft">‹</Text>
               </Pressable>
             )}
-            <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : 'Settings'}</Text>
+            <Text variant="title">{section === 'account' ? 'User Account' : section === 'data' ? 'App & Data' : section === 'appearance' ? 'Appearance' : section === 'calendar' ? 'Calendar Grid' : section === 'voice' ? 'Voice Assistant' : 'Settings'}</Text>
           </Row>
           {/* NO CLOSE BUTTON ON A TAB.
               Settings has been a top-level tab for a while and kept the close
@@ -473,7 +475,7 @@ export function Settings({
       </View>
       <Divider />
 
-      {section === null ? renderSectionList() : section === 'account' ? renderAccount() : section === 'data' ? renderData() : section === 'appearance' ? renderAppearance() : section === 'calendar' ? renderCalendar() : null}
+      {section === null ? renderSectionList() : section === 'account' ? renderAccount() : section === 'data' ? renderData() : section === 'appearance' ? renderAppearance() : section === 'calendar' ? renderCalendar() : section === 'voice' ? <VoiceSettings /> : null}
     </View>
   );
 }

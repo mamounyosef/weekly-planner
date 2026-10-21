@@ -112,7 +112,7 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
       <button
         type="button"
         disabled={disabled}
-        onClick={() => setOpen(v => !v)}
+        onClick={(e) => { e.stopPropagation(); setOpen(v => !v); }}
         title={`${cur.name} on Ollama: ${paramsLabel(cur)}, ${fmtCtx(cur.context)} context${cur.released ? `, released ${fmtDate(cur.released)}` : ''}`}
         className="h-8 px-2.5 rounded-full flex items-center gap-1 text-[12px] font-medium whitespace-nowrap transition-colors max-w-[180px]"
         style={{ color: open ? theme.text : theme.sub, background: open ? theme.hover : 'transparent', opacity: disabled ? 0.5 : 1 }}
@@ -129,7 +129,8 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
 
       {open && (
         <div
-          className="agent-in agent-scroll absolute z-30 overflow-y-auto overscroll-contain"
+          data-model-menu
+          className="agent-in agent-scroll absolute z-50 overflow-y-auto overscroll-contain"
           style={{
             left: 8, right: 8, bottom: 'calc(100% + 4px)', maxHeight: 'min(520px, 62vh)',
             // Theme surfaces can be translucent; lay them over a solid base so
@@ -146,7 +147,7 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
             {speed && (
               <button
                 type="button"
-                onClick={speed.onTest}
+                onClick={(e) => { e.stopPropagation(); speed.onTest(); }}
                 disabled={speed.testing}
                 className="ml-auto text-[11px] font-semibold rounded-md px-2 py-0.5 inline-flex items-center gap-1"
                 style={{ color: theme.accent, background: `${theme.accent}18`, opacity: speed.testing ? 0.7 : 1 }}
@@ -185,7 +186,7 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
               <button
                 key={m.id}
                 type="button"
-                onClick={() => { onPick(m.id); setOpen(false); }}
+                onClick={(e) => { e.stopPropagation(); onPick(m.id); setOpen(false); }}
                 className="w-full text-left rounded-lg px-2.5 py-2 flex flex-col gap-0.5 transition-colors"
                 style={{ background: sel ? `${theme.accent}1f` : 'transparent' }}
                 onMouseEnter={e => { if (!sel) e.currentTarget.style.background = theme.hover; }}

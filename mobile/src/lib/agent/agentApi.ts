@@ -129,8 +129,20 @@ export interface PhoneAgentState {
   error: string | null;
 }
 
+/** Voice mode keeps its own model pick, separate from the chat's. */
+const VOICE_MODEL_KEY = 'planner.agentVoiceModel';
+
+export interface PhoneAgentOptions {
+  /** Spoken chats: new chats are voice chats, and the voice model is used. */
+  voice?: boolean;
+  /** Voice chats: think before answering. Sent with every message. */
+  think?: boolean;
+}
+
 /** `onTab`: the assistant tab is selected (an overlay may still cover it). */
-export function usePhoneAgent(visible: boolean, onTab = visible) {
+export function usePhoneAgent(visible: boolean, onTab = visible, opts: PhoneAgentOptions = {}) {
+  const voice = !!opts.voice;
+  const modelKey = voice ? VOICE_MODEL_KEY : MODEL_KEY;
   const [state, setState] = useState<PhoneAgentState>({
     status: null, list: [], activeId: null, conversation: null, liveText: '', liveThinking: '', online: false, error: null,
   });
@@ -139,17 +151,27 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
   const [appActive, setAppActive] = useState(AppState.currentState === 'active');
 
   const [storedModel, setStoredModel] = useState<string | null>(null);
+  const [chatModel, setChatModel] = useState<string | null>(null);
   useEffect(() => {
-    SecureStore.getItemAsync(MODEL_KEY).then(v => { if (isKnownModel(v)) setStoredModel(v); }).catch(() => {});
-  }, []);
-  const model = storedModel ?? (isKnownModel(state.status?.defaultModel) ? state.status!.defaultModel! : DEFAULT_MODEL);
+    setStoredModel(null);
+    SecureStore.getItemAsync(modelKey).then(v => { if (isKnownModel(v)) setStoredModel(v); }).catch(() => {});
+    // Voice mode with no pick of its own yet starts from the chat's pick.
+    if (voice) SecureStore.getItemAsync(MODEL_KEY).then(v => { if (isKnownModel(v)) setChatModel(v); }).catch(() => {});
+  }, [modelKey, voice]);
+  const model = storedModel ?? (voice ? chatModel : null) ?? (isKnownModel(state.status?.defaultModel) ? state.status!.defaultModel! : DEFAULT_MODEL);
   const modelRef = useRef(model);
   modelRef.current = model;
   const setModel = useCallback((id: string) => {
     if (!isKnownModel(id)) return;
     setStoredModel(id);
-    SecureStore.setItemAsync(MODEL_KEY, id).catch(() => {});
-  }, []);
+    SecureStore.setItemAsync(modelKey, id).catch(() => {});
+  }, [modelKey]);
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+  const thinkRef = useRef(opts.think);
+  thinkRef.current = opts.think;
+  /** What every send carries besides its own fields. */
+  const extra = () => ({ model: modelRef.current, ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', s => setAppActive(s === 'active'));
@@ -269,7 +291,7 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
   }, []);
 
   const newChat = useCallback(async () => {
-    const c = await agentApi<AgentConversation>('/api/agent/conversations', { method: 'POST', body: { model: modelRef.current } });
+    const c = await agentApi<AgentConversation>('/api/agent/conversations', { method: 'POST', body: { model: modelRef.current, ...(voiceRef.current ? { voice: true } : {}) } });
     setState(s => ({ ...s, activeId: c.id, conversation: c, liveText: '', liveThinking: '', error: null }));
     return c;
   }, []);
@@ -277,19 +299,19 @@ export function usePhoneAgent(visible: boolean, onTab = visible) {
   const send = useCallback(async (text: string, attachmentIds: string[]) => {
     let id = activeRef.current;
     if (!id) id = (await newChat()).id;
-    await agentApi(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: { text, attachmentIds, model: modelRef.current } });
+    await agentApi(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: { text, attachmentIds, ...extra() } });
     refreshConversation(id);
   }, [newChat, refreshConversation]);
 
   const answer = useCallback(async (answers: AgentQuestionAnswer[]) => {
     const id = activeRef.current; if (!id) return;
-    await agentApi(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: { answers, model: modelRef.current } });
+    await agentApi(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: { answers, ...extra() } });
     refreshConversation(id);
   }, [refreshConversation]);
 
   const decide = useCallback(async (approved: boolean) => {
     const id = activeRef.current; if (!id) return;
-    await agentApi(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: { approved, model: modelRef.current } });
+    await agentApi(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: { approved, ...extra() } });
     refreshConversation(id);
   }, [refreshConversation]);
 

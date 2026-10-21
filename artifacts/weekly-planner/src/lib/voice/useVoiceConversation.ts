@@ -1,6 +1,6 @@
 // ─── Voice mode: the conversation ───────────────────────────────────────────
 //
-// Joins a VoiceSession (ears and mouth) to the assistant (useAgent with
+// Joins a voice engine (ears and mouth) to the assistant (useAgent with
 // { voice: true }). Everything the assistant does still goes through the same
 // server run as a typed chat: the same tools, the same verified report, the
 // same Approve step for deletes, the same history. Voice only changes how the
@@ -18,14 +18,21 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { AgentConversation, AgentMessage } from '../agent/agentTypes';
-import type { AgentState } from '../agent/agentClient';
-import { SentenceSplitter, approvalSpeech, endpointMs, questionSpeech, speakable, yesOrNo } from './speechText';
-import { VoiceSession, fetchVoiceHints, type VoicePhase } from './voiceSession';
-import { readVoicePrefs, type VoicePrefs } from './voicePrefs';
+//
+// SHARED BY COPYING with mobile/src/lib/voice/ (with voiceTypes.ts and
+// speechText.ts): edit here, then copy. Everything device-specific (the audio
+// engine, where the prefs live) comes in through `env`.
 
-/** What useAgent returns, as far as voice mode needs it. */
-export interface VoiceAgent extends Pick<AgentState, 'conversation' | 'liveText' | 'activeId' | 'list'> {
+import type { AgentConversation, AgentConversationSummary, AgentMessage } from '../agent/agentTypes';
+import { SentenceSplitter, approvalSpeech, endpointMs, questionSpeech, speakable, yesOrNo } from './speechText';
+import type { VoiceEngine, VoiceEnv, VoicePhase, VoicePrefs } from './voiceTypes';
+
+/** What the assistant hook (PC useAgent, phone usePhoneAgent) gives voice mode. */
+export interface VoiceAgent {
+  conversation: AgentConversation | null;
+  liveText: string;
+  activeId: string | null;
+  list: AgentConversationSummary[];
   send: (text: string, attachmentIds: string[]) => Promise<void>;
   decide: (approved: boolean) => Promise<void>;
   stop: () => Promise<void>;
@@ -80,7 +87,9 @@ function lastAssistant(conv: AgentConversation | null, since: number): AgentMess
   return null;
 }
 
-export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs): VoiceConversation {
+export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs, env: VoiceEnv): VoiceConversation {
+  const envRef = useRef(env);
+  envRef.current = env;
   const [active, setActive] = useState(false);
   const [phase, setPhase] = useState<VoicePhase>('ended');
   const [muted, setMutedState] = useState(false);
@@ -89,7 +98,7 @@ export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs): Voic
   const [saying, setSaying] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const sessionRef = useRef<VoiceSession | null>(null);
+  const sessionRef = useRef<VoiceEngine | null>(null);
   const agentRef = useRef(agent);
   agentRef.current = agent;
   const prefsRef = useRef(prefs);
@@ -221,9 +230,9 @@ export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs): Voic
     sinceRef.current = Date.now();
     trackRef.current = freshTrack(null);
     interruptedRef.current = false;
-    const p = readVoicePrefs(); // fresh: Settings may have changed in the other window
-    const session = new VoiceSession(
-      { voice: p.voice, speed: p.speed, endpointMs: endpointMs(p.pause), interrupt: p.interrupt, volume: p.volume, sounds: p.sounds, hints: '', livePrefs: () => { const f = readVoicePrefs(); return { voice: f.voice, speed: f.speed }; } },
+    const p = envRef.current.readPrefs(); // fresh: Settings may have changed in the other window
+    const session = envRef.current.createSession(
+      { voice: p.voice, speed: p.speed, endpointMs: endpointMs(p.pause), interrupt: p.interrupt, volume: p.volume, sounds: p.sounds, hints: '', livePrefs: () => { const f = envRef.current.readPrefs(); return { voice: f.voice, speed: f.speed }; } },
       {
         onPhase: setPhase,
         onSpeechStart: (utt, whilePlaying) => {
@@ -261,12 +270,9 @@ export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs): Voic
     setPhase('connecting');
     try {
       await session.start();
-      fetchVoiceHints().then(hints => { if (hints) session.configure({ hints }); });
+      envRef.current.fetchHints().then(hints => { if (hints) session.configure({ hints }); }).catch(() => {});
     } catch (err: any) {
-      const msg = err?.name === 'NotAllowedError'
-        ? 'The microphone is blocked for the planner. Allow it and try again.'
-        : err?.name === 'NotFoundError' ? 'No microphone was found.' : (err?.message ?? 'Voice mode could not start.');
-      setError(msg);
+      setError(envRef.current.describeStartError?.(err) ?? err?.message ?? 'Voice mode could not start.');
       session.stop();
       sessionRef.current = null;
       setActive(false);

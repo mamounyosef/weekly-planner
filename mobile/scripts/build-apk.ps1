@@ -29,6 +29,10 @@ try {
     try { .\gradlew.bat --stop | Out-Null } finally { Pop-Location }
   }
 
+  # Voice mode needs echo cancellation in the audio library's recorder.
+  node scripts/patch-audio-api.mjs
+  if ($LASTEXITCODE -ne 0) { throw 'audio library patch failed' }
+
   Write-Output 'Syncing native project (expo prebuild) ...'
   npx expo prebuild --platform android --no-install
   if ($LASTEXITCODE -ne 0) { throw 'expo prebuild failed' }

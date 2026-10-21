@@ -12,6 +12,7 @@ import { useEffect, useRef } from 'react';
 import { useAgent } from '@/lib/agent/agentClient';
 import { useVoiceConversation } from '@/lib/voice/useVoiceConversation';
 import { useVoicePrefs } from '@/lib/voice/voicePrefs';
+import { WEB_VOICE_ENV } from '@/lib/voice/webVoiceEnv';
 
 export interface OrbVoiceCommand { kind: 'toggle' | 'tap' | 'stop'; n: number }
 
@@ -23,7 +24,7 @@ function bridge(): any { return (window as any).pywebview?.api; }
 export default function OrbVoice({ command }: { command: OrbVoiceCommand | null }) {
   const [prefs] = useVoicePrefs();
   const agent = useAgent(true, { voice: true, think: prefs.think });
-  const voice = useVoiceConversation(agent, prefs);
+  const voice = useVoiceConversation(agent, prefs, WEB_VOICE_ENV);
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
   const seen = useRef(0);

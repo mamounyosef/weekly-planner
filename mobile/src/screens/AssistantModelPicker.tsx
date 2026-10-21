@@ -15,6 +15,7 @@ import {
   MODELS, VISION_MODEL, fmtCtx, fmtDate, fmtMoney, fmtTokens, modelInfo, paramsLabel, priceLabel,
 } from '../lib/agent/agentModels';
 import type { AgentUsage } from '../lib/agent/agentTypes';
+import type { PhoneModelSpeed, PhoneModelSpeeds } from '../lib/voice/phoneVoiceEnv';
 
 const VISION = '#56b6c2';
 const FREE_GREEN = '#98c379';
@@ -25,12 +26,38 @@ function Icon({ name, size = 16, color }: { name: string; size?: number; color: 
   return <Image source={{ uri: src }} style={{ width: size, height: size, tintColor: color }} />;
 }
 
-export function ModelPill({ p, model, usage, chatCost, onPick }: {
+const fmtSec = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+
+/** Voice mode's extra: how fast each model starts talking, measured on the PC. */
+export interface PillSpeed {
+  speeds: PhoneModelSpeeds;
+  mode: 'quick' | 'thinking';
+  testing: boolean;
+  error?: string | null;
+  onTest: () => void;
+}
+
+function SpeedBadge({ p, s, testing }: { p: Palette; s?: PhoneModelSpeed; testing: boolean }) {
+  if (!s) return testing ? <Text variant="caption" tone="faint" style={{ fontSize: 11 }}>timing...</Text> : null;
+  if (s.error || s.firstWordMs == null) return <Text variant="caption" tone="warn" style={{ fontSize: 11 }}>no answer</Text>;
+  const ms = s.firstWordMs;
+  const color = ms < 2500 ? '#98c379' : ms < 5000 ? '#e5c07b' : '#e06c75';
+  return (
+    <View style={{ backgroundColor: `${color}26`, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 }}>
+      <Text variant="caption" style={{ fontSize: 11, color, fontWeight: '700' }}>{fmtSec(ms)}</Text>
+    </View>
+  );
+}
+
+export function ModelPill({ p, model, usage, chatCost, onPick, speed, label }: {
   p: Palette;
   model: string;
   usage?: AgentUsage | null;
   chatCost?: number | null;
   onPick: (id: string) => void;
+  speed?: PillSpeed;
+  /** Shown before the model name, e.g. "Voice". */
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
   const insets = useSafeAreaInsets();
@@ -49,7 +76,10 @@ export function ModelPill({ p, model, usage, chatCost, onPick }: {
           backgroundColor: pressed ? p.surfaceAlt : 'transparent', maxWidth: 150,
         })}
       >
-        <Text variant="caption" tone="soft" numberOfLines={1} style={{ fontWeight: '600', flexShrink: 1 }}>{cur.name}</Text>
+        <Text variant="caption" tone="soft" numberOfLines={1} style={{ fontWeight: '600', flexShrink: 1 }}>{label ? `${label}: ` : ''}{cur.name}</Text>
+        {speed?.speeds[speed.mode]?.[cur.id]?.firstWordMs != null ? (
+          <Text variant="caption" tone="faint" style={{ fontSize: 11 }}>{fmtSec(speed.speeds[speed.mode]![cur.id].firstWordMs!)}</Text>
+        ) : null}
         <Icon name="chevron-down" size={12} color={p.inkFaint} />
       </Pressable>
 
@@ -66,7 +96,20 @@ export function ModelPill({ p, model, usage, chatCost, onPick }: {
           <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.xs }}>
             <Text variant="label" tone="faint">MODEL</Text>
             <Text variant="caption" tone="faint">strongest first</Text>
+            {speed ? (
+              <Pressable onPress={speed.onTest} disabled={speed.testing} style={{ marginLeft: 'auto', backgroundColor: p.accentSoft, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, opacity: speed.testing ? 0.6 : 1 }}>
+                <Text variant="caption" tone="accent" style={{ fontWeight: '700' }}>{speed.testing ? 'Testing...' : speed.speeds.testedAt ? 'Test again' : 'Test speed'}</Text>
+              </Pressable>
+            ) : null}
           </View>
+          {speed ? (
+            <Text variant="caption" tone={speed.error ? 'danger' : 'faint'} style={{ fontSize: 11, paddingHorizontal: space.lg, paddingBottom: space.sm }}>
+              {speed.error
+                ?? (speed.speeds.testedAt
+                  ? `Seconds until each model starts talking (${speed.mode === 'thinking' ? 'thinking first' : 'without thinking first'}), measured on the PC.`
+                  : speed.testing ? 'Timing every model on the PC, with and without thinking. A few minutes.' : 'Not measured yet.')}
+            </Text>
+          ) : null}
 
           {usage && usage.contextTokens > 0 ? (
             <View style={{ paddingHorizontal: space.lg, paddingBottom: space.sm }}>
@@ -106,6 +149,7 @@ export function ModelPill({ p, model, usage, chatCost, onPick }: {
                       </View>
                     ) : null}
                     <View style={{ flex: 1 }} />
+                    {speed ? <SpeedBadge p={p} s={speed.speeds[speed.mode]?.[m.id]} testing={speed.testing} /> : null}
                     {sel ? <Icon name="check" size={15} color={p.accent} /> : null}
                   </View>
                   <Text variant="caption" tone="soft">{paramsLabel(m)}   {fmtCtx(m.context)} context   {fmtDate(m.released)}</Text>

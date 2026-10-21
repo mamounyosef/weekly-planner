@@ -10,7 +10,7 @@ import { MODELS, paramsLabel } from '@/lib/agent/agentModels';
 import { VOICE_MODEL_KEY, useModelSpeeds, type ModelSpeed } from '@/lib/agent/agentClient';
 import { isKnownModel, DEFAULT_MODEL } from '@/lib/agent/agentModels';
 import { useVoicePrefs } from '@/lib/voice/voicePrefs';
-import { fetchVoiceStatus, fetchVoices, previewVoice, type VoiceInfo } from '@/lib/voice/voiceSession';
+import { fetchVoiceStatus, fetchVoices, previewVoice, stopPreview, type VoiceInfo } from '@/lib/voice/voiceSession';
 import type { PauseLength } from '@/lib/voice/speechText';
 
 export interface VoiceSettingsTheme {
@@ -63,18 +63,24 @@ export default function VoiceSettings({ theme: t }: { theme: VoiceSettingsTheme 
   };
 
   const play = async (id: string) => {
-    if (playing) return;
-    setPlaying(id);
-    try {
-      const v = voices.find(x => x.id === id);
-      await previewVoice(id, prefs.speed, prefs.volume, v ? `Hi, I'm ${v.name}. Your gym session is moved to Thursday at 6 PM, and you're free after that.` : undefined);
-    } catch (e: any) {
-      setVoicesError(e?.message ?? 'Could not play that voice.');
-    } finally {
+    if (playing === id) {
+      stopPreview();
       setPlaying(null);
-      fetchVoiceStatus().then(setStatus).catch(() => {});
+      return;
     }
+    // Starting another voice stops the current one first (previewVoice does it).
+    setPlaying(id);
+    const v = voices.find(x => x.id === id);
+    previewVoice(id, prefs.speed, prefs.volume, v ? `Hi, I'm ${v.name}. Your gym session is moved to Thursday at 6 PM, and you're free after that.` : undefined)
+      .catch(e => setVoicesError(e?.message ?? 'Could not play that voice.'))
+      .finally(() => {
+        // Only clear if no newer voice has taken over.
+        setPlaying(p => (p === id ? null : p));
+        fetchVoiceStatus().then(setStatus).catch(() => {});
+      });
   };
+
+  useEffect(() => stopPreview, []);
 
   const groups = useMemo(() => {
     const out: Array<{ title: string; items: VoiceInfo[] }> = [];
@@ -143,10 +149,9 @@ export default function VoiceSettings({ theme: t }: { theme: VoiceSettingsTheme 
                     <button
                       type="button"
                       onClick={e => { e.stopPropagation(); void play(v.id); }}
-                      disabled={!!playing && playing !== v.id}
-                      title={`Listen to ${v.name}`}
+                      title={playing === v.id ? 'Stop' : `Listen to ${v.name}`}
                       className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-white"
-                      style={{ background: v.gender === 'female' ? 'linear-gradient(135deg,#fb923c,#f43f5e)' : 'linear-gradient(135deg,#38bdf8,#6366f1)', opacity: playing && playing !== v.id ? 0.4 : 1 }}
+                      style={{ background: v.gender === 'female' ? 'linear-gradient(135deg,#fb923c,#f43f5e)' : 'linear-gradient(135deg,#38bdf8,#6366f1)' }}
                     >
                       {playing === v.id ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" className="ml-0.5" />}
                     </button>

@@ -23,6 +23,7 @@
     "expo-updates": "~57.0.19",
     "react": "19.2.3",
     "react-native": "0.86.3",
+    "react-native-audio-api": "0.13.6",
     "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
@@ -37,6 +38,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "publish": "node scripts/publish-ota.mjs",
+    "postinstall": "node scripts/patch-audio-api.mjs",
     "lint": "expo lint"
   },
   "private": true

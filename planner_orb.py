@@ -321,6 +321,7 @@ class Orb:
         self._tracking = False
         self._press = None        # (cursor x, y, window x, y) while the left button is down
         self._dragging = False
+        self._hover_block = False  # after a drag, no peek until the mouse leaves
         self._suppress_up = False
         self._breathe_i = 0
         self._cache = {}
@@ -648,13 +649,14 @@ class Orb:
                     if self._dragging:
                         user32.SetWindowPos(hwnd, None, wx + cx - px, wy + cy - py, 0, 0,
                                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
-                elif self._hover_started is None and not self.voice_mode:
+                elif self._hover_started is None and not self.voice_mode and not self._hover_block:
                     self._hover_started = time.monotonic()
                     user32.SetTimer(hwnd, TIMER_HOVER, 33, None)
                 return 0
 
             if msg == WM_MOUSELEAVE:
                 self._tracking = False
+                self._hover_block = False
                 if not self._press:
                     self._cancel_hover()
                 return 0
@@ -665,6 +667,7 @@ class Orb:
                 cx, cy = self._cursor()
                 self._press = (cx, cy, rc.left, rc.top)
                 self._dragging = False
+                self._cancel_hover()
                 user32.SetCapture(hwnd)
                 if msg == WM_LBUTTONDBLCLK:
                     self._suppress_up = True
@@ -675,6 +678,8 @@ class Orb:
             if msg == WM_LBUTTONUP:
                 user32.ReleaseCapture()
                 was_drag = self._dragging
+                if was_drag:
+                    self._hover_block = True
                 self._press = None
                 self._dragging = False
                 if was_drag and self.voice_mode:

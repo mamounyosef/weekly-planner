@@ -15,33 +15,9 @@
 // assistant is talking. Interrupting is then: voice heard -> duck at once ->
 // real words confirmed -> stop.
 
-export type VoicePhase = 'connecting' | 'loading' | 'listening' | 'hearing' | 'thinking' | 'speaking' | 'error' | 'ended';
+import type { VoiceEngine, VoicePhase, VoiceSessionConfig, VoiceSessionHandlers } from './voiceTypes';
 
-export interface VoiceSessionConfig {
-  voice: string;
-  speed: number;
-  endpointMs: number;
-  hints?: string;
-  /** May the user's voice cut the assistant off? */
-  interrupt: boolean;
-  volume: number;
-  sounds: boolean;
-  /** Read the saved voice and speed fresh, for each sentence. */
-  livePrefs?: () => { voice: string; speed: number };
-}
-
-export interface VoiceSessionHandlers {
-  onPhase?: (phase: VoicePhase) => void;
-  onSpeechStart?: (utt: number, whilePlaying: boolean) => void;
-  onPartial?: (text: string, utt: number) => void;
-  onFinal?: (text: string, utt: number) => void;
-  onDiscard?: (utt: number) => void;
-  /** A sentence began playing (for captions). */
-  onSaying?: (id: number, text: string) => void;
-  /** Everything queued has been said. */
-  onQuiet?: () => void;
-  onError?: (message: string) => void;
-}
+export type { VoicePhase, VoiceSessionConfig, VoiceSessionHandlers };
 
 const WORKLET = `
 class PlannerMic extends AudioWorkletProcessor {
@@ -76,7 +52,7 @@ registerProcessor('planner-mic', PlannerMic);
 
 const TTS_RATE = 24000;
 
-export class VoiceSession {
+export class VoiceSession implements VoiceEngine {
   private cfg: VoiceSessionConfig;
   private h: VoiceSessionHandlers;
   private ws: WebSocket | null = null;
@@ -412,8 +388,10 @@ export class VoiceSession {
   }
 }
 
-/** The words that help the engine spell this planner's names right. */
+let previewAudio: HTMLAudioElement | null = null;
+
 export async function fetchVoiceHints(): Promise<string> {
+
   try {
     const r = await fetch('/api/voice/hints');
     if (!r.ok) return '';
@@ -436,22 +414,63 @@ export async function fetchVoiceStatus(): Promise<{ available: boolean; running:
 }
 
 /** Play one sentence in a voice (Settings). Resolves when it has finished. */
+let previewToken = 0;
+let previewAbort: AbortController | null = null;
+let previewResolve: (() => void) | null = null;
+
+/** Stop any preview now, playing or still being made. */
+export function stopPreview(): void {
+  previewToken++;
+  previewAbort?.abort();
+  previewAbort = null;
+  if (previewAudio) {
+    previewAudio.pause();
+    previewAudio.src = '';
+    previewAudio.load();
+    previewAudio = null;
+  }
+  const r = previewResolve;
+  previewResolve = null;
+  r?.();
+}
+
 export async function previewVoice(voice: string, speed: number, volume = 0.9, text?: string): Promise<void> {
-  const r = await fetch('/api/voice/preview', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ voice, speed, ...(text ? { text } : {}) }),
-  });
+  stopPreview();
+  const token = previewToken;
+  const ctrl = new AbortController();
+  previewAbort = ctrl;
+  let r: Response;
+  try {
+    r = await fetch('/api/voice/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voice, speed, ...(text ? { text } : {}) }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    if (token !== previewToken) return;
+    throw e;
+  }
+  if (token !== previewToken) return;
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     throw new Error(j.error || 'The voice could not be played.');
   }
-  const url = URL.createObjectURL(await r.blob());
+  const blob = await r.blob();
+  if (token !== previewToken) return;
+  const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
+  previewAudio = audio;
   audio.volume = volume;
   await new Promise<void>((resolve) => {
-    audio.onended = () => resolve();
-    audio.onerror = () => resolve();
-    audio.play().catch(() => resolve());
+    const done = () => {
+      if (previewAudio === audio) previewAudio = null;
+      if (previewResolve === done) previewResolve = null;
+      resolve();
+    };
+    previewResolve = done;
+    audio.onended = done;
+    audio.onerror = done;
+    audio.play().catch(done);
   });
   URL.revokeObjectURL(url);
 }

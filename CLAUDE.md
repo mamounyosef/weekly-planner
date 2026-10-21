@@ -188,6 +188,13 @@
   `Api.voice_orb`. Left click while talking: stop it talking / done / mute.
 - WebView2 mic permission is auto-allowed for the local planner (`allow_planner_microphone`
   in `widget-window.py`).
+- Phone (runtime 1.3.0+): same conversation logic by COPYING `voiceTypes.ts`,
+  `speechText.ts`, `useVoiceConversation.ts` into `mobile/src/lib/voice/` (edit on the
+  PC side first). Phone engine `phoneVoiceSession.ts` on react-native-audio-api 0.13.6;
+  `mobile/scripts/patch-audio-api.mjs` (postinstall + build-apk) switches its Android
+  recorder to the voice-communication preset for echo cancellation. Orb: `src/ui/VoiceOrb.tsx`
+  (tinted light layers, no canvas). UI `AssistantVoice.tsx`, settings `VoiceSettings.tsx`.
+  The phone uses the PC's Whisper and Kokoro, so voice needs the PC on (like the assistant).
 - Test bench without a mic or sign-in: `npx tsx scripts/voice-harness.ts` (read-only, port
   5199, `window.__fakeMic("text")` makes the mic say something). `tools/test-speech-server.py`
   tests the engine alone; `tools/smoke-voice-orb.py` and `tools/preview-voice-orb.py` the orb.
