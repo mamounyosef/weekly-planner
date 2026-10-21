@@ -145,6 +145,34 @@ def log(*parts):
     print(time.strftime("%H:%M:%S"), *parts, flush=True)
 
 
+SPEECH_DEVICE = os.environ.get("SPEECH_DEVICE", "auto").lower()  # auto | cuda | cpu
+CPU_THREADS = max(1, min(8, (os.cpu_count() or 4)))
+
+
+def load_whisper(WhisperModel, name, device, compute):
+    """A Whisper model that has been seen to work.
+
+    From the local copy when there is one (no network, so an offline laptop
+    still starts), else downloaded once. A short silent transcription proves
+    the device actually runs it.
+    """
+    kw = {"device": device, "compute_type": compute}
+    if device == "cpu":
+        kw["cpu_threads"] = CPU_THREADS
+    hub = os.path.join(os.environ.get("HF_HOME", ""), "hub")
+    cached = bool(glob.glob(os.path.join(hub, "models--*--faster-whisper-%s" % name)))
+    model = None
+    if cached:
+        try:
+            model = WhisperModel(name, local_files_only=True, **kw)
+        except Exception as e:
+            log("Whisper %s from the local copy failed, fetching it:" % name, e)
+    if model is None:
+        model = WhisperModel(name, **kw)
+    list(model.transcribe(np.zeros(MIC_RATE, np.float32), language="en", beam_size=1)[0])
+    return model
+
+
 def espeak_config():
     """Kokoro's espeak-ng data, from a short path when its own is too long.
 
@@ -217,30 +245,47 @@ class Engine:
                 from kokoro_onnx import Kokoro
 
                 self.load_vad()
+                whisper, device = None, "cpu"
+                # The GPU only if it really works: a card can be listed while
+                # CUDA's libraries are missing, which used to fail on the first
+                # sentence instead of here. SPEECH_DEVICE=cpu (Notes' own engine
+                # on the laptop) never tries it.
+                if SPEECH_DEVICE != "cpu":
+                    for compute in dict.fromkeys([WHISPER_COMPUTE, "float16"]):
+                        try:
+                            whisper = load_whisper(WhisperModel, WHISPER_MODEL, "cuda", compute)
+                            device = "cuda"
+                            break
+                        except Exception as e:
+                            log("Whisper %s on the GPU failed:" % compute, e)
+                    if whisper is None and SPEECH_DEVICE == "cuda":
+                        raise RuntimeError("SPEECH_DEVICE=cuda, but Whisper could not run on the GPU (see above).")
+                if whisper is None:
+                    log("Using the CPU (%s, %d threads)" % (WHISPER_CPU_MODEL, CPU_THREADS))
+                    whisper = load_whisper(WhisperModel, WHISPER_CPU_MODEL, "cpu", "int8")
+
+                def make_kokoro(on_gpu):
+                    opts = ort.SessionOptions()
+                    opts.log_severity_level = 3
+                    sess = ort.InferenceSession(
+                        KOKORO_MODEL,
+                        sess_options=opts,
+                        providers=[("CUDAExecutionProvider", KOKORO_CUDA_OPTIONS), "CPUExecutionProvider"] if on_gpu else ["CPUExecutionProvider"],
+                    )
+                    k = Kokoro.from_session(sess, KOKORO_VOICES, espeak_config=espeak_config())
+                    # The first call compiles kernels; pay that now, not on the
+                    # user's first sentence (and prove it works).
+                    k.create("Ready.", voice=DEFAULT_VOICE, speed=1.0, lang="en-us")
+                    return k, sess
+
+                want_gpu = device == "cuda" and TTS_DEVICE != "cpu"
                 try:
-                    try:
-                        whisper = WhisperModel(WHISPER_MODEL, device="cuda", compute_type=WHISPER_COMPUTE)
-                    except Exception as e:
-                        log("Whisper %s on the GPU failed, trying float16:" % WHISPER_COMPUTE, e)
-                        whisper = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
-                    device = "cuda"
+                    kokoro, sess = make_kokoro(want_gpu)
                 except Exception as e:
-                    log("Whisper on the GPU failed, using the CPU:", e)
-                    whisper = WhisperModel(WHISPER_CPU_MODEL, device="cpu", compute_type="int8")
-                    device = "cpu"
-                opts = ort.SessionOptions()
-                opts.log_severity_level = 3
-                sess = ort.InferenceSession(
-                    KOKORO_MODEL,
-                    sess_options=opts,
-                    providers=[("CUDAExecutionProvider", KOKORO_CUDA_OPTIONS), "CPUExecutionProvider"]
-                    if device == "cuda" and TTS_DEVICE != "cpu" else ["CPUExecutionProvider"],
-                )
-                kokoro = Kokoro.from_session(sess, KOKORO_VOICES, espeak_config=espeak_config())
-                # The first call of each model compiles kernels; pay that now,
-                # not on the user's first sentence.
-                kokoro.create("Ready.", voice=DEFAULT_VOICE, speed=1.0, lang="en-us")
-                list(whisper.transcribe(np.zeros(MIC_RATE, np.float32), language="en", beam_size=1)[0])
+                    if not want_gpu:
+                        raise
+                    log("Kokoro on the GPU failed, using the CPU:", e)
+                    kokoro, sess = make_kokoro(False)
                 self.whisper, self.kokoro, self.device = whisper, kokoro, device
                 log("Models ready on %s in %.1fs (Kokoro on %s)" % (device, time.time() - t0, sess.get_providers()[0]))
             except Exception as e:

@@ -177,7 +177,9 @@
   "Turn off" (toolbar chip `VoiceEngineChip.tsx`, shown only while it runs with its VRAM, and
   Settings > Voice; Notes has its own) = `POST /api/voice/off` -> engine `/shutdown`: open sessions
   get `{type:"shutdown"}` (clients must NOT reconnect) and the process exits, freeing all VRAM.
-  No GPU (the laptop): Whisper falls back to CPU with `small.en` (`SPEECH_WHISPER_CPU_MODEL`).
+  Device: `SPEECH_DEVICE` auto (default: GPU only after a test transcription works, else CPU) |
+  cuda | cpu. No GPU (the laptop): CPU with `small.en` (`SPEECH_WHISPER_CPU_MODEL`); Notes starts
+  its own copy with SPEECH_DEVICE=cpu. Whisper loads from the local copy without network if present.
   The Notes app keeps a COPY at `notes-app/speech-engine/speech-server.py` for computers without
   the planner (its setup.bat installs a CPU venv + models there): copy it over after changes.
   VRAM: it measured 4.2 GB with float16 Whisper and onnxruntime's default CUDA arena; now Whisper
