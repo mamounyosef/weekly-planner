@@ -273,7 +273,7 @@ export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs, env: 
       envRef.current.fetchHints().then(hints => { if (hints) session.configure({ hints }); }).catch(() => {});
     } catch (err: any) {
       setError(envRef.current.describeStartError?.(err) ?? err?.message ?? 'Voice mode could not start.');
-      session.stop();
+      try { session.stop(); } catch { /* half started: nothing more to undo */ }
       sessionRef.current = null;
       setActive(false);
       setPhase('error');

@@ -26,9 +26,15 @@ const TTS_RATE = 24000;
 const MIC_RATE = 16000;
 const FRAME = 512;
 
+/** True while Android's mic permission screen is up (it sends the app to the background). */
+let askingPermission = false;
+export const isAskingMicPermission = () => askingPermission;
+
 /** One recorder for the app's lifetime: the library prefers a single instance. */
 let recorderSingleton: AudioRecorder | null = null;
 const recorder = () => (recorderSingleton ??= new AudioRecorder());
+/** The last session's recorder stop; a new start waits for it ("already recording" otherwise). */
+let recorderStopping: Promise<unknown> = Promise.resolve();
 
 export class PhoneVoiceSession implements VoiceEngine {
   private cfg: VoiceSessionConfig;
@@ -68,12 +74,23 @@ export class PhoneVoiceSession implements VoiceEngine {
   // ── Lifecycle ──
 
   async start(): Promise<void> {
-    const perm = await AudioManager.requestRecordingPermissions();
+    // Only ask when not granted yet: on Android every request opens the system
+    // permission screen, even for a granted permission, which pauses the app.
+    let perm = await AudioManager.checkRecordingPermissions();
+    if (perm !== 'Granted') {
+      askingPermission = true;
+      try { perm = await AudioManager.requestRecordingPermissions(); } finally { askingPermission = false; }
+    }
     if (perm !== 'Granted') throw Object.assign(new Error('Microphone permission is needed for voice mode.'), { name: 'NotAllowedError' });
     AudioManager.setAudioSessionOptions({ iosCategory: 'playAndRecord', iosMode: 'voiceChat', iosOptions: ['defaultToSpeaker', 'allowBluetooth'] } as any);
     await AudioManager.setAudioSessionActivity(true);
+    // Ended while it was starting (End tapped, app left): open nothing more.
+    if (this.closedByUs) return;
 
-    this.ctx = new AudioContext();
+    // At the voice's own rate: this library does not resample an AudioBuffer
+    // to the context's rate, so 24 kHz speech in a 48 kHz context would play at
+    // double speed. The output stream converts to the device rate instead.
+    this.ctx = new AudioContext({ sampleRate: TTS_RATE });
     this.duckGain = this.ctx.createGain();
     this.volGain = this.ctx.createGain();
     this.volGain.gain.value = this.cfg.volume;
@@ -83,10 +100,18 @@ export class PhoneVoiceSession implements VoiceEngine {
     this.volGain.connect(this.analyser);
     this.analyser.connect(this.ctx.destination);
 
+    await recorderStopping.catch(() => {});
+    if (this.closedByUs) return;
     const rec = recorder();
-    rec.onAudioReady({ sampleRate: MIC_RATE, bufferLength: FRAME, channelCount: 1 }, ({ buffer }) => this.onMic(buffer.getChannelData(0), buffer.sampleRate));
+    const cb = rec.onAudioReady({ sampleRate: MIC_RATE, bufferLength: FRAME, channelCount: 1 }, ({ buffer }) => this.onMic(buffer.getChannelData(0), buffer.sampleRate));
+    if (cb.status === 'error') throw new Error(cb.message || 'The microphone could not start.');
     const r = await rec.start();
-    if ((r as any)?.status === 'error') throw new Error((r as any).message || 'The microphone could not start.');
+    if (r.status === 'error') { rec.clearOnAudioReady(); throw new Error(r.message || 'The microphone could not start.'); }
+    if (this.closedByUs) {
+      rec.clearOnAudioReady();
+      recorderStopping = rec.stop().catch(() => {});
+      return;
+    }
     this.recording = true;
 
     await this.connect();
@@ -103,7 +128,7 @@ export class PhoneVoiceSession implements VoiceEngine {
       this.recording = false;
       const rec = recorder();
       rec.clearOnAudioReady();
-      rec.stop().catch(() => {});
+      recorderStopping = rec.stop().catch(() => {});
     }
     const ctx = this.ctx;
     setTimeout(() => {
@@ -117,6 +142,7 @@ export class PhoneVoiceSession implements VoiceEngine {
 
   private async connect() {
     const [base, session] = await Promise.all([prefs.getServerUrl(), prefs.getSession()]);
+    if (this.closedByUs) return;
     if (!base) { this.fail('Not connected to the planner.'); return; }
     const url = joinUrl(base, '/api/voice/ws').replace(/^http/i, 'ws');
     // React Native's WebSocket takes headers as a third argument.

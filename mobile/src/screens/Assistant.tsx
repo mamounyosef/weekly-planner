@@ -37,6 +37,7 @@ import { ModelPill } from './AssistantModelPicker';
 import { AssistantVoice } from './AssistantVoice';
 import { useVoiceConversation } from '../lib/voice/useVoiceConversation';
 import { usePhoneVoicePrefs } from '../lib/voice/phoneVoicePrefs';
+import { isAskingMicPermission } from '../lib/voice/phoneVoiceSession';
 import { PHONE_VOICE_ENV, fetchModelSpeeds, runModelSpeedTest, type PhoneModelSpeeds } from '../lib/voice/phoneVoiceEnv';
 import { fmtMoney, fmtTokens, modelInfo } from '../lib/agent/agentModels';
 
@@ -136,9 +137,16 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
   // Leaving the tab, or the app going to the background, ends the conversation:
   // the mic is never left open behind the user's back.
   useEffect(() => { if (!visible && voice.active) voice.stop(); }, [visible, voice]);
+  // The mic permission screen also sends the app to the background, so that
+  // one is ignored, and a short blip (a system overlay) gets a moment to return.
   useEffect(() => {
-    const sub = AppState.addEventListener('change', s => { if (s !== 'active') voiceStopRef.current(); });
-    return () => sub.remove();
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const sub = AppState.addEventListener('change', s => {
+      if (t) { clearTimeout(t); t = null; }
+      if (s === 'active' || isAskingMicPermission()) return;
+      t = setTimeout(() => { t = null; if (AppState.currentState !== 'active' && !isAskingMicPermission()) voiceStopRef.current(); }, 1500);
+    });
+    return () => { if (t) clearTimeout(t); sub.remove(); };
   }, []);
   const voiceStopRef = useRef(() => {});
   voiceStopRef.current = () => { if (voice.active) voice.stop(); };

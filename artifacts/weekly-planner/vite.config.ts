@@ -3354,9 +3354,11 @@ ${body}
           registerVoiceRoutes(server.middlewares, server.httpServer as any, {
             rootDir,
             requireAuth,
-            isSignedIn: async (req) => {
+            userFor: async (req) => {
               const { users } = await loadAccessConfig(rootDir);
-              return !!getRequestUser(req, users);
+              const user = getRequestUser(req, users);
+              if (!user) return null;
+              return { username: user.username, dbDir: (await ensureUserDb(rootDir, user.username)).dbDir };
             },
             log: trace,
           });

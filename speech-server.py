@@ -287,6 +287,10 @@ class Session:
         self.muted = False
         self.voice = DEFAULT_VOICE
         self.speed = 1.0
+        # Set when the planner's server opened this session for a signed-in
+        # user: the voice and speed then come from that user's saved settings
+        # (shared by all their devices) and the page's own values are ignored.
+        self.user = None
         self.endpoint_ms = 700
         self.hints = ""
         self.prompt = None
@@ -313,13 +317,19 @@ class Session:
         except Exception:
             self.closed = True
 
-    def configure(self, msg):
-        if msg.get("voice") in VOICE_IDS:
-            self.voice = msg["voice"]
+    def set_voice(self, voice, speed):
+        if voice in VOICE_IDS and voice != self.voice:
+            log("voice now %s" % voice)
+            self.voice = voice
         try:
-            self.speed = min(1.5, max(0.7, float(msg.get("speed", self.speed))))
+            if speed is not None:
+                self.speed = min(1.5, max(0.7, float(speed)))
         except (TypeError, ValueError):
             pass
+
+    def configure(self, msg):
+        if self.user is None:
+            self.set_voice(msg.get("voice"), msg.get("speed"))
         try:
             self.endpoint_ms = int(min(2000, max(350, int(msg.get("endpointMs", self.endpoint_ms)))))
         except (TypeError, ValueError):
@@ -431,14 +441,8 @@ class Session:
         text = clean_for_speech(text)
         if not text:
             return
-        if voice in VOICE_IDS and voice != self.voice:
-            log("voice now %s" % voice)
-            self.voice = voice
-        try:
-            if speed is not None:
-                self.speed = min(1.5, max(0.7, float(speed)))
-        except (TypeError, ValueError):
-            pass
+        if self.user is None:
+            self.set_voice(voice, speed)
         self.tts_queue.put_nowait((self.tts_gen, sid, text))
 
     def cancel_speech(self):
@@ -490,6 +494,10 @@ async def ws_handler(request):
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=20)
     await ws.prepare(request)
     s = Session(ws)
+    q = request.query
+    if q.get("user"):
+        s.user = q["user"]
+        s.set_voice(q.get("voice"), q.get("speed"))
     SESSIONS.add(s)
     worker = asyncio.ensure_future(s.tts_worker())
     log("session opened (%d open)" % len(SESSIONS))
@@ -505,7 +513,7 @@ async def ws_handler(request):
                 kind = m.get("type")
                 if kind == "start":
                     s.configure(m)
-                    log("session voice %s, speed %.2f, pause %d ms" % (s.voice, s.speed, s.endpoint_ms))
+                    log("session voice %s, speed %.2f, pause %d ms%s" % (s.voice, s.speed, s.endpoint_ms, " (saved for %s)" % s.user if s.user else ""))
                     if await ensure_loaded(s):
                         await s.send_json({"type": "status", "stage": "ready", "device": ENGINE.device})
                 elif kind == "config":
@@ -541,7 +549,23 @@ async def health(_request):
     return web.json_response({
         "ok": True, "ready": ENGINE.ready, "loading": ENGINE.loading, "device": ENGINE.device,
         "error": ENGINE.error, "sessions": len(SESSIONS),
+        # 2: sessions take the user's voice from the planner (/ws?user=, /session-prefs).
+        "api": 2,
     })
+
+
+async def session_prefs(request):
+    """A user's saved voice changed (any device): their open sessions follow."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    n = 0
+    for s in list(SESSIONS):
+        if s.user and s.user == body.get("user"):
+            s.set_voice(body.get("voice"), body.get("speed"))
+            n += 1
+    return web.json_response({"ok": True, "sessions": n})
 
 
 async def voices(_request):
@@ -596,6 +620,7 @@ def main():
     app.router.add_get("/voices", voices)
     app.router.add_post("/preview", preview)
     app.router.add_post("/warm", warm)
+    app.router.add_post("/session-prefs", session_prefs)
     app.router.add_get("/ws", ws_handler)
     app.cleanup_ctx.append(idle_unloader)
     log("speech server on 127.0.0.1:%d" % args.port)

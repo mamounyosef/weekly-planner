@@ -182,6 +182,17 @@
   (a spoken yes/no answers it; any "no" wins). The model gets `voicePromptSection` in
   `agentPrompt.ts` (messy speech, ask out loud, write for the ear, plus today+tomorrow
   pre-listed so common questions take one model call, not two).
+- Voice settings (voice, speed, pause, volume, interrupt, sounds, think) are per USER, shared by
+  PC and phone: `database/users/<u>/voice-prefs.json` via `GET/PUT /api/voice/prefs`. Browser
+  (`voicePrefs.ts`) and phone (`phoneVoicePrefs.ts`) keep only a cache, pulled on open/focus and
+  written through on change. The engine is authoritative for voice+speed: `voice-service.ts`
+  opens `/ws?user=&voice=&speed=` and pushes changes to `/session-prefs`; such sessions ignore
+  the page's voice/speed (Notes sessions, without `user`, still send their own).
+  After changing `speech-server.py`, restart it (kill the speech-server python process): a
+  running engine is reused as is (`/health` reports `api: 2` for the current one).
+- Phone voice gotchas: never call `requestRecordingPermissions` when already granted (Android
+  shows its permission screen anyway, which backgrounds the app and ended voice mode), and the
+  phone AudioContext runs at 24 kHz because react-native-audio-api does not resample buffers.
 - Voice model pick is separate from chat (`planner-agent-voice-model`, per device).
   "Think before answering" is a voice pref sent with each message (`conv.voiceThink`).
 - Speed test: `POST /api/agent/speed` or `npx tsx scripts/agent-speed-test.ts`, saved in
