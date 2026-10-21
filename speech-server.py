@@ -209,7 +209,7 @@ class Engine:
             gc.collect()
             log("Models unloaded after %d idle minutes" % (IDLE_UNLOAD_S // 60))
 
-    def transcribe(self, audio, hints, final):
+    def transcribe(self, audio, hints, final, prompt=None):
         """(text, mean no-speech probability). Partials use greedy decoding
         for speed; the final pass uses beam search for accuracy."""
         self.last_used = time.monotonic()
@@ -224,7 +224,8 @@ class Engine:
             # A punctuated, capitalised prompt keeps the beam-search pass
             # writing sentences too (without it, it came back all lower case
             # and unpunctuated), and the hints spell the planner's own words.
-            initial_prompt=("Hi, okay. Let's plan my day." + (" " + hints if hints else "")),
+            # Another app (Notes) may send its own opening line instead.
+            initial_prompt=((prompt or "Hi, okay. Let's plan my day.") + (" " + hints if hints else "")),
         )
         texts, nsp = [], []
         for s in segments:
@@ -288,6 +289,7 @@ class Session:
         self.speed = 1.0
         self.endpoint_ms = 700
         self.hints = ""
+        self.prompt = None
         self.tts_gen = 0
         self.tts_queue = asyncio.Queue()
         self.closed = False
@@ -324,6 +326,8 @@ class Session:
             pass
         if isinstance(msg.get("hints"), str):
             self.hints = msg["hints"][:600]
+        if isinstance(msg.get("prompt"), str) and msg["prompt"].strip():
+            self.prompt = msg["prompt"].strip()[:200]
 
     # ── hearing ──
 
@@ -390,7 +394,7 @@ class Session:
 
     async def _partial(self, utt, audio):
         try:
-            text, _ = await self.loop.run_in_executor(ENGINE.stt_pool, ENGINE.transcribe, audio, self.hints, False)
+            text, _ = await self.loop.run_in_executor(ENGINE.stt_pool, ENGINE.transcribe, audio, self.hints, False, self.prompt)
             if utt == self.utt and utt not in self.finalized and text:
                 self.last_partial = text
                 await self.send_json({"type": "partial", "utt": utt, "text": text})
@@ -404,7 +408,7 @@ class Session:
         dur = len(audio) / MIC_RATE
         try:
             t0 = time.time()
-            text, nsp = await self.loop.run_in_executor(ENGINE.stt_pool, ENGINE.transcribe, audio, self.hints, True)
+            text, nsp = await self.loop.run_in_executor(ENGINE.stt_pool, ENGINE.transcribe, audio, self.hints, True, self.prompt)
             mean_p = float(np.mean(probs)) if probs else 0.0
             norm = re.sub(r"[^a-z' ]", "", text.lower()).strip()
             junk = not norm or (norm in HALLUCINATIONS and (mean_p < 0.7 or nsp > 0.5)) or (dur < 0.45 and mean_p < 0.6)
