@@ -166,6 +166,10 @@
   Models in git-ignored `speech-models/` (Kokoro files there, Whisper in `speech-models/hf`).
   Everything on D: because C: is nearly full. Free, local, GPU; ~2 GB VRAM while loaded,
   unloaded after 20 idle minutes. Log: `database/speech-server.log`.
+- The Notes app (`notes-app` repo) shares this engine: it uses it on 127.0.0.1:5179 when the
+  planner already started it, and otherwise starts this same script with `.venv-speech` itself.
+  Its sessions send their own Whisper opening line (`prompt` in start/config). Keep the protocol
+  backward compatible.
 - `voice-service.ts` (wired in `vite.config.ts`) spawns it (windowsHide, not detached) on
   127.0.0.1:5179 and is the only door: `/api/voice/{status,voices,preview,warm,hints}` and
   the WebSocket `/api/voice/ws` (auth checked, then raw socket piped through).
