@@ -28,12 +28,21 @@ export interface AgentStatus {
 // know which device is which.
 
 const MODEL_KEY = 'planner-agent-model';
+/** Voice mode keeps its own pick: a fast model often suits talking better. */
+export const VOICE_MODEL_KEY = 'planner-agent-voice-model';
 
-function readStoredModel(): string | null {
+function readStoredModel(key = MODEL_KEY): string | null {
   try {
-    const v = localStorage.getItem(MODEL_KEY);
+    const v = localStorage.getItem(key);
     return isKnownModel(v) ? v : null;
   } catch { return null; }
+}
+
+export interface UseAgentOptions {
+  /** Spoken chats: new chats are voice chats, and the voice model is used. */
+  voice?: boolean;
+  /** Voice chats: think before answering. Sent with every message. */
+  think?: boolean;
 }
 
 // The open chat used to be remembered and reopened on every visit; it no
@@ -142,7 +151,9 @@ export interface AgentState {
   error: string | null;
 }
 
-export function useAgent(enabled: boolean) {
+export function useAgent(enabled: boolean, opts: UseAgentOptions = {}) {
+  const voice = !!opts.voice;
+  const modelKey = voice ? VOICE_MODEL_KEY : MODEL_KEY;
   const [state, setState] = useState<AgentState>({
     status: null, list: [], activeId: null, conversation: null,
     liveText: '', liveThinking: '', connected: false, error: null,
@@ -150,21 +161,31 @@ export function useAgent(enabled: boolean) {
   const activeRef = useRef(state.activeId);
   activeRef.current = state.activeId;
 
-  const [storedModel, setStoredModel] = useState<string | null>(readStoredModel);
-  const model = storedModel ?? (isKnownModel(state.status?.defaultModel) ? state.status!.defaultModel! : DEFAULT_MODEL);
+  const [storedModel, setStoredModel] = useState<string | null>(() => readStoredModel(modelKey));
+  // Voice mode with no pick of its own yet starts from the chat's pick.
+  const fallbackModel = (voice ? readStoredModel(MODEL_KEY) : null)
+    ?? (isKnownModel(state.status?.defaultModel) ? state.status!.defaultModel! : DEFAULT_MODEL);
+  const model = storedModel ?? fallbackModel;
   const modelRef = useRef(model);
   modelRef.current = model;
   const setModel = useCallback((id: string) => {
     if (!isKnownModel(id)) return;
-    try { localStorage.setItem(MODEL_KEY, id); } catch { /* private mode: this session only */ }
+    try { localStorage.setItem(modelKey, id); } catch { /* private mode: this session only */ }
     setStoredModel(id);
-  }, []);
+  }, [modelKey]);
   // The other window of the PC app picking a model updates this one.
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => { if (e.key === MODEL_KEY) setStoredModel(readStoredModel()); };
+    setStoredModel(readStoredModel(modelKey));
+    const onStorage = (e: StorageEvent) => { if (e.key === modelKey) setStoredModel(readStoredModel(modelKey)); };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, []);
+  }, [modelKey]);
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+  const thinkRef = useRef(opts.think);
+  thinkRef.current = opts.think;
+  /** What every send carries besides its own fields. */
+  const extra = () => ({ model: modelRef.current, ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
 
   // Every open starts on a fresh screen; old chats are one click away in the
   // history. A reply still being written is the exception: it stays in view.
@@ -246,7 +267,7 @@ export function useAgent(enabled: boolean) {
   }, []);
 
   const newChat = useCallback(async () => {
-    const c = await api<AgentConversation>('/api/agent/conversations', { method: 'POST', body: JSON.stringify({ model: modelRef.current }) });
+    const c = await api<AgentConversation>('/api/agent/conversations', { method: 'POST', body: JSON.stringify({ model: modelRef.current, ...(voiceRef.current ? { voice: true } : {}) }) });
     setState(s => ({ ...s, activeId: c.id, conversation: c, liveText: '', liveThinking: '', error: null }));
     return c;
   }, []);
@@ -255,19 +276,19 @@ export function useAgent(enabled: boolean) {
     setError(null);
     let id = activeRef.current;
     if (!id) id = (await newChat()).id;
-    await api(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, attachmentIds, model: modelRef.current }) });
+    await api(`/api/agent/conversations/${id}/messages`, { method: 'POST', body: JSON.stringify({ text, attachmentIds, ...extra() }) });
   }, [newChat, setError]);
 
   const answer = useCallback(async (answers: AgentQuestionAnswer[]) => {
     const id = activeRef.current; if (!id) return;
     setError(null);
-    await api(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: JSON.stringify({ answers, model: modelRef.current }) });
+    await api(`/api/agent/conversations/${id}/answer`, { method: 'POST', body: JSON.stringify({ answers, ...extra() }) });
   }, [setError]);
 
   const decide = useCallback(async (approved: boolean) => {
     const id = activeRef.current; if (!id) return;
     setError(null);
-    await api(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: JSON.stringify({ approved, model: modelRef.current }) });
+    await api(`/api/agent/conversations/${id}/approval`, { method: 'POST', body: JSON.stringify({ approved, ...extra() }) });
   }, [setError]);
 
   const undo = useCallback(async (changeSetId: string) => {
@@ -290,6 +311,50 @@ export function useAgent(enabled: boolean) {
   }, []);
 
   return { ...state, model, setModel, select, newChat, send, answer, decide, undo, stop, remove, rename, setError };
+}
+
+// ─── Model speed (voice mode's model menu) ──────────────────────────────────
+
+export interface ModelSpeed {
+  firstWordMs: number | null;
+  replyMs: number | null;
+  steps: number;
+  /** It looked at the calendar before answering (the test question needs that). */
+  usedTools?: boolean;
+  error?: string;
+}
+/** Measured both ways: `quick` without thinking first, `thinking` with. */
+export interface ModelSpeeds {
+  testedAt?: number;
+  quick?: Record<string, ModelSpeed>;
+  thinking?: Record<string, ModelSpeed>;
+  running?: boolean;
+}
+
+/** The last measured speed of every model, and a way to measure again. */
+export function useModelSpeeds(enabled: boolean, autoTest = false) {
+  const [speeds, setSpeeds] = useState<ModelSpeeds>({});
+  const [testing, setTesting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const test = useCallback(async () => {
+    setTesting(true);
+    setError(null);
+    try { setSpeeds(await api<ModelSpeeds>('/api/agent/speed', { method: 'POST', body: '{}' })); } catch (e: any) { setError(e?.message ?? 'The speed test failed.'); } finally { setTesting(false); }
+  }, []);
+  const autoRef = useRef(autoTest);
+  autoRef.current = autoTest;
+  useEffect(() => {
+    if (!enabled) return;
+    let gone = false;
+    api<ModelSpeeds>('/api/agent/speed').then(s => {
+      if (gone) return;
+      setSpeeds(s);
+      // Never measured on this PC: measure once, in the background.
+      if (s.running) { setTesting(true); void test(); } else if (!s.testedAt && autoRef.current) void test();
+    }).catch(() => {});
+    return () => { gone = true; };
+  }, [enabled, test]);
+  return { speeds, testing, error, test };
 }
 
 // ─── Dictation ───────────────────────────────────────────────────────────────

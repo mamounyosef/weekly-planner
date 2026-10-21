@@ -4,12 +4,13 @@
 // assistant, Ollama only. The choice belongs to this device.
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, Image as ImageIcon } from 'lucide-react';
+import { Check, ChevronDown, Gauge, Image as ImageIcon, Loader2 } from 'lucide-react';
 
 import {
   MODELS, VISION_MODEL, fmtCtx, fmtDate, fmtMoney, fmtTokens, modelInfo, paramsLabel, priceLabel, type ModelInfo,
 } from '@/lib/agent/agentModels';
 import type { AgentUsage } from '@/lib/agent/agentTypes';
+import type { ModelSpeed, ModelSpeeds } from '@/lib/agent/agentClient';
 import type { AgentTheme } from './AgentCards';
 
 const VISION = '#56b6c2';
@@ -24,7 +25,55 @@ function PriceLine({ m, theme }: { m: ModelInfo; theme: AgentTheme }) {
   );
 }
 
-export default function ModelPicker({ model, onPick, theme, usage, chatCost, disabled }: {
+const fmtSec = (ms: number) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+
+function ago(t: number): string {
+  const m = Math.round((Date.now() - t) / 60_000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.round(h / 24)} days ago`;
+}
+
+/** Voice mode's extra: how fast each model starts talking, measured on this PC. */
+export interface PickerSpeed {
+  speeds: ModelSpeeds;
+  /** Which measurement applies: the voice "think before answering" setting. */
+  mode: 'quick' | 'thinking';
+  testing: boolean;
+  error?: string | null;
+  onTest: () => void;
+}
+
+function SpeedBadge({ s, other, mode, testing, theme }: { s?: ModelSpeed; other?: ModelSpeed; mode: 'quick' | 'thinking'; testing: boolean; theme: AgentTheme }) {
+  if (!s) {
+    return testing
+      ? <span className="ml-auto text-[10.5px] inline-flex items-center gap-1" style={{ color: theme.sub }}><Loader2 size={10} className="animate-spin" /> timing</span>
+      : <span className="ml-auto" />;
+  }
+  if (s.error || s.firstWordMs == null) {
+    return <span className="ml-auto text-[10.5px]" style={{ color: '#f59e0b' }} title={s.error ?? 'Did not answer in words'}>no answer</span>;
+  }
+  const ms = s.firstWordMs;
+  // Colour is only a hint for reading the list at a glance; the choice is yours.
+  const color = ms < 2500 ? '#98c379' : ms < 5000 ? '#e5c07b' : '#e06c75';
+  const otherMs = other && !other.error ? other.firstWordMs : null;
+  return (
+    <span
+      className="ml-auto text-[11px] font-semibold tabular-nums px-1.5 py-px rounded-md inline-flex items-center gap-1"
+      style={{ color, background: `${color}1f` }}
+      title={`${mode === 'thinking' ? 'Thinking first' : 'Without thinking first'}: starts talking after ${fmtSec(ms)}${s.replyMs ? `, whole reply done after ${fmtSec(s.replyMs)}` : ''}.`
+        + `${otherMs != null ? ` ${mode === 'thinking' ? 'Without' : 'With'} thinking: ${fmtSec(otherMs)}.` : ''}`
+        + `${s.usedTools === false ? ' In the test it answered without looking at your calendar.' : ''}`}
+    >
+      {s.usedTools === false && <span style={{ color: '#e5c07b' }}>!</span>}
+      <Gauge size={10} /> {fmtSec(ms)}
+    </span>
+  );
+}
+
+export default function ModelPicker({ model, onPick, theme, usage, chatCost, disabled, speed, label }: {
   model: string;
   onPick: (id: string) => void;
   theme: AgentTheme;
@@ -33,6 +82,9 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
   /** What the whole chat has cost so far; null when a model without a price was used. */
   chatCost?: number | null;
   disabled?: boolean;
+  speed?: PickerSpeed;
+  /** Shown before the model name on the button, e.g. "Voice". */
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -67,7 +119,11 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
         onMouseEnter={e => { if (!open) e.currentTarget.style.background = theme.hover; }}
         onMouseLeave={e => { if (!open) e.currentTarget.style.background = 'transparent'; }}
       >
+        {label && <span className="flex-shrink-0" style={{ opacity: 0.7 }}>{label}:</span>}
         <span className="truncate">{cur.name}</span>
+        {speed && speed.speeds[speed.mode]?.[cur.id]?.firstWordMs != null && (
+          <span className="flex-shrink-0 tabular-nums" style={{ color: theme.sub, opacity: 0.75 }}>{fmtSec(speed.speeds[speed.mode]![cur.id].firstWordMs!)}</span>
+        )}
         <ChevronDown size={12} className="flex-shrink-0 transition-transform" style={{ opacity: 0.6, transform: open ? 'rotate(180deg)' : undefined }} />
       </button>
 
@@ -87,7 +143,29 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
           <div className="flex items-baseline gap-1.5 px-2 pt-1.5 pb-1">
             <span className="text-[11px] uppercase tracking-[0.06em]" style={{ color: theme.sub }}>Model</span>
             <span className="text-[11px]" style={{ color: theme.sub, opacity: 0.7 }}>strongest first</span>
+            {speed && (
+              <button
+                type="button"
+                onClick={speed.onTest}
+                disabled={speed.testing}
+                className="ml-auto text-[11px] font-semibold rounded-md px-2 py-0.5 inline-flex items-center gap-1"
+                style={{ color: theme.accent, background: `${theme.accent}18`, opacity: speed.testing ? 0.7 : 1 }}
+                title="Times every model on a real spoken request ('What do I have tomorrow?') against your calendar. Nothing is changed."
+              >
+                {speed.testing ? <Loader2 size={11} className="animate-spin" /> : <Gauge size={11} />}
+                {speed.testing ? 'Testing all models...' : speed.speeds.testedAt ? 'Test again' : 'Test speed'}
+              </button>
+            )}
           </div>
+          {speed && (
+            <div className="px-2 pb-1.5 text-[10.5px] leading-snug" style={{ color: speed.error ? '#ef4444' : theme.sub }}>
+              {speed.error
+                ? speed.error
+                : speed.speeds.testedAt
+                  ? `Seconds until each model starts talking (${speed.mode === 'thinking' ? 'thinking first' : 'without thinking first'}), measured ${ago(speed.speeds.testedAt)} on a real request.`
+                  : speed.testing ? 'Timing each model, with and without thinking, on a real request. About four minutes.' : 'Not measured yet.'}
+            </div>
+          )}
 
           {usage && usage.contextTokens > 0 && (
             <div className="mx-2 mb-1.5 mt-0.5">
@@ -121,7 +199,8 @@ export default function ModelPicker({ model, onPick, theme, usage, chatCost, dis
                       <ImageIcon size={11} /> vision
                     </span>
                   )}
-                  {sel && <Check size={13} className="ml-auto flex-shrink-0" style={{ color: theme.accent }} />}
+                  {speed && <SpeedBadge s={speed.speeds[speed.mode]?.[m.id]} other={speed.speeds[speed.mode === 'quick' ? 'thinking' : 'quick']?.[m.id]} mode={speed.mode} testing={speed.testing} theme={theme} />}
+                  {sel && <Check size={13} className={`${speed ? '' : 'ml-auto '}flex-shrink-0`} style={{ color: theme.accent }} />}
                 </div>
                 <div className="flex flex-wrap gap-x-2.5 text-[11.5px] tabular-nums" style={{ color: theme.sub }}>
                   <span>{paramsLabel(m)}</span>

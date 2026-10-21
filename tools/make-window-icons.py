@@ -63,6 +63,31 @@ def save(img, name):
     print("wrote", path)
 
 
+EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+
+def svg_icon(svg_path):
+    """Rasterize an SVG at 1024 px through headless Edge (no SVG library is
+    installed here), on a transparent background."""
+    import subprocess
+    import tempfile
+    out = os.path.join(tempfile.gettempdir(), "planner-icon-render.png")
+    if os.path.exists(out):
+        os.remove(out)
+    subprocess.run([
+        EDGE, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+        "--force-device-scale-factor=1", "--default-background-color=00000000",
+        "--window-size=%d,%d" % (S, S), "--screenshot=" + out,
+        "file:///" + svg_path.replace("\\", "/"),
+    ], check=True, timeout=60, capture_output=True)
+    return Image.open(out).convert("RGBA").crop((0, 0, S, S))
+
+
 if __name__ == "__main__":
-    save(main_icon(), "icon-main.ico")
+    # The app icon (taskbar pin, the .exe, the main window) is the clock and
+    # agenda design in tools/app-icon.svg; the widget keeps its drawn icon.
+    app = svg_icon(os.path.join(ROOT, "tools", "app-icon.svg"))
+    save(app, "icon-main.ico")
+    save(app, "app-icon.ico")
+    app.save(os.path.join(ROOT, "tools", "app-icon.png"))
     save(widget_icon(), "icon-widget.ico")

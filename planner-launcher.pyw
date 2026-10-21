@@ -317,15 +317,41 @@ def register_notification_protocol():
         print("Failed to register notification protocol:", e)
 
 
+def wait_for_launcher_mutex(seconds=10.0):
+    """Take the launcher mutex, waiting while a previous app is still exiting.
+
+    Closing the planner quits it, and its process takes a moment to go. A
+    taskbar click in that moment used to find the mutex still held and do
+    nothing at all. Our own handle keeps the mutex object alive, so it is
+    closed before every retry."""
+    global _launcher_mutex
+    deadline = time.monotonic() + seconds
+    while True:
+        if acquire_launcher_mutex():
+            return True
+        if _launcher_mutex:
+            kernel32.CloseHandle(_launcher_mutex)
+            _launcher_mutex = None
+        if find_planner_windows() or time.monotonic() > deadline:
+            return False
+        time.sleep(0.25)
+
+
 def main():
-    if not acquire_launcher_mutex():
-        # A second launcher started only to focus the window (a toast was
-        # clicked) still does that job, it just does not start anything.
-        if "--focus" in sys.argv:
-            existing = find_planner_windows()
-            if existing:
-                bring_window_to_front(existing[0])
+    if not wait_for_launcher_mutex():
+        # The planner is already running: whatever started this (the taskbar
+        # icon, a shortcut, a toast) wants to see it, so bring it forward.
+        existing = find_planner_windows()
+        if existing:
+            bring_window_to_front(existing[0])
         return
+
+    # Opening the planner undoes "closed on purpose" (widget-window.py
+    # stop_background), so the link watchdog guards the server again.
+    try:
+        os.remove(os.path.join(ROOT, "database", "app-closed"))
+    except OSError:
+        pass
 
     focus_only = "--focus" in sys.argv
     if focus_only:

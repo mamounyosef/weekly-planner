@@ -21,7 +21,11 @@
 - Both windows (main + widget) are WebView2 (Edge engine) windows hosted by ONE process,
   the launcher (`Daily Planner.exe` / `planner-launcher.pyw` -> `widget-window.py`
   `run_windows()`), with its profile in `.webview-profile/`. Chrome is no longer used.
-  Closing the main window only HIDES it; closing the widget while main is hidden quits.
+  Closing the main window QUITS everything (user's choice): widget, orb, dev server
+  and hotkey (`stop_background` in `widget-window.py`). It writes `database/app-closed`
+  so the link watchdog does not revive the server; the launcher deletes it on start.
+  The main window always opens maximized. A second launch (taskbar pin, toast) waits
+  for an exiting app, else brings the running one forward.
   Set env `PLANNER_WEBVIEW_DEBUG_PORT=9333` before launching to get a DevTools port for
   memory checks (heap snapshots over CDP).
 - Floating orb: `planner_orb.py` (native layered Win32 window, no WebView), driven by
@@ -29,8 +33,14 @@
   widget header's dot button, saved in `database/orb.json`) the widget is DWM-cloaked,
   never SW_HIDE'd: hover peeks, click pins, right-click opens the assistant in the
   widget, double-click opens main. Ring math: `src/lib/orbRing.ts` (tested).
+- In orb mode the widget is a tool window (no taskbar button); only main has one.
+- Window lifecycle log: `database/window-host.log` (start, repairs, widget out/tucked,
+  shutdown). Restart closes the WIDGET first, then main, so the host exits cleanly
+  (`tools/restart-planner.pyw`, log in `%TEMP%\planner-restart.log`).
 - Taskbar icons per window: `icon-main.ico` / `icon-widget.ico`, drawn by
-  `tools/make-window-icons.py`.
+  `tools/make-window-icons.py`. The app icon (clock + agenda) is `tools/app-icon.svg`,
+  rasterized by that script into `app-icon.ico` too; rebuild the exe after
+  (`tools/build-exe.ps1`), since the exe embeds it and the taskbar pin uses it.
 - The two windows do NOT talk directly — they sync **through the dev server** (`/api/events`,
   `/api/focus-timer`, polling). If the server (that terminal/process) is killed, the windows
   stop updating each other. Keep it running.
@@ -148,6 +158,39 @@
   recognition, share intent) need runtimeVersion 1.2.0 APK or later.
 - Data: `database/users/<u>/agent/` (conversations, `.llm.json` transcripts, undo
   records, uploads). Tests: `src/lib/agent/agentTools.test.ts`, `agentReport.test.ts`.
+
+## Voice mode (spoken conversation with the assistant)
+
+- Speech engine: `speech-server.py` (repo root), run ONLY with `.venv-speech` (CUDA 12
+  wheels, faster-whisper large-v3-turbo, Kokoro 82M via kokoro-onnx, Silero VAD v6).
+  Models in git-ignored `speech-models/` (Kokoro files there, Whisper in `speech-models/hf`).
+  Everything on D: because C: is nearly full. Free, local, GPU; ~2 GB VRAM while loaded,
+  unloaded after 20 idle minutes. Log: `database/speech-server.log`.
+- `voice-service.ts` (wired in `vite.config.ts`) spawns it (windowsHide, not detached) on
+  127.0.0.1:5179 and is the only door: `/api/voice/{status,voices,preview,warm,hints}` and
+  the WebSocket `/api/voice/ws` (auth checked, then raw socket piped through).
+- Browser: `src/lib/voice/voiceSession.ts` (mic worklet, playback, barge-in duck),
+  `useVoiceConversation.ts` (joins it to `useAgent({ voice: true })`), pure helpers in
+  `speechText.ts` (tested: `speechText.test.ts`), per-device prefs `voicePrefs.ts`.
+  UI: `src/components/voice/*` (VoiceDock in the assistant panel, VoiceOrbCanvas,
+  VoiceSettings tab, OrbVoice = headless session in the widget for the floating orb).
+- Voice chats are normal chats with `voice: true`: same tools, report, Undo, and Approve
+  (a spoken yes/no answers it; any "no" wins). The model gets `voicePromptSection` in
+  `agentPrompt.ts` (messy speech, ask out loud, write for the ear, plus today+tomorrow
+  pre-listed so common questions take one model call, not two).
+- Voice model pick is separate from chat (`planner-agent-voice-model`, per device).
+  "Think before answering" is a voice pref sent with each message (`conv.voiceThink`).
+- Speed test: `POST /api/agent/speed` or `npx tsx scripts/agent-speed-test.ts`, saved in
+  `database/users/<u>/agent/model-speed.json`, shown as seconds in the voice model menu.
+  Run it ONE request at a time: parallel requests queue on Ollama Cloud and skew everything.
+- Floating orb: middle-click toggles voice mode; the orb grows into a native voice orb
+  (`planner_voice_orb.py`, GDI+, ~4 ms/frame) fed ~30x/s by the widget page through
+  `Api.voice_orb`. Left click while talking: stop it talking / done / mute.
+- WebView2 mic permission is auto-allowed for the local planner (`allow_planner_microphone`
+  in `widget-window.py`).
+- Test bench without a mic or sign-in: `npx tsx scripts/voice-harness.ts` (read-only, port
+  5199, `window.__fakeMic("text")` makes the mic say something). `tools/test-speech-server.py`
+  tests the engine alone; `tools/smoke-voice-orb.py` and `tools/preview-voice-orb.py` the orb.
 
 ## Recurrence / editing model
 

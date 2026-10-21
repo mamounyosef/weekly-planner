@@ -114,11 +114,14 @@ WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
 WM_MOUSELEAVE = 0x02A3
 WM_CAPTURECHANGED = 0x0215
 WM_SETCURSOR = 0x0020
 WM_APP_REDRAW = 0x8001
 WM_APP_SHOW = 0x8002
+WM_APP_VOICE = 0x8003
 MA_NOACTIVATE = 3
 CS_DBLCLKS = 0x0008
 WS_POPUP = 0x80000000
@@ -143,6 +146,7 @@ MONITOR_DEFAULTTONEAREST = 2
 TIMER_HOVER = 1
 TIMER_BREATHE = 2
 TIMER_TOPMOST = 3
+TIMER_VOICE = 4
 
 # Geometry in logical pixels (scaled by the system DPI).
 SIZE = 34
@@ -158,6 +162,10 @@ SNAP_DISTANCE = 30        # logical px from a screen edge that snaps flush to it
 EDGE_GAP = 3              # logical px left between a snapped orb and the edge
 BREATHE_FRAMES = 20
 BREATHE_MS = 2600
+VOICE_SIZE = 104          # logical px of the window while in voice mode
+VOICE_FRAME_MS = 16
+VOICE_STALE_S = 3.0       # no news from the page this long: show "connecting"
+VOICE_DEAD_S = 30.0       # ...and this long: the page is gone, leave voice mode
 
 BLUE = (90, 169, 255)
 GOLD = (255, 194, 71)
@@ -272,7 +280,7 @@ class Orb:
     """The orb window. Construct, then `start()`; everything else is thread-safe."""
 
     def __init__(self, state_path, on_click, on_double_click, on_right_click, on_hover,
-                 on_drag_start, on_moved):
+                 on_drag_start, on_moved, on_middle_click=None, on_voice_tap=None):
         self.state_path = state_path
         self.cb_click = on_click
         self.cb_double = on_double_click
@@ -280,10 +288,27 @@ class Orb:
         self.cb_hover = on_hover
         self.cb_drag_start = on_drag_start
         self.cb_moved = on_moved
+        self.cb_middle = on_middle_click
+        self.cb_voice_tap = on_voice_tap
 
         self.hwnd = None
         self.scale = 1.0
         self.size = SIZE
+        self.cur = SIZE           # the window's size right now (bigger in voice mode)
+
+        # Voice mode (planner_voice_orb.py draws it). `voice_want` is what the
+        # page asked for; `voice_mode` is what the window is doing, which
+        # includes the shrink animation on the way out.
+        self.voice_want = False
+        self.voice_mode = False
+        self.voice_phase = "connecting"
+        self.voice_mic = 0.0
+        self.voice_out = 0.0
+        self.voice_muted = False
+        self.voice_seen = 0.0
+        self._voice_renderer = None
+        self._voice_last = 0.0
+        self._voice_center = None
         self._wndproc = WNDPROC(self._proc)
         self._ready = threading.Event()
 
@@ -313,6 +338,22 @@ class Orb:
         self.frac, self.running, self.alert = frac, bool(running), bool(alert)
         if changed and self.hwnd:
             user32.PostMessageW(self.hwnd, WM_APP_REDRAW, 0, 0)
+
+    def set_voice(self, on, phase="listening", mic=0.0, out=0.0, muted=False):
+        """The page's voice session, about 30 times a second while it runs."""
+        self.voice_phase = str(phase or "listening")
+        try:
+            self.voice_mic = max(0.0, min(1.0, float(mic)))
+            self.voice_out = max(0.0, min(1.0, float(out)))
+        except (TypeError, ValueError):
+            pass
+        self.voice_muted = bool(muted)
+        self.voice_seen = time.monotonic()
+        on = bool(on)
+        if on != self.voice_want:
+            self.voice_want = on
+            if self.hwnd:
+                user32.PostMessageW(self.hwnd, WM_APP_VOICE, 1 if on else 0, 0)
 
     def set_visible(self, on):
         self._visible = bool(on)
@@ -366,9 +407,9 @@ class Orb:
         w = info.rcWork
         return w.left, w.top, w.right, w.bottom
 
-    def _placed(self, x, y, snap):
+    def _placed(self, x, y, snap, n=None):
         """Clamp onto the nearest screen, snapping flush to an edge when close."""
-        n = self.size
+        n = n or self.size
         wa = self._work_area(x + n // 2, y + n // 2)
         if not wa:
             return x, y
@@ -414,29 +455,36 @@ class Orb:
         return buf
 
     def _ensure_dib(self):
-        if self._dib and self._dib[3] == self.size:
+        if self._dib and self._dib[3] == self.cur:
             return self._dib
+        if self._dib:
+            gdi32.DeleteObject(self._dib[1])
+            gdi32.DeleteDC(self._dib[0])
+            self._dib = None
         screen = user32.GetDC(None)
         mem = gdi32.CreateCompatibleDC(screen)
         user32.ReleaseDC(None, screen)
         bmi = BITMAPINFOHEADER()
         bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.biWidth = self.size
-        bmi.biHeight = -self.size  # top-down
+        bmi.biWidth = self.cur
+        bmi.biHeight = -self.cur  # top-down
         bmi.biPlanes = 1
         bmi.biBitCount = 32
         bits = ctypes.c_void_p()
         bmp = gdi32.CreateDIBSection(mem, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
         gdi32.SelectObject(mem, bmp)
-        self._dib = (mem, bmp, bits, self.size)
+        self._dib = (mem, bmp, bits, self.cur)
         return self._dib
 
     def _paint(self):
         if not self.hwnd:
             return
         mem, _bmp, bits, n = self._ensure_dib()
-        buf = self._frame()
-        ctypes.memmove(bits, buf, len(buf))
+        if self.voice_mode:
+            self._paint_voice(bits, n)
+        else:
+            buf = self._frame()
+            ctypes.memmove(bits, buf, len(buf))
         screen = user32.GetDC(None)
         size = wt.SIZE(n, n)
         src = wt.POINT(0, 0)
@@ -445,7 +493,80 @@ class Orb:
                                    ctypes.byref(src), 0, ctypes.byref(blend), ULW_ALPHA)
         user32.ReleaseDC(None, screen)
 
+    # ── voice mode ─────────────────────────────────────────────────────────
+
+    def _paint_voice(self, bits, n):
+        now = time.monotonic()
+        dt = now - self._voice_last if self._voice_last else 1 / 60
+        self._voice_last = now
+        stale = now - self.voice_seen
+        phase = self.voice_phase if stale < VOICE_STALE_S else "connecting"
+        appear = 1.0 if self.voice_want else 0.0
+        ctypes.memset(bits, 0, n * n * 4)
+        try:
+            self._voice_renderer.frame(bits, n, dt, phase, self.voice_mic, self.voice_out, self.voice_muted, appear)
+        except Exception as e:
+            print("Voice orb frame failed:", e)
+
+    def _voice_enter(self):
+        if self.voice_mode or not self.hwnd:
+            return
+        if not hasattr(self, "_voice_renderer_cls"):
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "planner_voice_orb", os.path.join(os.path.dirname(os.path.abspath(__file__)), "planner_voice_orb.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self._voice_renderer_cls = mod.VoiceOrbRenderer
+        self._voice_renderer = self._voice_renderer_cls()
+        self._cancel_hover()
+        rc = wt.RECT()
+        user32.GetWindowRect(self.hwnd, ctypes.byref(rc))
+        cx, cy = (rc.left + rc.right) // 2, (rc.top + rc.bottom) // 2
+        self._voice_center = (cx, cy)
+        vs = int(round(VOICE_SIZE * self.scale))
+        self.voice_mode = True
+        self.cur = vs
+        x, y = self._placed(cx - vs // 2, cy - vs // 2, snap=False, n=vs)
+        self._voice_last = 0.0
+        self._voice_moved = False
+        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, vs, vs, SWP_NOACTIVATE)
+        self._paint()
+        user32.KillTimer(self.hwnd, TIMER_BREATHE)
+        user32.SetTimer(self.hwnd, TIMER_VOICE, VOICE_FRAME_MS, None)
+
+    def _voice_leave_done(self):
+        """The shrink has finished: back to the plain dot, where it was."""
+        user32.KillTimer(self.hwnd, TIMER_VOICE)
+        self.voice_mode = False
+        rc = wt.RECT()
+        user32.GetWindowRect(self.hwnd, ctypes.byref(rc))
+        cx, cy = (rc.left + rc.right) // 2, (rc.top + rc.bottom) // 2
+        if self._voice_center and not getattr(self, "_voice_moved", False):
+            cx, cy = self._voice_center
+        self._voice_moved = False
+        self.cur = self.size
+        x, y = self._placed(cx - self.size // 2, cy - self.size // 2, snap=True)
+        self._paint()
+        user32.SetWindowPos(self.hwnd, None, x, y, self.size, self.size, SWP_NOZORDER | SWP_NOACTIVATE)
+        self._voice_renderer = None
+        self._sync_breathing()
+
+    def _voice_tick(self):
+        if not self.voice_mode:
+            user32.KillTimer(self.hwnd, TIMER_VOICE)
+            return
+        if self.voice_want and time.monotonic() - self.voice_seen > VOICE_DEAD_S:
+            # The page that ran the conversation has gone quiet for good.
+            self.voice_want = False
+        self._paint()
+        if not self.voice_want and self._voice_renderer.grow < 0.06:
+            self._voice_leave_done()
+
     def _sync_breathing(self):
+        if self.voice_mode:
+            user32.KillTimer(self.hwnd, TIMER_BREATHE)
+            return
         if self.running and self._visible:
             user32.SetTimer(self.hwnd, TIMER_BREATHE, BREATHE_MS // BREATHE_FRAMES, None)
         else:
@@ -527,7 +648,7 @@ class Orb:
                     if self._dragging:
                         user32.SetWindowPos(hwnd, None, wx + cx - px, wy + cy - py, 0, 0,
                                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
-                elif self._hover_started is None:
+                elif self._hover_started is None and not self.voice_mode:
                     self._hover_started = time.monotonic()
                     user32.SetTimer(hwnd, TIMER_HOVER, 33, None)
                 return 0
@@ -556,7 +677,18 @@ class Orb:
                 was_drag = self._dragging
                 self._press = None
                 self._dragging = False
-                if was_drag:
+                if was_drag and self.voice_mode:
+                    # The big voice orb was moved: remember where the small dot
+                    # will be once it shrinks back, not the big window's corner.
+                    rc = wt.RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(rc))
+                    x, y = self._placed(rc.left, rc.top, snap=False, n=self.cur)
+                    user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    self._voice_moved = True
+                    cx, cy = x + self.cur // 2, y + self.cur // 2
+                    sx, sy = self._placed(cx - self.size // 2, cy - self.size // 2, snap=True)
+                    threading.Thread(target=self._save_pos, args=(sx, sy), daemon=True).start()
+                elif was_drag:
                     rc = wt.RECT()
                     user32.GetWindowRect(hwnd, ctypes.byref(rc))
                     x, y = self._placed(rc.left, rc.top, snap=True)
@@ -565,6 +697,8 @@ class Orb:
                     self._fire(self.cb_moved)
                 elif self._suppress_up:
                     self._suppress_up = False
+                elif self.voice_mode:
+                    self._fire(self.cb_voice_tap)
                 else:
                     self._cancel_hover()
                     self._fire(self.cb_click)
@@ -585,6 +719,15 @@ class Orb:
                 self._fire(self.cb_right)
                 return 0
 
+            if msg == WM_MBUTTONDOWN:
+                return 0
+
+            if msg == WM_MBUTTONUP:
+                # Middle click (the wheel): start or end voice mode.
+                self._cancel_hover()
+                self._fire(self.cb_middle)
+                return 0
+
             if msg == WM_TIMER:
                 if wparam == TIMER_HOVER:
                     if self._hover_started is None:
@@ -599,6 +742,8 @@ class Orb:
                 elif wparam == TIMER_BREATHE:
                     self._breathe_i = (self._breathe_i + 1) % BREATHE_FRAMES
                     self._paint()
+                elif wparam == TIMER_VOICE:
+                    self._voice_tick()
                 elif wparam == TIMER_TOPMOST and self._visible:
                     user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
@@ -606,7 +751,14 @@ class Orb:
 
             if msg == WM_APP_REDRAW:
                 self._sync_breathing()
-                self._paint()
+                if not self.voice_mode:
+                    self._paint()
+                return 0
+
+            if msg == WM_APP_VOICE:
+                if wparam and self.voice_want:
+                    self._voice_enter()
+                # Leaving is the shrink animation, run by the voice timer.
                 return 0
 
             if msg == WM_APP_SHOW:
@@ -618,6 +770,9 @@ class Orb:
                     user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
                 else:
                     self._cancel_hover()
+                    if self.voice_mode:
+                        self.voice_want = False
+                        self._voice_leave_done()
                     user32.ShowWindow(hwnd, SW_HIDE)
                 self._sync_breathing()
                 return 0

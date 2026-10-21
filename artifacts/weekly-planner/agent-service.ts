@@ -22,7 +22,7 @@ import {
   TOOL_DEFS, READ_ONLY_TOOLS,
   type AgentWorld, type ToolOutcome, type UndoRecord, type UndoStores, type DeletionPlan, type EventData, type PrayerDay,
 } from './src/lib/agent/agentTools';
-import { DEFAULT_MODEL, VISION_MODEL, costOf, isKnownModel, modelInfo, thinkValue } from './src/lib/agent/agentModels';
+import { DEFAULT_MODEL, MODELS, VISION_MODEL, costOf, isKnownModel, modelInfo, thinkValue } from './src/lib/agent/agentModels';
 import { coercePrayerDone } from './src/lib/prayerTimes';
 import { buildSystemPrompt } from './src/lib/agent/agentPrompt';
 import type { FocusSessionRecord } from './src/lib/focusStats';
@@ -112,6 +112,16 @@ function loadConfig(rootDir: string): OllamaConfig | null {
     baseUrl: (env.OLLAMA_BASE_URL?.trim() || 'https://ollama.com').replace(/\/+$/, ''),
     model: isKnownModel(env.OLLAMA_AGENT_MODEL?.trim()) ? env.OLLAMA_AGENT_MODEL!.trim() : DEFAULT_MODEL,
   };
+}
+
+/**
+ * Thinking in a spoken chat is the user's choice ("Think before answering"):
+ * it makes replies more careful and the wait several times longer. gpt-oss
+ * cannot switch it off, so "off" is its lowest level.
+ */
+function voiceThink(model: string, on: boolean): boolean | 'medium' | 'low' {
+  const levels = !!modelInfo(model).thinkLevels;
+  return on ? (levels ? 'medium' : true) : (levels ? 'low' : false);
 }
 
 const MAX_STEPS = 24;
@@ -260,7 +270,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       const c = await readJson<AgentConversation | null>(path.join(dir, f), null);
       if (!c) continue;
       const lastText = [...c.messages].reverse().find(m => m.text)?.text ?? '';
-      out.push({ id: c.id, title: c.title, updatedAt: c.updatedAt, state: c.state, messageCount: c.messages.length, preview: lastText.slice(0, 120) });
+      out.push({ id: c.id, title: c.title, updatedAt: c.updatedAt, state: c.state, messageCount: c.messages.length, preview: lastText.slice(0, 120), ...(c.voice ? { voice: true } : {}) });
     }
     return out.sort((a, b) => b.updatedAt - a.updatedAt);
   }
@@ -471,6 +481,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
     messages: Array<Record<string, unknown>>,
     signal: AbortSignal,
     onDelta: (d: { text?: string; thinking?: string }) => void,
+    think: boolean | 'high' | 'medium' | 'low' = thinkValue(model),
   ): Promise<ModelTurn> {
     let attempt = 0;
     for (;;) {
@@ -480,7 +491,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         const res = await fetch(`${cfg.baseUrl}/api/chat`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, think: thinkValue(model), options: { temperature: 0.2 } }),
+          body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, think, options: { temperature: 0.2 } }),
           signal,
         });
         if (res.status === 401 || res.status === 403) throw new FatalModelError('Ollama rejected the API key. Put a valid key in the .env file (OLLAMA_API_KEY).');
@@ -598,9 +609,12 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
 
       for (let step = 0; step < MAX_STEPS; step++) {
         const world = await loadWorld(auth);
-        const system = buildSystemPrompt(world, auth.user.name || auth.user.username);
+        const system = buildSystemPrompt(world, auth.user.name || auth.user.username, { voice: !!conv.voice });
         const messages = [{ role: 'system', content: system }, ...(await materialize(auth, llm.messages, cfg, model, controller.signal))];
-        const turn = await callModel(cfg, model, messages, controller.signal, onDelta);
+        // A spoken reply is waited for in silence: whether to think first is
+        // the user's setting for voice mode (sent with each message).
+        const think = conv.voice ? voiceThink(model, !!conv.voiceThink) : thinkValue(model);
+        const turn = await callModel(cfg, model, messages, controller.signal, onDelta, think);
         usage.calls += 1;
         usage.promptTokens += turn.promptTokens;
         usage.outputTokens += turn.outputTokens;
@@ -737,6 +751,84 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
     void text;
   }
 
+  // ── Model speed test (for choosing a voice model) ──
+  //
+  // How long until each model would START TALKING on a real spoken request:
+  // the voice prompt, the real tools, the user's real calendar, and a question
+  // that needs one lookup ("what do I have tomorrow?"). Read-only tools are
+  // really run; nothing is ever written. Two tries per model, the faster one
+  // counts (the first call to a cold model is often slow for reasons that are
+  // not the model's). The result is shown next to each model; nothing is
+  // chosen for the user.
+
+  const speedFile = (p: AgentUserPaths) => path.join(agentDir(p), 'model-speed.json');
+  const speedRuns = new Map<string, Promise<unknown>>();
+
+  interface SpeedResult { model: string; firstWordMs: number | null; replyMs: number | null; steps: number; usedTools: boolean; error?: string }
+
+  async function timeOne(auth: AgentAuth, cfg: OllamaConfig, model: string, thinkOn: boolean): Promise<SpeedResult> {
+    const world = await loadWorld(auth);
+    const system = buildSystemPrompt(world, auth.user.name || auth.user.username, { voice: true });
+    const msgs: Array<Record<string, unknown>> = [{ role: 'system', content: system }, { role: 'user', content: 'What do I have tomorrow?' }];
+    const think = voiceThink(model, thinkOn);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
+    const t0 = Date.now();
+    let firstWordMs: number | null = null;
+    let steps = 0;
+    // Tomorrow is in the voice prompt's "already looked up" section, so an
+    // answer without a tool call is still an answer from the real calendar.
+    let usedTools = system.includes('already looked up');
+    try {
+      for (; steps < 4;) {
+        steps++;
+        const turn = await callModel(cfg, model, msgs, controller.signal, d => {
+          if (d.text && firstWordMs === null && /\w/.test(d.text)) firstWordMs = Date.now() - t0;
+        }, think);
+        msgs.push({ role: 'assistant', content: turn.content, ...(turn.toolCalls.length ? { tool_calls: turn.toolCalls } : {}) });
+        if (!turn.toolCalls.length) break;
+        for (const c of turn.toolCalls) {
+          const name = String(c.function?.name ?? '');
+          if (READ_ONLY_TOOLS.has(name)) usedTools = true;
+          const result = READ_ONLY_TOOLS.has(name)
+            ? runTool(name, c.function?.arguments, world).result
+            : { error: 'Not available in this test.' };
+          msgs.push({ role: 'tool', tool_name: name, content: JSON.stringify(result) });
+        }
+      }
+      return { model, firstWordMs, replyMs: Date.now() - t0, steps, usedTools };
+    } catch (err: any) {
+      return { model, firstWordMs: null, replyMs: null, steps, usedTools, error: err instanceof StoppedError ? 'Took longer than 90 seconds.' : String(err?.message ?? err).slice(0, 160) };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function runSpeedTest(auth: AgentAuth): Promise<unknown> {
+    const cfg = loadConfig(rootDir);
+    if (!cfg) throw new Error('The assistant is not set up (no OLLAMA_API_KEY).');
+    const jobs = MODELS.flatMap(m => [{ id: m.id, thinkOn: false }, { id: m.id, thinkOn: true }]);
+    const quick: Record<string, SpeedResult> = {};
+    const thinking: Record<string, SpeedResult> = {};
+    // One at a time: parallel requests queue behind each other on Ollama Cloud and
+    // made every model look slow (and the order random). Takes a few minutes.
+    let next = 0;
+    const worker = async () => {
+      while (next < jobs.length) {
+        const { id, thinkOn } = jobs[next++];
+        const a = await timeOne(auth, cfg, id, thinkOn);
+        const b = a.error ? a : await timeOne(auth, cfg, id, thinkOn);
+        const best = [a, b].filter(r => !r.error && r.firstWordMs !== null).sort((x, y) => x.firstWordMs! - y.firstWordMs!)[0] ?? b;
+        (thinkOn ? thinking : quick)[id] = best;
+        log(`AGENT speed ${id} ${thinkOn ? 'thinking' : 'quick'}: first word ${best.firstWordMs ?? '-'} ms, reply ${best.replyMs ?? '-'} ms${best.usedTools ? '' : ' (no lookup)'}${best.error ? ` (${best.error})` : ''}`);
+      }
+    };
+    await worker();
+    const out = { testedAt: Date.now(), question: 'What do I have tomorrow?', quick, thinking };
+    await writeJsonAtomic(speedFile(auth.userPaths), out);
+    return out;
+  }
+
   // ─── Routes ────────────────────────────────────────────────────────────────
 
   middlewares.use('/api/agent', async (req, res, next) => {
@@ -754,6 +846,22 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       if (parts[0] === 'status' && method === 'GET') {
         const cfg = loadConfig(rootDir);
         return sendJson(res, 200, { configured: !!cfg, model: cfg?.model ?? null, defaultModel: cfg?.model ?? DEFAULT_MODEL, limits: AGENT_LIMITS, dictation: deps.isLoopback(req) });
+      }
+
+      // GET /api/agent/speed: the last speed test. POST: run one (about a minute).
+      if (parts[0] === 'speed') {
+        if (method === 'GET') {
+          const saved = await readJson<unknown>(speedFile(p), null);
+          return sendJson(res, 200, { ...(saved && typeof saved === 'object' ? saved : {}), running: speedRuns.has(username) });
+        }
+        if (method === 'POST') {
+          let run = speedRuns.get(username);
+          if (!run) {
+            run = runSpeedTest(auth).finally(() => speedRuns.delete(username));
+            speedRuns.set(username, run);
+          }
+          try { return sendJson(res, 200, { ...(await run as object), running: false }); } catch (err: any) { return sendJson(res, 500, { error: err?.message ?? String(err) }); }
+        }
       }
 
       // GET /api/agent/stream  (SSE)
@@ -819,11 +927,12 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         if (parts.length === 1 && method === 'GET') return sendJson(res, 200, { conversations: await listConvs(p) });
         if (parts.length === 1 && method === 'POST') {
           const cfg = loadConfig(rootDir);
-          let body0: { model?: unknown } = {};
+          let body0: { model?: unknown; voice?: unknown } = {};
           try { body0 = JSON.parse((await readBody(req, 16 * 1024)) || '{}'); } catch { body0 = {}; }
           const conv: AgentConversation = {
             id: newId(), title: 'New chat', createdAt: Date.now(), updatedAt: Date.now(),
             messages: [], changeSets: {}, state: 'idle', model: isKnownModel(body0.model) ? body0.model : (cfg?.model ?? DEFAULT_MODEL),
+            ...(body0.voice === true ? { voice: true } : {}),
           };
           await saveConv(username, p, conv);
           await saveLlm(p, conv.id, { messages: [] });
@@ -857,6 +966,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         // Per device: each send says which model that device has picked. An
         // unknown name is ignored rather than trusted (the run would 404).
         if (isKnownModel(body.model) && (action === 'messages' || action === 'answer' || action === 'approval')) conv.model = body.model;
+        if (conv.voice && typeof body.think === 'boolean') conv.voiceThink = body.think;
 
         if (action === 'messages') {
           const text = typeof body.text === 'string' ? body.text.slice(0, AGENT_LIMITS.maxMessageChars) : '';

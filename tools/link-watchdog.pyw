@@ -354,6 +354,10 @@ def public_ok(host):
 def main():
     if os.path.exists(PAUSE):
         return
+    # The user closed the planner, which stops the server on purpose: do not
+    # start it again or report the link down. The launcher removes the marker.
+    if os.path.exists(os.path.join(DB, "app-closed")):
+        return
     if not TAILSCALE:
         log("tailscale.exe not found, nothing to watch")
         return

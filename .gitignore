@@ -65,6 +65,10 @@ __pycache__/
 
 .venv-launcher/
 
+# Voice mode: the speech engine's environment and its models (several GB)
+.venv-speech/
+speech-models/
+
 # ESP32 firmware
 firmware/.pio/
 firmware/src/secrets.h

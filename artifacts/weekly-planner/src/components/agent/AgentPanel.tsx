@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ArrowDown, ArrowUp, BarChart3, Brain, CalendarSearch, Camera, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
+  ArrowDown, ArrowUp, AudioLines, BarChart3, Brain, CalendarSearch, Camera, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
   Clock, FileText, History, ImagePlus, ListChecks, ListTodo, Loader2, Mic, MicOff, Pencil, Plus, Search, Settings2,
   Square, Tag, Timer, Trash2, Wand2, X,
 } from 'lucide-react';
@@ -15,12 +15,15 @@ import {
 import type { AgentConversation, AgentMessage, AgentToolTrace } from '@/lib/agent/agentTypes';
 import { AGENT_LIMITS } from '@/lib/agent/agentTypes';
 import {
-  classifyFile, speechRecognitionCtor, startDictation, uploadFile, useAgent, windowsDictation,
+  classifyFile, speechRecognitionCtor, startDictation, uploadFile, useAgent, useModelSpeeds, windowsDictation,
   type PendingAttachment,
 } from '@/lib/agent/agentClient';
 import AgentMarkdown from './AgentMarkdown';
 import AgentOrb from './AgentOrb';
 import ModelPicker from './ModelPicker';
+import VoiceDock from '../voice/VoiceDock';
+import { useVoiceConversation } from '@/lib/voice/useVoiceConversation';
+import { useVoicePrefs } from '@/lib/voice/voicePrefs';
 import { fmtMoney, fmtTokens, modelInfo } from '@/lib/agent/agentModels';
 import { ApprovalCard, ErrorNote, QuestionCard, ReportCard, type AgentTheme } from './AgentCards';
 import { ImagePreviewModal, type PreviewImageItem } from './ImagePreviewModal';
@@ -91,9 +94,25 @@ const PANEL_CSS = `
 let localSeq = 0;
 
 export default function AgentPanel({ open, onClose, theme, timeFormat, fullscreen, floating, width, onResize, onOpenDate }: AgentPanelProps) {
-  const agent = useAgent(open);
+  // Voice mode uses the same chat machinery with its own model pick and
+  // spoken chats; switching it on swaps the composer for the voice dock.
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [voicePrefs, setVoicePrefs] = useVoicePrefs();
+  const agent = useAgent(open, { voice: voiceOn, think: voicePrefs.think });
   const conv = agent.conversation;
   const busy = conv?.state === 'running';
+  const voice = useVoiceConversation(agent, voicePrefs);
+  const speeds = useModelSpeeds(open && voiceOn, true);
+  const startVoice = useCallback(() => {
+    stopDictationRef.current?.();
+    // Both in the same click, so the "voice ended" check below never sees
+    // voice mode on with no session yet. (The voice model is picked up by the
+    // time anything is sent: that waits for the first sentence.)
+    setVoiceOn(true);
+    void voice.start();
+  }, [voice]);
+  useEffect(() => { if (voiceOn && !voice.active && voice.phase !== 'error') setVoiceOn(false); }, [voiceOn, voice.active, voice.phase]);
+  useEffect(() => { if (!open && voice.active) voice.stop(); }, [open, voice]);
 
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState<PendingAttachment[]>([]);
@@ -381,9 +400,9 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
           {agent.status?.configured === false && (
             <ErrorNote theme={theme} text="The assistant has no Ollama API key. Add OLLAMA_API_KEY to the .env file in the planner folder on the PC." />
           )}
-          {!conv?.messages.length && (
-            <EmptyState theme={theme} gradient={gradient} onPick={t => { setDraft(t); inputRef.current?.focus(); }} />
-          )}
+          {!conv?.messages.length && (voiceOn ? <VoiceEmpty theme={theme} /> : (
+            <EmptyState theme={theme} gradient={gradient} onPick={t => { setDraft(t); inputRef.current?.focus(); }} onVoice={startVoice} />
+          ))}
           {conv?.messages.map(m => (
             m.role === 'user'
               ? (
@@ -426,8 +445,22 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
           </button>
         )}
 
+        {/* Voice mode takes the composer's place */}
+        {!historyOpen && voiceOn && (
+          <VoiceDock
+            voice={voice}
+            theme={theme}
+            model={agent.model}
+            onPickModel={agent.setModel}
+            speed={{ speeds: speeds.speeds, mode: voicePrefs.think ? 'thinking' : 'quick', testing: speeds.testing, error: speeds.error, onTest: speeds.test }}
+            think={voicePrefs.think}
+            onThink={v => setVoicePrefs({ think: v })}
+            compact={typeof window !== 'undefined' && window.innerHeight < 640}
+          />
+        )}
+
         {/* Composer */}
-        {!historyOpen && (
+        {!historyOpen && !voiceOn && (
           <div className="flex-shrink-0 px-3 pt-2 pb-3" style={{ background: `linear-gradient(to top, ${theme.bg} 70%, transparent)` }}>
             <div
               className="rounded-[24px] flex flex-col agent-composer relative"
@@ -507,6 +540,9 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
                 {fullscreen && <ComposerButton theme={theme} title="Take a photo" onClick={() => cameraInputRef.current?.click()}><Camera size={16} /></ComposerButton>}
                 <ComposerButton theme={theme} title={listening ? 'Stop listening' : 'Speak'} active={listening} danger={listening} onClick={toggleMic}>
                   {listening ? <MicOff size={16} /> : <Mic size={16} />}
+                </ComposerButton>
+                <ComposerButton theme={theme} title="Voice mode: talk with the assistant" onClick={startVoice}>
+                  <AudioLines size={16} />
                 </ComposerButton>
                 <ModelPicker model={agent.model} onPick={agent.setModel} theme={theme} usage={lastUsage} chatCost={chatCost} />
                 <div className="flex-1 text-[10.5px] text-right pr-2 truncate" style={{ color: theme.sub }}>
@@ -602,7 +638,32 @@ function greeting(): string {
   return h < 5 ? 'Up late?' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
 }
 
-function EmptyState({ theme, onPick }: { theme: AgentTheme; gradient?: string; onPick: (t: string) => void }) {
+function VoiceEmpty({ theme }: { theme: AgentTheme }) {
+  const tips = [
+    'What do I have tomorrow?',
+    'Move my gym session to Thursday at six',
+    'Find me two free hours on Friday to study',
+  ];
+  return (
+    <div className="pt-8 pb-2 space-y-4 agent-in px-1">
+      <div className="text-[22px] font-semibold tracking-tight leading-tight" style={{ color: theme.text }}>
+        {greeting()}.<br /><span style={{ color: theme.sub }}>I'm listening.</span>
+      </div>
+      <div className="text-[12.5px] leading-relaxed" style={{ color: theme.sub }}>
+        Talk naturally, even fast or messy. I'll ask if something is unclear. You can cut in while I'm talking, and everything we say is written down here.
+      </div>
+      <div className="space-y-1.5">
+        {tips.map(t => (
+          <div key={t} className="text-[12.5px] rounded-xl px-3 py-2" style={{ background: theme.surface, border: `1px solid ${theme.bdr}`, color: theme.text }}>
+            <span style={{ color: '#60a5fa' }}>Try:</span> "{t}"
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ theme, onPick, onVoice }: { theme: AgentTheme; gradient?: string; onPick: (t: string) => void; onVoice?: () => void }) {
   return (
     <div className="pt-10 pb-2 space-y-7 agent-in">
       <div className="space-y-3 px-1">
@@ -627,6 +688,26 @@ function EmptyState({ theme, onPick }: { theme: AgentTheme; gradient?: string; o
             <ArrowUp size={14} className="flex-shrink-0 rotate-45 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all" style={{ color: theme.sub }} />
           </button>
         ))}
+        {onVoice && (
+          <button
+            type="button"
+            onClick={onVoice}
+            className="agent-example agent-in w-full text-left rounded-2xl pl-2 pr-3 py-2 flex items-center gap-3 group"
+            style={{
+              border: `1px solid ${theme.bdr}`,
+              background: `linear-gradient(110deg, rgba(59,130,246,0.14), rgba(249,115,22,0.12))`,
+              animationDelay: `${60 + EXAMPLES.length * 45}ms`, animationFillMode: 'backwards', ['--agent-accent' as any]: '#fb923c',
+            }}
+          >
+            <span className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #3b82f6, #f97316)', color: '#fff' }}>
+              <AudioLines size={15} />
+            </span>
+            <span className="flex-1 min-w-0 text-[13px] leading-snug" style={{ color: theme.text }}>
+              <span className="font-semibold">Talk instead</span>
+              <span style={{ color: theme.sub }}> · a spoken conversation</span>
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -689,7 +770,7 @@ function UserBubble({
           dir="auto"
           style={{ background: `${theme.accent}1c`, border: `1px solid ${theme.accent}2e`, color: theme.text }}
         >
-          {m.text}
+          {m.text.replace(/^\(You were interrupted\.\)\s*/, '')}
         </div>
       )}
       <div className="text-[10px] opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: theme.sub }}>{timeOf(m.at)}</div>
@@ -830,7 +911,7 @@ function UsageLine({ usage, theme }: { usage: NonNullable<AgentMessage['usage']>
 
 function HistoryList({ theme, items, activeId, onPick, onDelete, onRename, onNew }: {
   theme: AgentTheme;
-  items: Array<{ id: string; title: string; updatedAt: number; preview: string; state: string; messageCount: number }>;
+  items: Array<{ id: string; title: string; updatedAt: number; preview: string; state: string; messageCount: number; voice?: boolean }>;
   activeId: string | null;
   onPick: (id: string) => void;
   onDelete: (id: string) => void;
@@ -895,6 +976,7 @@ function HistoryList({ theme, items, activeId, onPick, onDelete, onRename, onNew
                     <div className="text-[12.5px] font-semibold truncate flex items-center gap-1.5" style={{ color: theme.text }} dir="auto">
                       {(c.state === 'awaiting_answer' || c.state === 'awaiting_approval') && <span className="inline-block rounded-full flex-shrink-0" style={{ width: 7, height: 7, background: '#f59e0b' }} title="Waiting for you" />}
                       {c.state === 'running' && <Loader2 size={11} className="animate-spin flex-shrink-0" />}
+                      {c.voice && <AudioLines size={11} className="flex-shrink-0" style={{ color: '#fb923c' }} aria-label="Voice chat" />}
                       <span className="truncate">{c.title}</span>
                     </div>
                     <div className="text-[11px] truncate" style={{ color: theme.sub }} dir="auto">{c.preview || 'Empty chat'}</div>

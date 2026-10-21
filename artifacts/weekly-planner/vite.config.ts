@@ -68,6 +68,7 @@ import {
 } from './ota-server';
 import { createFunnelWatchdog } from './funnel-watchdog';
 import { registerAgentRoutes } from './agent-service';
+import { registerVoiceRoutes } from './voice-service';
 
 /**
  * The interpreter to run a windowless helper .pyw with.
@@ -3346,6 +3347,17 @@ ${body}
               await syncService.ingestFile(username, syncPathsOf(userPaths), 'focusSessions');
             },
             isLoopback: isLocalDesktopRequest,
+            log: trace,
+          });
+
+          // ── Voice mode (local speech engine on the GPU) ──────────────────────
+          registerVoiceRoutes(server.middlewares, server.httpServer as any, {
+            rootDir,
+            requireAuth,
+            isSignedIn: async (req) => {
+              const { users } = await loadAccessConfig(rootDir);
+              return !!getRequestUser(req, users);
+            },
             log: trace,
           });
 

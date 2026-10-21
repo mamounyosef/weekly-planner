@@ -17,6 +17,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { mergeContiguousFocusSession } from '@/lib/focusStats';
 import {
   resolveWeekTasks,
+  expandTaskRange,
   toggleTaskDone as toggleTaskDoneHelper,
   isTaskDone,
   coerceTasks,
@@ -242,6 +243,8 @@ const FULL_BOX: OverlapBox = { left: 0, width: 1, segments: [{ fromMin: 0, toMin
 // is still instant.
 const loadAgentPanel = () => import('@/components/agent/AgentPanel');
 const AgentPanel = React.lazy(loadAgentPanel);
+const OrbVoice = React.lazy(() => import('@/components/voice/OrbVoice'));
+type OrbVoiceCommand = import('@/components/voice/OrbVoice').OrbVoiceCommand;
 
 export default function Widget() {
   const [events, setEvents]           = useState<PlannerData>({});
@@ -266,9 +269,11 @@ export default function Widget() {
   const [orbEnabled, setOrbEnabled]   = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantMounted, setAssistantMounted] = useState(false);
+  const [orbVoiceCmd, setOrbVoiceCmd] = useState<OrbVoiceCommand | null>(null);
   const [winWidth, setWinWidth] = useState(() => window.innerWidth);
   const [focusExcludedDates, setFocusExcludedDates] = useState<string[]>([]);
   const [focusGoalSeconds, setFocusGoalSeconds] = useState(0);
+  const [autoRollRecurringTasks, setAutoRollRecurringTasks] = useState(true);
   const rootRef = useRef<HTMLDivElement>(null);
   const [focusSessions, setFocusSessions] = useState<FocusSession[]>([]);
   /** Serialized form of the sessions on screen — see `applyFocusSessions`. */
@@ -305,6 +310,11 @@ export default function Widget() {
   const [showTaskRow, setShowTaskRow]               = useState(true);
   const [widgetTasksDoneExpanded, setWidgetTasksDoneExpanded] = useState(false);
   const [widgetTasksOpenExpanded, setWidgetTasksOpenExpanded] = useState(false);
+  // Drag-to-reorder of the widget's open tasks (within one day group).
+  const [dragTaskId, setDragTaskId] = useState<string | null>(null);
+  const [taskDropTarget, setTaskDropTarget] = useState<{ id: string; edge: 'before' | 'after' } | null>(null);
+  const taskDropRef = useRef<{ id: string; edge: 'before' | 'after' } | null>(null);
+  const justDraggedTaskRef = useRef(false);
   const [taskColor, setTaskColor]                   = useState('#7dd3fc');  const [taskCheckboxShape, setTaskCheckboxShape]   = useState<TaskCheckboxShape>('circle');
   const [tasks, setTasks]                           = useState<TaskData>({});
   const [overflowModal, setOverflowModal]           = useState<{
@@ -360,6 +370,7 @@ export default function Widget() {
           // Same list again (every poll): keep the old array so nothing recomputes.
           setFocusExcludedDates(prev => (prev.join('|') === next.join('|') ? prev : next));
         }
+        if (typeof s.autoRollRecurringTasks === 'boolean') setAutoRollRecurringTasks(s.autoRollRecurringTasks);
         if (s.focusDailyGoalSeconds != null) setFocusGoalSeconds(Math.max(0, Number(s.focusDailyGoalSeconds) || 0));
         if (s.shortcuts) setShortcuts(coerceShortcuts(s.shortcuts));
         setPrayer(coercePrayerSettings(s.prayer));
@@ -719,6 +730,10 @@ export default function Widget() {
   // class toggled straight on the DOM: no React render on the way in.
   useEffect(() => {
     (window as any).__plannerOrb = (cmd: string) => {
+      if (cmd === 'voice-toggle' || cmd === 'voice-tap' || cmd === 'voice-stop') {
+        setOrbVoiceCmd({ kind: cmd === 'voice-toggle' ? 'toggle' : cmd === 'voice-tap' ? 'tap' : 'stop', n: Date.now() });
+        return;
+      }
       if (cmd === 'hide') { setAssistantOpen(false); return; }
       const el = rootRef.current;
       if (el) { el.classList.remove('orb-pop'); void el.offsetWidth; el.classList.add('orb-pop'); }
@@ -986,6 +1001,42 @@ export default function Widget() {
       centerScrollOnLive(true);
     }
   }, [nowTick, normNowMin, centerScrollOnLive]);
+
+  /** Save the whole task store the way the widget always has (see persistFocusSessions for why a plain list is safe). */
+  const saveWidgetTasks = (next: TaskData) => {
+    setTasks(next);
+    try { localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(next)); } catch { /* private mode */ }
+    const url = Object.keys(next).length === 0 ? '/api/tasks?force=1' : '/api/tasks';
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next),
+    }).catch(() => {});
+  };
+
+  /** Complete a task, or (for a done one) undo that. */
+  const toggleWidgetTask = (t: TaskData[string]) => {
+    const occId = t.occDate ? `${t.masterId || t.id}::${t.occDate}` : t.id;
+    saveWidgetTasks(toggleTaskDoneHelper(tasks, occId));
+  };
+
+  /**
+   * New order for a day's tasks, written as `order` on each task itself (the
+   * master of a repeating one, so no occurrence is split off). The same field
+   * the main panel's manual order uses, so both windows agree.
+   */
+  const reorderWidgetTasks = (masterIds: string[]) => {
+    const now = Date.now();
+    let next = tasks;
+    let changed = false;
+    [...new Set(masterIds)].forEach((id, i) => {
+      const m = next[id];
+      if (!m || m.order === i * 10) return;
+      next = { ...next, [id]: { ...m, order: i * 10, updatedAt: now } };
+      changed = true;
+    });
+    if (changed) saveWidgetTasks(next);
+  };
 
   const minimizeWidget = () => {
     if (orbEnabled) { tuckIntoOrb(); return; }
@@ -1877,13 +1928,83 @@ export default function Widget() {
             return t.dayIndex === yestDayIdx;
           }).map(t => ({ task: t, dayLabel: 'Yesterday' }));
 
-          const widgetTasks = [...yesterdayTasks, ...todayTasks];
+          // Same occurrences as the main Tasks panel (expandTaskRange): a
+          // repeating task shows only its one open occurrence, rolled to today
+          // when auto-roll is on, plus its completed ones. Without this the
+          // widget listed yesterday's missed occurrence of a daily task as
+          // "Yesterday" while the main window had already rolled it to Today.
+          const yestYmd = format(yestDate, 'yyyy-MM-dd');
+          const shownOccIds = new Set<string>();
+          for (const t of Object.values(tasks)) {
+            for (const occ of expandTaskRange(t, yestYmd, todayYmd, { autoRollRecurring: autoRollRecurringTasks, today: todayYmd })) {
+              shownOccIds.add(occ.occId);
+            }
+          }
+          // Within each day, the same order as the main Tasks panel: the
+          // task's own `order` (what a drag sets, here or there), then title.
+          const byOrder = (a: { task: (typeof tasks)[string] }, b: { task: (typeof tasks)[string] }) =>
+            ((a.task.order ?? 0) - (b.task.order ?? 0)) || (a.task.title || '').localeCompare(b.task.title || '');
+          const widgetTasks = [
+            ...yesterdayTasks.filter(({ task }) => shownOccIds.has(task.id)).sort(byOrder),
+            ...todayTasks.filter(({ task }) => shownOccIds.has(task.id)).sort(byOrder),
+          ];
           const openWidgetTasks = widgetTasks.filter(({ task }) => !isTaskDone(task, task.occDate ?? null));
           const doneWidgetTasks = widgetTasks.filter(({ task }) => isTaskDone(task, task.occDate ?? null));
           const MAX_TASKS_VISIBLE = 4;
           const visibleTasks = openWidgetTasks.slice(0, MAX_TASKS_VISIBLE);
           const hasMoreTasks = openWidgetTasks.length > MAX_TASKS_VISIBLE;
           const displayedOpenWidgetTasks = widgetTasksOpenExpanded ? openWidgetTasks : visibleTasks;
+
+          // Press on an open task: a click completes it; moving it more than a
+          // few pixels drags it to a new place among the tasks of its own day.
+          const beginTaskPress = (e: React.PointerEvent, item: { task: (typeof tasks)[string]; dayLabel: string }) => {
+            if (e.button !== 0) return;
+            const startY = e.clientY;
+            let dragging = false;
+            const move = (ev: PointerEvent) => {
+              if (!dragging) {
+                if (Math.abs(ev.clientY - startY) < 5) return;
+                dragging = true;
+                setDragTaskId(item.task.id);
+              }
+              const el = (document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null)?.closest('[data-wtask]') as HTMLElement | null;
+              let target: { id: string; edge: 'before' | 'after' } | null = null;
+              if (el && el.dataset.wgroup === item.dayLabel && el.dataset.wtask !== item.task.id) {
+                const r = el.getBoundingClientRect();
+                target = { id: el.dataset.wtask!, edge: ev.clientY < r.top + r.height / 2 ? 'before' : 'after' };
+              }
+              const prev = taskDropRef.current;
+              if (prev?.id !== target?.id || prev?.edge !== target?.edge) {
+                taskDropRef.current = target;
+                setTaskDropTarget(target);
+              }
+            };
+            const up = () => {
+              window.removeEventListener('pointermove', move);
+              window.removeEventListener('pointerup', up);
+              window.removeEventListener('pointercancel', up);
+              const target = taskDropRef.current;
+              taskDropRef.current = null;
+              setDragTaskId(null);
+              setTaskDropTarget(null);
+              if (!dragging) return;
+              // The click that follows a drag is not a "complete".
+              justDraggedTaskRef.current = true;
+              window.setTimeout(() => { justDraggedTaskRef.current = false; }, 0);
+              if (!target) return;
+              const group = openWidgetTasks.filter(x => x.dayLabel === item.dayLabel);
+              const from = group.findIndex(x => x.task.id === item.task.id);
+              if (from === -1) return;
+              const [moved] = group.splice(from, 1);
+              const at = group.findIndex(x => x.task.id === target.id);
+              if (at === -1) return;
+              group.splice(target.edge === 'before' ? at : at + 1, 0, moved);
+              reorderWidgetTasks(group.map(x => x.task.masterId || x.task.id));
+            };
+            window.addEventListener('pointermove', move);
+            window.addEventListener('pointerup', up);
+            window.addEventListener('pointercancel', up);
+          };
 
           return (
             <>
@@ -1994,24 +2115,24 @@ export default function Widget() {
                           )}
                         <div
                           key={t.id}
+                          data-no-drag="true"
+                          data-wtask={t.id}
+                          data-wgroup={item.dayLabel}
+                          onPointerDown={(e) => beginTaskPress(e, item)}
                           onClick={() => {
-                            const occId = t.occDate ? `${t.masterId || t.id}::${t.occDate}` : t.id;
-                            const next = toggleTaskDoneHelper(tasks, occId);
-                            setTasks(next);
-                            localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(next));
-                            const url = Object.keys(next).length === 0 ? '/api/tasks?force=1' : '/api/tasks';
-                            fetch(url, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify(next),
-                            }).catch(() => {});
+                            if (justDraggedTaskRef.current) return;
+                            toggleWidgetTask(t);
                           }}
-                          className="px-2 py-0.5 rounded-md border text-[10.5px] font-medium flex items-center gap-1.5 shadow-2xs cursor-pointer transition-opacity"
+                          title="Click to complete, drag to reorder"
+                          className="px-2 py-0.5 rounded-md border text-[10.5px] font-medium flex items-center gap-1.5 shadow-2xs cursor-pointer transition-opacity select-none"
                           style={{
                             background: `${taskColor}18`,
                             borderColor: `${taskColor}44`,
                             color: menuText,
-                            opacity: done ? 0.5 : 1,
+                            opacity: done ? 0.5 : dragTaskId === t.id ? 0.45 : 1,
+                            boxShadow: taskDropTarget?.id === t.id
+                              ? (taskDropTarget.edge === 'before' ? `0 -2px 0 0 ${taskColor}` : `0 2px 0 0 ${taskColor}`)
+                              : undefined,
                           }}
                         >
                           <span className="flex-shrink-0 flex items-center" style={{ color: taskColor }}>
@@ -2069,7 +2190,10 @@ export default function Widget() {
                           return (
                             <div
                               key={t.id}
-                              className="px-2 py-0.5 rounded-md border text-[10.5px] font-medium flex items-center gap-1.5"
+                              data-no-drag="true"
+                              onClick={() => toggleWidgetTask(t)}
+                              title="Click to mark as not done"
+                              className="px-2 py-0.5 rounded-md border text-[10.5px] font-medium flex items-center gap-1.5 cursor-pointer select-none hover:opacity-80"
                               style={{
                                 background: `${taskColor}0e`,
                                 borderColor: `${taskColor}2a`,
@@ -2718,6 +2842,14 @@ export default function Widget() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Voice mode from the floating orb (middle-click): no UI here, the orb
+          itself shows the conversation. Mounted on first use. */}
+      {orbVoiceCmd && (
+        <React.Suspense fallback={null}>
+          <OrbVoice command={orbVoiceCmd} />
+        </React.Suspense>
+      )}
 
       {/* The assistant, opened by right-clicking the orb: slides over the
           widget and fills the window. */}

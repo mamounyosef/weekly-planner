@@ -12,7 +12,6 @@ import { Animated, Easing, View } from 'react-native';
 
 const ORB = require('../../assets/agent-orb.png');
 const GLOW = require('../../assets/agent-orb-glow.png');
-const SPARK = require('../../assets/agent-orb-spark.png');
 
 function loop(v: Animated.Value, to: number, duration: number) {
   return Animated.loop(Animated.sequence([
@@ -32,17 +31,12 @@ export function AgentOrb({ size = 24, busy = false, still = false, dim = false, 
   tile?: { bg: string; border: string; radius?: number; pad?: number; glow?: boolean };
 }) {
   const breath = useRef(new Animated.Value(0)).current;
-  const spin = useRef(new Animated.Value(0)).current;
   const ripple = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const anims: Animated.CompositeAnimation[] = [];
     const period = busy ? 575 : still ? 3000 : 2100;
     anims.push(loop(breath, 1, period));
-    spin.setValue(0);
-    anims.push(Animated.loop(Animated.timing(spin, {
-      toValue: 1, duration: busy ? 1600 : still ? 14000 : 9000, easing: Easing.linear, useNativeDriver: true,
-    })));
     if (busy) {
       ripple.setValue(0);
       anims.push(Animated.loop(Animated.timing(ripple, {
@@ -51,12 +45,11 @@ export function AgentOrb({ size = 24, busy = false, still = false, dim = false, 
     }
     anims.forEach(a => a.start());
     return () => anims.forEach(a => a.stop());
-  }, [busy, still, breath, spin, ripple]);
+  }, [busy, still, breath, ripple]);
 
   const coreScale = still && !busy ? 1 : breath.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1.04] });
   const glowScale = breath.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1.12] });
   const glowOpacity = breath.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0.85] });
-  const rotate = spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
   const rippleScale = ripple.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1.65] });
   const rippleOpacity = ripple.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] });
   const halo = size * 1.44;
@@ -80,17 +73,6 @@ export function AgentOrb({ size = 24, busy = false, still = false, dim = false, 
         />
       ) : null}
       <Animated.Image source={ORB} style={{ width: size, height: size, transform: [{ scale: coreScale }] }} />
-      <Animated.View
-        style={{
-          position: 'absolute', left: size * 0.08, top: size * 0.08, width: size * 0.84, height: size * 0.84,
-          transform: [{ rotate }],
-        }}
-      >
-        <Animated.Image
-          source={SPARK}
-          style={{ position: 'absolute', left: size * 0.84 * 0.18, top: size * 0.84 * 0.14, width: size * 0.84 * 0.34, height: size * 0.84 * 0.34 }}
-        />
-      </Animated.View>
     </View>
   );
 

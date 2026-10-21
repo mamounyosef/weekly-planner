@@ -312,6 +312,9 @@ user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
 user32.IsZoomed.argtypes = [ctypes.c_void_p]
 user32.IsZoomed.restype = ctypes.wintypes.BOOL
 
+user32.ShowWindowAsync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+user32.ShowWindowAsync.restype = ctypes.wintypes.BOOL
+
 
 
 VK_LBUTTON = 0x01
@@ -411,6 +414,11 @@ class Api:
     def orb_state(self, frac, running, alert):
         if _orb is not None:
             _orb.set_state(frac, running, alert)
+
+    def voice_orb(self, on, phase, mic, out, muted):
+        """Voice mode started from the orb: the page's live state, ~30x a second."""
+        if _orb is not None:
+            _orb.set_voice(bool(on), phase, mic, out, muted)
 
     def set_always_on_top(self, on_top):
         global _always_on_top_enabled
@@ -518,7 +526,12 @@ def apply_taskbar_presence(hwnd):
 
     try:
         ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW)
+        if _orb_enabled:
+            # In orb mode the orb IS the widget's button: no taskbar entry.
+            ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+        else:
+            ex = (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
         user32.ShowWindow(hwnd, SW_HIDE)
         user32.ShowWindow(hwnd, SW_SHOW)
 
@@ -621,6 +634,10 @@ def on_shown():
         user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
 
         apply_taskbar_presence(hwnd)
+        # Belt and braces: the hide/show above must never leave a tucked-away
+        # widget sitting on screen at startup.
+        if _orb_enabled and _orb_mode is None:
+            set_cloak(hwnd, True)
 
         # Set up window procedure subclassing
         _new_wndproc = WNDPROC(wndproc)
@@ -772,6 +789,25 @@ def on_main_loaded():
     threading.Timer(4.0, _check_main_frame_after_load).start()
 
 
+def allow_planner_microphone(core):
+    """Voice mode needs the microphone. WebView2 would ask with a permission
+    prompt every session (and in the cloaked widget nobody would ever see it),
+    so the planner's own pages get it straight away. Only the microphone, and
+    only for the local planner; anything else keeps WebView2's default."""
+    from Microsoft.Web.WebView2.Core import CoreWebView2PermissionKind, CoreWebView2PermissionState
+
+    def on_permission(sender, a):
+        try:
+            uri = str(a.Uri or "")
+            local = uri.startswith("http://127.0.0.1:") or uri.startswith("http://localhost:")
+            if local and a.PermissionKind == CoreWebView2PermissionKind.Microphone:
+                a.State = CoreWebView2PermissionState.Allow
+        except Exception as e:
+            print("Microphone permission handler failed:", e)
+
+    core.PermissionRequested += on_permission
+
+
 def enable_webview_app_region():
     """Let the main window's page use `app-region: drag` (WebView2 1.0.2420+).
 
@@ -792,6 +828,11 @@ def enable_webview_app_region():
                 sender.CoreWebView2.Settings.IsNonClientRegionSupportEnabled = True
         except Exception as e:
             print("Failed to enable app-region support:", e)
+        try:
+            if args.IsSuccess:
+                allow_planner_microphone(sender.CoreWebView2)
+        except Exception as e:
+            print("Failed to set up microphone access:", e)
         return original(self, sender, args)
 
     EdgeChrome.on_webview_ready = on_webview_ready
@@ -855,8 +896,11 @@ def show_main_window():
         return
     try:
         main_window.show()
-        main_window.restore()
         hwnd = int(main_window.native.Handle.ToInt64())
+        # Win32 restore, not pywebview's restore(): that forces the Normal
+        # state and would shrink a maximized planner to a small window.
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE: back to maximized if it was
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
     except Exception as e:
@@ -872,20 +916,128 @@ def _main_is_hidden():
 
 
 def on_main_closing():
-    """Closing the main window HIDES it while the widget is still up.
-
-    Both windows live in one process, which holds the launcher mutex for as long
-    as it runs. A destroyed main window could then never come back: a toast
-    click starts a second launcher, which sees the mutex and can only focus an
-    EXISTING window. Hidden, the window is still there to be shown again (by the
-    widget's open button, a toast, or the Daily Planner shortcut). The closing
-    event runs on the GUI thread and waits for this handler, so the hide itself
-    has to happen off it.
-    """
-    if window is not None and window in webview.windows:
-        threading.Thread(target=main_window.hide, daemon=True).start()
-        return False
+    """Closing the main window QUITS the app: main, widget and orb all go and
+    the process exits (the user's choice: X means stop). The taskbar icon or a
+    toast then starts it again through the launcher. The dev server is a
+    separate process and keeps running, so phone sync and reminders do not
+    stop. The closing event runs on the GUI thread and waits for this handler,
+    so the widget is destroyed off it."""
+    global _quit_everything
+    _quit_everything = True
+    host_log("main window closing: app quits")
+    if _orb is not None:
+        try:
+            _orb.close()
+        except Exception:
+            pass
+    if window is not None and window in webview.windows and not _widget_closed:
+        threading.Thread(target=window.destroy, daemon=True).start()
     return True
+
+
+_widget_closed = False  # once the widget is gone, closing main really quits
+_quit_everything = False  # main was closed: the server and hotkey stop too
+
+APP_CLOSED_MARKER = os.path.join(_BASE_DIR, "database", "app-closed")
+
+
+def stop_background():
+    """Closing the planner stops ALL of it (the user's choice): the dev server
+    and the focus hotkey as well as the windows.
+
+    database/app-closed tells the link watchdog the server is down on purpose,
+    so it does not start the planner again; the launcher deletes it on the next
+    start. The server is killed by pid WITHOUT /T: a restart script running
+    right now is the server's child and must survive."""
+    import subprocess
+    no_window = 0x08000000
+    try:
+        with open(APP_CLOSED_MARKER, "w", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+    except Exception as e:
+        host_log("could not write the app-closed marker: %s" % e)
+
+    def run(args):
+        try:
+            return subprocess.run(args, creationflags=no_window, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=20).stdout.decode("utf-8", "ignore")
+        except Exception as e:
+            host_log("%s failed: %s" % (args[0], e))
+            return ""
+
+    pids = set()
+    for line in run(["netstat", "-ano", "-p", "TCP"]).splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and "LISTENING" in line and parts[1].endswith(":5173"):
+            if parts[-1].isdigit() and parts[-1] != "0":
+                pids.add(parts[-1])
+    for line in run([
+        "powershell", "-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' or Name='python.exe'\" "
+        "| Where-Object { $_.CommandLine -like '*focus-hotkey.py*' } "
+        "| ForEach-Object { $_.ProcessId }",
+    ]).splitlines():
+        if line.strip().isdigit():
+            pids.add(line.strip())
+    pids.discard(str(os.getpid()))
+    for pid in sorted(pids):
+        run(["taskkill", "/PID", pid, "/F"])
+    host_log("stopped the server and hotkey (pids %s)" % ", ".join(sorted(pids)))
+
+
+HOST_LOG = os.path.join(_BASE_DIR, "database", "window-host.log")
+
+
+def host_log(message):
+    """A line in database/window-host.log: which windows opened, closed or had
+    to be repaired. print() is not enough here: under the frozen launcher it
+    can go nowhere at all."""
+    try:
+        with open(HOST_LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  " + message + "\n")
+    except Exception:
+        pass
+
+
+def keep_main_shown_at_start(seconds=20.0):
+    """Make sure the main window really is on screen after a launch.
+
+    THE BUG THIS FIXES: the restart relaunches through launch.vbs, which starts
+    the launcher with a hidden show flag (WshShell.Run style 0). Windows
+    applies the launching program's show flag to the first window a process
+    shows, which is the main planner, so after every restart it came back
+    minimized or hidden and only the widget appeared.
+
+    Watches for the first `seconds` (WebView2 can still be settling) and
+    restores it whenever it is hidden or minimized, straight through Win32.
+    Stops early once it has stayed up for a few seconds."""
+    started = time.monotonic()
+    good_since = None
+    repaired = 0
+    while time.monotonic() - started < seconds:
+        time.sleep(0.4)
+        try:
+            hwnd = _main_hwnd()
+            if not hwnd or main_window not in webview.windows:
+                continue
+            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and user32.IsZoomed(hwnd):
+                good_since = good_since or time.monotonic()
+                if time.monotonic() - good_since > 4:
+                    break
+                continue
+            good_since = None
+            repaired += 1
+            host_log("main window came up %s; maximizing it" % (
+                "minimized" if user32.IsIconic(hwnd)
+                else "hidden" if not user32.IsWindowVisible(hwnd) else "not maximized"))
+            # It always starts filling the screen (SW_SHOWMAXIMIZED also
+            # un-hides and un-minimizes it).
+            user32.ShowWindowAsync(hwnd, 3)
+            user32.SetForegroundWindow(hwnd)
+        except Exception as e:
+            host_log("checking the main window failed: %s" % e)
+    host_log("main window check done (%d repair(s))" % repaired)
 
 
 def on_widget_closing():
@@ -896,6 +1048,9 @@ def on_widget_closing():
     what lets a restart finish: it posts WM_CLOSE to both windows, the main one
     hides, and this then takes everything down so the relaunch is not blocked.
     """
+    global _widget_closed
+    _widget_closed = True
+    host_log("widget closing (main hidden: %s)" % _main_is_hidden())
     if main_window is not None and main_window in webview.windows and _main_is_hidden():
         threading.Thread(target=main_window.destroy, daemon=True).start()
     if _orb is not None:
@@ -1033,10 +1188,16 @@ def show_widget(mode):
         was = _orb_mode
         _orb_mode = mode
         _peek_engaged = False
+        if was != mode:
+            host_log("widget out: %s (was %s)" % (mode, was))
         if was is None:
             _place_widget_beside_orb(hwnd)
             _widget_js("assistant" if mode == "assistant" else "show")
             set_cloak(hwnd, False)
+        # Minimized meanwhile (Win+D, Show desktop): bring it back too, or it
+        # would be "out" yet nowhere on screen.
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE restores it
         elif mode == "assistant" and was != "assistant":
             _widget_js("assistant")
         elif mode != "assistant" and was == "assistant":
@@ -1052,6 +1213,7 @@ def hide_widget():
     with _orb_lock:
         if _orb_mode is None:
             return
+        host_log("widget tucked away (was %s)" % _orb_mode)
         _orb_mode = None
         _peek_engaged = False
         hwnd = _widget_hwnd()
@@ -1061,8 +1223,12 @@ def hide_widget():
 
 
 def _orb_click():
+    hwnd = _widget_hwnd()
     if _orb_mode in (None, "peek"):
         show_widget("pinned")
+    elif hwnd and user32.IsIconic(hwnd):
+        # Out, but minimized behind the scenes: a click means "show me".
+        show_widget(_orb_mode)
     else:
         hide_widget()
 
@@ -1079,8 +1245,23 @@ def _orb_right_click():
         show_widget("assistant")
 
 
+def _orb_middle_click():
+    """Middle-click (the wheel) on the orb: talk to the assistant, or stop.
+    A peeking widget goes away first: voice mode is the orb on its own."""
+    with _orb_lock:
+        if _orb_mode == "peek":
+            hide_widget()
+    host_log("orb voice toggle")
+    _widget_js("voice-toggle")
+
+
+def _orb_voice_tap():
+    """A left click on the orb while in voice mode (stop talking / done / mute)."""
+    _widget_js("voice-tap")
+
+
 def _orb_hover():
-    if _orb_mode is None:
+    if _orb_mode is None and not (_orb is not None and _orb.voice_mode):
         show_widget("peek")
 
 
@@ -1163,6 +1344,11 @@ def set_orb_enabled(on):
             if hwnd:
                 set_cloak(hwnd, False)
             _widget_js("show")
+        # Taskbar button: none in orb mode (the orb is its button), back
+        # again without it. The style only takes effect across a hide/show,
+        # which apply_taskbar_presence does safely.
+        if hwnd:
+            apply_taskbar_presence(hwnd)
 
 
 WIDGET_ZOOM_DEFAULT = 0.85
@@ -1215,6 +1401,8 @@ def start_orb():
             on_hover=_orb_hover,
             on_drag_start=_orb_drag_start,
             on_moved=_orb_moved,
+            on_middle_click=_orb_middle_click,
+            on_voice_tap=_orb_voice_tap,
         )
         _orb.set_visible(_orb_enabled)
         _orb.start()
@@ -1244,11 +1432,15 @@ def run_windows(show_main=True):
         frameless=False,
         resizable=True,
         hidden=not show_main,
+        maximized=show_main,  # opens filling the screen
         js_api=MainApi(),
     )
     main_window.events.closing += on_main_closing
     main_window.events.loaded += on_main_loaded
     main_window.events.shown += lambda: set_form_icon(main_window, MAIN_ICON_PATH)
+    host_log("starting windows (show_main=%s)" % show_main)
+    if show_main:
+        threading.Thread(target=keep_main_shown_at_start, name="main-shown-check", daemon=True).start()
 
     # The orb first: whether the widget starts tucked away depends on it. Orb
     # mode is on unless it was switched off, and never on without a working
@@ -1285,6 +1477,16 @@ def run_windows(show_main=True):
         private_mode=False,
         storage_path=os.path.join(base_dir, '.webview-profile')
     )
+    host_log("all windows closed; window host exiting")
+    if _quit_everything:
+        stop_background()
+    # Then really exit. With every window closed the process still lingered
+    # (interpreter/.NET shutdown never finished), so each restart waited and
+    # finally force-killed it. WebView2 has already flushed its profile by
+    # now (that happens as each window closes); give its browser processes a
+    # moment to wind down, then leave.
+    time.sleep(1.5)
+    os._exit(0)
 
 if __name__ == '__main__':
     # Run directly (the server's "open widget" route): the widget is what was

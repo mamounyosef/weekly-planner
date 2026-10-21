@@ -15,7 +15,6 @@ export const ORB_ACCENT = '#7c9cff';
 const ORB_CSS = `
 @keyframes agent-orb-breathe { 0%, 100% { transform: scale(0.94) } 50% { transform: scale(1.04) } }
 @keyframes agent-orb-glow { 0%, 100% { opacity: 0.45; transform: scale(0.9) } 50% { opacity: 0.85; transform: scale(1.12) } }
-@keyframes agent-orb-drift { to { transform: rotate(360deg) } }
 @keyframes agent-orb-ripple { 0% { opacity: 0.55; transform: scale(0.7) } 100% { opacity: 0; transform: scale(1.65) } }
 @keyframes agent-orb-flicker { 0%, 100% { opacity: 0.9 } 40% { opacity: 1 } 70% { opacity: 0.8 } }
 .agent-orb { position: relative; display: inline-block; flex-shrink: 0; isolation: isolate; }
@@ -24,18 +23,12 @@ const ORB_CSS = `
   background: radial-gradient(circle, rgba(124,156,255,0.55) 0%, rgba(124,156,255,0.18) 45%, rgba(124,156,255,0) 70%); }
 .agent-orb-core { inset: 0;
   background: radial-gradient(circle at 50% 50%, #ffffff 0%, #c4d2ff 25%, rgba(124,156,255,0.9) 70%, rgba(124,156,255,0) 100%); }
-.agent-orb-drift { inset: 8%; }
-.agent-orb-drift::after { content: ''; position: absolute; left: 18%; top: 14%; width: 34%; height: 34%; border-radius: 9999px;
-  background: radial-gradient(circle, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 70%); }
 .agent-orb-ripple { inset: 0; border: 1.5px solid rgba(124,156,255,0.7); opacity: 0; }
 .agent-orb.is-live .agent-orb-core { animation: agent-orb-breathe 4.2s ease-in-out infinite, agent-orb-flicker 3.1s ease-in-out infinite; }
 .agent-orb.is-live .agent-orb-halo { animation: agent-orb-glow 4.2s ease-in-out infinite; }
-.agent-orb.is-live .agent-orb-drift { animation: agent-orb-drift 9s linear infinite; }
 .agent-orb.is-calm .agent-orb-halo { animation: agent-orb-glow 6s ease-in-out infinite; }
-.agent-orb.is-calm .agent-orb-drift { animation: agent-orb-drift 14s linear infinite; }
 .agent-orb.is-busy .agent-orb-core { animation: agent-orb-breathe 1.15s ease-in-out infinite, agent-orb-flicker 0.9s ease-in-out infinite; }
 .agent-orb.is-busy .agent-orb-halo { animation: agent-orb-glow 1.15s ease-in-out infinite; }
-.agent-orb.is-busy .agent-orb-drift { animation: agent-orb-drift 1.6s linear infinite; }
 .agent-orb.is-busy .agent-orb-ripple { animation: agent-orb-ripple 1.4s cubic-bezier(0.2, 0.6, 0.3, 1) infinite; }
 .agent-orb.is-busy .agent-orb-ripple.r2 { animation-delay: 0.7s; }
 .agent-orb-tile { display: inline-grid; place-items: center; flex-shrink: 0; }
@@ -74,7 +67,6 @@ export default function AgentOrb({ size = 24, busy = false, still = false, tile,
     >
       <span className="agent-orb-halo" />
       <span className="agent-orb-core" />
-      <span className="agent-orb-drift" />
       <span className="agent-orb-ripple" />
       <span className="agent-orb-ripple r2" />
     </span>

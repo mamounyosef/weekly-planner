@@ -212,6 +212,10 @@ export interface AgentConversation {
   state: RunState;
   /** Model used for this conversation. */
   model: string;
+  /** A spoken conversation (voice mode): the model gets the voice prompt. */
+  voice?: boolean;
+  /** Voice chats: think before answering (slower, more careful). */
+  voiceThink?: boolean;
   /** Partial text of the assistant turn being generated right now. */
   liveText?: string;
   liveThinking?: string;
@@ -224,6 +228,7 @@ export interface AgentConversationSummary {
   state: RunState;
   messageCount: number;
   preview: string;
+  voice?: boolean;
 }
 
 // ─── Wire events (server -> client stream) ───────────────────────────────────

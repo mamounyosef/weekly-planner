@@ -16,6 +16,7 @@
     "ota-server.ts",
     "app-delivery.ts",
     "agent-service.ts",
+    "voice-service.ts",
     "src/lib/sync*.ts",
     "src/lib/settingsScope.ts",
     "src/lib/draft.ts",

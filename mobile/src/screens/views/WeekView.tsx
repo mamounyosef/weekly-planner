@@ -2259,7 +2259,7 @@ function NowMarker({ top }: { top: number }) {
   return (
     <View
       pointerEvents="none"
-      style={{ position: 'absolute', top: top - 5, left: 0, right: 0, height: 10 }}
+      style={{ position: 'absolute', top: top - 5, left: 0, right: 0, height: 10, zIndex: 30, elevation: 30 }}
     >
       <View style={{
         position: 'absolute',

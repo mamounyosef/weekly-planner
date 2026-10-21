@@ -96,10 +96,13 @@ def find_windows(titles):
 def close_windows():
     hwnds = find_windows(WINDOW_TITLES)
     log(f"closing {len(hwnds)} window(s)")
-    # ORDER MATTERS: closing the main window only HIDES it, and the app quits
-    # cleanly (saving the login cookie) only when the widget closes while the
-    # main window is hidden. Main first, then the widget.
-    for title in WINDOW_TITLES:
+    # ORDER MATTERS: the WIDGET first. Once it has gone, closing the main
+    # window really quits the app (widget-window.py `_widget_closed`), so the
+    # host exits on its own and WebView2 saves the login cookie. Main first
+    # used to race: the main window's hide runs on a thread, the widget's
+    # close often checked "is main hidden?" before it was, so main survived
+    # and the host had to be killed after 10 s on every restart.
+    for title in ("Today's Schedule", "Daily Planner"):
         for hwnd in find_windows((title,)):
             try:
                 user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
@@ -173,9 +176,14 @@ def kill_window_host():
     def host_pids():
         out = run([
             "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            # Only real interpreters: this PowerShell's OWN command line contains
+            # 'planner-launcher.pyw' too, so matching on the command line alone
+            # always found "a host still running" (itself), waited the full 10 s
+            # and then force-killed the app on every restart.
             "Get-CimInstance Win32_Process "
             "| Where-Object { $_.Name -eq 'Daily Planner.exe' "
-            "-or $_.CommandLine -like '*planner-launcher.pyw*' } "
+            "-or (($_.Name -eq 'pythonw.exe' -or $_.Name -eq 'python.exe') "
+            "-and $_.CommandLine -like '*planner-launcher.pyw*') } "
             "| ForEach-Object { $_.ProcessId }",
         ])
         if not out or not out.stdout:
