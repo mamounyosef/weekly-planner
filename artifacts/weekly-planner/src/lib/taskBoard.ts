@@ -14,7 +14,7 @@
  */
 import {
   type Task, type TaskData, type TaskFilter,
-  expandTaskRange, isStepDone, isTaskDone, makeOccId, matchesFilters
+  expandTaskRange, isRestingRepeat, isStepDone, isTaskDone, makeOccId, matchesFilters
 } from './tasks';
 import { resolveListId, type TaskList } from './taskLists';
 
@@ -66,6 +66,27 @@ export function orderKey(t: Task): number {
 export type Bucket = 'Overdue' | 'Today' | 'Tomorrow' | 'Upcoming' | 'No Date';
 export type SectionKey = Bucket | 'Done';
 
+/** The sections that are "on my plate now"; everything after them is later. */
+const NOW_SECTIONS: readonly SectionKey[] = ['Overdue', 'Today'];
+const LATER_SECTIONS: readonly SectionKey[] = ['Tomorrow', 'Upcoming', 'No Date', 'Done'];
+
+/**
+ * After which section the thick "now / later" divider is drawn, or null for none.
+ *
+ * It closes the last non-empty of Overdue and Today, and only when something
+ * is drawn below it: a divider with nothing on one side separates nothing.
+ * `counts` is how many tasks each section SHOWS, so filters decide it for free
+ * (Today alone, or Overdue alone, never gets one). A missing key counts as 0.
+ */
+export function nowDividerAfter(counts: Partial<Record<SectionKey, number>>): SectionKey | null {
+  const has = (k: SectionKey) => (counts[k] ?? 0) > 0;
+  if (!LATER_SECTIONS.some(has)) return null;
+  for (let i = NOW_SECTIONS.length - 1; i >= 0; i--) {
+    if (has(NOW_SECTIONS[i])) return NOW_SECTIONS[i];
+  }
+  return null;
+}
+
 export interface Row {
   occId: string;
   task: Task;
@@ -115,6 +136,8 @@ export function buildTaskRows(
     for (const { occId, occDate } of expandTaskRange(t, from, to, { autoRollRecurring: autoRollRecurringTasks, today })) {
       const done = isTaskDone(t, occDate);
       if (done && occDate < staleBefore) continue;
+      // A frequent repeat just ticked off: its next date waits off the list.
+      if (!done && isRestingRepeat(t, occDate, today)) continue;
       rows.push({ occId, task: t.recur ? { ...t, occDate } : t, due: occDate, done });
     }
   }

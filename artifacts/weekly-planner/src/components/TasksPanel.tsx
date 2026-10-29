@@ -13,7 +13,7 @@ import {
 } from '@/lib/recurrence';
 import type { TimeFormat } from '@/lib/settingsSync';
 import {
-  ALL_TASK_FILTERS, TASK_FILTER_LABELS, expandTaskRange, isTaskDone,
+  ALL_TASK_FILTERS, TASK_FILTER_LABELS, expandTaskRange, isRestingRepeat, isTaskDone,
   taskBucket, todayYmd,
   type Task, type TaskData, type TaskFilter,
 } from '@/lib/tasks';
@@ -22,7 +22,7 @@ import {
   type TaskList as TaskListDef,
 } from '@/lib/taskLists';
 import { useReorder } from '@/lib/useReorder';
-import { compareStepRows, rowComparator, type SortMode } from '@/lib/taskBoard';
+import { compareStepRows, nowDividerAfter, rowComparator, type SortMode } from '@/lib/taskBoard';
 import { planReorder } from '@/lib/dragSort';
 import { TASK_SORT_MODE_KEY } from '@/lib/taskViewPrefs';
 import { useViewport } from '@/hooks/use-mobile';
@@ -154,6 +154,8 @@ function useTaskRows(tasks: TaskData, today: string, autoRollRecurringTasks = tr
       for (const { occId, occDate } of expandTaskRange(t, from, to, { autoRollRecurring: autoRollRecurringTasks, today })) {
         const done = isTaskDone(t, occDate);
         if (done && occDate < staleBefore) continue;
+        // A frequent repeat just ticked off: its next date waits off the list.
+        if (!done && isRestingRepeat(t, occDate, today)) continue;
         rows.push({ occId, task: t.recur ? { ...t, occDate } : t, due: occDate, done });
       }
     }
@@ -321,15 +323,10 @@ function TasksPanel({
   const [composerTitle, setComposerTitle] = useState('');
   const [composerFocused, setComposerFocused] = useState(false);
   /**
-   * NO DATE, until one is asked for.
-   *
-   * This used to open on today, which is a guess dressed up as an answer. Most
-   * of what goes on a task list is not something that happens today -- it is
-   * something to get done -- and filing it under today means finding it in the
-   * overdue bucket tomorrow morning having never had a deadline at all. The
-   * chips are right there for Today and Tomorrow when a day IS meant.
+   * Today, by default (the user's choice): a new task lands in Today unless
+   * another day or No Date is picked with the chips.
    */
-  const [composerDate, setComposerDate] = useState<string | null>(null);
+  const [composerDate, setComposerDate] = useState<string | null>(today);
   const prevTodayRef = useRef(today);
 
   useEffect(() => {
@@ -350,12 +347,25 @@ function TasksPanel({
   // Which list the composer files into. It follows the tab you're on, because
   // that's what "add a task here" means — but it stays overridable, so you can
   // sit on one list and throw something onto another without switching.
-  const [composerListId, setComposerListId] = useState<string>(() => selectedListId ?? GENERAL_LIST_ID);
+  // With several lists shown, it keeps your pick while that list is still in
+  // view, and otherwise lands on the first shown list (rail order), so a new
+  // task never drops into a list you aren't looking at.
+  const firstShownListId = useMemo(
+    () => lists.find(l => selectedListIds.includes(l.id))?.id ?? GENERAL_LIST_ID,
+    [lists, selectedListIds],
+  );
+  const selectedListKey = selectedListIds.join('|');
+  const [composerListId, setComposerListId] = useState<string>(() => firstShownListId);
   const [showListPicker, setShowListPicker] = useState(false);
   useEffect(() => {
-    setComposerListId(selectedListId ?? GENERAL_LIST_ID);
+    setComposerListId(cur => {
+      if (selectedListIds.length === 0) return GENERAL_LIST_ID;
+      if (selectedListIds.length > 1 && selectedListIds.includes(cur)) return cur;
+      return firstShownListId;
+    });
     setShowListPicker(false);
-  }, [selectedListId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedListKey, firstShownListId]);
   // The rail's inline editor: `null` closed, `'new'` creating, otherwise the id
   // of the list being edited.
   const [listEditor, setListEditor] = useState<string | null>(null);
@@ -413,9 +423,9 @@ function TasksPanel({
 
   const resetComposer = useCallback(() => {
     setComposerTitle('');
-    // Back to no date, matching how the composer opens: typing one dated task
-    // must not silently date the next five.
-    setComposerDate(null);
+    // Back to today, matching how the composer opens: picking another day for
+    // one task must not silently date the next five.
+    setComposerDate(today);
     setComposerTime(null);
     setComposerRecur(undefined);
     setComposerNotes('');
@@ -458,6 +468,14 @@ function TasksPanel({
 
   // Sectioning & Sorting
   const sections = useMemo(() => sectionize(rows, filters, today, sortMode), [rows, filters, today, sortMode]);
+  const dividerAfter = nowDividerAfter({
+    Overdue: sections.open.Overdue.length,
+    Today: sections.open.Today.length,
+    Tomorrow: sections.open.Tomorrow.length,
+    Upcoming: sections.open.Upcoming.length,
+    'No Date': sections.open['No Date'].length,
+    Done: sections.done.length,
+  });
   // The same sections with NO list filter: a drag made while some lists are
   // selected is placed against this, so the lists that are not on screen keep
   // their order (see handleDropTask).
@@ -1390,8 +1408,8 @@ function TasksPanel({
 
           {Object.entries(sections.open).map(([name, list]) => (
             list.length === 0 ? null : (
+              <React.Fragment key={name}>
               <Section
-                key={name}
                 name={name}
                 label={
                   name === 'Today'
@@ -1431,6 +1449,8 @@ function TasksPanel({
                   onOpenMenu={onOpenMenu}
                 />
               </Section>
+              {dividerAfter === name && <NowDivider theme={theme} />}
+              </React.Fragment>
             )
           ))}
 
@@ -2254,6 +2274,24 @@ function QuickPill({ icon, label, title, active, disabled, theme, onClick }: {
       {icon}
       <span>{label}</span>
     </button>
+  );
+}
+
+/**
+ * The thick line under what is on your plate now (Overdue + Today), parting it
+ * from everything later. Where it goes is `nowDividerAfter` (taskBoard.ts).
+ */
+function NowDivider({ theme }: { theme: TaskTheme }) {
+  return (
+    <div role="separator" aria-label="Later tasks below" className="px-1 pt-1 pb-2">
+      <div
+        className="h-[3px] rounded-full"
+        style={{
+          background: `linear-gradient(90deg, ${theme.accent}00, ${theme.accent}b3 18%, ${theme.accent}b3 82%, ${theme.accent}00)`,
+          boxShadow: `0 0 10px ${theme.accent}40`,
+        }}
+      />
+    </div>
   );
 }
 

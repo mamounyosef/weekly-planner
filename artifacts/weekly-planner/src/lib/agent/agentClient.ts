@@ -14,9 +14,14 @@ import type {
 import { AGENT_LIMITS } from './agentTypes';
 import { DEFAULT_MODEL, isKnownModel } from './agentModels';
 import { readTaskView } from '../taskViewPrefs';
+import { thinkSettingFor } from './thinkPrefs';
+import type { AgentKeysStatus } from './agentTypes';
+import type { Provider } from './agentModels';
 
 export interface AgentStatus {
   configured: boolean;
+  /** Which services have at least one key. */
+  providers?: Record<Provider, boolean>;
   model: string | null;
   /** The server's default, used until this device picks one. */
   defaultModel?: string;
@@ -188,7 +193,11 @@ export function useAgent(enabled: boolean, opts: UseAgentOptions = {}) {
   /** What every send carries besides its own fields. */
   // `view` is this screen's Tasks panel (sort, selected lists, filters), read
   // fresh at each send, so "the order I see" means what is on screen now.
-  const extra = () => ({ model: modelRef.current, view: readTaskView(), ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
+  // Typed chats carry this device's thinking pick for the model; voice keeps its own switch.
+  const extra = () => ({
+    model: modelRef.current, view: readTaskView(),
+    ...(voiceRef.current ? { think: !!thinkRef.current } : { thinkSetting: thinkSettingFor(modelRef.current) }),
+  });
 
   // Every open starts on a fresh screen; old chats are one click away in the
   // history. A reply still being written is the exception: it stays in view.
@@ -359,6 +368,22 @@ export function useModelSpeeds(enabled: boolean, autoTest = false) {
   }, [enabled, test]);
   return { speeds, testing, error, test };
 }
+
+// ─── API keys (Settings > Assistant) ────────────────────────────────────────
+// The server keeps the keys; this side only ever sees them masked.
+
+type KeyResult = { ok: boolean; error?: string; info?: string };
+const keyCall = (url: string, method = 'POST', body: unknown = {}) =>
+  api<KeyResult>(url, method === 'GET' ? undefined : { method, body: JSON.stringify(body) }).catch((e: Error) => ({ ok: false, error: e.message }) as KeyResult);
+
+export const agentKeysApi = {
+  status: () => api<AgentKeysStatus>('/api/agent/keys'),
+  add: (p: Provider, key: string) => keyCall(`/api/agent/keys/${p}`, 'POST', { key }),
+  use: (p: Provider, i: number) => keyCall(`/api/agent/keys/${p}/${i}/use`),
+  test: (p: Provider, i: number) => keyCall(`/api/agent/keys/${p}/${i}/test`),
+  remove: (p: Provider, i: number) => keyCall(`/api/agent/keys/${p}/${i}/remove`),
+  openrouterLimits: (i: number) => api<{ ok: boolean; freeUsed?: number | null; freeLimit?: number | null }>(`/api/agent/keys/openrouter/${i}/limits`).catch(() => ({ ok: false } as { ok: boolean; freeUsed?: number | null; freeLimit?: number | null })),
+};
 
 // ─── Dictation ───────────────────────────────────────────────────────────────
 

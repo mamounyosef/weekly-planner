@@ -24,7 +24,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // engine, where the prefs live) comes in through `env`.
 
 import type { AgentConversation, AgentConversationSummary, AgentMessage } from '../agent/agentTypes';
-import { SentenceSplitter, approvalSpeech, endpointMs, questionSpeech, speakable, yesOrNo } from './speechText';
+import { SentenceSplitter, approvalSpeech, questionSpeech, speakable, yesOrNo } from './speechText';
 import type { VoiceEngine, VoiceEnv, VoicePhase, VoicePrefs } from './voiceTypes';
 
 /** What the assistant hook (PC useAgent, phone usePhoneAgent) gives voice mode. */
@@ -232,7 +232,7 @@ export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs, env: 
     interruptedRef.current = false;
     const p = envRef.current.readPrefs(); // fresh: Settings may have changed in the other window
     const session = envRef.current.createSession(
-      { voice: p.voice, speed: p.speed, endpointMs: endpointMs(p.pause), interrupt: p.interrupt, volume: p.volume, sounds: p.sounds, hints: '', livePrefs: () => { const f = envRef.current.readPrefs(); return { voice: f.voice, speed: f.speed }; } },
+      { voice: p.voice, speed: p.speed, endpointMs: p.pauseMs, trailBoost: p.trailBoost, unfinishedBoost: p.unfinishedBoost, sensitivity: p.sensitivity, maxTurnS: p.maxTurnS, interrupt: p.interrupt, volume: p.volume, sounds: p.sounds, hints: '', livePrefs: () => { const f = envRef.current.readPrefs(); return { voice: f.voice, speed: f.speed }; } },
       {
         onPhase: setPhase,
         onSpeechStart: (utt, whilePlaying) => {
@@ -283,7 +283,7 @@ export function useVoiceConversation(agent: VoiceAgent, prefs: VoicePrefs, env: 
   // Settings changed while talking: apply at once.
   useEffect(() => {
     sessionRef.current?.configure({
-      voice: prefs.voice, speed: prefs.speed, endpointMs: endpointMs(prefs.pause), interrupt: prefs.interrupt, volume: prefs.volume, sounds: prefs.sounds,
+      voice: prefs.voice, speed: prefs.speed, endpointMs: prefs.pauseMs, trailBoost: prefs.trailBoost, unfinishedBoost: prefs.unfinishedBoost, sensitivity: prefs.sensitivity, maxTurnS: prefs.maxTurnS, interrupt: prefs.interrupt, volume: prefs.volume, sounds: prefs.sounds,
     });
   }, [prefs]);
 

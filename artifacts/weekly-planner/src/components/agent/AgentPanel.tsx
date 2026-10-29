@@ -9,11 +9,11 @@ import { createPortal } from 'react-dom';
 import {
   ArrowDown, ArrowUp, AudioLines, BarChart3, Brain, CalendarSearch, Camera, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleHelp,
   Clock, FileText, History, ImagePlus, ListChecks, ListTodo, Loader2, Mic, MicOff, Pencil, Plus, Search, Settings2,
-  ArrowUpDown, Square, Tag, Timer, Trash2, Wand2, X,
+  ArrowUpDown, KeyRound, Square, Tag, Timer, Trash2, Wand2, X,
 } from 'lucide-react';
 
 import type { AgentConversation, AgentMessage, AgentToolTrace } from '@/lib/agent/agentTypes';
-import { AGENT_LIMITS } from '@/lib/agent/agentTypes';
+import { AGENT_LIMITS, keyNoteText } from '@/lib/agent/agentTypes';
 import {
   classifyFile, speechRecognitionCtor, startDictation, uploadFile, useAgent, useModelSpeeds, windowsDictation,
   type PendingAttachment,
@@ -21,11 +21,12 @@ import {
 import AgentMarkdown from './AgentMarkdown';
 import AgentOrb from './AgentOrb';
 import ModelPicker from './ModelPicker';
+import ThinkControl from './ThinkControl';
 import VoiceDock from '../voice/VoiceDock';
 import { useVoiceConversation } from '@/lib/voice/useVoiceConversation';
 import { useVoicePrefs } from '@/lib/voice/voicePrefs';
 import { WEB_VOICE_ENV } from '@/lib/voice/webVoiceEnv';
-import { fmtMoney, fmtTokens, modelInfo } from '@/lib/agent/agentModels';
+import { PROVIDER_LABEL, fmtMoney, fmtTokens, modelInfo } from '@/lib/agent/agentModels';
 import { ApprovalCard, ErrorNote, QuestionCard, ReportCard, type AgentTheme } from './AgentCards';
 import { ImagePreviewModal, type PreviewImageItem } from './ImagePreviewModal';
 
@@ -401,7 +402,10 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
           style={{ display: historyOpen ? 'none' : undefined }}
         >
           {agent.status?.configured === false && (
-            <ErrorNote theme={theme} text="The assistant has no Ollama API key. Add OLLAMA_API_KEY to the .env file in the planner folder on the PC." />
+            <ErrorNote theme={theme} text="The assistant has no API key. Add an Ollama or OpenRouter key in Settings > Assistant (or OLLAMA_API_KEY in the .env file in the planner folder on the PC)." />
+          )}
+          {agent.status?.configured && agent.status.providers && !agent.status.providers[modelInfo(agent.model).provider] && (
+            <ErrorNote theme={theme} text={`${modelInfo(agent.model).name} runs on ${PROVIDER_LABEL[modelInfo(agent.model).provider]}, and there is no ${PROVIDER_LABEL[modelInfo(agent.model).provider]} API key yet. Add one in Settings > Assistant, or pick a model on the other service.`} />
           )}
           {!conv?.messages.length && (voiceOn ? <VoiceEmpty theme={theme} /> : (
             <EmptyState theme={theme} gradient={gradient} onPick={t => { setDraft(t); inputRef.current?.focus(); }} onVoice={startVoice} />
@@ -548,6 +552,7 @@ export default function AgentPanel({ open, onClose, theme, timeFormat, fullscree
                   <AudioLines size={16} />
                 </ComposerButton>
                 <ModelPicker model={agent.model} onPick={agent.setModel} theme={theme} usage={lastUsage} chatCost={chatCost} />
+                <ThinkControl model={agent.model} theme={theme} />
                 <div className="flex-1 text-[10.5px] text-right pr-2 truncate" style={{ color: theme.sub }}>
                   {!fullscreen && !busy && width >= 470 && (draft ? 'Enter to send' : '')}
                 </div>
@@ -863,6 +868,7 @@ function AssistantBlock({ m, conv, isLast, liveText, liveThinking, theme, gradie
   return (
     <div className="agent-in">
       <div className="min-w-0 space-y-3">
+        {(m.keyNotes ?? []).map((n, i) => <KeyNote key={`${n.at}-${i}`} text={keyNoteText(n)} theme={theme} />)}
         <Thinking text={thinking} live={running && !!liveThinking && !liveText} theme={theme} />
         <Steps tools={m.tools ?? []} theme={theme} running={running} />
         {text && (
@@ -892,11 +898,24 @@ function AssistantBlock({ m, conv, isLast, liveText, liveThinking, theme, gradie
   );
 }
 
+/** This reply came through a later API key of its service, and why. */
+function KeyNote({ text, theme }: { text: string; theme: AgentTheme }) {
+  return (
+    <div
+      className="flex items-start gap-1.5 text-[11.5px] leading-snug rounded-lg px-2.5 py-1.5"
+      style={{ color: theme.darkMode ? '#fcd34d' : '#92400e', background: theme.darkMode ? 'rgba(245,158,11,0.12)' : '#fef3c7' }}
+    >
+      <KeyRound size={12} className="flex-shrink-0 mt-[2px]" />
+      <span>{text}</span>
+    </div>
+  );
+}
+
 /** Which model wrote a reply, and what it cost. Quiet until you look for it. */
 function UsageLine({ usage, theme }: { usage: NonNullable<AgentMessage['usage']>; theme: AgentTheme }) {
   const info = modelInfo(usage.model);
   const parts = [
-    info.name,
+    info.provider === 'openrouter' ? `${info.name} (OpenRouter)` : info.name,
     `${fmtTokens(usage.promptTokens)} in`,
     `${fmtTokens(usage.outputTokens)} out`,
     usage.costUsd === null ? 'price not listed' : fmtMoney(usage.costUsd),

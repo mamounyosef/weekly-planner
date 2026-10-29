@@ -200,9 +200,51 @@ export interface AgentMessage {
   error?: string;
   /** Assistant only: which model wrote it and what it cost, summed over the turn. */
   usage?: AgentUsage;
+  /** Assistant only: replies that came through a later API key, and why. */
+  keyNotes?: AgentKeyNote[];
 }
 
-/** Token counts Ollama reported for one assistant turn (all its model calls). */
+/**
+ * A reply answered through a later key of its service, because the keys
+ * before it ran out of credit or were refused. Shown on the reply.
+ */
+export interface AgentKeyNote {
+  provider: 'ollama' | 'openrouter';
+  /** Which key answered, counting from 1. */
+  key: number;
+  keys: number;
+  /** Why the keys before it were passed over. */
+  reason: string;
+  at: number;
+}
+
+/** "Answered with OpenRouter key 2 of 3: OpenRouter key 1 is out of credit (...)". */
+export function keyNoteText(n: AgentKeyNote): string {
+  const label = n.provider === 'openrouter' ? 'OpenRouter' : 'Ollama';
+  return `Answered with ${label} key ${n.key} of ${n.keys}${n.reason ? `: ${n.reason}` : ''}`;
+}
+
+/** One saved API key as the settings screens see it: never the key itself. */
+export interface AgentKeyInfo {
+  masked: string;
+  /** The key is read from the planner's .env file (OLLAMA_API_KEY), not saved in the list itself. */
+  fromEnv?: boolean;
+  /** Requests go to this key now. */
+  inUse: boolean;
+  /** Skipped until then (epoch ms), or null when it is fine. */
+  outUntil: number | null;
+  /** Why it is skipped: out of credit, or refused by the service. */
+  trouble?: 'credit' | 'rejected';
+  detail: string;
+}
+
+/** GET /api/agent/keys */
+export interface AgentKeysStatus {
+  ollama: AgentKeyInfo[];
+  openrouter: AgentKeyInfo[];
+}
+
+/** Token counts the service reported for one assistant turn (all its model calls). */
 export interface AgentUsage {
   model: string;
   /** Prompt tokens summed over every call of the turn. */
@@ -236,6 +278,8 @@ export interface AgentConversation {
   voice?: boolean;
   /** Voice chats: think before answering (slower, more careful). */
   voiceThink?: boolean;
+  /** Typed chats: the sending device's thinking pick for the model (coerced on arrival). */
+  think?: { level: string; budget?: number };
   /** The Tasks panel of the device that sent the latest message (coerced). */
   taskView?: AgentTaskView;
   /** Partial text of the assistant turn being generated right now. */

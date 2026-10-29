@@ -9,9 +9,14 @@
 //
 //   OVERDUE    late. First, loudest, and impossible to scroll past.
 //   TODAY      due now.
-//   UPCOMING   has a date, later.
-//   ANYTIME    no date at all. Not late, not urgent, not lost either.
-//   DONE       folded away, because finished work should be findable but quiet.
+//   ── a thick line: above it is what is on your plate now ──
+//   TOMORROW / UPCOMING   has a date, later.
+//   NO DATE    no date at all. Not late, not urgent, not lost either.
+//   COMPLETED  folded away, because finished work should be findable but quiet.
+//
+// The screen is laid out like the PC's Tasks panel on purpose (header, list
+// chips, date chips with counts, an add line, collapsible sections, small
+// tiles with pills), so moving between the two needs no relearning.
 //
 // The buckets come from `taskBucket` in the shared library, so the phone and the
 // PC can never disagree about what "overdue" means.
@@ -34,7 +39,7 @@
 // looks identical until the first move.
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { Image, Modal, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Row, Text, useTheme } from '../ui/kit';
@@ -48,11 +53,11 @@ import { prefs } from '../lib/prefs';
 import { usePlanner } from '../state/planner';
 import { Editor, type EditorTarget } from './Editor';
 import {
-  dueDateOf, isStepDone, stepDoneChanges, taskBucket, todayYmd, type Task,
+  ALL_TASK_FILTERS, TASK_FILTER_LABELS, dueDateOf, isStepDone, stepDoneChanges, type Task,
 } from '../lib/tasks';
 import { GENERAL_LIST_ID, resolveListId, type TaskList } from '../lib/taskLists';
 import {
-  buildTaskRows, groupTasks, DEFAULT_SORT_MODE,
+  buildTaskRows, groupTasks, nowDividerAfter, DEFAULT_SORT_MODE, SORT_MODES,
   type Node, type Row as BoardRow, type SectionKey, type SortMode,
 } from '../lib/taskBoard';
 import { planAppendOrder, planReorder } from '../lib/dragSort';
@@ -98,13 +103,13 @@ function applyOrderGuess(
 // a stripped-down copy of what the board had already worked out and could not
 // tell which DAY of a repeat one of its steps belonged to.
 
-const ORDER: { key: string; title: string; tone: 'danger' | 'accent' | 'ink' | 'faint' }[] = [
-  { key: 'Overdue', title: 'Overdue', tone: 'danger' },
-  { key: 'Today', title: 'Today', tone: 'accent' },
-  { key: 'Tomorrow', title: 'Tomorrow', tone: 'ink' },
-  { key: 'Upcoming', title: 'Upcoming', tone: 'ink' },
-  { key: 'No Date', title: 'No Date', tone: 'faint' },
-  { key: 'Done', title: 'Done', tone: 'faint' },
+const ORDER: { key: SectionKey; title: string }[] = [
+  { key: 'Overdue', title: 'Overdue' },
+  { key: 'Today', title: 'Today' },
+  { key: 'Tomorrow', title: 'Tomorrow' },
+  { key: 'Upcoming', title: 'Upcoming' },
+  { key: 'No Date', title: 'No Date' },
+  { key: 'Done', title: 'Completed' },
 ];
 
 // The rule that a task nobody has placed sorts AFTER the ones somebody has now
@@ -120,7 +125,9 @@ export function Tasks() {
 
   const [refreshing, setRefreshing] = useState(false);
   const [editing, setEditing] = useState<EditorTarget | null>(null);
-  const [showDone, setShowDone] = useState(false);
+  // Which sections are folded. Completed starts folded, as on the PC.
+  const [collapsed, setCollapsed] = useState<Partial<Record<SectionKey, boolean>>>({ Done: true });
+  const [showSortMenu, setShowSortMenu] = useState(false);
   // The saved selection, as stored. Lists that don't exist (yet) are ignored
   // where it is used (`activeListIds` below) but never pruned from here: the
   // real lists can arrive after the first paint, and pruning then wiped the
@@ -456,138 +463,176 @@ export function Tasks() {
     }
   };
 
-  /** The list a task is filed on, or null when it is on General. */
-  const listOf = (t: Task): TaskList | null => {
-    if (lists.length === 0) return null;
+  // ── Counts for the chips, the same numbers the PC panel shows ──
+  // Lists count everything open; the date chips count what the selected lists
+  // hold, before the date filters themselves narrow it.
+  const chipCounts = useMemo(() => {
+    const stored = tasks() as unknown as Record<string, Task>;
+    const rows = buildTaskRows(stored, today, true);
+    const everything = groupTasks(rows, stored, lists, [], [], today, sortMode);
+    const inLists = activeListIds.length
+      ? groupTasks(rows, stored, lists, activeListIds, [], today, sortMode)
+      : everything;
+    const perList: Record<string, number> = {};
+    let all = 0;
+    for (const key of OPEN_KEYS) {
+      for (const node of everything[key]) {
+        all += 1;
+        const id = resolveListId(node.row.task.listId, lists);
+        perList[id] = (perList[id] ?? 0) + 1;
+      }
+    }
+    const byFilter: Record<TaskFilter, number> = {
+      today: inLists.Today.length,
+      overdue: inLists.Overdue.length,
+      upcoming: inLists.Tomorrow.length + inLists.Upcoming.length,
+      general: inLists['No Date'].length,
+      completed: inLists.Done.length,
+    };
+    return { all, perList, byFilter };
+  }, [tasks, today, lists, activeListIds, sortMode]);
+
+  const dividerAfter = nowDividerAfter({
+    Overdue: grouped.Overdue.length,
+    Today: grouped.Today.length,
+    Tomorrow: grouped.Tomorrow.length,
+    Upcoming: grouped.Upcoming.length,
+    'No Date': grouped['No Date'].length,
+    Done: grouped.Done.length,
+  });
+
+  // The list pill on a card, General included, exactly when the PC shows one:
+  // whenever more than one list is on screen.
+  const showListBadge = activeListIds.length !== 1 && lists.length > 1;
+  const listBadgeOf = (t: Task): TaskList | null => {
+    if (!showListBadge) return null;
     const id = resolveListId(t.listId, lists);
-    // General is the ABSENCE of a list, not a list. Printing its name on every
-    // unfiled row would put a word on most of the screen that tells nobody
-    // anything: a row with no marker is on General, by elimination.
-    if (id === GENERAL_LIST_ID) return null;
     return lists.find(l => l.id === id) ?? null;
   };
+
+  const headerTitle = activeListIds.length === 0
+    ? 'Tasks'
+    : activeListIds.length === 1
+      ? (lists.find(l => l.id === activeListIds[0])?.name ?? 'Tasks')
+      : `${activeListIds.length} Lists`;
 
   return (
     <View style={{ flex: 1, backgroundColor: p.bg }}>
       <View style={{
         paddingTop: insets.top + space.sm,
-        paddingBottom: space.md,
         borderBottomWidth: 1,
         borderBottomColor: p.line,
-        gap: space.sm,
       }}>
-        <View style={{ paddingHorizontal: space.xl }}>
-          <Text variant="caption" tone="faint">
-            {open === 0 ? 'NOTHING OUTSTANDING' : `${open} TO DO`}
-          </Text>
-          <Row style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text variant="display">Tasks</Text>
-          </Row>
-        </View>
+        {/* Title row: the same shape as the PC panel's header. */}
+        <Row style={{ paddingHorizontal: space.lg, alignItems: 'center', gap: space.md }}>
+          <View style={{
+            width: 34, height: 34, borderRadius: 10,
+            alignItems: 'center', justifyContent: 'center',
+            backgroundColor: p.accentSoft, borderWidth: 1, borderColor: p.line,
+          }}>
+            <Image source={{ uri: ICONS['check-square'] }} style={{ width: 17, height: 17, tintColor: p.accent }} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Row gap={space.sm} style={{ alignItems: 'center' }}>
+              <Text variant="heading" numberOfLines={1} style={{ flexShrink: 1 }}>{headerTitle}</Text>
+              {open > 0 ? (
+                <View style={{ minWidth: 20, paddingHorizontal: 6, height: 20, borderRadius: 10, backgroundColor: p.accent, alignItems: 'center', justifyContent: 'center' }}>
+                  <Text variant="label" style={{ color: p.accentInk, letterSpacing: 0 }}>{open}</Text>
+                </View>
+              ) : null}
+            </Row>
+            <Text variant="caption" tone="faint" style={{ fontSize: 12 }}>
+              {open === 0 ? 'Nothing outstanding' : `${openNodes} shown`} · {lists.length} {lists.length === 1 ? 'list' : 'lists'}
+            </Text>
+          </View>
+          <Pressable
+            unstable_pressDelay={PRESS_DELAY}
+            onPress={() => setShowSortMenu(true)}
+            accessibilityRole="button"
+            accessibilityLabel={`Sort: ${SORT_LABELS[sortMode]}`}
+            style={({ pressed }) => [{
+              flexDirection: 'row', alignItems: 'center', gap: 6,
+              paddingHorizontal: 10, height: 32, borderRadius: 9,
+              backgroundColor: p.surfaceAlt, borderWidth: 1, borderColor: p.line,
+            }, pressed ? PRESSED : null]}
+          >
+            <Image source={{ uri: ICONS['arrow-up-down'] }} style={{ width: 13, height: 13, tintColor: p.inkSoft }} />
+            <Text variant="caption" tone="soft" style={{ fontSize: 12, fontWeight: '600' }}>{SORT_LABELS[sortMode]}</Text>
+            <Image source={{ uri: ICONS['chevron-down'] }} style={{ width: 12, height: 12, tintColor: p.inkFaint }} />
+          </Pressable>
+        </Row>
 
-        
+        {/* Lists. */}
         {showChips ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xl, paddingVertical: space.sm, gap: space.sm }}>
-            <Pressable
-              unstable_pressDelay={PRESS_DELAY}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.lg, paddingTop: space.md, gap: space.sm }}>
+            <Chip
+              label="All"
+              count={chipCounts.all}
+              active={activeListIds.length === 0}
               onPress={() => setActiveListIds([])}
-              accessibilityRole="button"
-              accessibilityState={{ selected: activeListIds.length === 0 }}
-              android_ripple={{ color: p.accentSoft }}
-              style={({ pressed }) => [{
-                paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
-                backgroundColor: activeListIds.length === 0 ? p.accentSoft : p.surfaceAlt,
-                borderWidth: 1, borderColor: activeListIds.length === 0 ? p.accent : p.line
-              }, pressed ? PRESSED : null]}
-            >
-              <Text variant="caption" tone={activeListIds.length === 0 ? 'accent' : 'faint'}>All</Text>
-            </Pressable>
+            />
             {lists.map(l => {
               const on = activeListIds.includes(l.id);
               return (
-                <Pressable
-                  unstable_pressDelay={PRESS_DELAY}
+                <Chip
                   key={l.id}
+                  label={l.name}
+                  dot={l.color || p.ok}
+                  count={chipCounts.perList[l.id] ?? 0}
+                  active={on}
                   onPress={() => setActiveListIds(prev =>
                     prev.includes(l.id) ? prev.filter(x => x !== l.id) : [...prev, l.id]
                   )}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: on }}
-                  android_ripple={{ color: p.accentSoft }}
-                  style={({ pressed }) => [{
-                    flexDirection: 'row', alignItems: 'center', gap: space.sm,
-                    paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
-                    backgroundColor: on ? p.accentSoft : p.surfaceAlt,
-                    borderWidth: 1, borderColor: on ? p.accent : p.line
-                  }, pressed ? PRESSED : null]}
-                >
-                  {l.color ? <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: l.color }} /> : null}
-                  <Text variant="caption" tone={on ? 'accent' : 'faint'}>{l.name}</Text>
-                </Pressable>
+                />
               );
             })}
           </ScrollView>
         ) : null}
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.xl, paddingVertical: space.sm, gap: space.sm }}>
-          {['datetime', 'manual', 'title'].map((mode) => (
-            <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-              key={mode}
-              onPress={() => setSortMode(mode as SortMode)}
-              style={({ pressed }) => [{
-                paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
-                backgroundColor: sortMode === mode ? p.accentSoft : p.surfaceAlt,
-                borderWidth: 1, borderColor: sortMode === mode ? p.accent : p.line
-              }, pressed ? PRESSED : null]}
-            >
-              <Text variant="caption" tone={sortMode === mode ? 'accent' : 'faint'}>
-                {mode === 'datetime' ? 'Date' : mode === 'manual' ? 'Manual' : 'Title'}
-              </Text>
-            </Pressable>
-          ))}
-          {/* The divider carries the word too. The sort chips and the filter
-              chips share one horizontal scroller with no indicator, so on a
-              normal phone the filters begin past the right edge with nothing
-              visible to suggest there is anything there. A label at the seam is
-              what makes the row read as "and now, filters" instead of as a row
-              that happens to end. */}
-          <View style={{ width: 1, backgroundColor: p.line, marginVertical: 4, marginHorizontal: space.xs }} />
-          <Text variant="caption" tone="faint" style={{ alignSelf: 'center', marginRight: space.xs }}>Show</Text>
-          {(['today', 'overdue', 'upcoming', 'general', 'completed'] as TaskFilter[]).map((f) => {
-            // "Anytime", matching the heading these tasks appear under. The
-            // chip said General and the heading said Anytime, both on screen at
-            // once, for the same bucket.
-            const labels = { today: 'Today', overdue: 'Overdue', upcoming: 'Upcoming', general: 'Anytime', completed: 'Done' };
+        {/* Dates, like the PC's filter row. */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: space.lg, paddingTop: space.sm, gap: space.sm }}>
+          <Chip label="All" active={filters.length === 0} check onPress={() => setFilters([])} />
+          {ALL_TASK_FILTERS.map(f => {
             const active = filters.includes(f);
             return (
-              <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+              <Chip
                 key={f}
+                label={TASK_FILTER_LABELS[f]}
+                count={chipCounts.byFilter[f]}
+                active={active}
+                check
+                danger={f === 'overdue'}
                 onPress={() => setFilters(active ? filters.filter(x => x !== f) : [...filters, f])}
-                style={({ pressed }) => [{
-                  paddingHorizontal: space.md, paddingVertical: space.xs, borderRadius: 16,
-                  backgroundColor: active ? p.accentSoft : 'transparent',
-                  borderWidth: 1, borderColor: active ? p.accent : p.line
-                }, pressed ? PRESSED : null]}
-              >
-                <Text variant="caption" tone={active ? 'accent' : 'faint'}>
-                  {labels[f as keyof typeof labels]}
-                </Text>
-              </Pressable>
+              />
             );
           })}
         </ScrollView>
 
+        {/* Add a task: the PC's composer line. It opens the full editor. */}
+        <View style={{ paddingHorizontal: space.lg, paddingVertical: space.md }}>
+          <Pressable
+            unstable_pressDelay={TAP_DELAY}
+            onPress={() => setEditing({ store: 'tasks', date: today, listId: filter ?? undefined })}
+            accessibilityRole="button"
+            accessibilityLabel="Add a task"
+            android_ripple={{ color: p.accentSoft }}
+            style={({ pressed }) => [{
+              flexDirection: 'row', alignItems: 'center', gap: space.sm,
+              paddingHorizontal: space.md, height: 42, borderRadius: 12,
+              backgroundColor: p.surface, borderWidth: 1.5, borderColor: p.line,
+            }, pressed ? PRESSED : null]}
+          >
+            <Image source={{ uri: ICONS.plus }} style={{ width: 16, height: 16, tintColor: p.inkFaint }} />
+            <Text variant="body" tone="faint" style={{ fontSize: 14 }}>Add a new task...</Text>
+          </Pressable>
+        </View>
       </View>
-
-
 
       <SortableScrollView
         contentContainerStyle={{
-          paddingHorizontal: space.xl,
-          paddingTop: space.lg,
-          paddingBottom: TAB_STACK_BOTTOM_INSET + 120,
+          paddingHorizontal: space.md,
+          paddingTop: space.md,
+          paddingBottom: TAB_STACK_BOTTOM_INSET + 40,
         }}
         keyboardShouldPersistTaps="handled"
         refreshControl={
@@ -602,142 +647,236 @@ export function Tasks() {
             <Text variant="caption" tone="faint" style={{ textAlign: 'center', maxWidth: 260 }}>
               {filter
                 ? 'Anything you add while this list is selected lands here.'
-                : 'Add one with the button below, or on your PC. They meet in the middle.'}
+                : 'Add one above, or on your PC. They meet in the middle.'}
             </Text>
           </View>
         ) : null}
 
-        
         {ORDER.map(section => {
-          const nodes = grouped[section.key as keyof typeof grouped] ?? [];
+          const key = section.key as SectionKey;
+          const nodes = grouped[key] ?? [];
           if (!nodes || nodes.length === 0) return null;
 
-          const collapsible = section.key === 'Done';
-          const visible = collapsible && !showDone ? [] : nodes;
+          const isCollapsed = !!collapsed[key];
+          const visible = isCollapsed ? [] : nodes;
+          const danger = key === 'Overdue';
+          const dateLabel = key === 'Today' ? shortDate(today)
+            : key === 'Tomorrow' ? shortDate(ymd(addDays(now, 1)))
+              : null;
 
           return (
-            <View key={section.key} style={{ marginBottom: space.xl }}>
+            <View key={key} style={{ marginBottom: space.sm }}>
               <Pressable
-        unstable_pressDelay={PRESS_DELAY}
-                onPress={collapsible ? () => setShowDone(v => !v) : undefined}
-                disabled={!collapsible}
-                style={({ pressed }) => [{ paddingVertical: space.md }, pressed ? PRESSED : null]}
+                unstable_pressDelay={PRESS_DELAY}
+                onPress={() => setCollapsed(c => ({ ...c, [key]: !c[key] }))}
+                accessibilityRole="button"
+                accessibilityState={{ expanded: !isCollapsed }}
+                style={({ pressed }) => [{ paddingVertical: space.sm, paddingHorizontal: space.xs }, pressed ? PRESSED : null]}
               >
-                <Row style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-                  <Text
-                    variant="label"
-                    style={{
-                      letterSpacing: 1,
-                      color: section.tone === 'danger' ? p.danger
-                        : section.tone === 'accent' ? p.accent
-                          : section.tone === 'ink' ? p.ink : p.inkFaint,
-                    }}
-                  >
-                    {section.title.toUpperCase()}
+                <Row gap={space.sm} style={{ alignItems: 'center' }}>
+                  <Image
+                    source={{ uri: ICONS['chevron-down'] }}
+                    style={{ width: 14, height: 14, tintColor: p.inkFaint, transform: [{ rotate: isCollapsed ? '-90deg' : '0deg' }] }}
+                  />
+                  <Text variant="bodyStrong" style={{ fontSize: 14, color: danger ? p.danger : p.ink }}>
+                    {section.title}
                   </Text>
-                  <Row gap={space.md} style={{ alignItems: 'center' }}>
-                    {collapsible && (
-                      <View style={{ paddingHorizontal: space.sm, paddingVertical: space.xs, backgroundColor: p.surfaceAlt, borderRadius: 16 }}>
-                        <Text variant="bodyStrong" tone="accent" style={{ fontSize: 16 }}>
-                          {showDone ? '▴' : '▾'}
-                        </Text>
-                      </View>
-                    )}
-                    <Text variant="caption" tone="faint">
-                      {nodes.length}
-                    </Text>
-                  </Row>
+                  {dateLabel ? (
+                    <Text variant="caption" tone="faint" style={{ fontSize: 12 }}>{dateLabel}</Text>
+                  ) : null}
+                  <Text variant="caption" style={{ marginLeft: 'auto', fontSize: 12, color: danger ? p.danger : p.inkFaint }}>
+                    {nodes.length}
+                  </Text>
                 </Row>
               </Pressable>
 
               {/* The gap belongs to the LIST, not to this wrapper: a wrapper's
                   gap sits between its own children, and it has exactly one. */}
-              <View style={{ marginTop: space.sm }}>
-                <SortableList
-                  data={visible}
-                  gap={space.sm}
-                  // Done is in the order things were FINISHED, which is not
-                  // something to arrange. A drag there used to lift the row,
-                  // carry it, drop it, and have the list put it straight back.
-                  sortable={section.key !== 'Done'}
-                  keyExtractor={n => n.row.occId}
-                  onReorder={(fromIdx, toIdx) => moveItem(
-                    (board.whole[section.key as SectionKey] ?? nodes).map(n => n.row.task),
-                    visible.map(n => n.row.task),
-                    fromIdx,
-                    toIdx,
-                  )}
-                  renderItem={(node, _index, drag) => (
-                    <TaskCard
-                      node={node}
-                      today={today}
-                      clock={timeFormat}
-                      list={filter ? null : listOf(node.row.task)}
-                      drag={drag}
-                      occKey={node.row.occId}
-                      pending={isPending}
-                      composing={composingFor === node.row.task.id}
-                      onCompose={next => setComposingFor(next ? node.row.task.id : null)}
-                      onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
-                      onMoveChild={(fromChild, toChild) => {
-                        const steps = node.children.map(c => c.task);
-                        moveItem(steps, steps, fromChild, toChild);
-                      }}
-                      onToggle={(row, key, parent) => toggleAnimated(key, {
-                        task: row.task, parent, occDate: row.due,
-                      })}
-                      onOpen={t => setEditing({
-                        store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
-                      })}
-                    />
-                  )}
-                />
-              </View>
+              {visible.length > 0 ? (
+                <View style={{ marginTop: 2 }}>
+                  <SortableList
+                    data={visible}
+                    gap={6}
+                    // Done is in the order things were FINISHED, which is not
+                    // something to arrange. A drag there used to lift the row,
+                    // carry it, drop it, and have the list put it straight back.
+                    sortable={key !== 'Done'}
+                    keyExtractor={n => n.row.occId}
+                    onReorder={(fromIdx, toIdx) => moveItem(
+                      (board.whole[key] ?? nodes).map(n => n.row.task),
+                      visible.map(n => n.row.task),
+                      fromIdx,
+                      toIdx,
+                    )}
+                    renderItem={(node, _index, drag) => (
+                      <TaskCard
+                        node={node}
+                        today={today}
+                        clock={timeFormat}
+                        list={listBadgeOf(node.row.task)}
+                        showDate={key === 'Overdue' || key === 'Upcoming' || key === 'Done'}
+                        drag={drag}
+                        occKey={node.row.occId}
+                        pending={isPending}
+                        composing={composingFor === node.row.task.id}
+                        onCompose={next => setComposingFor(next ? node.row.task.id : null)}
+                        onAddSubtask={title => addSubtask(node.row.task, title, node.children.map(c => c.task))}
+                        onMoveChild={(fromChild, toChild) => {
+                          const steps = node.children.map(c => c.task);
+                          moveItem(steps, steps, fromChild, toChild);
+                        }}
+                        onToggle={(row, k, parent) => toggleAnimated(k, {
+                          task: row.task, parent, occDate: row.due,
+                        })}
+                        onOpen={t => setEditing({
+                          store: 'tasks', id: t.id, date: t.id === node.row.task.id ? (node.row.due ?? today) : (dueDateOf(t) ?? today),
+                        })}
+                      />
+                    )}
+                  />
+                </View>
+              ) : null}
+
+              {dividerAfter === key ? <NowDivider /> : null}
             </View>
           );
         })}
       </SortableScrollView>
 
-      <Pressable
-        unstable_pressDelay={TAP_DELAY}
-        onPress={() => setEditing({ store: 'tasks', date: today, listId: filter ?? undefined })}
-        accessibilityRole="button"
-        accessibilityLabel="Add a task"
-        android_ripple={{ color: p.accentSoft, radius: 34 }}
-        style={({ pressed }) => ({
-          position: 'absolute',
-          right: space.xl,
-          bottom: TAB_STACK_BOTTOM_INSET + space.xl,
-          width: 60, height: 60, borderRadius: 30,
-          alignItems: 'center', justifyContent: 'center',
-          backgroundColor: p.accent,
-          transform: [{ scale: pressed ? 0.94 : 1 }],
-          elevation: 8,
-          shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 12,
-          shadowOffset: { width: 0, height: 5 },
-        })}
-      >
-        <Text variant="display" style={{ color: p.accentInk, fontSize: 32, lineHeight: 36 }}>+</Text>
-      </Pressable>
+      <Modal visible={showSortMenu} transparent animationType="fade" onRequestClose={() => setShowSortMenu(false)}>
+        <Pressable style={{ flex: 1 }} onPress={() => setShowSortMenu(false)} accessibilityLabel="Close sort menu">
+          <View style={{
+            position: 'absolute', right: space.lg, top: insets.top + space.sm + 40,
+            minWidth: 180, paddingVertical: 6, borderRadius: 12,
+            backgroundColor: p.surfaceAlt, borderWidth: 1, borderColor: p.line,
+            elevation: 12, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 14, shadowOffset: { width: 0, height: 6 },
+          }}>
+            {SORT_MODES.map(mode => (
+              <Pressable
+                key={mode}
+                unstable_pressDelay={PRESS_DELAY}
+                onPress={() => { setSortMode(mode); setShowSortMenu(false); }}
+                android_ripple={{ color: p.accentSoft }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: space.md, paddingVertical: 10 }}
+              >
+                <View style={{ width: 14 }}>
+                  {sortMode === mode ? (
+                    <Image source={{ uri: ICONS.check }} style={{ width: 14, height: 14, tintColor: p.accent }} />
+                  ) : null}
+                </View>
+                <Text variant="body" style={{ fontSize: 14, color: sortMode === mode ? p.accent : p.ink }}>
+                  {SORT_LABELS[mode]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+      </Modal>
 
       <Editor target={editing} onClose={() => setEditing(null)} />
     </View>
   );
 }
 
+const OPEN_KEYS = ['Overdue', 'Today', 'Tomorrow', 'Upcoming', 'No Date'] as const;
+
+const SORT_LABELS: Record<SortMode, string> = {
+  datetime: 'Date & Time',
+  manual: 'Manual Order',
+  title: 'Title (A-Z)',
+  'title-desc': 'Title (Z-A)',
+};
+
+/** "Fri, Oct 23", as the PC writes a date. */
+function shortDate(day: string): string {
+  return new Date(`${day}T00:00:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function addDays(d: Date, n: number): Date {
+  const next = new Date(d);
+  next.setDate(next.getDate() + n);
+  return next;
+}
+
+/**
+ * The thick line under what is on your plate now (Overdue + Today), parting it
+ * from everything later. Where it goes is `nowDividerAfter` (taskBoard.ts).
+ */
+function NowDivider() {
+  const p = useTheme();
+  return (
+    <View
+      accessibilityRole="none"
+      accessibilityLabel="Later tasks below"
+      style={{ paddingTop: space.md, paddingBottom: space.xs, paddingHorizontal: space.sm }}
+    >
+      <View style={{ height: 3, borderRadius: 2, backgroundColor: p.accent, opacity: 0.7 }} />
+    </View>
+  );
+}
+
+/** A pill in the list and date rows, drawn like the PC's filter chips. */
+function Chip({ label, count, dot, active, danger, check, onPress }: {
+  label: string;
+  count?: number;
+  dot?: string;
+  active: boolean;
+  danger?: boolean;
+  /** Show a tick when on, as the PC's date chips do. */
+  check?: boolean;
+  onPress: () => void;
+}) {
+  const p = useTheme();
+  const tone = danger ? p.danger : p.accent;
+  return (
+    <Pressable
+      unstable_pressDelay={PRESS_DELAY}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active }}
+      android_ripple={{ color: p.accentSoft }}
+      style={({ pressed }) => [{
+        flexDirection: 'row', alignItems: 'center', gap: 6,
+        paddingLeft: 10, paddingRight: count != null && count > 0 ? 5 : 10, height: 30, borderRadius: 15,
+        backgroundColor: active ? `${tone}22` : p.surface,
+        borderWidth: 1, borderColor: active ? tone : p.line,
+      }, pressed ? PRESSED : null]}
+    >
+      {check && active ? (
+        <Image source={{ uri: ICONS.check }} style={{ width: 11, height: 11, tintColor: tone }} />
+      ) : null}
+      {dot ? <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: dot }} /> : null}
+      <Text variant="caption" style={{ fontSize: 12, fontWeight: '600', color: active ? tone : p.inkSoft }}>{label}</Text>
+      {count != null && count > 0 ? (
+        <View style={{
+          minWidth: 20, height: 20, paddingHorizontal: 5, borderRadius: 10,
+          alignItems: 'center', justifyContent: 'center',
+          backgroundColor: active ? tone : p.surfaceAlt,
+        }}>
+          <Text variant="label" style={{ letterSpacing: 0, fontSize: 10, color: active ? p.accentInk : p.inkSoft }}>{count}</Text>
+        </View>
+      ) : null}
+    </Pressable>
+  );
+}
+
 // ─── One task, and its steps ─────────────────────────────────────────────────
-// The card is the unit, not the row: a task and everything under it share one
-// surface, one edge stripe and one border, so a glance separates "three things
-// to do" from "one thing in three parts" without reading a word.
+// Drawn like a row of the PC's Tasks panel: a soft tile, the tick, the title,
+// and a line of small pills (list, date, time, repeat, notes) under it. The
+// card is still the unit: a task and its steps share one tile, so a glance
+// separates "three things to do" from "one thing in three parts".
 
 function TaskCard({
-  node, today, clock, list, drag, composing, occKey, pending,
+  node, today, clock, list, showDate, drag, composing, occKey, pending,
   onMoveChild, onToggle, onOpen, onCompose, onAddSubtask,
 }: {
   node: Node;
   today: string;
   clock?: string;
+  /** The list pill, or null when it would say nothing (one list on screen). */
   list: TaskList | null;
+  /** The date pill, shown where the section does not already say the day. */
+  showDate: boolean;
   drag: DragHandle;
   composing: boolean;
   /** What this row is keyed by while it waits to be written. */
@@ -760,34 +899,24 @@ function TaskCard({
   // Optimistic on purpose: everything below reads "done" from what the user has
   // just done, not from what has been stored yet.
   const done = node.row.done || pending(occKey);
-  // An explicit colour on the task wins; otherwise the list it is filed on says
-  // more at a glance than a default green does.
-  const colour = task.color ?? list?.color ?? p.ok;
+  const overdue = !done && !!due && due < today;
+  // The tick takes the task's own colour, else red when late, else neutral,
+  // as on the PC.
+  const colour = task.color ?? (overdue ? p.danger : p.inkSoft);
   const startMin = task.startTime ? fromTimeString(task.startTime) : null;
   const doneKids = children.filter(c => c.done || pending(c.occId)).length;
-
-  const meta: string[] = [];
-  if (due) {
-    meta.push(describeDue(due, today) + (startMin !== null ? ` ${formatClock(startMin, clock)}` : ''));
-  } else if (startMin !== null) {
-    meta.push(formatClock(startMin, clock));
-  }
-  if (list) meta.push(list.name);
-  if (children.length > 0) meta.push(`${doneKids} of ${children.length} done`);
+  const hasNotes = Boolean((task.description || (task as any).notes)?.trim());
+  const pills = !!list || (showDate && !!due) || startMin !== null || !!task.recur || hasNotes;
 
   return (
     <View style={{
-      borderRadius: radius.md,
-      backgroundColor: p.surface,
+      borderRadius: 14,
+      backgroundColor: overdue ? `${p.danger}14` : p.surface,
       borderWidth: 1,
-      borderColor: p.line,
+      borderColor: overdue ? `${p.danger}33` : p.line,
       overflow: 'hidden',
-      opacity: done ? 0.6 : 1,
+      opacity: done ? 0.7 : 1,
     }}>
-      <View style={{
-        position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colour,
-      }} />
-
       <Pressable
         unstable_pressDelay={PRESS_DELAY}
         onPress={() => onOpen(task)}
@@ -796,73 +925,84 @@ function TaskCard({
         style={({ pressed }) => ({
           flexDirection: 'row',
           alignItems: 'center',
-          gap: space.md,
-          padding: space.md,
+          gap: 10,
+          paddingLeft: 12,
+          paddingRight: 8,
+          paddingVertical: 9,
           opacity: pressed && !drag.active ? 0.9 : 1,
         })}
       >
-        <Tick colour={colour} done={done} label={task.title} onPress={() => onToggle(node.row, occKey, null)} />
+        <Tick colour={colour} done={done} size={20} label={task.title} onPress={() => onToggle(node.row, occKey, null)} />
 
-        <View style={{ flex: 1 }}>
-          <Row gap={space.xs} style={{ alignItems: 'center' }}>
-            {list ? (
-              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: list.color || p.ok, marginTop: 3 }} />
-            ) : null}
+        <View style={{ flex: 1, gap: 5 }}>
+          <Row gap={6} style={{ alignItems: 'center' }}>
             <Text
-              variant="bodyStrong"
+              variant="body"
               tone={done ? 'faint' : 'ink'}
               numberOfLines={2}
               // `flex: 1`, never `flexShrink`. See the note in `Today.tsx`.
-              style={{ flex: 1, textAlign: 'left' }}
+              style={{
+                flex: 1, textAlign: 'left', fontSize: 14, lineHeight: 19,
+                textDecorationLine: done ? 'line-through' : 'none',
+              }}
             >
               {task.title || 'Untitled'}
             </Text>
-            {Boolean((task.description || (task as any).notes)?.trim()) ? (
-              <Image
-                source={{ uri: ICONS['align-left'] }}
-                style={{ width: 13, height: 13, tintColor: p.inkFaint, flexShrink: 0 }}
-                resizeMode="contain"
-              />
+            {children.length > 0 ? (
+              <View style={{ paddingHorizontal: 6, borderRadius: 9, borderWidth: 1, borderColor: p.line }}>
+                <Text variant="caption" tone="faint" style={{ fontSize: 11 }}>{doneKids}/{children.length}</Text>
+              </View>
             ) : null}
-            {task.recur ? <Text variant="caption" tone="faint" style={{ fontSize: 13 }}>↻</Text> : null}
           </Row>
 
-          {meta.length > 0 ? (
-            <Text
-              variant="caption"
-              numberOfLines={1}
-              style={{
-                marginTop: 3,
-                fontSize: 12,
-                color: !done && due && due < today ? p.danger : p.inkFaint,
-              }}
-            >
-              {meta.join(' · ')}
-            </Text>
+          {pills ? (
+            <Row gap={6} style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+              {list ? (
+                <Pill>
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: list.color || p.ok }} />
+                  <Text variant="caption" tone="soft" style={{ fontSize: 11 }}>{list.name}</Text>
+                </Pill>
+              ) : null}
+              {showDate && due ? (
+                <Pill colour={overdue ? p.danger : undefined}>
+                  <Image
+                    source={{ uri: ICONS[overdue ? 'triangle-alert' : 'calendar'] }}
+                    style={{ width: 11, height: 11, tintColor: overdue ? p.danger : p.inkSoft }}
+                  />
+                  <Text variant="caption" style={{ fontSize: 11, color: overdue ? p.danger : p.inkSoft }}>{shortDate(due)}</Text>
+                </Pill>
+              ) : null}
+              {startMin !== null ? (
+                <Pill>
+                  <Image source={{ uri: ICONS.clock }} style={{ width: 11, height: 11, tintColor: p.inkSoft }} />
+                  <Text variant="caption" tone="soft" style={{ fontSize: 11 }}>{formatClock(startMin, clock)}</Text>
+                </Pill>
+              ) : null}
+              {task.recur ? (
+                <Image source={{ uri: ICONS.repeat }} style={{ width: 12, height: 12, tintColor: p.inkFaint }} accessibilityLabel="Repeats" />
+              ) : null}
+              {hasNotes ? (
+                <Image source={{ uri: ICONS['align-left'] }} style={{ width: 12, height: 12, tintColor: p.inkFaint }} accessibilityLabel="Has notes" />
+              ) : null}
+            </Row>
           ) : null}
         </View>
 
         <Pressable
-        unstable_pressDelay={PRESS_DELAY}
+          unstable_pressDelay={PRESS_DELAY}
           onPress={() => onCompose(!composing)}
           accessibilityRole="button"
           accessibilityLabel={`Add a step to ${task.title || 'this task'}`}
           hitSlop={space.sm}
           style={({ pressed }) => ({
-            width: 34, height: 34, borderRadius: 17,
+            width: 28, height: 28, borderRadius: 14,
             alignItems: 'center', justifyContent: 'center',
             borderWidth: 1,
             borderColor: composing ? p.accent : p.line,
             backgroundColor: composing || pressed ? p.accentSoft : 'transparent',
           })}
         >
-          <Text
-            variant="body"
-            tone={composing ? 'accent' : 'faint'}
-            style={{ fontSize: 18, lineHeight: 20 }}
-          >
-            +
-          </Text>
+          <Image source={{ uri: ICONS.plus }} style={{ width: 14, height: 14, tintColor: composing ? p.accent : p.inkFaint }} />
         </Pressable>
       </Pressable>
 
@@ -893,6 +1033,20 @@ function TaskCard({
           ) : null}
         </View>
       ) : null}
+    </View>
+  );
+}
+
+/** A small outlined pill under a task's title, as on the PC. */
+function Pill({ colour, children }: { colour?: string; children: React.ReactNode }) {
+  const p = useTheme();
+  return (
+    <View style={{
+      flexDirection: 'row', alignItems: 'center', gap: 4,
+      height: 20, paddingHorizontal: 7, borderRadius: 10,
+      borderWidth: 1, borderColor: colour ? `${colour}55` : p.line,
+    }}>
+      {children}
     </View>
   );
 }

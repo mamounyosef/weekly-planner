@@ -22,8 +22,10 @@ import type {
   AgentAttachment, AgentConversation, AgentConversationSummary, AgentQuestionAnswer, AgentStreamEvent,
 } from './agentTypes';
 import { AGENT_LIMITS } from './agentTypes';
-import { DEFAULT_MODEL, isKnownModel } from './agentModels';
+import { DEFAULT_MODEL, isKnownModel, type Provider } from './agentModels';
+import type { AgentKeysStatus } from './agentTypes';
 import { readPhoneTaskView } from './taskView';
+import { thinkSettingFor } from './thinkPrefs';
 
 const ACTIVE_KEY = 'planner.agentActiveConversation';
 /** This phone's own model pick. Per device: the PC keeps its own. */
@@ -117,7 +119,30 @@ export async function attachmentSource(id: string): Promise<{ uri: string; heade
 
 // ─── The hook ───────────────────────────────────────────────────────────────
 
-export interface AgentStatus { configured: boolean; model: string | null; defaultModel?: string }
+export interface AgentStatus {
+  configured: boolean;
+  /** Which services have at least one key on the PC. */
+  providers?: Record<Provider, boolean>;
+  model: string | null;
+  defaultModel?: string;
+}
+
+// ─── API keys (Settings > Assistant) ────────────────────────────────────────
+// The keys live on the PC; the phone only ever sees them masked.
+
+type KeyResult = { ok: boolean; error?: string; info?: string };
+const keyCall = (path: string, body: unknown = {}) =>
+  agentApi<KeyResult>(path, { method: 'POST', body, timeoutMs: 45_000 }).catch((e: Error) => ({ ok: false, error: e.message }) as KeyResult);
+
+export const agentKeysApi = {
+  status: () => agentApi<AgentKeysStatus>('/api/agent/keys'),
+  add: (p: Provider, key: string) => keyCall(`/api/agent/keys/${p}`, { key }),
+  use: (p: Provider, i: number) => keyCall(`/api/agent/keys/${p}/${i}/use`),
+  test: (p: Provider, i: number) => keyCall(`/api/agent/keys/${p}/${i}/test`),
+  remove: (p: Provider, i: number) => keyCall(`/api/agent/keys/${p}/${i}/remove`),
+  openrouterLimits: (i: number) => agentApi<{ ok: boolean; freeUsed?: number | null; freeLimit?: number | null }>(`/api/agent/keys/openrouter/${i}/limits`)
+    .catch(() => ({ ok: false }) as { ok: boolean; freeUsed?: number | null; freeLimit?: number | null }),
+};
 
 export interface PhoneAgentState {
   status: AgentStatus | null;
@@ -132,6 +157,20 @@ export interface PhoneAgentState {
 
 /** Voice mode keeps its own model pick, separate from the chat's. */
 const VOICE_MODEL_KEY = 'planner.agentVoiceModel';
+
+/** Every open assistant hears a model picked elsewhere on the phone (Settings > Assistant). */
+const modelListeners = new Set<(key: string, id: string) => void>();
+
+/** Picks the chat's model on this phone, from anywhere. */
+export function setPhoneChatModel(id: string) {
+  if (!isKnownModel(id)) return;
+  SecureStore.setItemAsync(MODEL_KEY, id).catch(() => {});
+  for (const l of modelListeners) l(MODEL_KEY, id);
+}
+
+export function readPhoneChatModel(): Promise<string | null> {
+  return SecureStore.getItemAsync(MODEL_KEY).then(v => (isKnownModel(v) ? v : null)).catch(() => null);
+}
 
 export interface PhoneAgentOptions {
   /** Spoken chats: new chats are voice chats, and the voice model is used. */
@@ -166,15 +205,32 @@ export function usePhoneAgent(visible: boolean, onTab = visible, opts: PhoneAgen
     if (!isKnownModel(id)) return;
     setStoredModel(id);
     SecureStore.setItemAsync(modelKey, id).catch(() => {});
+    for (const l of modelListeners) l(modelKey, id);
   }, [modelKey]);
+  useEffect(() => {
+    const hear = (key: string, id: string) => {
+      if (key === modelKey) setStoredModel(id);
+      if (key === MODEL_KEY && voice) setChatModel(id);
+    };
+    modelListeners.add(hear);
+    return () => { modelListeners.delete(hear); };
+  }, [modelKey, voice]);
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
   const thinkRef = useRef(opts.think);
   thinkRef.current = opts.think;
   /** What every send carries besides its own fields. */
   const extra = () => ({ model: modelRef.current, ...(voiceRef.current ? { think: !!thinkRef.current } : {}) });
-  /** `extra()` plus this phone's Tasks view (sort, lists, filters), read at each send. */
-  const extraWithView = async () => ({ ...extra(), view: await readPhoneTaskView() });
+  /**
+   * `extra()` plus this phone's Tasks view (sort, lists, filters), read at each
+   * send, and for typed chats this phone's thinking pick for the model (voice
+   * keeps its own switch).
+   */
+  const extraWithView = async () => ({
+    ...extra(),
+    view: await readPhoneTaskView(),
+    ...(voiceRef.current ? {} : { thinkSetting: await thinkSettingFor(modelRef.current) }),
+  });
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', s => setAppActive(s === 'active'));

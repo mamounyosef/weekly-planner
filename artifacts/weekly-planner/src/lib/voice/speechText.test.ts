@@ -8,7 +8,8 @@
 
 import assert from 'node:assert/strict';
 
-import { SentenceSplitter, approvalSpeech, endpointMs, questionSpeech, speakable, yesOrNo } from './speechText';
+import { PAUSE_STEPS, SentenceSplitter, approvalSpeech, endpointMs, questionSpeech, speakable, yesOrNo } from './speechText';
+import { coerceVoicePrefs } from './voiceTypes';
 
 let passed = 0;
 function t(name: string, fn: () => void) {
@@ -223,7 +224,33 @@ t('pause lengths', () => {
   assert.equal(endpointMs('quick'), 500);
   assert.equal(endpointMs('balanced'), 750);
   assert.equal(endpointMs('patient'), 1150);
+  assert.equal(endpointMs('relaxed'), 2000);
+  assert.equal(endpointMs('slow'), 3500);
+  assert.equal(endpointMs('unhurried'), 5500);
+  assert.equal(endpointMs('endless'), 9000);
   assert.equal(endpointMs(undefined), 750);
+  // Every step is strictly longer than the one before, and survives a save round trip.
+  for (let i = 1; i < PAUSE_STEPS.length; i++) assert.ok(PAUSE_STEPS[i].ms > PAUSE_STEPS[i - 1].ms);
+  // Old saves (a named pause) carry over to seconds; new saves are clamped to the slider.
+  for (const s of PAUSE_STEPS) assert.equal(coerceVoicePrefs({ pause: s.id }).pauseMs, s.ms);
+  assert.equal(coerceVoicePrefs({ pause: 'bogus' }).pauseMs, 750);
+  assert.equal(coerceVoicePrefs({}).pauseMs, 750);
+  assert.equal(coerceVoicePrefs({ pauseMs: 4300 }).pauseMs, 4300);
+  assert.equal(coerceVoicePrefs({ pauseMs: 50 }).pauseMs, 400);
+  assert.equal(coerceVoicePrefs({ pauseMs: 99999 }).pauseMs, 12000);
+  assert.equal(coerceVoicePrefs({ pauseMs: 'x', pause: 'slow' }).pauseMs, 3500);
+  assert.equal(coerceVoicePrefs({ pauseMs: 6000, pause: 'quick' }).pauseMs, 6000);
+  assert.equal(coerceVoicePrefs({}).trailBoost, 1.9);
+  assert.equal(coerceVoicePrefs({ trailBoost: 9 }).trailBoost, 3);
+  assert.equal(coerceVoicePrefs({ trailBoost: 0 }).trailBoost, 1);
+  assert.equal(coerceVoicePrefs({}).sensitivity, 50);
+  assert.equal(coerceVoicePrefs({ sensitivity: 250 }).sensitivity, 100);
+  assert.equal(coerceVoicePrefs({ sensitivity: -4 }).sensitivity, 0);
+  assert.equal(coerceVoicePrefs({}).maxTurnS, 45);
+  assert.equal(coerceVoicePrefs({ maxTurnS: 3 }).maxTurnS, 15);
+  assert.equal(coerceVoicePrefs({ maxTurnS: 9999 }).maxTurnS, 180);
+  assert.equal(coerceVoicePrefs({}).unfinishedBoost, 1.35);
+  assert.equal(coerceVoicePrefs({ unfinishedBoost: 5 }).unfinishedBoost, 2);
   assert.equal(endpointMs('nonsense'), 750);
 });
 

@@ -9,8 +9,10 @@
 // window can close, and the reply still finishes. Clients watch it through
 // one SSE stream per user.
 //
-// The API key never leaves this process. It is read from the repo's `.env`
-// (git-ignored) and is sent to nothing but ollama.com.
+// API keys never leave this process: Ollama's (the repo's `.env` key first,
+// then any added in Settings > Assistant) go only to ollama.com, OpenRouter's
+// only to openrouter.ai. When a key runs out of credit, the request moves to
+// the next key of the same service and the reply says so (agent-keys.ts).
 
 import fsp from 'fs/promises';
 import fsSync from 'fs';
@@ -22,7 +24,12 @@ import {
   TOOL_DEFS, READ_ONLY_TOOLS,
   type AgentWorld, type ToolOutcome, type UndoRecord, type UndoStores, type DeletionPlan, type EventData, type PrayerDay,
 } from './src/lib/agent/agentTools';
-import { DEFAULT_MODEL, MODELS, VISION_MODEL, costOf, isKnownModel, modelInfo, thinkValue } from './src/lib/agent/agentModels';
+import {
+  DEFAULT_MODEL, MODELS, PROVIDER_LABEL, VISION_MODEL, coerceThinkSetting, costOf, isKnownModel, modelInfo, thinkFields, thinkValue,
+} from './src/lib/agent/agentModels';
+import { keyTrouble, serviceErrorText } from './src/lib/agent/agentKeys';
+import { KeyFailure, KeyStore, KeysExhausted, isProvider } from './agent-keys';
+import { postWithFallback, relayStream, toOpenRouter } from './server-openrouter';
 import { coercePrayerDone } from './src/lib/prayerTimes';
 import { buildSystemPrompt } from './src/lib/agent/agentPrompt';
 import type { FocusSessionRecord } from './src/lib/focusStats';
@@ -31,7 +38,7 @@ import {
   AGENT_LIMITS,
   type AgentAttachment, type AgentConversation, type AgentConversationSummary, type AgentMessage,
   type AgentQuestion, type AgentQuestionAnswer, type AgentStreamEvent, type AgentToolTrace, type ChangeSet,
-  type AgentUsage,
+  type AgentUsage, type AgentKeyNote,
 } from './src/lib/agent/agentTypes';
 import { coerceCategories } from './src/lib/categories';
 import { coerceTaskLists } from './src/lib/taskLists';
@@ -86,7 +93,10 @@ interface Middlewares { use: (route: string, handler: (req: any, res: any, next:
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-interface OllamaConfig { apiKey: string; baseUrl: string; model: string }
+interface AgentConfig { baseUrl: string; model: string }
+
+/** The thinking fields of one request: Ollama's `think` or OpenRouter's `reasoning`. */
+type ThinkFields = ReturnType<typeof thinkFields>;
 
 function readEnvFile(rootDir: string): Record<string, string> {
   try {
@@ -102,26 +112,18 @@ function readEnvFile(rootDir: string): Record<string, string> {
   }
 }
 
-/** Re-read on every run, so a new key or model needs no server restart. */
-function loadConfig(rootDir: string): OllamaConfig | null {
-  const env = { ...readEnvFile(rootDir), ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('OLLAMA_'))) } as Record<string, string>;
-  const apiKey = env.OLLAMA_API_KEY?.trim();
-  if (!apiKey) return null;
+/** `.env` plus the process environment's OLLAMA_* / OPENROUTER_* (re-read on every use, so no restart for a new key). */
+function readEnv(rootDir: string): Record<string, string> {
+  return { ...readEnvFile(rootDir), ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('OLLAMA_') || k.startsWith('OPENROUTER_'))) } as Record<string, string>;
+}
+
+/** Re-read on every run, so a new model or base URL needs no server restart. */
+function loadConfig(rootDir: string): AgentConfig {
+  const env = readEnv(rootDir);
   return {
-    apiKey,
     baseUrl: (env.OLLAMA_BASE_URL?.trim() || 'https://ollama.com').replace(/\/+$/, ''),
     model: isKnownModel(env.OLLAMA_AGENT_MODEL?.trim()) ? env.OLLAMA_AGENT_MODEL!.trim() : DEFAULT_MODEL,
   };
-}
-
-/**
- * Thinking in a spoken chat is the user's choice ("Think before answering"):
- * it makes replies more careful and the wait several times longer. gpt-oss
- * cannot switch it off, so "off" is its lowest level.
- */
-function voiceThink(model: string, on: boolean): boolean | 'medium' | 'low' {
-  const levels = !!modelInfo(model).thinkLevels;
-  return on ? (levels ? 'medium' : true) : (levels ? 'low' : false);
 }
 
 const MAX_STEPS = 24;
@@ -211,6 +213,7 @@ const SAFE_ID = /^[a-zA-Z0-9-]{8,64}$/;
 
 export function registerAgentRoutes(middlewares: Middlewares, deps: AgentServiceDeps) {
   const { rootDir, log } = deps;
+  const keys = new KeyStore(rootDir, () => readEnv(rootDir), () => loadConfig(rootDir).baseUrl, log);
 
   const agentDir = (p: AgentUserPaths) => path.join(p.dbDir, 'agent');
   const convFile = (p: AgentUserPaths, id: string) => path.join(agentDir(p), 'conversations', `${id}.json`);
@@ -394,29 +397,34 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
    * and kept next to the upload, so switching models mid-chat or replaying a
    * long conversation never pays for the same picture twice.
    */
-  async function describeImage(auth: AgentAuth, cfg: OllamaConfig, id: string, signal: AbortSignal): Promise<string | null> {
+  async function describeImage(auth: AgentAuth, cfg: AgentConfig, id: string, signal: AbortSignal, onSwitch: (n: AgentKeyNote) => void): Promise<string | null> {
     const metaFile = path.join(uploadDir(auth.userPaths), `${id}.json`);
     const meta = await readJson<(AgentAttachment & { description?: string }) | null>(metaFile, null);
     if (!meta || meta.kind !== 'image') return null;
     if (meta.description) return meta.description;
     let b64: string;
     try { b64 = (await fsp.readFile(path.join(uploadDir(auth.userPaths), `${id}.bin`))).toString('base64'); } catch { return null; }
-    const res = await fetch(`${cfg.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: VISION_MODEL,
-        stream: false,
-        think: false,
-        options: { temperature: 0 },
-        messages: [{
-          role: 'user',
-          content: 'Transcribe this image for a planning assistant that cannot see it. Copy EVERY piece of text exactly, row by row and column by column: titles, dates, weekdays, times, places, names, links, notes. Keep tables as tables (one line per row, cells separated by " | "). Then add one line describing anything visual that matters (colour coding, which rows are highlighted or crossed out). Do not summarise, do not skip rows, do not invent anything.',
-          images: [b64],
-        }],
-      }),
-      signal,
-    });
+    let res: Response;
+    try {
+      // The reader runs on Ollama, so it uses the Ollama keys (the next one when a key is out of credit).
+      res = await keys.withKeys('ollama', signal, onSwitch, async key => {
+        const r = await fetch(`${cfg.baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: describeBody(b64),
+          signal,
+        });
+        if (!r.ok) {
+          const text = serviceErrorText(await r.clone().text().catch(() => ''));
+          const mark = keyTrouble('ollama', r.status, text, Date.now());
+          if (mark) throw new KeyFailure(mark);
+        }
+        return r;
+      });
+    } catch (err: any) {
+      if (err instanceof KeysExhausted) throw new FatalModelError(`Could not read the image with ${modelInfo(VISION_MODEL).name}: ${err.message}`);
+      throw err;
+    }
     if (!res.ok) throw new RetryableModelError(`Could not read the image with ${modelInfo(VISION_MODEL).name} (Ollama answered ${res.status}).`, res.status === 429 || res.status >= 500);
     const j: any = await res.json().catch(() => ({}));
     const text = String(j?.message?.content ?? '').trim();
@@ -425,7 +433,21 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
     return text;
   }
 
-  async function materialize(auth: AgentAuth, msgs: LlmMessage[], cfg: OllamaConfig, model: string, signal: AbortSignal): Promise<Array<Record<string, unknown>>> {
+  function describeBody(b64: string): string {
+    return JSON.stringify({
+      model: VISION_MODEL,
+      stream: false,
+      think: false,
+      options: { temperature: 0 },
+      messages: [{
+        role: 'user',
+        content: 'Transcribe this image for a planning assistant that cannot see it. Copy EVERY piece of text exactly, row by row and column by column: titles, dates, weekdays, times, places, names, links, notes. Keep tables as tables (one line per row, cells separated by " | "). Then add one line describing anything visual that matters (colour coding, which rows are highlighted or crossed out). Do not summarise, do not skip rows, do not invent anything.',
+        images: [b64],
+      }],
+    });
+  }
+
+  async function materialize(auth: AgentAuth, msgs: LlmMessage[], cfg: AgentConfig, model: string, signal: AbortSignal, onSwitch: (n: AgentKeyNote) => void): Promise<Array<Record<string, unknown>>> {
     const sees = modelInfo(model).vision;
     // Images are re-sent only for the two most recent user messages that have
     // them. Older ones were already read; resending every screenshot on every
@@ -445,7 +467,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
           // The model cannot see: it reads what the vision model transcribed.
           const parts: string[] = [];
           for (const [n, id] of m.attachmentIds.entries()) {
-            const d = await describeImage(auth, cfg, id, signal);
+            const d = await describeImage(auth, cfg, id, signal, onSwitch);
             parts.push(`--- Image ${n + 1}, as read by ${modelInfo(VISION_MODEL).name} ---\n${d ?? '(The image could not be read.)'}\n--- End of image ${n + 1} ---`);
           }
           o.content = `${m.content}\n\n${parts.join('\n\n')}`;
@@ -475,75 +497,139 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
     outputTokens: number;
   }
 
+  /**
+   * One model call, streamed, on whichever service runs the model, with that
+   * service's keys in order (agent-keys.ts): a key that is out of credit or
+   * refused hands the same request to the next key. Passing problems (a busy
+   * model, a dropped connection before anything arrived) are retried.
+   */
   async function callModel(
-    cfg: OllamaConfig,
+    cfg: AgentConfig,
     model: string,
     messages: Array<Record<string, unknown>>,
     signal: AbortSignal,
     onDelta: (d: { text?: string; thinking?: string }) => void,
-    think: boolean | 'high' | 'medium' | 'low' = thinkValue(model),
+    think: ThinkFields,
+    onSwitch: (n: AgentKeyNote) => void = () => {},
   ): Promise<ModelTurn> {
+    const provider = modelInfo(model).provider;
+    const label = PROVIDER_LABEL[provider];
     let attempt = 0;
     for (;;) {
       attempt++;
       let streamed = false;
       try {
-        const res = await fetch(`${cfg.baseUrl}/api/chat`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, messages, tools: TOOL_DEFS, stream: true, think, options: { temperature: 0.2 } }),
-          signal,
-        });
-        if (res.status === 401 || res.status === 403) throw new FatalModelError('Ollama rejected the API key. Put a valid key in the .env file (OLLAMA_API_KEY).');
-        if (res.status === 404) throw new FatalModelError(`Ollama does not know the model "${model}". Pick another one in the model menu.`);
-        if (!res.ok || !res.body) {
-          const text = await res.text().catch(() => '');
-          throw new RetryableModelError(`Ollama answered ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`, res.status === 429 || res.status >= 500);
-        }
-        const turn: ModelTurn = { content: '', thinking: '', toolCalls: [], promptTokens: 0, outputTokens: 0 };
-        const decoder = new TextDecoder();
-        let buf = '';
-        const reader = (res.body as any).getReader();
-        let idle: NodeJS.Timeout | null = null;
-        const armIdle = () => {
-          if (idle) clearTimeout(idle);
-          idle = setTimeout(() => reader.cancel().catch(() => {}), IDLE_TIMEOUT_MS);
-        };
-        armIdle();
-        try {
-          for (;;) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            armIdle();
-            buf += decoder.decode(value, { stream: true });
-            let nl: number;
-            while ((nl = buf.indexOf('\n')) >= 0) {
-              const line = buf.slice(0, nl).trim();
-              buf = buf.slice(nl + 1);
-              if (!line) continue;
-              let j: any;
-              try { j = JSON.parse(line); } catch { continue; }
-              if (j.error) throw new RetryableModelError(String(j.error), !streamed);
-              const msg = j.message ?? {};
-              if (msg.thinking) { turn.thinking += msg.thinking; streamed = true; onDelta({ thinking: msg.thinking }); }
-              if (msg.content) { turn.content += msg.content; streamed = true; onDelta({ text: msg.content }); }
-              if (Array.isArray(msg.tool_calls)) { turn.toolCalls.push(...msg.tool_calls); streamed = true; }
-              if (j.done) {
-                if (Number.isFinite(j.prompt_eval_count)) turn.promptTokens = Number(j.prompt_eval_count);
-                if (Number.isFinite(j.eval_count)) turn.outputTokens = Number(j.eval_count);
+        return await keys.withKeys(provider, signal, onSwitch, async key => {
+          const turn: ModelTurn = { content: '', thinking: '', toolCalls: [], promptTokens: 0, outputTokens: 0 };
+          const take = (j: any) => {
+            const msg = j.message ?? {};
+            if (msg.thinking) { turn.thinking += msg.thinking; streamed = true; onDelta({ thinking: msg.thinking }); }
+            if (msg.content) { turn.content += msg.content; streamed = true; onDelta({ text: msg.content }); }
+            if (Array.isArray(msg.tool_calls)) { turn.toolCalls.push(...msg.tool_calls); streamed = true; }
+            if (j.done) {
+              if (Number.isFinite(j.prompt_eval_count)) turn.promptTokens = Number(j.prompt_eval_count);
+              if (Number.isFinite(j.eval_count)) turn.outputTokens = Number(j.eval_count);
+            }
+          };
+          /** A failed response: this key is finished (next key), the model is unknown, or a passing problem. */
+          const fail = async (res: Response): Promise<never> => {
+            const text = serviceErrorText(await res.text().catch(() => ''));
+            const mark = keyTrouble(provider, res.status, text, Date.now());
+            if (mark) throw new KeyFailure(mark);
+            if (res.status === 404) throw new FatalModelError(`${label} does not know the model "${model}". Pick another one in the model menu.`);
+            throw new RetryableModelError(`${label} answered ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}`, res.status === 429 || res.status >= 500);
+          };
+          /** An error inside the stream: before anything arrived it may mean the key is out of credit. */
+          const streamError = (msg: string): Error => {
+            const mark = streamed ? null : keyTrouble(provider, 0, msg, Date.now());
+            return mark ? new KeyFailure(mark) : new RetryableModelError(msg, !streamed);
+          };
+
+          // Stops a stream that has gone quiet for too long.
+          let idle: NodeJS.Timeout | null = null;
+          let cancel: () => void = () => {};
+          const armIdle = () => {
+            if (idle) clearTimeout(idle);
+            idle = setTimeout(() => cancel(), IDLE_TIMEOUT_MS);
+          };
+          try {
+            if (provider === 'openrouter') {
+              const req = { model, messages, tools: TOOL_DEFS, options: { temperature: 0.2 }, ...think };
+              const budgeted = (think.reasoning as { max_tokens?: number } | undefined)?.max_tokens !== undefined;
+              // A reasoning budget the model lists but its provider fails on: ask again with the level instead.
+              const withoutBudget = { ...req, reasoning: undefined };
+              let res = await postWithFallback(key, toOpenRouter(req, true), signal);
+              if (budgeted && !res.ok && res.status !== 429 && res.status !== 401 && res.status !== 402 && res.status !== 403) {
+                await res.text().catch(() => '');
+                res = await postWithFallback(key, toOpenRouter(withoutBudget, true), signal);
+              }
+              if (!res.ok || !res.body) return await fail(res);
+              cancel = () => { (res.body as any)?.cancel?.().catch?.(() => {}); };
+              armIdle();
+              try {
+                await relayStream(res, take, armIdle);
+              } catch (err: any) {
+                if (signal.aborted) throw err;
+                throw streamError(String(err?.message ?? err));
+              }
+              return turn;
+            }
+
+            const body: Record<string, unknown> = { model, messages, tools: TOOL_DEFS, stream: true, options: { temperature: 0.2 }, ...think };
+            const post = () => fetch(`${cfg.baseUrl}/api/chat`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal,
+            });
+            let res = await post();
+            if (res.status === 400 && body.think !== undefined) {
+              // Some models refuse the think switch: ask again without it.
+              const text = await res.clone().text().catch(() => '');
+              if (/think/i.test(text)) {
+                await res.text().catch(() => '');
+                delete body.think;
+                res = await post();
               }
             }
+            if (!res.ok || !res.body) return await fail(res);
+            const reader = (res.body as any).getReader();
+            cancel = () => { reader.cancel().catch(() => {}); };
+            armIdle();
+            const decoder = new TextDecoder();
+            let buf = '';
+            const line = (raw: string) => {
+              const s = raw.trim();
+              if (!s) return;
+              let j: any;
+              try { j = JSON.parse(s); } catch { return; }
+              if (j.error) throw streamError(String(j.error));
+              take(j);
+            };
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              armIdle();
+              buf += decoder.decode(value, { stream: true });
+              let nl: number;
+              while ((nl = buf.indexOf('\n')) >= 0) {
+                line(buf.slice(0, nl));
+                buf = buf.slice(nl + 1);
+              }
+            }
+            line(buf);
+            return turn;
+          } finally {
+            if (idle) clearTimeout(idle);
           }
-        } finally {
-          if (idle) clearTimeout(idle);
-        }
-        return turn;
+        });
       } catch (err: any) {
         if (signal.aborted) throw new StoppedError();
         if (err instanceof FatalModelError) throw err;
+        if (err instanceof KeysExhausted) throw new FatalModelError(err.message);
         const retryable = err instanceof RetryableModelError ? err.retryable : !streamed;
         if (!retryable || attempt >= 4) {
-          throw new FatalModelError(err instanceof RetryableModelError ? err.message : `Could not reach Ollama Cloud (${err?.message ?? err}).`);
+          throw new FatalModelError(err instanceof RetryableModelError ? err.message : `Could not reach ${label} (${err?.message ?? err}).`);
         }
         await new Promise(r => setTimeout(r, [0, 1500, 4000, 9000][attempt] ?? 9000));
       }
@@ -595,11 +681,15 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       await saveConv(username, p, conv);
     };
 
+    // A reply that came through a later key says so, on the reply itself, as
+    // soon as the switch happens (once per change of key, not on every reply).
+    const onSwitch = (n: AgentKeyNote) => {
+      msg.keyNotes = [...(msg.keyNotes ?? []), n];
+      log(`AGENT ${PROVIDER_LABEL[n.provider]} key ${n.key} of ${n.keys} answering${n.reason ? `: ${n.reason}` : ''}`);
+      void saveConv(username, p, conv).catch(() => {});
+    };
+
     try {
-      if (!cfg) {
-        await finish('error', 'The assistant is not set up: OLLAMA_API_KEY is missing from the .env file on the PC.');
-        return;
-      }
       // The model this device picked for the message (validated on the way
       // in), else whatever the chat last used, else the server default.
       const model = isKnownModel(conv.model) ? conv.model : cfg.model;
@@ -613,11 +703,12 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       for (let step = 0; step < MAX_STEPS; step++) {
         const world = await worldNow();
         const system = buildSystemPrompt(world, auth.user.name || auth.user.username, { voice: !!conv.voice });
-        const messages = [{ role: 'system', content: system }, ...(await materialize(auth, llm.messages, cfg, model, controller.signal))];
+        const messages = [{ role: 'system', content: system }, ...(await materialize(auth, llm.messages, cfg, model, controller.signal, onSwitch))];
         // A spoken reply is waited for in silence: whether to think first is
-        // the user's setting for voice mode (sent with each message).
-        const think = conv.voice ? voiceThink(model, !!conv.voiceThink) : thinkValue(model);
-        const turn = await callModel(cfg, model, messages, controller.signal, onDelta, think);
+        // the user's setting for voice mode (a plain switch). A typed chat
+        // uses the sending device's thinking pick for this model.
+        const think = conv.voice ? thinkValue(model, !!conv.voiceThink) : thinkFields(model, coerceThinkSetting(conv.think));
+        const turn = await callModel(cfg, model, messages, controller.signal, onDelta, think, onSwitch);
         usage.calls += 1;
         usage.promptTokens += turn.promptTokens;
         usage.outputTokens += turn.outputTokens;
@@ -771,11 +862,11 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
 
   interface SpeedResult { model: string; firstWordMs: number | null; replyMs: number | null; steps: number; usedTools: boolean; error?: string }
 
-  async function timeOne(auth: AgentAuth, cfg: OllamaConfig, model: string, thinkOn: boolean): Promise<SpeedResult> {
+  async function timeOne(auth: AgentAuth, cfg: AgentConfig, model: string, thinkOn: boolean): Promise<SpeedResult> {
     const world = await loadWorld(auth);
     const system = buildSystemPrompt(world, auth.user.name || auth.user.username, { voice: true });
     const msgs: Array<Record<string, unknown>> = [{ role: 'system', content: system }, { role: 'user', content: 'What do I have tomorrow?' }];
-    const think = voiceThink(model, thinkOn);
+    const think = thinkValue(model, thinkOn);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90_000);
     const t0 = Date.now();
@@ -811,8 +902,10 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
 
   async function runSpeedTest(auth: AgentAuth): Promise<unknown> {
     const cfg = loadConfig(rootDir);
-    if (!cfg) throw new Error('The assistant is not set up (no OLLAMA_API_KEY).');
-    const jobs = MODELS.flatMap(m => [{ id: m.id, thinkOn: false }, { id: m.id, thinkOn: true }]);
+    if (!keys.hasKey('ollama')) throw new Error('The speed test needs an Ollama API key (Settings > Assistant).');
+    // Ollama models only: OpenRouter's free models allow 50 requests a day, and
+    // four timed requests each would spend them on a test.
+    const jobs = MODELS.filter(m => m.provider === 'ollama').flatMap(m => [{ id: m.id, thinkOn: false }, { id: m.id, thinkOn: true }]);
     const quick: Record<string, SpeedResult> = {};
     const thinking: Record<string, SpeedResult> = {};
     // One at a time: parallel requests queue behind each other on Ollama Cloud and
@@ -850,7 +943,35 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
       // GET /api/agent/status
       if (parts[0] === 'status' && method === 'GET') {
         const cfg = loadConfig(rootDir);
-        return sendJson(res, 200, { configured: !!cfg, model: cfg?.model ?? null, defaultModel: cfg?.model ?? DEFAULT_MODEL, limits: AGENT_LIMITS, dictation: deps.isLoopback(req) });
+        const providers = { ollama: keys.hasKey('ollama'), openrouter: keys.hasKey('openrouter') };
+        return sendJson(res, 200, {
+          configured: providers.ollama || providers.openrouter, providers,
+          model: cfg.model, defaultModel: cfg.model, limits: AGENT_LIMITS, dictation: deps.isLoopback(req),
+        });
+      }
+
+      // API keys (Settings > Assistant). Clients only ever see masked keys.
+      //   GET  /api/agent/keys
+      //   POST /api/agent/keys/<provider>            { key }   add after the others
+      //   POST /api/agent/keys/<provider>/<i>/use|test|remove
+      //   GET  /api/agent/keys/openrouter/<i>/limits
+      if (parts[0] === 'keys') {
+        if (parts.length === 1 && method === 'GET') return sendJson(res, 200, keys.status());
+        const prov = parts[1];
+        if (!isProvider(prov)) return sendJson(res, 404, { error: 'Unknown service.' });
+        if (parts.length === 2 && method === 'POST') {
+          let body: { key?: unknown } = {};
+          try { body = JSON.parse((await readBody(req, 8 * 1024)) || '{}'); } catch { body = {}; }
+          return sendJson(res, 200, await keys.add(prov, body.key));
+        }
+        const index = Number(parts[2]);
+        if (parts.length === 4 && Number.isInteger(index) && index >= 0) {
+          if (parts[3] === 'limits' && method === 'GET' && prov === 'openrouter') return sendJson(res, 200, await keys.openrouterLimits(index));
+          if (method === 'POST' && parts[3] === 'use') return sendJson(res, 200, keys.use(prov, index));
+          if (method === 'POST' && parts[3] === 'remove') return sendJson(res, 200, keys.remove(prov, index));
+          if (method === 'POST' && parts[3] === 'test') return sendJson(res, 200, await keys.test(prov, index));
+        }
+        return sendJson(res, 404, { error: 'Not found' });
       }
 
       // GET /api/agent/speed: the last speed test. POST: run one (about a minute).
@@ -936,7 +1057,7 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
           try { body0 = JSON.parse((await readBody(req, 16 * 1024)) || '{}'); } catch { body0 = {}; }
           const conv: AgentConversation = {
             id: newId(), title: 'New chat', createdAt: Date.now(), updatedAt: Date.now(),
-            messages: [], changeSets: {}, state: 'idle', model: isKnownModel(body0.model) ? body0.model : (cfg?.model ?? DEFAULT_MODEL),
+            messages: [], changeSets: {}, state: 'idle', model: isKnownModel(body0.model) ? body0.model : cfg.model,
             ...(body0.voice === true ? { voice: true } : {}),
           };
           await saveConv(username, p, conv);
@@ -972,6 +1093,13 @@ export function registerAgentRoutes(middlewares: Middlewares, deps: AgentService
         // unknown name is ignored rather than trusted (the run would 404).
         if (isKnownModel(body.model) && (action === 'messages' || action === 'answer' || action === 'approval')) conv.model = body.model;
         if (conv.voice && typeof body.think === 'boolean') conv.voiceThink = body.think;
+        // Typed chats: the device's thinking pick for its model (level, and a
+        // budget where the model takes one). Untrusted: coerced, then checked
+        // against the model at run time (resolveThink).
+        if (action === 'messages' || action === 'answer' || action === 'approval') {
+          const t = coerceThinkSetting(body.thinkSetting);
+          if (t) conv.think = t; else delete conv.think;
+        }
         // The Tasks panel of the device sending this (sort, lists, filters), so
         // "the order I see" means what that screen shows. Untrusted: coerced.
         if (body.view !== undefined && (action === 'messages' || action === 'answer' || action === 'approval')) {

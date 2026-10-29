@@ -30,16 +30,17 @@ import {
 import type {
   AgentApproval, AgentAttachment, AgentConversation, AgentMessage, AgentQuestion, AgentQuestionAnswer, ChangeSet,
 } from '../lib/agent/agentTypes';
-import { AGENT_LIMITS } from '../lib/agent/agentTypes';
+import { AGENT_LIMITS, keyNoteText } from '../lib/agent/agentTypes';
 import { buildReport, summarize, type Tone } from '../lib/agent/agentReport';
 import { PhoneImagePreviewModal, type PreviewItem } from './AssistantImagePreview';
 import { ModelPill } from './AssistantModelPicker';
+import { ThinkChip } from './AssistantThink';
 import { AssistantVoice } from './AssistantVoice';
 import { useVoiceConversation } from '../lib/voice/useVoiceConversation';
 import { usePhoneVoicePrefs } from '../lib/voice/phoneVoicePrefs';
 import { isAskingMicPermission } from '../lib/voice/phoneVoiceSession';
 import { PHONE_VOICE_ENV, fetchModelSpeeds, runModelSpeedTest, type PhoneModelSpeeds } from '../lib/voice/phoneVoiceEnv';
-import { fmtMoney, fmtTokens, modelInfo } from '../lib/agent/agentModels';
+import { PROVIDER_LABEL, fmtMoney, fmtTokens, modelInfo } from '../lib/agent/agentModels';
 
 export interface SharedToAssistant {
   /** Changes whenever something new is shared, so the same file twice still lands. */
@@ -319,6 +320,11 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
           contentContainerStyle={{ padding: space.lg, gap: space.lg, paddingBottom: space.xl }}
           keyboardShouldPersistTaps="handled"
         >
+          {agent.status?.configured === false ? (
+            <Note p={p} text="The assistant has no API key on the PC. Add an Ollama or OpenRouter key in Settings > Assistant." />
+          ) : agent.status?.providers && !agent.status.providers[modelInfo(agent.model).provider] ? (
+            <Note p={p} text={`${modelInfo(agent.model).name} runs on ${PROVIDER_LABEL[modelInfo(agent.model).provider]}, and there is no ${PROVIDER_LABEL[modelInfo(agent.model).provider]} API key yet. Add one in Settings > Assistant, or pick a model on the other service.`} />
+          ) : null}
           {!conv?.messages.length && (voiceOn ? <VoiceEmpty p={p} /> : <EmptyState p={p} onPick={t => setDraft(t)} onVoice={startVoice} />)}
           {conv?.messages.map(m => (m.role === 'user'
             ? <UserBubble key={m.id} m={m} p={p} onPreview={(items, index) => setPreviewState({ items, index, isPending: false })} />
@@ -421,6 +427,7 @@ export function Assistant({ visible, onTab, timeFormat, shared, onSharedHandled,
               <AgentOrb size={20} still />
             </Pressable>
             <ModelPill p={p} model={agent.model} onPick={agent.setModel} usage={lastUsage} chatCost={chatCost} />
+            <ThinkChip p={p} model={agent.model} />
             <View style={{ flex: 1 }} />
             {busy ? (
               <Pressable onPress={agent.stop} accessibilityLabel="Stop" style={{ width: 38, height: 38, borderRadius: 19, backgroundColor: p.ink, alignItems: 'center', justifyContent: 'center' }}>
@@ -649,6 +656,7 @@ function AssistantBlock({ m, conv, p, isLast, liveText, liveThinking, timeFormat
   return (
     <View>
       <View style={{ gap: space.sm, minWidth: 0 }}>
+      {(m.keyNotes ?? []).map((n, i) => <Note key={`${n.at}-${i}`} p={p} text={keyNoteText(n)} />)}
       {thinking ? (
         <Collapsible p={p} label={running && !liveText ? 'Thinking...' : 'Reasoning'}>
           <Text variant="caption" tone="soft">{thinking}</Text>
@@ -686,7 +694,7 @@ function AssistantBlock({ m, conv, p, isLast, liveText, liveThinking, timeFormat
       {m.error ? <Note p={p} text={m.error} /> : null}
       {!running && m.usage && m.usage.calls > 0 ? (
         <Text variant="caption" tone="faint" style={{ fontSize: 10.5 }}>
-          {[modelInfo(m.usage.model).name, `${fmtTokens(m.usage.promptTokens)} in`, `${fmtTokens(m.usage.outputTokens)} out`, m.usage.costUsd === null ? 'price not listed' : fmtMoney(m.usage.costUsd)].join(' · ')}
+          {[modelInfo(m.usage.model).provider === 'openrouter' ? `${modelInfo(m.usage.model).name} (OpenRouter)` : modelInfo(m.usage.model).name, `${fmtTokens(m.usage.promptTokens)} in`, `${fmtTokens(m.usage.outputTokens)} out`, m.usage.costUsd === null ? 'price not listed' : fmtMoney(m.usage.costUsd)].join(' · ')}
         </Text>
       ) : null}
       </View>

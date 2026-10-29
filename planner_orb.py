@@ -676,12 +676,15 @@ class Orb:
                 return 0
 
             if msg == WM_LBUTTONUP:
-                user32.ReleaseCapture()
+                # Read and clear the drag state BEFORE ReleaseCapture: it sends
+                # WM_CAPTURECHANGED synchronously, which resets _dragging and
+                # made every finished drag look like a plain click (pinning the widget).
                 was_drag = self._dragging
                 if was_drag:
                     self._hover_block = True
                 self._press = None
                 self._dragging = False
+                user32.ReleaseCapture()
                 if was_drag and self.voice_mode:
                     # The big voice orb was moved: remember where the small dot
                     # will be once it shrinks back, not the big window's corner.

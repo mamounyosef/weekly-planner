@@ -1022,10 +1022,9 @@ def keep_main_shown_at_start(seconds=20.0):
             if not hwnd or main_window not in webview.windows:
                 continue
             if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and user32.IsZoomed(hwnd):
-                good_since = good_since or time.monotonic()
-                if time.monotonic() - good_since > 4:
-                    break
-                continue
+                # Seen up once: from here on a minimize is the user's, so stop
+                # watching or this fights their minimize button for 20 s.
+                break
             good_since = None
             repaired += 1
             host_log("main window came up %s; maximizing it" % (

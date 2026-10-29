@@ -179,6 +179,36 @@ export function expandTaskRange(
   return results;
 }
 
+/**
+ * A repeat that comes round at least once a week: daily every 1 to 7 days, or
+ * weekly every week (on any weekdays). Anything rarer is not "frequent".
+ */
+export function isFrequentRepeat(t: Task): boolean {
+  const r = t.recur;
+  if (!r) return false;
+  const n = Number.isFinite(r.interval) && r.interval >= 1 ? r.interval : 1;
+  if (r.freq === 'daily') return n <= 7;
+  if (r.freq === 'weekly') return n === 1;
+  return false;
+}
+
+/**
+ * Should the open occurrence of `master` on `occDate` be left off the task
+ * list for now?
+ *
+ * Only a frequent repeat that has already been DONE up to here: its next date
+ * is in the future and the series started before it. Listing it under
+ * Upcoming the moment it is ticked is noise, since it will be back in Today
+ * within a week anyway. A frequent repeat whose very first date is still ahead
+ * is NOT hidden, or a task added today for next Monday would vanish until then.
+ */
+export function isRestingRepeat(master: Task, occDate: string, today: string): boolean {
+  if (!isFrequentRepeat(master) || occDate <= today) return false;
+  if (master.completedDates?.includes(occDate)) return false;
+  const anchor = master.weekKey ? ymd(addDays(parseYmd(master.weekKey), master.dayIndex ?? 0)) : null;
+  return !!anchor && anchor < occDate;
+}
+
 // ─── Completion ──────────────────────────────────────────────────────────────
 
 export function isTaskDone(t: Task, occDate?: string | null): boolean {

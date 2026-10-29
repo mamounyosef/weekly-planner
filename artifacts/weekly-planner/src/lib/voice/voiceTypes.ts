@@ -7,7 +7,7 @@
 // Web Audio in the browser (voiceSession.ts), react-native-audio-api on the
 // phone (phoneVoiceSession.ts).
 
-import type { PauseLength } from './speechText';
+import { MAX_TURN_RANGE, SENSITIVITY_RANGE, TRAIL_BOOST_RANGE, UNFINISHED_BOOST_RANGE, clampPauseMs, endpointMs, isPauseLength } from './speechText';
 
 export type VoicePhase = 'connecting' | 'loading' | 'listening' | 'hearing' | 'thinking' | 'speaking' | 'error' | 'ended';
 
@@ -15,6 +15,13 @@ export interface VoiceSessionConfig {
   voice: string;
   speed: number;
   endpointMs: number;
+  /** See VoicePrefs: extra waiting after trailing words / an unfinished sentence. */
+  trailBoost?: number;
+  unfinishedBoost?: number;
+  /** 0 to 100: how readily the mic decides you are talking. */
+  sensitivity?: number;
+  /** Seconds of one turn after which it is cut and answered. */
+  maxTurnS?: number;
   hints?: string;
   /** May the user's voice cut the assistant off? */
   interrupt: boolean;
@@ -75,8 +82,16 @@ export interface VoicePrefs {
   voice: string;
   /** 0.8 to 1.3. */
   speed: number;
-  /** How long a pause ends your turn. */
-  pause: PauseLength;
+  /** Silence that ends your turn, in ms (400 to 12000). */
+  pauseMs: number;
+  /** Wait this many times longer after "and", "um"... (1 to 3). */
+  trailBoost: number;
+  /** Wait this many times longer after a sentence that has not ended (1 to 2). */
+  unfinishedBoost: number;
+  /** 0 to 100: how readily the mic decides you are talking (50 = normal). */
+  sensitivity: number;
+  /** Longest single turn in seconds (15 to 180); it is answered when this runs out. */
+  maxTurnS: number;
   /** Talking over the assistant stops it. */
   interrupt: boolean;
   /** Soft tones when voice mode starts, hears you out, and ends. */
@@ -93,7 +108,11 @@ export interface VoicePrefs {
 export const DEFAULT_VOICE_PREFS: VoicePrefs = {
   voice: 'af_heart',
   speed: 1.0,
-  pause: 'balanced',
+  pauseMs: 750,
+  trailBoost: TRAIL_BOOST_RANGE.def,
+  unfinishedBoost: UNFINISHED_BOOST_RANGE.def,
+  sensitivity: SENSITIVITY_RANGE.def,
+  maxTurnS: MAX_TURN_RANGE.def,
   interrupt: true,
   sounds: true,
   volume: 0.9,
@@ -109,7 +128,14 @@ export function coerceVoicePrefs(raw: unknown): VoicePrefs {
   return {
     voice: typeof r.voice === 'string' && /^[a-z]{2}_[a-z]+$/.test(r.voice) ? r.voice : DEFAULT_VOICE_PREFS.voice,
     speed: Math.round(num(r.speed, 0.8, 1.3, DEFAULT_VOICE_PREFS.speed) * 100) / 100,
-    pause: r.pause === 'quick' || r.pause === 'patient' || r.pause === 'balanced' ? r.pause : DEFAULT_VOICE_PREFS.pause,
+    // Older saves hold a named pause ("patient"): carried over to its seconds.
+    pauseMs: r.pauseMs !== undefined && r.pauseMs !== null && Number.isFinite(Number(r.pauseMs))
+      ? clampPauseMs(Number(r.pauseMs))
+      : isPauseLength(r.pause) ? endpointMs(r.pause) : DEFAULT_VOICE_PREFS.pauseMs,
+    trailBoost: Math.round(num(r.trailBoost, TRAIL_BOOST_RANGE.min, TRAIL_BOOST_RANGE.max, TRAIL_BOOST_RANGE.def) * 100) / 100,
+    unfinishedBoost: Math.round(num(r.unfinishedBoost, UNFINISHED_BOOST_RANGE.min, UNFINISHED_BOOST_RANGE.max, UNFINISHED_BOOST_RANGE.def) * 100) / 100,
+    sensitivity: Math.round(num(r.sensitivity, SENSITIVITY_RANGE.min, SENSITIVITY_RANGE.max, SENSITIVITY_RANGE.def)),
+    maxTurnS: Math.round(num(r.maxTurnS, MAX_TURN_RANGE.min, MAX_TURN_RANGE.max, MAX_TURN_RANGE.def)),
     interrupt: typeof r.interrupt === 'boolean' ? r.interrupt : DEFAULT_VOICE_PREFS.interrupt,
     sounds: typeof r.sounds === 'boolean' ? r.sounds : DEFAULT_VOICE_PREFS.sounds,
     volume: Math.round(num(r.volume, 0, 1, DEFAULT_VOICE_PREFS.volume) * 100) / 100,

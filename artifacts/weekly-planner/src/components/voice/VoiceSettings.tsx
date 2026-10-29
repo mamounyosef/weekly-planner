@@ -12,7 +12,7 @@ import { isKnownModel, DEFAULT_MODEL } from '@/lib/agent/agentModels';
 import { useVoicePrefs } from '@/lib/voice/voicePrefs';
 import { fetchVoiceStatus, fetchVoices, previewVoice, stopPreview, turnOffVoiceEngine, type VoiceInfo } from '@/lib/voice/voiceSession';
 import { formatVram } from './VoiceEngineChip';
-import type { PauseLength } from '@/lib/voice/speechText';
+import { MAX_TURN_RANGE, SENSITIVITY_RANGE, PAUSE_MAX_MS, PAUSE_MIN_MS, PAUSE_STEP_MS, PAUSE_STEPS, TRAIL_BOOST_RANGE, UNFINISHED_BOOST_RANGE } from '@/lib/voice/speechText';
 
 export interface VoiceSettingsTheme {
   darkMode: boolean;
@@ -24,11 +24,6 @@ export interface VoiceSettingsTheme {
   accentLight: string;
 }
 
-const PAUSES: Array<{ id: PauseLength; label: string; desc: string }> = [
-  { id: 'quick', label: 'Quick', desc: 'Answers half a second after you stop. Snappy, may cut in.' },
-  { id: 'balanced', label: 'Balanced', desc: 'Three quarters of a second. Right for most people.' },
-  { id: 'patient', label: 'Patient', desc: 'Over a second. For thinking out loud.' },
-];
 
 function readVoiceModel(): string {
   try {
@@ -198,23 +193,71 @@ export default function VoiceSettings({ theme: t }: { theme: VoiceSettingsTheme 
 
       {card(<>
         {heading(<Pause size={18} style={{ color: t.accent }} />, 'Conversation', 'How it takes turns with you.')}
-        <div className="flex flex-col gap-2">
-          <span className="text-xs font-semibold" style={{ color: t.text }}>Pause before it answers</span>
-          <div className="grid grid-cols-3 gap-2">
-            {PAUSES.map(p => {
-              const sel = prefs.pause === p.id;
+        <div className="flex flex-col gap-3">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-semibold flex justify-between" style={{ color: t.text }}>
+              Pause before it answers <span className="tabular-nums" style={{ color: t.accent }}>{(prefs.pauseMs / 1000).toFixed(1)} s</span>
+            </span>
+            <input type="range" min={PAUSE_MIN_MS} max={PAUSE_MAX_MS} step={PAUSE_STEP_MS} value={prefs.pauseMs}
+              onChange={e => update({ pauseMs: Number(e.target.value) })} />
+            <span className="text-[11px]" style={{ color: t.sub }}>
+              How much silence ends your turn. Quick starts at about half a second; thinking out loud needs 3 seconds or more.
+            </span>
+          </label>
+          <div className="flex flex-wrap gap-1.5">
+            {PAUSE_STEPS.map(p => {
+              const sel = prefs.pauseMs === p.ms;
               return (
-                <button key={p.id} type="button" onClick={() => update({ pause: p.id })}
-                  className="rounded-2xl px-3 py-2.5 text-left transition-colors"
-                  style={{ border: `1px solid ${sel ? t.accent : t.bdr}`, background: sel ? t.accentLight : 'transparent' }}>
-                  <div className="text-[13px] font-semibold" style={{ color: sel ? t.accent : t.text }}>{p.label}</div>
-                  <div className="text-[11px] leading-snug" style={{ color: t.sub }}>{p.desc}</div>
+                <button key={p.id} type="button" title={p.desc} onClick={() => update({ pauseMs: p.ms })}
+                  className="rounded-full px-3 py-1 text-[11px] font-semibold transition-colors"
+                  style={{ border: `1px solid ${sel ? t.accent : t.bdr}`, background: sel ? t.accentLight : 'transparent', color: sel ? t.accent : t.sub }}>
+                  {p.label} {(p.ms / 1000).toFixed(p.ms % 1000 ? 1 : 0)} s
                 </button>
               );
             })}
           </div>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-semibold flex justify-between" style={{ color: t.text }}>
+              Extra wait when you trail off <span className="tabular-nums" style={{ color: t.accent }}>{prefs.trailBoost.toFixed(1)}x ({(prefs.pauseMs * prefs.trailBoost / 1000).toFixed(1)} s)</span>
+            </span>
+            <input type="range" min={TRAIL_BOOST_RANGE.min} max={TRAIL_BOOST_RANGE.max} step={TRAIL_BOOST_RANGE.step} value={prefs.trailBoost}
+              onChange={e => update({ trailBoost: Number(e.target.value) })} />
+            <span className="text-[11px]" style={{ color: t.sub }}>
+              After "and", "um", "so", "the" or a comma, the pause is multiplied by this. 1.0x turns it off.
+            </span>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-semibold flex justify-between" style={{ color: t.text }}>
+              Extra wait mid-sentence <span className="tabular-nums" style={{ color: t.accent }}>{prefs.unfinishedBoost.toFixed(2)}x ({(prefs.pauseMs * prefs.unfinishedBoost / 1000).toFixed(1)} s)</span>
+            </span>
+            <input type="range" min={UNFINISHED_BOOST_RANGE.min} max={UNFINISHED_BOOST_RANGE.max} step={UNFINISHED_BOOST_RANGE.step} value={prefs.unfinishedBoost}
+              onChange={e => update({ unfinishedBoost: Number(e.target.value) })} />
+            <span className="text-[11px]" style={{ color: t.sub }}>
+              When what it heard does not end like a finished sentence, the pause is multiplied by this. 1.00x turns it off.
+            </span>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-semibold flex justify-between" style={{ color: t.text }}>
+              Mic sensitivity <span className="tabular-nums" style={{ color: t.accent }}>{prefs.sensitivity}%</span>
+            </span>
+            <input type="range" min={SENSITIVITY_RANGE.min} max={SENSITIVITY_RANGE.max} step={SENSITIVITY_RANGE.step} value={prefs.sensitivity}
+              onChange={e => update({ sensitivity: Number(e.target.value) })} />
+            <span className="text-[11px]" style={{ color: t.sub }}>
+              How readily it decides you are talking. Raise it if it misses quiet speech or cuts you off when your voice dips; lower it if background noise starts or holds a turn. 50% is normal.
+            </span>
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-xs font-semibold flex justify-between" style={{ color: t.text }}>
+              Longest single turn <span className="tabular-nums" style={{ color: t.accent }}>{prefs.maxTurnS} s</span>
+            </span>
+            <input type="range" min={MAX_TURN_RANGE.min} max={MAX_TURN_RANGE.max} step={MAX_TURN_RANGE.step} value={prefs.maxTurnS}
+              onChange={e => update({ maxTurnS: Number(e.target.value) })} />
+            <span className="text-[11px]" style={{ color: t.sub }}>
+              If you talk this long without a break, it answers anyway. Raise it for long monologues.
+            </span>
+          </label>
           <span className="text-[11px]" style={{ color: t.sub }}>
-            When you trail off on "and", "um" or "so", it waits longer on its own.
+            Press Enter, or the done button, to end your turn at once.
           </span>
         </div>
         <Toggle t={t} on={prefs.interrupt} onChange={v => update({ interrupt: v })}

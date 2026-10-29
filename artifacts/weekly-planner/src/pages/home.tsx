@@ -35,6 +35,10 @@ import {
 } from 'date-fns';
 import { Bell, BellRing, Filter, ChevronLeft, ChevronRight, ArrowLeft, Palette, X, Moon, Sun, Pencil, CalendarRange, Trash2, Settings, AppWindow, CheckSquare, Undo2, Redo2, Target, BarChart3, Play, Pause, RotateCcw, Plus, Minus, Flame, Award, TrendingUp, Home, Clock, Timer, GripHorizontal, Link2, Link2Off, Keyboard, Volume2, Sparkles, AlertTriangle, Edit2, ListTodo, Square, Repeat, StickyNote, AlignLeft, CheckCircle2, Circle, ChevronDown, ChevronUp, MoreHorizontal, CalendarX, Check, Calendar as CalendarIcon, Tag, User as UserIcon, LogOut, Sunrise, Sunset, Activity } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
+import {
+  CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX,
+  customWindow, followToday, dayKey as customDayKey,
+} from '@/lib/customView';
 import { AnimatePresence, motion, type HTMLMotionProps } from 'framer-motion';
 import {
   FOCUS_SESSIONS_KEY,
@@ -307,10 +311,6 @@ const CALENDAR_VIEW_BUTTONS: CalendarView[] = [...CALENDAR_VIEWS, 'custom'];
 const isCalendarView = (v: unknown): v is CalendarView =>
   typeof v === 'string' && (CALENDAR_VIEW_BUTTONS as string[]).includes(v);
 
-const CUSTOM_BEFORE_MIN = -14;
-const CUSTOM_BEFORE_MAX = 14;
-const CUSTOM_AFTER_MIN  = -14;
-const CUSTOM_AFTER_MAX  = 14;
 
 // App zoom: a fine 5% step, clamped to something still usable at both ends.
 const ZOOM_MIN  = 0.5;
@@ -2654,24 +2654,13 @@ export default function DailyPlanner() {
   // Custom view widens the grid:
   // When anchored to 'day' (Current Day/Today): before/after offsets are relative to currentDate.
   // When anchored to 'week': before/after offsets are relative to week start (0) and week end (6).
-  const isDayAnchor = customAnchor === 'day';
-  const customBeforeClamped = isDayAnchor
-    ? Math.max(0, Math.min(CUSTOM_BEFORE_MAX, customDaysBefore))
-    : clamp(customDaysBefore, CUSTOM_BEFORE_MIN, CUSTOM_BEFORE_MAX);
-  const customAfterClamped = isDayAnchor
-    ? Math.max(0, Math.min(CUSTOM_AFTER_MAX, customDaysAfter))
-    : clamp(customDaysAfter, CUSTOM_AFTER_MIN, CUSTOM_AFTER_MAX);
-  const customFrom = isDayAnchor
-    ? dayViewColIdx - customBeforeClamped
-    : customBeforeClamped;
-  const rawCustomTo = isDayAnchor
-    ? dayViewColIdx + customAfterClamped + 1
-    : 6 + customAfterClamped + 1;
-  const customTo   = Math.max(customFrom + 1, rawCustomTo);
+  const customCols = customWindow(customAnchor, customDaysBefore, customDaysAfter, dayViewColIdx).cols;
+  const customFrom = customCols[0];
+  const customTo   = customCols[customCols.length - 1] + 1;
   const visibleCols   = calendarView === 'day'
     ? [dayViewColIdx]
     : calendarView === 'custom'
-      ? Array.from({ length: customTo - customFrom }, (_, i) => customFrom + i)
+      ? customCols
       : [0, 1, 2, 3, 4, 5, 6];
   const colCount      = visibleCols.length;
   /**
@@ -4143,6 +4132,20 @@ export default function DailyPlanner() {
 
   // ── Live time indicator ────────────────────────────────────────────────────
   const nowDate = useMemo(() => new Date(nowTick), [nowTick]);
+  // When the day rolls over (midnight, or waking from hibernate), a calendar
+  // still on the old today moves to the new one; otherwise the Today-anchored
+  // custom view stays centred on a past day.
+  const prevTodayRef = useRef(nowDate);
+  const todayKeyNow = customDayKey(nowDate);
+  useEffect(() => {
+    const prev = prevTodayRef.current;
+    prevTodayRef.current = nowDate;
+    setCurrentDate(d => {
+      const next = followToday(d, prev, nowDate);
+      return next === d ? d : next;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [todayKeyNow]);
   const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
   const normNowMin = normalizeMin(nowMin, dayStartH);
   const nowInView = normNowMin >= dayStartMin && normNowMin <= dayEndMin;

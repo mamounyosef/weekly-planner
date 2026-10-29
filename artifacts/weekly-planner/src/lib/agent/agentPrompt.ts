@@ -65,12 +65,22 @@ export function voicePromptSection(world: AgentWorld): string {
     const json = r.isError ? '' : JSON.stringify(r.result);
     if (json && json.length <= 12_000) glance = json;
   } catch { /* the model can still call list_items itself */ }
+  // Overdue tasks too, so "what tasks do I have?" (overdue first, then today)
+  // is also one call.
+  let overdue = '';
+  try {
+    const r = runTool('list_tasks', { section: 'Overdue' }, world);
+    const json = r.isError ? '' : JSON.stringify(r.result);
+    if (json && json.length <= 8_000) overdue = json;
+  } catch { /* the model can still call list_tasks itself */ }
   const glanceSection = glance ? `
 
 ## Today and tomorrow, already looked up
 This is the result of list_items for today and tomorrow (with prayers), read just now:
-${glance}
-Answer questions about these two days straight from it, without calling list_items for them. For any other date, for searching, and before changing or deleting anything, use the tools as usual (you need the ids anyway).` : '';
+${glance}${overdue ? `
+And the Overdue section of list_tasks, read just now:
+${overdue}` : ''}
+Answer questions about these two days${overdue ? ' and about overdue tasks' : ''} straight from it, without calling the tools for them. For any other date, for searching, and before changing or deleting anything, use the tools as usual (you need the ids anyway).` : '';
   const reminder = `
 
 REMEMBER: your reply is spoken aloud. Short, plain, natural sentences only. No markdown of any kind.`;
@@ -153,6 +163,10 @@ ${lists}
 
 Task order: the Tasks panel has sections (Overdue, Today, Tomorrow, Upcoming, No Date) and each task has ONE manual position, shared by every list and every device (PC, widget, phone). Selecting lists only filters that one order, it never has an order of its own. Read it with list_tasks; change it with reorder_tasks (never with update_tasks, and reordering never changes dates). Steps are ordered under their own task.
 ${view ? `The user's Tasks panel right now: ${view}. "The order I see" means this view: count positions among the lists shown.${world.taskView?.sort && world.taskView.sort !== 'manual' ? ' Their panel is NOT in Manual order, so after a reorder tell them it shows when they sort by Manual order.' : ''}` : "The user's Tasks panel view is not known (their device did not say)."}
+
+What is on their plate: when the user asks about their tasks in general ("what tasks do I have", "what do I have to do today", or just "tasks"), read list_tasks and answer with what is still open and due: first the Overdue tasks, then Today's, each in their manual order. Leave out tomorrow and later unless they ask for them, and if nothing is overdue or due today, say so and mention what comes next.
+
+Ticking off a repeating task: "mark X as done" means the occurrence that is due, the Overdue or Today one (use its "<id>::YYYY-MM-DD" occurrence id from list_tasks). If several missed days of it are overdue and it is unclear which they mean, ask. NEVER mark an upcoming occurrence (tomorrow or later) as done without asking first, even when it is the only one left open: it is almost never what they mean. This is the one exception to "act, do not ask permission".
 
 Google Calendar: the planner owns "${owned}" and can change items there.${others.length ? ` These calendars are mirrored READ-ONLY and can never be changed or deleted by you: ${others.map(o => `"${o}"`).join(', ')}.` : ''}
 

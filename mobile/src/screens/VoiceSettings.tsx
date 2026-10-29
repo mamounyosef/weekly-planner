@@ -13,7 +13,7 @@ import { radius, space } from '../theme';
 import { TAB_STACK_BOTTOM_INSET } from '../ui/TabBar';
 import { usePhoneVoicePrefs } from '../lib/voice/phoneVoicePrefs';
 import { fetchPhoneVoices, previewPhoneVoice, type PhoneVoiceInfo } from '../lib/voice/phoneVoiceEnv';
-import type { PauseLength } from '../lib/voice/speechText';
+import { PAUSE_STEPS, endpointMs, type PauseLength } from '../lib/voice/speechText';
 
 export function VoiceSettings() {
   const p = useTheme();
@@ -105,13 +105,29 @@ export function VoiceSettings() {
         <Text variant="label" tone="faint">PAUSE BEFORE IT ANSWERS</Text>
         <Segment<PauseLength>
           options={[{ key: 'quick', label: 'Quick' }, { key: 'balanced', label: 'Balanced' }, { key: 'patient', label: 'Patient' }]}
-          value={prefs.pause}
-          onChange={k => update({ pause: k })}
+          value={(PAUSE_STEPS.find(x => x.ms === prefs.pauseMs)?.id ?? 'none') as PauseLength}
+          onChange={k => update({ pauseMs: endpointMs(k) })}
         />
+        <Segment<PauseLength>
+          options={[{ key: 'relaxed', label: 'Relaxed' }, { key: 'slow', label: 'Slow' }, { key: 'unhurried', label: 'Unhurried' }, { key: 'endless', label: 'Longest' }]}
+          value={(PAUSE_STEPS.find(x => x.ms === prefs.pauseMs)?.id ?? 'none') as PauseLength}
+          onChange={k => update({ pauseMs: endpointMs(k) })}
+        />
+        <Text variant="label" tone="faint">EXACT PAUSE (SECONDS OF SILENCE)</Text>
+        <Stepper value={prefs.pauseMs} min={500} max={12000} step={250} onChange={v => update({ pauseMs: v })} format={v => `${(v / 1000).toFixed(2).replace(/0$/, '')} s`} />
+        <Text variant="label" tone="faint">EXTRA WAIT WHEN YOU TRAIL OFF ("AND", "UM"...)</Text>
+        <Stepper value={Math.round(prefs.trailBoost * 100)} min={100} max={300} step={10} onChange={v => update({ trailBoost: v / 100 })} format={v => `${(v / 100).toFixed(1)}x`} />
+        <Text variant="label" tone="faint">EXTRA WAIT MID-SENTENCE</Text>
+        <Stepper value={Math.round(prefs.unfinishedBoost * 100)} min={100} max={200} step={5} onChange={v => update({ unfinishedBoost: v / 100 })} format={v => `${(v / 100).toFixed(2)}x`} />
+        <Text variant="label" tone="faint">MIC SENSITIVITY</Text>
+        <Stepper value={prefs.sensitivity} min={0} max={100} step={5} onChange={v => update({ sensitivity: v })} format={v => `${v}%`} />
+        <Text variant="label" tone="faint">LONGEST SINGLE TURN</Text>
+        <Stepper value={prefs.maxTurnS} min={15} max={180} step={15} onChange={v => update({ maxTurnS: v })} format={v => `${v} s`} />
         <Text variant="caption" tone="faint">
-          {prefs.pause === 'quick' ? 'Answers half a second after you stop. Snappy, may cut in.'
-            : prefs.pause === 'patient' ? 'Waits over a second. For thinking out loud.'
-              : 'Three quarters of a second. Right for most people.'} It waits longer by itself when you trail off on "and" or "um".
+          Sensitivity: higher hears quiet speech and dips in your voice; lower ignores background noise. Past the longest turn it answers even if you keep talking.
+        </Text>
+        <Text variant="caption" tone="faint">
+          {(PAUSE_STEPS.find(s => s.ms === prefs.pauseMs)?.desc ?? `${(prefs.pauseMs / 1000).toFixed(2)} seconds of silence ends your turn.`)} Trailing off waits {(prefs.pauseMs * prefs.trailBoost / 1000).toFixed(1)} s, an unfinished sentence {(prefs.pauseMs * prefs.unfinishedBoost / 1000).toFixed(1)} s.
         </Text>
       </View>
 

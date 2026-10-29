@@ -26,9 +26,10 @@ import {
   SORT_MODES,
   DEFAULT_SORT_MODE,
   coerceSortMode,
+  nowDividerAfter,
 } from './taskBoard';
 import {
-  isStepDone, stepDoneChanges, matchesFilters,
+  isStepDone, stepDoneChanges, matchesFilters, isFrequentRepeat, isRestingRepeat,
   type Task, type TaskData, type TaskFilter,
 } from './tasks';
 import { GENERAL_LIST_ID, type TaskList } from './taskLists';
@@ -308,7 +309,10 @@ function main() {
     const out = group(tasks);
     assert.equal(out.Today.length, 0, "today's occurrence is done");
     assert.equal(out.Done.length, 1, 'and it shows as done');
-    assert.equal(out.Tomorrow.length, 1, "tomorrow's is untouched");
+    // Tomorrow's is untouched (still open), but a daily repeat just ticked off
+    // rests off the list until its day comes (see 41).
+    assert.equal(out.Tomorrow.length, 0, "tomorrow's rests off the list");
+    assert.ok(!(tasks.r.completedDates ?? []).includes(day(1)), "and is not ticked");
   }
 
   console.log('--- 11. FILTERS SAY EXACTLY WHAT tasks.ts SAYS ---');
@@ -756,6 +760,127 @@ function main() {
     const card = group(deep).Today.find(n => n.row.task.id === 'p');
     assert.deepEqual(card?.children.map(c => c.task.id), ['s'], 'one level, no more');
     assert.ok(group(deep).Today.some(n => n.row.task.id === 'ss'), 'and the grandchild is a root');
+  }
+
+  console.log('--- 41. A FREQUENT REPEAT JUST DONE RESTS OFF THE LIST ---');
+  {
+    const open = (t: Task, today = TODAY) =>
+      buildTaskRows(store(t), today).filter(r => !r.done).map(r => r.due);
+    const all = (t: Task, today = TODAY) => flatten(group(store(t), { today }));
+
+    // Every frequency that comes round at least weekly hides its next date once
+    // the current one is done.
+    const frequent: Array<[string, any]> = [
+      ['daily x1', { freq: 'daily', interval: 1 }],
+      ['daily x2', { freq: 'daily', interval: 2 }],
+      ['daily x7', { freq: 'daily', interval: 7 }],
+      ['weekly', { freq: 'weekly', interval: 1 }],
+      ['weekly Mon+Thu', { freq: 'weekly', interval: 1, byWeekday: [1, 4] }],
+    ];
+    for (const [name, recur] of frequent) {
+      const t = task('f', TODAY, { recur, completedDates: [TODAY] });
+      assert.deepEqual(open(t), [], `${name}: next date hidden after today is done`);
+      assert.equal(group(store(t)).Done.length, 1, `${name}: today still shows as done`);
+      assert.equal(group(store(t)).Upcoming.length + group(store(t)).Tomorrow.length, 0,
+        `${name}: nothing in Tomorrow or Upcoming`);
+    }
+
+    // Rarer repeats keep showing their next date, exactly as before.
+    const rare: Array<[string, any]> = [
+      ['daily x8', { freq: 'daily', interval: 8 }],
+      ['every 2 weeks', { freq: 'weekly', interval: 2 }],
+      ['monthly', { freq: 'monthly', interval: 1 }],
+      ['yearly', { freq: 'yearly', interval: 1 }],
+    ];
+    for (const [name, recur] of rare) {
+      const t = task('r', TODAY, { recur, completedDates: [TODAY] });
+      const next = open(t);
+      assert.equal(next.length, 1, `${name}: next date still listed`);
+      assert.ok(next[0]! > TODAY, `${name}: and it is in the future`);
+    }
+
+    // It comes back the day it is due, in Today.
+    {
+      const t = task('w', TODAY, { recur: { freq: 'weekly', interval: 1 } as any, completedDates: [TODAY] });
+      assert.deepEqual(open(t, day(6)), [], 'still resting the day before');
+      const back = group(store(t), { today: day(7) });
+      assert.equal(back.Today.length, 1, 'back in Today on its day');
+    }
+
+    // A frequent repeat whose first date is still ahead is NOT hidden: a task
+    // added today for next Monday must not vanish until Monday.
+    for (const [name, recur] of frequent) {
+      const t = task('n', day(3), { recur });
+      assert.deepEqual(open(t), [day(3)], `${name}: a series not yet started is listed`);
+    }
+
+    // Not done yet: today's (or an overdue) occurrence is always shown.
+    {
+      const t = task('d', day(-1), { recur: { freq: 'daily', interval: 1 } as any });
+      assert.equal(open(t).length, 1, 'an open daily is listed');
+      assert.ok(open(t)[0]! <= TODAY, 'and it is today or overdue, never hidden');
+    }
+    {
+      // Weekly, last week's date missed: it is overdue and listed.
+      const t = task('m', day(-7), { recur: { freq: 'weekly', interval: 1 } as any, completedDates: [] });
+      const rows = open(t);
+      assert.equal(rows.length, 1, 'a missed weekly is still listed');
+    }
+    {
+      // Weekly, last week done, today not its day: rests until next week.
+      const t = task('p', day(-3), { recur: { freq: 'weekly', interval: 1 } as any, completedDates: [day(-3)] });
+      assert.deepEqual(open(t), [], 'done last time, next one rests');
+      assert.deepEqual(all(t).length, 1, 'only the done row is on the board');
+    }
+
+    // A done FUTURE occurrence (ticked ahead) is still listed as done.
+    {
+      const t = task('a', day(-1), {
+        recur: { freq: 'daily', interval: 1 } as any,
+        completedDates: [day(-1), TODAY, day(1)],
+      });
+      const rows = buildTaskRows(store(t), TODAY);
+      assert.ok(rows.some(r => r.due === day(1) && r.done), 'a date ticked ahead still shows done');
+      assert.equal(rows.filter(r => !r.done).length, 0, 'and the next open one rests');
+    }
+
+    // Rubbish interval falls back to every 1, which is frequent.
+    for (const interval of [0, -3, NaN, Infinity, undefined]) {
+      const t = task('x', TODAY, { recur: { freq: 'daily', interval } as any, completedDates: [TODAY] });
+      assert.equal(isFrequentRepeat(t), true, `interval ${interval} reads as every day`);
+    }
+
+    // The pure helper agrees on its own edges.
+    const w = task('h', day(-7), { recur: { freq: 'weekly', interval: 1 } as any, completedDates: [day(-7)] });
+    assert.equal(isRestingRepeat(w, TODAY, TODAY), false, 'today is never resting');
+    assert.equal(isRestingRepeat(w, day(-1), TODAY), false, 'the past is never resting');
+    assert.equal(isRestingRepeat(w, day(7), TODAY), true, 'the next week is resting');
+    assert.equal(isRestingRepeat({ ...w, completedDates: [day(-7), day(7)] }, day(7), TODAY), false,
+      'a date already done is not "resting", it is done');
+    assert.equal(isRestingRepeat(task('o', day(-7)), day(7), TODAY), false, 'a one-off never rests');
+    assert.equal(isRestingRepeat(task('g', null, { recur: { freq: 'daily', interval: 1 } as any }), day(1), TODAY), false,
+      'an undated task never rests');
+    assert.equal(isRestingRepeat(w, day(-7), TODAY), false, 'the anchor itself never rests');
+  }
+
+  // ── The now / later divider ──
+  {
+    assert.equal(nowDividerAfter({}), null, 'nothing at all: no divider');
+    assert.equal(nowDividerAfter({ Overdue: 2, Today: 3, Tomorrow: 1 }), 'Today', 'the usual case: after Today');
+    assert.equal(nowDividerAfter({ Overdue: 2, Today: 0, Upcoming: 1 }), 'Overdue', 'no Today: closes Overdue');
+    assert.equal(nowDividerAfter({ Today: 1, 'No Date': 1 }), 'Today', 'no Overdue: after Today');
+    assert.equal(nowDividerAfter({ Overdue: 2, Today: 3 }), null, 'nothing after: no divider');
+    assert.equal(nowDividerAfter({ Today: 3 }), null, 'Today filter alone: no divider');
+    assert.equal(nowDividerAfter({ Overdue: 1 }), null, 'Overdue filter alone: no divider');
+    assert.equal(nowDividerAfter({ Tomorrow: 1, Upcoming: 4, 'No Date': 2, Done: 9 }), null, 'nothing due now: no divider');
+    assert.equal(nowDividerAfter({ Today: 1, Done: 5 }), 'Today', 'only Done below still separates');
+    assert.equal(nowDividerAfter({ Overdue: 0, Today: 0, Tomorrow: 3 }), null, 'explicit zeros count as empty');
+    assert.equal(nowDividerAfter({ Overdue: -1, Today: 2, Tomorrow: 1 }), 'Today', 'a negative count is empty');
+    assert.equal(nowDividerAfter({ Overdue: 1, Today: Number.NaN, Tomorrow: 1 }), 'Overdue', 'NaN is empty');
+    for (const later of ['Tomorrow', 'Upcoming', 'No Date', 'Done'] as SectionKey[]) {
+      assert.equal(nowDividerAfter({ Overdue: 1, [later]: 1 }), 'Overdue', `${later} alone below Overdue`);
+      assert.equal(nowDividerAfter({ Today: 1, [later]: 1 }), 'Today', `${later} alone below Today`);
+    }
   }
 
   console.log('\nALL PASS (taskBoard: sections, subtasks, cycles, filters, total order)');

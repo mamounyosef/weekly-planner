@@ -139,6 +139,11 @@ TRAILING_HOLD = re.compile(
     r"(\b(and|but|or|so|because|then|also|like|um|uh|er|the|a|an|to|for|with|at|on|in|of|my|is|are|if|when|that|which|maybe|actually)|,|-)\s*$",
     re.IGNORECASE,
 )
+# A sentence that ended: Whisper closes it with . ? or ! (maybe inside a quote).
+SENTENCE_END = re.compile(r"[.?!]+[\"')\]]*\s*$")
+MIN_ENDPOINT_MS = 350
+MAX_ENDPOINT_MS = 12000  # the longest pause setting
+MAX_HOLD_MS = 30000  # the longest a boosted wait can stretch to
 
 
 def log(*parts):
@@ -389,6 +394,10 @@ class Session:
         # (shared by all their devices) and the page's own values are ignored.
         self.user = None
         self.endpoint_ms = 700
+        self.trail_boost = 1.9
+        self.unfinished_boost = 1.35
+        self.sensitivity = 50
+        self.max_turn_s = MAX_UTTERANCE_S
         self.hints = ""
         self.prompt = None
         self.tts_gen = 0
@@ -428,9 +437,21 @@ class Session:
         if self.user is None:
             self.set_voice(msg.get("voice"), msg.get("speed"))
         try:
-            self.endpoint_ms = int(min(2000, max(350, int(msg.get("endpointMs", self.endpoint_ms)))))
+            self.endpoint_ms = int(min(MAX_ENDPOINT_MS, max(MIN_ENDPOINT_MS, int(msg.get("endpointMs", self.endpoint_ms)))))
         except (TypeError, ValueError):
             pass
+        for key, attr, lo, hi in (("trailBoost", "trail_boost", 1.0, 3.0), ("unfinishedBoost", "unfinished_boost", 1.0, 2.0)):
+            try:
+                if msg.get(key) is not None:
+                    setattr(self, attr, min(hi, max(lo, float(msg[key]))))
+            except (TypeError, ValueError):
+                pass
+        for key, attr, lo, hi in (("sensitivity", "sensitivity", 0.0, 100.0), ("maxTurnS", "max_turn_s", 15.0, 180.0)):
+            try:
+                if msg.get(key) is not None:
+                    setattr(self, attr, min(hi, max(lo, float(msg[key]))))
+            except (TypeError, ValueError):
+                pass
         if isinstance(msg.get("hints"), str):
             self.hints = msg["hints"][:600]
         if isinstance(msg.get("prompt"), str) and msg["prompt"].strip():
@@ -459,7 +480,9 @@ class Session:
             self.preroll.append(frame)
             # While the assistant talks, only a clear, sustained voice counts:
             # the echo cancellation leaves a little of its own voice behind.
-            need, th = (8, 0.85) if self.playing else (3, 0.5)
+            # Sensitivity 0..100 (50 = the old fixed 0.5): higher listens more readily.
+            base = 0.8 - 0.6 * (self.sensitivity / 100.0)
+            need, th = (8, min(0.95, base + 0.35)) if self.playing else (3, base)
             self.start_run = self.start_run + 1 if p >= th else 0
             if self.start_run >= need:
                 self.speaking = True
@@ -474,11 +497,17 @@ class Session:
             return
         self.frames.append(frame)
         self.probs.append(p)
-        self.silence_ms = self.silence_ms + FRAME_MS if p < 0.35 else 0
+        self.silence_ms = self.silence_ms + FRAME_MS if p < (0.8 - 0.6 * (self.sensitivity / 100.0)) * 0.7 else 0
         hold = self.endpoint_ms
-        if self.last_partial and TRAILING_HOLD.search(self.last_partial):
-            hold = min(2200, int(self.endpoint_ms * 1.9))
-        too_long = len(self.frames) * FRAME_MS >= MAX_UTTERANCE_S * 1000
+        if self.last_partial:
+            if TRAILING_HOLD.search(self.last_partial):
+                # Trailing off on "and", "um"...: wait much longer.
+                hold = int(self.endpoint_ms * self.trail_boost)
+            elif not SENTENCE_END.search(self.last_partial):
+                # An unfinished sentence: the speaker is probably still thinking.
+                hold = int(self.endpoint_ms * self.unfinished_boost)
+            hold = min(MAX_HOLD_MS, hold)
+        too_long = len(self.frames) * FRAME_MS >= self.max_turn_s * 1000
         if self.silence_ms >= hold or too_long:
             self._end_utterance()
             return
@@ -613,7 +642,7 @@ async def ws_handler(request):
                 kind = m.get("type")
                 if kind == "start":
                     s.configure(m)
-                    log("session voice %s, speed %.2f, pause %d ms%s" % (s.voice, s.speed, s.endpoint_ms, " (saved for %s)" % s.user if s.user else ""))
+                    log("session voice %s, speed %.2f, pause %d ms (x%.2f trailing, x%.2f unfinished), sensitivity %d, max turn %d s%s" % (s.voice, s.speed, s.endpoint_ms, s.trail_boost, s.unfinished_boost, s.sensitivity, s.max_turn_s, " (saved for %s)" % s.user if s.user else ""))
                     if await ensure_loaded(s):
                         await s.send_json({"type": "status", "stage": "ready", "device": ENGINE.device})
                 elif kind == "config":
@@ -648,6 +677,25 @@ async def ws_handler(request):
 _vram = {"at": 0.0, "mb": None}
 
 
+def _smi(query):
+    import subprocess
+    return subprocess.run(
+        ["nvidia-smi", query, "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=3,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    ).stdout
+
+
+def _gpu_used_mb():
+    try:
+        return int(_smi("--query-gpu=memory.used").splitlines()[0].strip())
+    except Exception:
+        return None
+
+
+_BASELINE_MB = _gpu_used_mb()  # the card's use before any model is loaded
+
+
 def vram_mb():
     """This process's GPU memory in MB (nvidia-smi), or None. Cached 5 s."""
     if time.monotonic() - _vram["at"] < 5:
@@ -655,16 +703,17 @@ def vram_mb():
     _vram["at"] = time.monotonic()
     _vram["mb"] = None
     try:
-        import subprocess
-        out = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=3,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout
+        out = _smi("--query-compute-apps=pid,used_memory")
         for line in out.splitlines():
             parts = [x.strip() for x in line.split(",")]
-            if len(parts) == 2 and parts[0] == str(os.getpid()):
+            if len(parts) == 2 and parts[0] == str(os.getpid()) and parts[1].isdigit():
                 _vram["mb"] = int(parts[1])
+        if _vram["mb"] is None and _BASELINE_MB is not None:
+            # Windows (WDDM) reports per-process memory as [N/A]: use the growth of the
+            # whole card since this process started instead.
+            now = _gpu_used_mb()
+            if now is not None:
+                _vram["mb"] = max(0, now - _BASELINE_MB)
     except Exception:
         pass
     return _vram["mb"]

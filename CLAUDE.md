@@ -139,6 +139,18 @@
   (`registerAgentRoutes`, routes under `/api/agent/*`). Key/model in the repo-root
   `.env` (git-ignored): `OLLAMA_API_KEY`, `OLLAMA_BASE_URL`, `OLLAMA_AGENT_MODEL`
   (default `gemma4:31b`). Re-read on every run, so no restart for a new key.
+- Two services, same catalogue as the Notes app (`agentModels.ts`): Ollama and OpenRouter
+  (free models, `server-openrouter.ts` converts to/from Ollama's shapes). Each service has
+  several keys (`agent-keys.ts`, list in git-ignored `database/agent-keys.json`, marks in
+  `agent-key-status.json`). The `.env` key is NOT copied: the list holds `env:OLLAMA_API_KEY`,
+  so it stays Ollama key 1, read live. Out of credit or refused (rules in `agentKeys.ts`) ->
+  same request to the next key of the SAME service, and the reply gets a `keyNotes` line.
+  Managed in Settings > Assistant (PC tab and phone screen), `/api/agent/keys/*`, masked only.
+- Thinking: per model, per device (`thinkPrefs.ts` on PC and phone), sent as `thinkSetting`
+  with each typed message; `thinkFields` turns it into Ollama `think` or OpenRouter
+  `reasoning`. UI copied from Notes: Think chip (`ThinkControl.tsx` / phone
+  `AssistantThink.tsx`) and level pills in the model menu (one click = model + level).
+  Voice keeps its plain switch. The speed test times Ollama models only (OpenRouter's 50/day).
 - Tools (the sandbox): `src/lib/agent/agentTools.ts`, pure functions over a planner
   snapshot. The model can ONLY call names in `TOOL_DEFS`; anything else is refused
   (gemma4 invents tools and then claims success). Writes go through the injected

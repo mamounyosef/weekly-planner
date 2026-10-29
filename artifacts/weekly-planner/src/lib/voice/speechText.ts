@@ -229,9 +229,40 @@ export function questionSpeech(questions: AgentQuestion[]): string {
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
-export type PauseLength = 'quick' | 'balanced' | 'patient';
+export type PauseLength = 'quick' | 'balanced' | 'patient' | 'relaxed' | 'slow' | 'unhurried' | 'endless';
+
+/** Every pause choice, shortest first, with the silence that ends a turn. */
+export const PAUSE_STEPS: ReadonlyArray<{ id: PauseLength; label: string; ms: number; desc: string }> = [
+  { id: 'quick', label: 'Quick', ms: 500, desc: 'Answers half a second after you stop. Snappy, may cut in.' },
+  { id: 'balanced', label: 'Balanced', ms: 750, desc: 'Three quarters of a second. Right for most people.' },
+  { id: 'patient', label: 'Patient', ms: 1150, desc: 'Over a second. For thinking out loud.' },
+  { id: 'relaxed', label: 'Relaxed', ms: 2000, desc: 'Two seconds of silence. Room to find your words.' },
+  { id: 'slow', label: 'Slow', ms: 3500, desc: 'Three and a half seconds. For long, winding thoughts.' },
+  { id: 'unhurried', label: 'Unhurried', ms: 5500, desc: 'Five and a half seconds. Think as long as you like.' },
+  { id: 'endless', label: 'Take your time', ms: 9000, desc: 'Nine seconds. It practically never cuts in. Press Enter or tap done when finished.' },
+];
+
+/** The slider's range, in ms of silence, and its step. */
+export const PAUSE_MIN_MS = 400;
+export const PAUSE_MAX_MS = 12000;
+export const PAUSE_STEP_MS = 100;
+/** Extra waiting, as a multiple of the pause: after "and", "um"... and after an unfinished sentence. */
+export const TRAIL_BOOST_RANGE = { min: 1, max: 3, step: 0.1, def: 1.9 } as const;
+export const UNFINISHED_BOOST_RANGE = { min: 1, max: 2, step: 0.05, def: 1.35 } as const;
+
+/** Mic sensitivity (0 to 100, 50 is the old fixed behaviour) and the longest single turn. */
+export const SENSITIVITY_RANGE = { min: 0, max: 100, step: 5, def: 50 } as const;
+export const MAX_TURN_RANGE = { min: 15, max: 180, step: 5, def: 45 } as const;
+
+export function clampPauseMs(n: number): number {
+  return Math.round(Math.min(PAUSE_MAX_MS, Math.max(PAUSE_MIN_MS, n)) / PAUSE_STEP_MS) * PAUSE_STEP_MS;
+}
+
+export function isPauseLength(v: unknown): v is PauseLength {
+  return PAUSE_STEPS.some(s => s.id === v);
+}
 
 /** How much silence ends a turn. The engine stretches it after "and", "um"... */
 export function endpointMs(p: PauseLength | string | null | undefined): number {
-  return p === 'quick' ? 500 : p === 'patient' ? 1150 : 750;
+  return PAUSE_STEPS.find(s => s.id === p)?.ms ?? 750;
 }

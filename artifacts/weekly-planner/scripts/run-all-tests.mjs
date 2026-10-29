@@ -21,6 +21,7 @@ const testFiles = [
   'src/lib/deskSensor.test.ts',
   'src/lib/deskRealism.test.ts',
   'src/lib/shortcuts.test.ts',
+  'src/lib/customView.test.ts',
   'src/lib/backup.test.ts',
   'src/lib/notifications.test.ts',
   'src/lib/categories.test.ts',

@@ -154,7 +154,7 @@ export class PhoneVoiceSession implements VoiceEngine {
     this.setPhase('connecting');
     ws.onopen = () => {
       this.reconnects = 0;
-      ws.send(JSON.stringify({ type: 'start', voice: this.cfg.voice, speed: this.cfg.speed, endpointMs: this.cfg.endpointMs, hints: this.cfg.hints ?? '' }));
+      ws.send(JSON.stringify({ type: 'start', voice: this.cfg.voice, speed: this.cfg.speed, endpointMs: this.cfg.endpointMs, trailBoost: this.cfg.trailBoost, unfinishedBoost: this.cfg.unfinishedBoost, sensitivity: this.cfg.sensitivity, maxTurnS: this.cfg.maxTurnS, hints: this.cfg.hints ?? '' }));
     };
     ws.onmessage = (e: MessageEvent) => {
       if (typeof e.data === 'string') this.onJson(e.data);
@@ -355,7 +355,7 @@ export class PhoneVoiceSession implements VoiceEngine {
     this.cfg = { ...this.cfg, ...patch };
     if (this.volGain && patch.volume !== undefined && this.ctx) this.volGain.gain.setTargetAtTime(this.cfg.volume, this.ctx.currentTime, 0.05);
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'config', voice: this.cfg.voice, speed: this.cfg.speed, endpointMs: this.cfg.endpointMs, hints: this.cfg.hints ?? '' }));
+      this.ws.send(JSON.stringify({ type: 'config', voice: this.cfg.voice, speed: this.cfg.speed, endpointMs: this.cfg.endpointMs, trailBoost: this.cfg.trailBoost, unfinishedBoost: this.cfg.unfinishedBoost, sensitivity: this.cfg.sensitivity, maxTurnS: this.cfg.maxTurnS, hints: this.cfg.hints ?? '' }));
     }
   }
 

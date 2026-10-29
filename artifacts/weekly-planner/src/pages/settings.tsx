@@ -58,6 +58,7 @@ import {
   AudioLines,
 } from 'lucide-react';
 import VoiceSettings from '@/components/voice/VoiceSettings';
+import AssistantSettings from '@/components/agent/AssistantSettings';
 import { useAuth } from '@/lib/auth';
 import {
   FOCUS_CHIMES,
@@ -755,7 +756,7 @@ function coerceAutoBackup(raw: unknown): AutoBackupCfg {
   return cfg;
 }
 
-type TabCategory = 'appearance' | 'calendar' | 'categories' | 'tasks' | 'notifications' | 'prayer' | 'audio' | 'voice' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
+type TabCategory = 'appearance' | 'calendar' | 'categories' | 'tasks' | 'notifications' | 'prayer' | 'audio' | 'assistant' | 'voice' | 'shortcuts' | 'backup' | 'integrations' | 'hardware' | 'account';
 
 interface Toast {
   id: number;
@@ -1176,7 +1177,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabCategory>(() => {
     try {
       const requested = new URLSearchParams(window.location.search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'voice', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'assistant', 'voice', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
       if (requested && known.includes(requested)) return requested as TabCategory;
     } catch (_) {}
     return 'appearance';
@@ -1196,7 +1197,7 @@ export default function SettingsPage() {
     try {
       const search = window.location.search || (location.includes('?') ? location.slice(location.indexOf('?')) : '');
       const requested = new URLSearchParams(search).get('tab');
-      const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'voice', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+      const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'assistant', 'voice', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
       if (requested && known.includes(requested)) {
         setActiveTab(requested as TabCategory);
       }
@@ -1207,7 +1208,7 @@ export default function SettingsPage() {
     const handlePopState = () => {
       try {
         const requested = new URLSearchParams(window.location.search).get('tab');
-        const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'voice', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
+        const known: string[] = ['appearance', 'calendar', 'categories', 'tasks', 'notifications', 'prayer', 'audio', 'assistant', 'voice', 'shortcuts', 'backup', 'integrations', 'hardware', 'account'];
         if (requested && known.includes(requested)) {
           setActiveTab(requested as TabCategory);
         }
@@ -2308,6 +2309,7 @@ export default function SettingsPage() {
       badge: effectiveNotifications.enabled ? undefined : 'Off' },
     { id: 'prayer', label: 'Prayer Times', icon: <Compass size={17} /> },
     { id: 'audio', label: 'Focus & Audio', icon: <Volume2 size={17} /> },
+    { id: 'assistant', label: 'Assistant', icon: <Sparkles size={17} /> },
     { id: 'voice', label: 'Voice Assistant', icon: <AudioLines size={17} /> },
     { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={17} /> },
     { id: 'backup', label: 'Backups & Data', icon: <Database size={17} /> },
@@ -6329,6 +6331,21 @@ export default function SettingsPage() {
                     </div>
                   </TabPanel>
                 )}
+              </TabPanel>
+            )}
+
+            {/* ASSISTANT TAB: API keys, model, thinking */}
+            {activeTab === 'assistant' && (
+              <TabPanel
+                isPhone={isPhone}
+                key="assistant"
+                initial={{ opacity: 0, y: isPhone ? 0 : 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: isPhone ? 0 : -4 }}
+                transition={{ duration: isPhone ? 0.08 : 0.12, ease: 'easeOut' }}
+                className="flex flex-col gap-6"
+              >
+                <AssistantSettings theme={{ darkMode, text: textPrimary, sub: textSecondary, card: cardBg, bdr: cardBdr, accent: accentColor, accentLight }} />
               </TabPanel>
             )}
 
